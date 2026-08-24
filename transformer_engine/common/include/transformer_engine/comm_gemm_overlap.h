@@ -138,6 +138,8 @@ class CommOverlapCore {
     NVTE_ERROR("Operation is not implemented.");
   }
 
+  virtual bool is_fused() { return false; }
+
   bool with_cublasmp() { return _with_cublasmp; }
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -194,6 +196,14 @@ class CommOverlapCore {
   }
 
   virtual void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
+
+  virtual void fused_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
@@ -316,6 +326,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   uint64_t _ag_signal_base = 0;
   uint64_t _rs_signal_base = 0;
+  bool _fused{false};
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
@@ -331,7 +342,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool fused = false);
 
   // Constructor for cuBLASMp backend
   CommOverlapP2PBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
@@ -410,7 +421,18 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main) override;
 
+  /*
+  ** Persistent ROCm fused AllGather + GEMM implemented with hipKittens
+  */
+  void fused_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main) override;
+
   bool is_aggregate() { return _aggregate; } // needed for rocm pathing
+
+  bool is_fused() override { return _fused; }
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.
