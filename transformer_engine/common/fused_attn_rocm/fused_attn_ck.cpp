@@ -471,7 +471,7 @@ void fused_attn_ck_fwd_impl(
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   // ASM v3 does not support sink; force CK tile path
-  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1) && !has_sink;
+  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
@@ -481,7 +481,6 @@ void fused_attn_ck_fwd_impl(
 
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
-
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
@@ -578,6 +577,9 @@ void fused_attn_ck_fwd_impl(
     return;
   }
 
+  NVTE_CHECK(!has_sink || devPtrSoftmaxOffset != nullptr,
+           "softmax_offset is required for non-vanilla softmax");
+
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;
@@ -660,7 +662,6 @@ void fused_attn_ck_fwd_impl(
 
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
