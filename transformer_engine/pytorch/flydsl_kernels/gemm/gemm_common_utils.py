@@ -13,7 +13,7 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 """
 
 import flydsl.expr as fx
-from flydsl.expr import arith, rocdl
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 
 from .exceptions import FlyDSLUnsupportedError
 
@@ -185,3 +185,37 @@ def swizzle_128(row, col_in_bytes):
 def pack_i32x4_i32x8(lo, hi):
     # Pack two i32x4 as one i32x8
     return lo.shuffle(hi, list(range(8)))
+
+
+# Returns, for one lane (lane_id, wave_id), a list of n_rounds swizzled flat
+# global offsets indexed by DMA pass: offsets[step] = r*row_stride + c where
+# (r, c) = swizzle_128(row, col). Each is the static per-thread/per-pass source
+# of one 16-byte load; the dynamic K-tile base is added later as soffset.
+# ``row_stride`` is the global row stride in element units matching the operand
+# view (a byte stride for the flat-byte 16-bit/FP32 cores, an element stride for
+# the FP8 cores), not the 128-wide tile width. Dtype-independent: the swizzle
+# operates on a flat 16-byte-per-lane staging layout shared by every core.
+#
+# ``preshuffled=True`` selects the AITER preshuffled operand layout, in which the
+# source tile is already permuted into the MFMA-friendly order, so the offsets
+# are computed directly instead of via ``swizzle_128``.
+def compute_global_swizzle(lane_id, wave_id, row_stride, n_rounds, preshuffled=False):
+    offsets = []
+    n_waves = fx.block_dim.x // 64
+    for round in range_constexpr(n_rounds):
+        if const_expr(preshuffled):
+            row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
+            col = (lane_id // 8) * 16
+            offsets.append(
+                (row // 16) * (row_stride * 16)
+                + (row % 16) * 16
+                + (col // 64) * 1024
+                + ((col % 64) // 16) * 256
+                + (col % 16)
+            )
+        else:
+            row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
+            col = (lane_id % 8) * 16
+            r, c = swizzle_128(row, col)
+            offsets.append(r * row_stride + c)
+    return offsets

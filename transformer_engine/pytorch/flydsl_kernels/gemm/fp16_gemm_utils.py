@@ -15,7 +15,7 @@ core selects its own MFMA opcode. The module keeps its historical
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm, vector
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
@@ -25,6 +25,7 @@ from .gemm_common_utils import (
     barrier,
     cdiv,
     ceildiv,
+    compute_global_swizzle,
     divmod,
     encode_waitcnt,
     min,
@@ -41,25 +42,6 @@ def make_byte_buffer_tensor(arg):
     BF16, and FP32 all share this maker.
     """
     return fx.rocdl.make_buffer_tensor(arg, max_size=False)
-
-
-def compute_global_swizzle(
-    lane_id,
-    wave_id,
-    row_stride_bytes,
-    n_rounds,
-    preshuffled=False,
-):
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds):
-        if const_expr(preshuffled):
-            raise AssertionError("16-bit first-pass port does not support preshuffled operands")
-        row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
-        col_bytes = (lane_id % 8) * 16
-        r, c = swizzle_128(row, col_bytes)
-        offsets.append(r * row_stride_bytes + c)
-    return offsets
 
 
 def compute_global_transpose_swizzle(
