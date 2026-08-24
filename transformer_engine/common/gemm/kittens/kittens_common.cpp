@@ -4,7 +4,38 @@
 *************************************************************************/
 
 #include "hip/hip_runtime.h"
+#include "fused_ag_gemm.h"
 #include "kittens_common.h"
+
+#ifdef KITTENS_HAVE_CDNA4
+bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args);
+void kittens_fused_ag_gemm_reset_cdna4();
+#endif
+
+bool kittens_fused_ag_gemm_supported(int sm_arch) {
+#ifdef KITTENS_HAVE_CDNA4
+    if (sm_arch == 95) {
+        return true;
+    }
+#endif
+    static_cast<void>(sm_arch);
+    return false;
+}
+
+void kittens_fused_ag_gemm_reset() {
+#ifdef KITTENS_HAVE_CDNA4
+    kittens_fused_ag_gemm_reset_cdna4();
+#endif
+}
+
+bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_fused_ag_gemm_bf16_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
 
 BlockwiseGemmBackend *BlockwiseGemmBackend::get_for_arch(int sm_arch) {
 #ifdef KITTENS_HAVE_CDNA4
