@@ -24,9 +24,11 @@ from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    fused_ag_gemm_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -209,6 +211,14 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
+        if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
+            ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_size, fp8,
+        ):
+            ub_overlap_ag_fprop = False
+        if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
+            ub_name + "_dgrad", inp, weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+        ):
+            ub_overlap_ag_dgrad = False
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.RS
@@ -1431,6 +1441,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag_dgrad = (
             ub_overlap_ag and self.sequence_parallel and self.parallel_mode == "row"
         )
+
+        # Layers with no overlap backend take the non-overlapped path.
+        if ub_name is not None and is_ub_initialized():
+            if ub_overlap_disabled(ub_name + "_fprop"):
+                self.ub_overlap_rs_fprop = False
+                self.ub_overlap_ag_fprop = False
+            if ub_overlap_disabled(ub_name + "_dgrad"):
+                self.ub_overlap_ag_dgrad = False
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled(ub_name + "_wgrad"):
+                self.ub_bulk_wgrad = False
+
         if any(
             [
                 self.ub_overlap_ag_fprop,
