@@ -2021,6 +2021,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       inputB->scaling_mode == NVTE_MXFP4_1D_SCALING) {
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
     NVTE_CHECK(cuda::sm_arch() == 95, "MXFP4 GEMM is only supported on gfx950");
+    NVTE_CHECK(!(is_transa ? inputA->mxfp4_shuffle_rowwise_data
+                           : inputA->mxfp4_shuffle_columnwise_data),
+               "hipBLASLt MXFP4 GEMM requires plain (un-shuffled) A data");
+    NVTE_CHECK(!(is_transb ? inputB->mxfp4_shuffle_columnwise_data
+                           : inputB->mxfp4_shuffle_rowwise_data),
+               "hipBLASLt MXFP4 GEMM requires plain (un-shuffled) B data");
     NVTE_CHECK((k % 256) == 0,
                "hipBLASLt MXFP4 GEMM requires K to be a multiple of 256 (got K=", k, ")");
     NVTE_CHECK((m % 32) == 0, "hipBLASLt MXFP4 GEMM requires M to be a multiple of 32 (got M=", m, ")");
