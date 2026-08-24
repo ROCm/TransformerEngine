@@ -421,13 +421,13 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
 
           NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, slice_bytes, cudaMemcpyDeviceToDevice, l_stream_send[r]));
           signal_val = ag_signal_base + step + 1;
-          hipStreamWriteValue64(l_stream_send[r], flagptr, signal_val, 0);
+          NVTE_CHECK_CUDA(hipStreamWriteValue64(l_stream_send[r], flagptr, signal_val, 0));
         }
 
         {
           void *flagptr = GET_RECV_PTR_BY_INDEX(prev_rank, _ub_comm, _ub_reg, r);
           signal_val = ag_signal_base + step + 1;
-          hipStreamWaitValue64(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
+          NVTE_CHECK_CUDA(hipStreamWaitValue64(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF));
         }
         
         NVTE_CHECK_CUDA(cudaEventRecord(get_event(next_recv_chunk_id, r), l_stream_recv[r]));
@@ -551,14 +551,14 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
 
         NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, comm_bytes,
                                         cudaMemcpyDeviceToDevice, l_stream_send[comm_stream_id]));
-        hipStreamWriteValue64(l_stream_send[comm_stream_id], flagptr, signal_val, 0);
+        NVTE_CHECK_CUDA(hipStreamWriteValue64(l_stream_send[comm_stream_id], flagptr, signal_val, 0));
       }
 
       // Wait for incoming partial from chunk contributor
       {
         void *flagptr = GET_RECV_PTR_BY_INDEX(recv_rank, _ub_comm, _ub_reg, comm_stream_id);
-        hipStreamWaitValue64(l_stream_recv[comm_stream_id], flagptr, signal_val,
-                             hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
+        NVTE_CHECK_CUDA(hipStreamWaitValue64(l_stream_recv[comm_stream_id], flagptr, signal_val,
+                                             hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF));
       }
     }
   }
