@@ -866,9 +866,12 @@ void performDqTest(const TestParams &params) {
   auto [atol, rtol] = getTestTolerances(dtype, true, true);
   compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 }
-#endif // __HIP_PLATFORM_AMD__
 
-#ifdef __HIP_PLATFORM_AMD__
+// Native MXFP4 GEMM needs hipBLASLt >= 1.3. 
+#define NVTE_HIPBLASLT_MXFP4_GEMM_SUPPORTED \
+  ((HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3))
+
+#if NVTE_HIPBLASLT_MXFP4_GEMM_SUPPORTED
 #include "gemm/rocm_fp4_e2m1_table.h"
 
 // FP4 E2M1 value table
@@ -888,87 +891,59 @@ static inline size_t mxfp4_scale_shuffle_index(size_t row, size_t col, size_t sc
   return i0 * (scale_n_pad / 8) * 256 + i3 * 256 + i5 * 64 + i2 * 4 + i4 * 2 + i1;  // 256 = 32*8
 }
 
-// CPU-dequantize the row-wise data of an MXFP4 test::Tensor. When the tensor carries
-// pre-swizzled scales (with_gemm_swizzled_scales), the E8M0 bytes are read through the 32x8
-// tile mapping instead of the plain linear layout.
-static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16,
-                                             bool swizzled_scales) {
-  const NVTEShape data_shape = src_fp4.rowwise_shape();       // logical [R, C]
+// CPU-dequantize an MXFP4 test::Tensor into the *logical* [R, C] operand (row-major, bf16),
+// reading either its row-wise or its column-wise buffer.
+//
+// Both buffers have the same structure: FP4 values packed two-per-byte as [S, P/2], with one
+// UE8M0 block scale per 32 elements along the packed dimension P. The views differ only in how
+// (S, P) map to the logical (row, col):
+//   - row-wise:    S = R, P = C  ->  logical (r, c) = (s, p)
+//   - column-wise: S = C, P = R  ->  logical (r, c) = (p, s)  (buffer physically holds the
+//                                    transpose [C, R/2])
+// Writing dst in logical [R, C] order yields exactly what nvte_dequantize produces for MXFP8,
+// which is what CanonicalizeGemmInput consumes for the non-transposed operand in non-TN layouts.
+//
+// When the tensor carries pre-swizzled scales (with_gemm_swizzled_scales), the E8M0 bytes are
+// read through the 32x8 tile mapping instead of the plain linear layout.
+static void dequantize_mxfp4_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16,
+                                     bool swizzled_scales, bool columnwise) {
+  const NVTEShape data_shape = columnwise ? src_fp4.columnwise_shape() : src_fp4.rowwise_shape();
   NVTE_CHECK(data_shape.ndim == 2, "Expected 2D MXFP4 data");
-  const size_t R = data_shape.data[0];
-  const size_t C = data_shape.data[1];
-  NVTE_CHECK((C % 2) == 0, "MXFP4 columns must be even (two-per-byte packing)");
+  const size_t R = data_shape.data[0];   // logical rows
+  const size_t C = data_shape.data[1];   // logical cols
+  const size_t S = columnwise ? C : R;   // stored-major dimension
+  const size_t P = columnwise ? R : C;   // packed/scaled dimension (two FP4 per byte)
+  NVTE_CHECK((P % 2) == 0, "MXFP4 packed dimension must be even (two-per-byte packing)");
 
-  const size_t packed_bytes = R * (C / 2);
+  const size_t packed_bytes = S * (P / 2);
   std::vector<uint8_t> h_data(packed_bytes);
-  NVTE_CHECK_CUDA(cudaMemcpy(h_data.data(), src_fp4.rowwise_dptr(), packed_bytes,
-                             cudaMemcpyDeviceToHost));
+  NVTE_CHECK_CUDA(cudaMemcpy(h_data.data(),
+                             columnwise ? src_fp4.columnwise_dptr() : src_fp4.rowwise_dptr(),
+                             packed_bytes, cudaMemcpyDeviceToHost));
 
-  const NVTEShape scale_shape = src_fp4.rowwise_scale_inv_shape();  // padded [Ypad, Xpad]
+  const NVTEShape scale_shape =
+      columnwise ? src_fp4.columnwise_scale_inv_shape() : src_fp4.rowwise_scale_inv_shape();
   NVTE_CHECK(scale_shape.ndim == 2, "Expected 2D MXFP4 scale_inv");
-  const size_t x_pad = scale_shape.data[1];
+  const size_t x_pad = scale_shape.data[1];  // padded scale columns
   const size_t num_scales = scale_shape.data[0] * scale_shape.data[1];
   std::vector<uint8_t> h_scale(num_scales);
-  NVTE_CHECK_CUDA(cudaMemcpy(h_scale.data(), src_fp4.rowwise_scale_inv_dptr(), num_scales,
-                             cudaMemcpyDeviceToHost));
-
-  bf16 *dst = dst_bf16.rowwise_cpu_dptr<bf16>();
-  for (size_t r = 0; r < R; ++r) {
-    for (size_t c = 0; c < C; ++c) {
-      const uint8_t byte = h_data[r * (C / 2) + c / 2];
-      const uint8_t nib = (c & 1) ? (byte >> 4) : (byte & 0xF);
-      const size_t scale_idx = swizzled_scales
-          ? mxfp4_scale_shuffle_index(r, c / 32, x_pad)
-          : (r * x_pad + c / 32);
-      const uint8_t e8m0 = h_scale[scale_idx];
-      const float scale = exp2f(static_cast<float>(e8m0) - 127.0f);
-      dst[r * C + c] = static_cast<bf16>(kHostFP4E2M1Table[nib] * scale);
-    }
-  }
-  dst_bf16.from_cpu();
-}
-
-// CPU-dequantize the column-wise data of an MXFP4 test::Tensor into the *logical* operand
-// (row-major, same shape as the tensor's row-wise view). The column-wise buffer physically
-// stores the transpose ([C, R]) with block scales along its own last dim; dequantizing it and
-// writing dst[r, c] = CW[c, r] yields the logical [R, C] operand -- i.e. what nvte_dequantize
-// produces for MXFP8. Used for non-TN layouts, where CanonicalizeGemmInput consumes the
-// column-wise buffer for the non-transposed operand.
-static void dequantize_mxfp4_columnwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16,
-                                                bool swizzled_scales) {
-  // columnwise_shape() reports the LOGICAL [R, C] (same as the row-wise view), but the
-  // column-wise byte buffer physically stores the transpose [C, R/2] -- two FP4 values packed
-  // per byte along R -- with UE8M0 block scales taken along R. Dequantize into the logical
-  // [R, C] operand (row-major).
-  const NVTEShape logical = src_fp4.columnwise_shape();   // [R, C]
-  NVTE_CHECK(logical.ndim == 2, "Expected 2D MXFP4 column-wise data");
-  const size_t R = logical.data[0];
-  const size_t C = logical.data[1];
-  NVTE_CHECK((R % 2) == 0, "MXFP4 column-wise R must be even (two-per-byte packing along R)");
-
-  const size_t packed_bytes = C * (R / 2);
-  std::vector<uint8_t> h_data(packed_bytes);
-  NVTE_CHECK_CUDA(cudaMemcpy(h_data.data(), src_fp4.columnwise_dptr(), packed_bytes,
-                             cudaMemcpyDeviceToHost));
-
-  const NVTEShape scale_shape = src_fp4.columnwise_scale_inv_shape();  // padded [., x_pad]
-  NVTE_CHECK(scale_shape.ndim == 2, "Expected 2D MXFP4 column-wise scale_inv");
-  const size_t x_pad = scale_shape.data[1];
-  const size_t num_scales = scale_shape.data[0] * scale_shape.data[1];
-  std::vector<uint8_t> h_scale(num_scales);
-  NVTE_CHECK_CUDA(cudaMemcpy(h_scale.data(), src_fp4.columnwise_scale_inv_dptr(), num_scales,
-                             cudaMemcpyDeviceToHost));
+  NVTE_CHECK_CUDA(cudaMemcpy(h_scale.data(),
+                             columnwise ? src_fp4.columnwise_scale_inv_dptr()
+                                        : src_fp4.rowwise_scale_inv_dptr(),
+                             num_scales, cudaMemcpyDeviceToHost));
 
   bf16 *dst = dst_bf16.rowwise_cpu_dptr<bf16>();  // logical [R, C], row-major
-  for (size_t c = 0; c < C; ++c) {         // c indexes logical C (rows of the stored transpose)
-    for (size_t r = 0; r < R; ++r) {       // r indexes logical R (packed/scaled dimension)
-      const uint8_t byte = h_data[c * (R / 2) + r / 2];
-      const uint8_t nib = (r & 1) ? (byte >> 4) : (byte & 0xF);
+  for (size_t s = 0; s < S; ++s) {
+    for (size_t p = 0; p < P; ++p) {
+      const uint8_t byte = h_data[s * (P / 2) + p / 2];
+      const uint8_t nib = (p & 1) ? (byte >> 4) : (byte & 0xF);
       const size_t scale_idx = swizzled_scales
-          ? mxfp4_scale_shuffle_index(c, r / 32, x_pad)
-          : (c * x_pad + r / 32);
+          ? mxfp4_scale_shuffle_index(s, p / 32, x_pad)
+          : (s * x_pad + p / 32);
       const uint8_t e8m0 = h_scale[scale_idx];
       const float scale = exp2f(static_cast<float>(e8m0) - 127.0f);
+      const size_t r = columnwise ? p : s;   // logical (r, c): row-wise -> (s, p),
+      const size_t c = columnwise ? s : p;   //                 column-wise -> (p, s)
       dst[r * C + c] = static_cast<bf16>(kHostFP4E2M1Table[nib] * scale);
     }
   }
@@ -983,16 +958,9 @@ void performMxfp4Test(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-#if !((HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3))
-  GTEST_SKIP() << "MXFP4 GEMM requires hipBLASLt >= 1.3";
-#endif
   if (!(prop.major == 9 && prop.minor == 5)) {
     GTEST_SKIP() << "MXFP4 GEMM is only supported on gfx950";
   }
-  if (params.m % 32 || params.n % 32 || params.k % 256) {
-    GTEST_SKIP() << "MXFP4 requires M, N multiples of 32 and K a multiple of 256";
-  }
-
   // Shapes follow the GEMM transpose (same convention as the MXFP8 test)
   TShape a_shape = params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m};
   TShape b_shape = params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k};
@@ -1021,14 +989,8 @@ void performMxfp4Test(const TestParams &params) {
   // consumes (row-wise if that operand is transposed, else column-wise), swizzle-aware.
   Tensor A_ref("A_ref", a_shape, DType::kBFloat16);
   Tensor B_ref("B_ref", b_shape, DType::kBFloat16);
-  if (a_rowwise)
-    dequantize_mxfp4_rowwise_to_bf16(A_fp4, A_ref, params.mxfp4_swizzled);
-  else
-    dequantize_mxfp4_columnwise_to_bf16(A_fp4, A_ref, params.mxfp4_swizzled);
-  if (b_rowwise)
-    dequantize_mxfp4_rowwise_to_bf16(B_fp4, B_ref, params.mxfp4_swizzled);
-  else
-    dequantize_mxfp4_columnwise_to_bf16(B_fp4, B_ref, params.mxfp4_swizzled);
+  dequantize_mxfp4_to_bf16(A_fp4, A_ref, params.mxfp4_swizzled, /*columnwise=*/!a_rowwise);
+  dequantize_mxfp4_to_bf16(B_fp4, B_ref, params.mxfp4_swizzled, /*columnwise=*/!b_rowwise);
 
   Tensor bias;  // MXFP4 GEMM does not support a fused bias epilogue; always empty.
   Tensor pre_gelu_out;
@@ -1055,6 +1017,7 @@ void performMxfp4Test(const TestParams &params) {
   const double rtol = 6e-2;
   compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 }
+#endif // NVTE_HIPBLASLT_MXFP4_GEMM_SUPPORTED
 #endif // __HIP_PLATFORM_AMD__
 
 #define MAKE_TEST_PARAMS(P_)                                                    \
@@ -1195,6 +1158,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
 // ============================================================================
 // Native MXFP4 (hipBLASLt) GEMM tests
 // ============================================================================
+#if NVTE_HIPBLASLT_MXFP4_GEMM_SUPPORTED
 class Mxfp4GEMMTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::tuple<size_t, size_t, size_t>, Layout, bool>> {};
@@ -1227,6 +1191,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP4, Mxfp4GEMMTestSuite,
                                   TN(std::get<1>(info.param)) + "x" +
                                   (std::get<2>(info.param) ? "swizzled" : "plain");
                          });
+#endif // NVTE_HIPBLASLT_MXFP4_GEMM_SUPPORTED
 
 // ============================================================================
 // Production GEMM shape instantiations (run with --gtest_filter='ProdGemm*')
