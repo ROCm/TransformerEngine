@@ -407,6 +407,9 @@ class _GroupedLinear(torch.autograd.Function):
             return None
         n, k = g0.shape
         step = g0.numel() * g0.element_size()
+        nbytes_needed = g0.storage_offset() * g0.element_size() + len(tensors) * step
+        if g0.untyped_storage().size() < nbytes_needed:
+            return None
         for i, g in enumerate(tensors):
             if (
                 g is None
@@ -414,6 +417,7 @@ class _GroupedLinear(torch.autograd.Function):
                 or g.device != g0.device
                 or tuple(g.shape) != (n, k)
                 or not g.is_contiguous()
+                or g.untyped_storage().data_ptr() != g0.untyped_storage().data_ptr()
                 or g.data_ptr() != g0.data_ptr() + i * step
             ):
                 return None
