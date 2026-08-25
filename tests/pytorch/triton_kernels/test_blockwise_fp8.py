@@ -112,7 +112,7 @@ def test_quantize_fp8_blockwise(shape, dtype, axis, pow2):
         dq = _dequant_colwise(q, s, x.shape[0])
         dq_ref = _dequant_colwise(q_ref, s_ref, x.shape[0])
     torch.testing.assert_close(s, s_ref, atol=1e-5, rtol=1e-4)
-    torch.testing.assert_close(dq, dq_ref, atol=0.25, rtol=0.12)
+    torch.testing.assert_close(dq, dq_ref, atol=0.10, rtol=0.10)
 
 
 @pytest.mark.parametrize("shape", [(128, 256), (200, 128)])
@@ -128,14 +128,14 @@ def test_quantize_fp8_blockwise_dual(shape, dtype, pow2):
     torch.testing.assert_close(
         _dequant_rowwise(q_row, s_row, x.shape[1]),
         _dequant_rowwise(q_row_ref, s_row_ref, x.shape[1]),
-        atol=0.25,
-        rtol=0.12,
+        atol=0.10,
+        rtol=0.10,
     )
     torch.testing.assert_close(
         _dequant_colwise(q_col, s_col, x.shape[0]),
         _dequant_colwise(q_col_ref, s_col_ref, x.shape[0]),
-        atol=0.25,
-        rtol=0.12,
+        atol=0.10,
+        rtol=0.10,
     )
 
 
@@ -158,7 +158,7 @@ def test_quantize_fp8_blockwise_weight(shape, dtype, pow2):
     dq_ref = q_ref.float() * (
         s_ref.repeat_interleave(BLOCK, dim=-2).repeat_interleave(BLOCK, dim=-1)[..., :m, :n]
     )
-    torch.testing.assert_close(dq, dq_ref, atol=0.25, rtol=0.12)
+    torch.testing.assert_close(dq, dq_ref, atol=0.10, rtol=0.10)
 
 
 @pytest.mark.parametrize(
