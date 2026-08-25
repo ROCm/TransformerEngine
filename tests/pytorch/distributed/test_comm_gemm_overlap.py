@@ -589,6 +589,9 @@ def test_fused_layer_bulk_dgrad_bf16(nprocs):
     fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
     assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
     assert "qkv_dgrad" in fused, fused
+    eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
+    assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
+    assert "qkv_dgrad" in eligible, eligible
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -607,13 +610,15 @@ def test_fused_layer_declines_ineligible_k(nprocs):
     assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
     assert "qkv_dgrad" in fused, fused
     assert disabled is not None and "qkv_dgrad" not in disabled, disabled
+    eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
+    assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
+    assert "qkv_dgrad" not in eligible, eligible
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_layer_declines_unaligned_region(nprocs):
-    """A Userbuffers region the fused backend cannot serve declines at setup."
-    """
+    """A Userbuffers region the fused backend cannot serve declines at setup."""
     result = _run_fused_layer(
         nprocs,
         [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],

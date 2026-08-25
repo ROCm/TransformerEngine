@@ -19,6 +19,7 @@ from functools import partial, reduce
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
@@ -185,6 +186,10 @@ def _parse_args(argv=None, namespace=None):
         "-v", "--verbose", action="store_true", default=False, help="Verbose info messages."
     )
     opts = parser.parse_args(argv, namespace)
+
+    if opts.fused and not IS_HIP_EXTENSION:
+        warnings.warn("The fused AG+GEMM backend is ROCm only.")
+        opts.fused = False
 
     if opts.bulk_overlap:
         if opts.fused and opts.comm_type != tex.CommOverlapType.AG:

@@ -564,6 +564,10 @@ def _train(opts):
             del test_graph
     else:
         test_out = run_fwd_bwd(test_model, test_x)
+    dist_print(
+        "UB BULK ELIGIBLE: "
+        + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
+    )
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():

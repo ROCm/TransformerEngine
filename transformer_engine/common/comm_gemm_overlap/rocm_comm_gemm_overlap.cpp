@@ -303,6 +303,9 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
              "fused bulk AG reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
+  NVTE_CHECK(D.size(0) == n_chunk * tp_size,
+             "fused bulk AG: the GEMM writes ", D.size(0), " rows but the kernel grid is sized for ",
+             n_chunk * tp_size, " from the Userbuffers region.");
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensFusedAgGemmArgs args{

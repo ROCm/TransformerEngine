@@ -87,6 +87,7 @@ _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
 _ub_fused_names = set()
+_ub_fused_bulk_decisions = {}
 _ub_disabled_names = set()
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
@@ -688,14 +689,12 @@ def fused_bulk_ag_eligible(
     """Whether this call may use the bulk all-gather overlap."""
     if not IS_HIP_EXTENSION:
         return True
-    if not _ub_is_fused(name):
-        return False
-    if fp8:
-        return False
-    if dtype != torch.bfloat16:
-        return False
-    m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
-    return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    if eligible:
+        m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
+        eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    _ub_fused_bulk_decisions[name] = eligible
+    return eligible
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -715,6 +714,7 @@ def destroy_ub():
     _ub_with_cublasmp = False
     _ub_initialized = False
     _ub_fused_names.clear()
+    _ub_fused_bulk_decisions.clear()
     _ub_disabled_names.clear()
     if IS_HIP_EXTENSION:
         tex.reset_fused_ag_gemm_cache()
