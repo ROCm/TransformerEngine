@@ -51,9 +51,207 @@ def _set_amd_knobs(enable: bool = True):
 
 NUM_XCDS = 8
 
+# First call per autotune key uses balanced group_offs so the cached config
+# is not locked to one uneven MoE routing (Triton keys on G/N/K, not splits).
+_grouped_blockwise_warmed = set()
+_grouped_blockwise_vk_warmed = set()
+
+
+def _get_grouped_blockwise_autotune_configs():
+    """Curated fwd/dgrad tiles from Primus-Turbo (32-config sweep → these 8).
+
+    BLOCK_SIZE_N is pinned to 128: the kernel loads one B scale per N-tile
+    (BN == SCALE_BLOCK_N). BN=256 applies the wrong scale to half the columns.
+    """
+    return [
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 64,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=1,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 64,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 64,
+            },
+            num_warps=8,
+            num_stages=1,
+        ),
+    ]
+
+
+def _bwd_autotune_configs():
+    """Curated variable-K wgrad tiles from Primus-Turbo. BLOCK_SIZE_K=128 always."""
+    return [
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=1,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=8,
+            num_stages=1,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "CHUNK_SIZE": 32,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+    ]
+
 
 # Blockwise grouped FP8 kernel and public entrypoint
 
+@triton.autotune(configs=_get_grouped_blockwise_autotune_configs(), key=["G", "N", "K"])
 @triton.jit()
 def _grouped_blockwise_fp8_persistent_gemm_kernel(
     # Pointers
@@ -285,54 +483,51 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     out = torch.empty((M_total, N), device=a.device, dtype=out_dtype)
     A_scales_t = a_scales.T.contiguous()
     num_sms = get_num_cus()
+    even_k = K % 128 == 0
 
-    blk_m = 256
-    blk_n = 128  # Keep 128 to match B_scale block alignment
-    blk_k = 128
-    even_k = K % blk_k == 0
+    def _launch(c_out, offs):
+        _grouped_blockwise_fp8_persistent_gemm_kernel[(num_sms,)](
+            a,
+            b,
+            c_out,
+            A_scales_t,
+            b_scales,
+            offs,
+            G,
+            N,
+            K,
+            a.stride(0),
+            stride_bg,
+            stride_bn,
+            c_out.stride(0),
+            c_out.stride(1),
+            A_scales_t.stride(0),
+            A_scales_t.stride(1),
+            b_scales.stride(0),
+            stride_bs_n,
+            stride_bs_k,
+            stride_ak=stride_ak,
+            stride_bk=stride_bk,
+            NUM_SMS=num_sms,
+            NUM_XCDS=NUM_XCDS,
+            EVEN_K=even_k,
+            CACHE_MODIFIER=".ca",
+            waves_per_eu=0,
+            matrix_instr_nonkdim=16,
+            kpack=1,
+        )
 
-    # GROUP_SIZE_M heuristic (match tensorwise)
-    tiles_m_per_group = (M_total + G * blk_m - 1) // (G * blk_m)
-    tiles_n = (N + blk_n - 1) // blk_n
-    group_m = 8 if min(tiles_m_per_group, tiles_n) < 16 else 4
+    # Triton's autotune key is (G, N, K) only. Prime once with balanced offs
+    # so the cached config is not locked to the first uneven MoE routing.
+    warm_key = (G, N, K, even_k)
+    if warm_key not in _grouped_blockwise_warmed:
+        _grouped_blockwise_warmed.add(warm_key)
+        per = M_total // max(G, 1)
+        bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
+        bal_offs[-1] = M_total
+        _launch(torch.empty_like(out), bal_offs)
 
-    _grouped_blockwise_fp8_persistent_gemm_kernel[(num_sms,)](
-        a,
-        b,
-        out,
-        A_scales_t,
-        b_scales,
-        group_offs,
-        G,
-        N,
-        K,
-        a.stride(0),
-        stride_bg,
-        stride_bn,
-        out.stride(0),
-        out.stride(1),
-        A_scales_t.stride(0),
-        A_scales_t.stride(1),
-        b_scales.stride(0),
-        stride_bs_n,
-        stride_bs_k,
-        stride_ak=stride_ak,
-        stride_bk=stride_bk,
-        BLOCK_SIZE_M=blk_m,
-        BLOCK_SIZE_N=blk_n,
-        BLOCK_SIZE_K=blk_k,
-        GROUP_SIZE_M=group_m,
-        NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=32,
-        EVEN_K=even_k,
-        CACHE_MODIFIER=".ca",
-        num_warps=8,
-        num_stages=1,  # 256×128×128 needs 48KB/stage; 2 stages=96KB > 64KB LDS
-        waves_per_eu=0,
-        matrix_instr_nonkdim=16,
-        kpack=1,
-    )
+    _launch(out, group_offs)
     return out
 
 
@@ -341,6 +536,10 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
 
 
 
+@triton.autotune(
+    configs=_bwd_autotune_configs(),
+    key=["G", "OUT_M", "OUT_N"],
+)
 @triton.jit()
 def _grouped_blockwise_fp8_variable_k_gemm_kernel(
     # C[g] = LHS_g^T @ RHS_g * block_scales
@@ -530,45 +729,47 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
         )
     num_sms = get_num_cus()
 
-    # Use 128x128 tiles to reduce register pressure from double-accumulator
-    # (partial + acc both need full tile VGPRs for blockwise scale application).
-    # With 256x256 tiles + 8 warps, 2 accumulator sets need ~290 VGPRs/wave
-    # which exceeds the 256 limit at 2 waves/SIMD, causing spilling.
-    # 128x128 with 4 warps keeps VGPRs at ~170/wave, fitting 2 waves/SIMD.
-    _grouped_blockwise_fp8_variable_k_gemm_kernel[(num_sms,)](
-        lhs,
-        rhs,
-        out,
-        lhs_scales,
-        rhs_scales,
-        group_offs,
-        G,
-        OUT_M,
-        OUT_N,
-        lhs.stride(0),
-        rhs.stride(0),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        lhs_scales.stride(0),
-        lhs_scales.stride(1),
-        rhs_scales.stride(0),
-        rhs_scales.stride(1),
-        stride_lhs_n=lhs.stride(1),
-        stride_rhs_n=rhs.stride(1),
-        BLOCK_SIZE_M=128,
-        BLOCK_SIZE_N=128,
-        BLOCK_SIZE_K=128,
-        GROUP_SIZE_M=4,
-        NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=32,
-        CACHE_MODIFIER=".ca",
-        ACCUMULATE=accumulate,
-        num_warps=4,
-        num_stages=2,
-        waves_per_eu=0,
-        matrix_instr_nonkdim=16,
-        kpack=1,
-    )
+    def _launch(c_out, offs, accumulate_flag):
+        _grouped_blockwise_fp8_variable_k_gemm_kernel[(num_sms,)](
+            lhs,
+            rhs,
+            c_out,
+            lhs_scales,
+            rhs_scales,
+            offs,
+            G,
+            OUT_M,
+            OUT_N,
+            lhs.stride(0),
+            rhs.stride(0),
+            c_out.stride(0),
+            c_out.stride(1),
+            c_out.stride(2),
+            lhs_scales.stride(0),
+            lhs_scales.stride(1),
+            rhs_scales.stride(0),
+            rhs_scales.stride(1),
+            stride_lhs_n=lhs.stride(1),
+            stride_rhs_n=rhs.stride(1),
+            NUM_SMS=num_sms,
+            NUM_XCDS=NUM_XCDS,
+            CACHE_MODIFIER=".ca",
+            ACCUMULATE=accumulate_flag,
+            waves_per_eu=0,
+            matrix_instr_nonkdim=16,
+            kpack=1,
+        )
+
+    # Autotune key is (G, OUT_M, OUT_N). Prime on a scratch buffer with
+    # balanced padded offs so accumulate=True never benchmarks into ``out``.
+    warm_key = (G, OUT_M, OUT_N, out.dtype, accumulate)
+    if warm_key not in _grouped_blockwise_vk_warmed:
+        _grouped_blockwise_vk_warmed.add(warm_key)
+        m_padded = lhs.shape[0]
+        per = max((m_padded // max(G, 1)) // 128 * 128, 128)
+        bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
+        bal_offs[-1] = m_padded
+        _launch(torch.zeros_like(out), bal_offs, False)
+
+    _launch(out, group_offs, accumulate)
     return out
