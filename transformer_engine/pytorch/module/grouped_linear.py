@@ -400,37 +400,78 @@ class _GroupedLinear(torch.autograd.Function):
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
+    def _is_blockwise_fp8_grouped_gemm_supported(
+        *,
+        fp8,
+        recipe,
+        use_bias,
+        backward_override,
+        fuse_wgrad_accumulation,
+        cpu_offloading,
+        save_original_input,
+        wgrad_store,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        m_splits,
+    ) -> bool:
+        """Return whether the ROCm Triton blockwise FP8 grouped GEMM path can run this call.
+
+        Requires ``NVTE_USE_BLOCKWISE_GMM_TRITON=1``, ``Float8BlockScaling``, and the
+        hardcoded blockwise layout (activation 1x128 along K, weights 128x128, grad 1x128).
+        Unsupported orchestration features fall back to the default path.
+        """
+        if not IS_HIP_EXTENSION:
+            return False
+        if os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") != "1":
+            return False
+        if not fp8 or recipe is None or not recipe.float8_block_scaling():
+            return False
+        if (
+            recipe.x_block_scaling_dim != 1
+            or recipe.w_block_scaling_dim != 2
+            or recipe.grad_block_scaling_dim != 1
+        ):
+            return False
+        if use_bias:
+            return False
+        if backward_override is not None:
+            return False
+        if fuse_wgrad_accumulation:
+            return False
+        if cpu_offloading:
+            return False
+        if save_original_input:
+            return False
+        if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
+            return False
+        if debug:
+            return False
+        if unpad_output or (
+            actual_m_splits is not None and list(actual_m_splits) != list(m_splits)
+        ):
+            return False
+        return True
+
+    @staticmethod
     def _forward_blockwise_fp8(
         ctx,
         *,
         inp,
         m_splits,
+        m_splits_tensor,
         weights,
-        biases,
-        use_bias,
-        fp8,
-        recipe,
-        wgrad_store,
         weight_quantizers,
-        fuse_wgrad_accumulation,
-        cpu_offloading,
         activation_dtype,
         is_grad_enabled,
-        save_original_input,
-        debug,
-        actual_m_splits,
-        unpad_output,
-        backward_override,
     ):
-        """DeepSeek-style blockwise FP8 grouped GEMM forward (ROCm Triton).
+        """Blockwise FP8 grouped GEMM forward (ROCm Triton).
 
         Selected from :meth:`forward` under the ``Float8BlockScaling`` recipe when
-        ``NVTE_USE_BLOCKWISE_FP8_GROUPED_GEMM=1``. Activations are quantized rowwise
-        (1x128 along K), weights 128x128; the backward wgrad (see
+        :meth:`_is_blockwise_fp8_grouped_gemm_supported` is true. Activations are
+        quantized rowwise (1x128 along K), weights 128x128; the backward wgrad (see
         :meth:`_backward_blockwise_fp8`) uses a segment-padded columnwise operand
         quantized from the original high-precision input (no double-quantization).
-        Recipe configurations and orchestration features it does not yet support are
-        rejected instead of silently ignored.
         """
         from ..triton_kernels.common import te_dtype_to_torch_dtype
         from ..triton_kernels.blockwise_quantize import (
@@ -443,62 +484,6 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
         num_gemms = len(m_splits)
-
-        # fp8 + block-scaling recipe are internal invariants (asserts, guaranteed by the
-        # caller's gate); the rest are user-reachable (raise).
-        assert fp8, "blockwise grouped FP8 path requires fp8=True"
-        assert recipe.float8_block_scaling(), "blockwise grouped FP8 path requires Float8BlockScaling"
-
-        # The Triton kernels hardcode the DeepSeek layout (x rowwise 1x128, w 128x128,
-        # grad rowwise 1x128). Reject recipe block-scaling dims that don't match rather
-        # than silently producing wrong numerics.
-        if (
-            recipe.x_block_scaling_dim != 1
-            or recipe.w_block_scaling_dim != 2
-            or recipe.grad_block_scaling_dim != 1
-        ):
-            raise NotImplementedError(
-                "the blockwise grouped FP8 path only supports x_block_scaling_dim=1, "
-                "w_block_scaling_dim=2, grad_block_scaling_dim=1 (got "
-                f"{recipe.x_block_scaling_dim}, {recipe.w_block_scaling_dim}, "
-                f"{recipe.grad_block_scaling_dim})"
-            )
-        if use_bias:
-            raise NotImplementedError("bias is not supported in the blockwise grouped FP8 path yet")
-        if backward_override is not None:
-            raise NotImplementedError(
-                "backward_override is not supported in the blockwise grouped FP8 path yet"
-            )
-        if fuse_wgrad_accumulation:
-            raise NotImplementedError(
-                "fuse_wgrad_accumulation (gradient_accumulation_fusion) is not yet supported in "
-                "the ROCm blockwise grouped FP8 path. Pass --no-gradient-accumulation-fusion to the "
-                "training script: wgrad is then returned as a plain gradient and Megatron's DDP "
-                "post-hook accumulates it into the fp32 main_grad (numerically equivalent for bring-up)."
-            )
-        if cpu_offloading:
-            raise NotImplementedError(
-                "cpu_offloading is not supported in the blockwise grouped FP8 path yet"
-            )
-        if save_original_input:
-            raise NotImplementedError(
-                "save_original_input is not supported in the blockwise grouped FP8 path yet"
-            )
-        if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
-            raise NotImplementedError(
-                "delayed wgrad is not supported in the blockwise grouped FP8 path yet"
-            )
-        if debug:
-            raise NotImplementedError(
-                "debug quantization is not supported in the blockwise grouped FP8 path yet"
-            )
-        if unpad_output or (
-            actual_m_splits is not None and list(actual_m_splits) != list(m_splits)
-        ):
-            raise NotImplementedError(
-                "the ROCm fused-pad / unpad_output path is not supported in the blockwise grouped "
-                "FP8 path yet"
-            )
 
         # Resolve the FP8 torch dtype via the quantizer, normalizing through ``tex.DType``
         # so ``te_dtype_to_torch_dtype`` picks the arch-correct variant (fnuz on CDNA3).
@@ -513,9 +498,10 @@ class _GroupedLinear(torch.autograd.Function):
         inp_shape = inp.shape
         a = inp.reshape(-1, in_features).to(activation_dtype).contiguous()
 
-        # Group offsets built on-device from the split tensor (graph-capture safe,
-        # no device->host sync).
-        group_lens = m_splits.to(device=device, dtype=torch.int64)
+        # Prefer the caller-provided GPU splits tensor (avoids a blocking H2D of
+        # pageable m_splits). Fall back to m_splits when it is not passed.
+        split_src = m_splits_tensor if m_splits_tensor is not None else m_splits
+        group_lens = split_src.to(device=device, dtype=torch.int64)
         group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
         group_offs[1:] = torch.cumsum(group_lens, 0)
 
@@ -585,14 +571,12 @@ class _GroupedLinear(torch.autograd.Function):
             )
             wgrad_list = [dW[g].contiguous() for g in range(ctx.num_gemms)]
 
-        grad_biases = [None] * ctx.num_gemms  # bias rejected in forward
+        grad_biases = [None] * ctx.num_gemms  # bias not supported on this path
 
-        # Grads match forward inputs: (inp, m_splits, dispatched_probs, non_tensor_args,
-        # *weights, *biases).
+        # Grads match forward inputs: (inp, m_splits, non_tensor_args, *weights, *biases).
         return (
             dgrad.view(ctx.inp_shape) if dgrad is not None else None,
             None,  # m_splits
-            None,  # dispatched_probs
             None,  # non_tensor_args
             *wgrad_list,
             *grad_biases,
@@ -653,37 +637,31 @@ class _GroupedLinear(torch.autograd.Function):
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
 
-        # DeepSeek-style blockwise FP8 grouped GEMM (ROCm Triton) opt-in. Only engages under
-        # the Float8BlockScaling recipe (whose quantizers already carry blockwise semantics);
-        # it runs its own quantization + grouped GEMM and returns early, bypassing the default
-        # quantizer setup below.
-        use_blockwise_fp8 = (
-            IS_HIP_EXTENSION
-            and fp8
-            and os.getenv("NVTE_USE_BLOCKWISE_FP8_GROUPED_GEMM", "0") == "1"
-            and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
-        )
-        if use_blockwise_fp8:
+        # Blockwise FP8 grouped GEMM (ROCm Triton) opt-in. Runs its own quantization +
+        # grouped GEMM and returns early, bypassing the default quantizer setup below.
+        if _GroupedLinear._is_blockwise_fp8_grouped_gemm_supported(
+            fp8=fp8,
+            recipe=FP8GlobalStateManager.get_fp8_recipe() if fp8 else None,
+            use_bias=use_bias,
+            backward_override=backward_override,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            wgrad_store=wgrad_store,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            m_splits=m_splits,
+        ):
             return _GroupedLinear._forward_blockwise_fp8(
                 ctx,
                 inp=inp,
                 m_splits=m_splits,
+                m_splits_tensor=m_splits_tensor,
                 weights=weights,
-                biases=biases,
-                use_bias=use_bias,
-                fp8=fp8,
-                recipe=FP8GlobalStateManager.get_fp8_recipe(),
-                wgrad_store=wgrad_store,
                 weight_quantizers=weight_quantizers,
-                fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-                cpu_offloading=cpu_offloading,
                 activation_dtype=activation_dtype,
                 is_grad_enabled=is_grad_enabled,
-                save_original_input=save_original_input,
-                debug=debug,
-                actual_m_splits=actual_m_splits,
-                unpad_output=unpad_output,
-                backward_override=backward_override,
             )
 
         # Configure quantizers
