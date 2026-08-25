@@ -400,14 +400,14 @@ class _GroupedLinear(torch.autograd.Function):
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
-    def _packed_main_grad_view(main_grads):
-        """[G, N, K] view of consecutive contiguous ``main_grad`` buffers, or None."""
-        g0 = main_grads[0]
+    def _packed_3d_view(tensors):
+        """[G, N, K] view of consecutive contiguous 2D buffers, or None."""
+        g0 = tensors[0]
         if g0 is None or g0.ndim != 2 or not g0.is_contiguous():
             return None
         n, k = g0.shape
         step = g0.numel() * g0.element_size()
-        for i, g in enumerate(main_grads):
+        for i, g in enumerate(tensors):
             if (
                 g is None
                 or g.dtype != g0.dtype
@@ -417,7 +417,22 @@ class _GroupedLinear(torch.autograd.Function):
                 or g.data_ptr() != g0.data_ptr() + i * step
             ):
                 return None
-        return g0.as_strided((len(main_grads), n, k), (n * k, k, 1))
+        return g0.as_strided((len(tensors), n, k), (n * k, k, 1))
+
+    @staticmethod
+    def _expert_weights_as_3d(weights, dtype):
+        """[G, N, K] expert weights without stacking when storage is already packed.
+
+        ``single_grouped_weight`` keeps experts as consecutive slices of one
+        ``GroupedTensor.rowwise_data`` buffer; those slices are a zero-copy view.
+        Discrete ``weight0..weightN`` still need a stack.
+        """
+        packed = _GroupedLinear._packed_3d_view(weights)
+        if packed is not None:
+            if packed.dtype != dtype:
+                packed = packed.to(dtype)
+            return packed if packed.is_contiguous() else packed.contiguous()
+        return torch.stack([wt.to(dtype).contiguous() for wt in weights], 0).contiguous()
 
     @staticmethod
     def _handle_fused_wgrad(weight, main_grad):
@@ -516,7 +531,7 @@ class _GroupedLinear(torch.autograd.Function):
         group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
         group_offs[1:] = torch.cumsum(group_lens, 0)
 
-        w = torch.stack([wt.to(activation_dtype).contiguous() for wt in weights], 0).contiguous()
+        w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
 
         # Quantize: activation rowwise (1x128 along K), weights 128x128.
         a_row, a_srow = quantize_fp8_blockwise(a, dt, axis=1, block_size=128)
@@ -613,7 +628,7 @@ class _GroupedLinear(torch.autograd.Function):
                     accumulate = True
                 if getattr(ctx, "origin_weights_overwrite_main_grad", False):
                     accumulate = False
-                packed_out = _GroupedLinear._packed_main_grad_view(main_grads)
+                packed_out = _GroupedLinear._packed_3d_view(main_grads)
                 wgrad_list = main_grads
                 out_dtype = main_grads[0].dtype if main_grads[0] is not None else ctx.activation_dtype
             else:
