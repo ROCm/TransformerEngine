@@ -11,9 +11,6 @@ plus every supported low-precision recipe (FP8, MXFP8, MXFP4, NVFP4) via
 te.autocast. Precisions whose hardware/runtime support is unavailable on the
 current device are skipped automatically.
 
-Note: Transformer Engine exposes no MXFP6 recipe (MXFP6 exists only as a
-low-level CK/CUTLASS data type), so it is not part of the sweep.
-
 Output: benchmark_gemm.csv (written to cwd)
 """
 

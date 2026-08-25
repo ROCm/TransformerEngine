@@ -46,14 +46,18 @@ BENCHMARK_LABEL = "Normalization Forward"
 # the plain baseline (Quantize is an identity outside autocast).
 RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
 
-# Forward output bytes/elem by precision (input is always bf16 = 2 bytes/elem):
-#   bf16  : 2.0
-#   fp8   : 1.0             (E4M3/E5M2 data, per-tensor scale ~ 0)
-#   mxfp8 : 1.0 + 1/32      (+ E8M0 1 byte / 32-elem block)
+# Forward output bytes/elem by precision. Under autocast the norm quantizes
+# through the recipe-created quantizers, which default to columnwise usage on, so
+# it writes BOTH rowwise and columnwise data (plus both MXFP8 scale buffers) --
+# the norm->Linear training layout (rowwise feeds fprop, columnwise feeds wgrad).
+# Input is always bf16 (2 bytes/elem).
+#   bf16  : 2.0                    (single bf16 output; Quantize is identity)
+#   fp8   : 2.0                    (rowwise + columnwise E4M3/E5M2 data; scale ~ 0)
+#   mxfp8 : 2.0 + 2/32 = 2 + 1/16  (rowwise + columnwise data + both E8M0 scales)
 _FWD_WRITE_BYTES = {
     "bf16": 2.0,
-    "fp8": 1.0,
-    "mxfp8": 1.0 + 1.0 / 32,
+    "fp8": 2.0,
+    "mxfp8": 2.0 + 1.0 / 16,
 }
 
 
