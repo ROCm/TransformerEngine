@@ -400,58 +400,66 @@ class _GroupedLinear(torch.autograd.Function):
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
+    def _packed_main_grad_view(main_grads):
+        """[G, N, K] view of consecutive contiguous ``main_grad`` buffers, or None."""
+        g0 = main_grads[0]
+        if g0 is None or g0.ndim != 2 or not g0.is_contiguous():
+            return None
+        n, k = g0.shape
+        step = g0.numel() * g0.element_size()
+        for i, g in enumerate(main_grads):
+            if (
+                g is None
+                or g.dtype != g0.dtype
+                or g.device != g0.device
+                or tuple(g.shape) != (n, k)
+                or not g.is_contiguous()
+                or g.data_ptr() != g0.data_ptr() + i * step
+            ):
+                return None
+        return g0.as_strided((len(main_grads), n, k), (n * k, k, 1))
+
+    @staticmethod
+    def _handle_fused_wgrad(weight, main_grad):
+        """Megatron DDP hook: mark wgrad as consumed and return a dummy (or None)."""
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+            shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
+            return get_dummy_wgrad(shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False))
+        return None
+
+    @staticmethod
     def _is_blockwise_fp8_grouped_gemm_supported(
         *,
         fp8,
         recipe,
         use_bias,
         backward_override,
-        fuse_wgrad_accumulation,
         cpu_offloading,
         save_original_input,
-        wgrad_store,
         debug,
         unpad_output,
         actual_m_splits,
-        m_splits,
     ) -> bool:
-        """Return whether the ROCm Triton blockwise FP8 grouped GEMM path can run this call.
-
-        Requires ``NVTE_USE_BLOCKWISE_GMM_TRITON=1``, ``Float8BlockScaling``, and the
-        hardcoded blockwise layout (activation 1x128 along K, weights 128x128, grad 1x128).
-        Unsupported orchestration features fall back to the default path.
-        """
-        if not IS_HIP_EXTENSION:
-            return False
-        if os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") != "1":
-            return False
-        if not fp8 or recipe is None or not recipe.float8_block_scaling():
-            return False
-        if (
-            recipe.x_block_scaling_dim != 1
-            or recipe.w_block_scaling_dim != 2
-            or recipe.grad_block_scaling_dim != 1
-        ):
-            return False
-        if use_bias:
-            return False
-        if backward_override is not None:
-            return False
-        if fuse_wgrad_accumulation:
-            return False
-        if cpu_offloading:
-            return False
-        if save_original_input:
-            return False
-        if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
-            return False
-        if debug:
-            return False
-        if unpad_output or (
-            actual_m_splits is not None and list(actual_m_splits) != list(m_splits)
-        ):
-            return False
-        return True
+        """ROCm Triton blockwise FP8 grouped GEMM: HIP, env, Float8BlockScaling 1x128/128x128."""
+        return (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") == "1"
+            and fp8
+            and recipe is not None
+            and recipe.float8_block_scaling()
+            and (recipe.x_block_scaling_dim, recipe.w_block_scaling_dim, recipe.grad_block_scaling_dim)
+            == (1, 2, 1)
+            and not (
+                use_bias
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
 
     @staticmethod
     def _forward_blockwise_fp8(
@@ -464,6 +472,9 @@ class _GroupedLinear(torch.autograd.Function):
         weight_quantizers,
         activation_dtype,
         is_grad_enabled,
+        fuse_wgrad_accumulation,
+        is_first_microbatch,
+        wgrad_store,
     ):
         """Blockwise FP8 grouped GEMM forward (ROCm Triton).
 
@@ -531,6 +542,20 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.weight_requires_grad = weights[0].requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.is_first_microbatch = is_first_microbatch
+            ctx.wgrad_store = wgrad_store
+            if fuse_wgrad_accumulation and ctx.weight_requires_grad:
+                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                ctx.origin_weights_overwrite_main_grad = getattr(
+                    weights[0], "overwrite_main_grad", False
+                )
+                if hasattr(weights[0], "__fsdp_param__"):
+                    ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                else:
+                    ctx.main_grad_funcs = [
+                        lambda j=i: weights[j].main_grad for i in range(num_gemms)
+                    ]
 
         new_workspaces = [None] * num_gemms
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
@@ -566,10 +591,75 @@ class _GroupedLinear(torch.autograd.Function):
             go_col, go_scol, _l, _o = quantize_fp8_blockwise_segment_m(
                 g_out, dt, 128, group_lens, group_offs
             )
-            dW = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
-                go_col, a_col, go_scol, a_scol, vk_offs, out_dtype=ctx.activation_dtype
-            )
-            wgrad_list = [dW[g].contiguous() for g in range(ctx.num_gemms)]
+            fuse = getattr(ctx, "fuse_wgrad_accumulation", False)
+            origin_weights = [None] * ctx.num_gemms
+            main_grads = [None] * ctx.num_gemms
+            accumulate = False
+            packed_out = None
+            if fuse:
+                origin_weight_refs = ctx.origin_weight_refs
+                ctx.origin_weight_refs = None
+                origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
+                assert all(
+                    w is not None for w in origin_weights
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+                for origin_weight, main_grad in zip(origin_weights, main_grads):
+                    if main_grad is not None:
+                        origin_weight.main_grad = main_grad
+                if ctx.is_first_microbatch is not None:
+                    accumulate = not ctx.is_first_microbatch
+                else:
+                    accumulate = True
+                if getattr(ctx, "origin_weights_overwrite_main_grad", False):
+                    accumulate = False
+                packed_out = _GroupedLinear._packed_main_grad_view(main_grads)
+                wgrad_list = main_grads
+                out_dtype = main_grads[0].dtype if main_grads[0] is not None else ctx.activation_dtype
+            else:
+                out_dtype = ctx.activation_dtype
+                wgrad_3d = torch.empty(
+                    (ctx.num_gemms, ctx.out_features, a_col.shape[1]),
+                    dtype=out_dtype,
+                    device=a_col.device,
+                )
+                packed_out = wgrad_3d
+                wgrad_list = [wgrad_3d[g] for g in range(ctx.num_gemms)]
+
+            def grouped_gemm_wgrad(*_unused):
+                dW = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
+                    go_col,
+                    a_col,
+                    go_scol,
+                    a_scol,
+                    vk_offs,
+                    out_dtype=out_dtype,
+                    out=packed_out,
+                    accumulate=accumulate and packed_out is not None and fuse,
+                )
+                if fuse and packed_out is None:
+                    for g, mg in enumerate(main_grads):
+                        if mg is None:
+                            continue
+                        if accumulate:
+                            mg.add_(dW[g])
+                        else:
+                            mg.copy_(dW[g])
+                # Signature matches WeightGradStore / GroupedLinear.backward_dw.
+                return None, [None] * ctx.num_gemms, None
+
+            wgrad_store = getattr(ctx, "wgrad_store", None)
+            if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
+                # tensor_list[2] is the wgrad buffers backward_dw assigns to .grad.
+                wgrad_store.put([go_col, a_col, wgrad_list], grouped_gemm_wgrad)
+            else:
+                grouped_gemm_wgrad()
+
+            if fuse:
+                wgrad_list = [
+                    _GroupedLinear._handle_fused_wgrad(weight, main_grad)
+                    for weight, main_grad in zip(origin_weights, main_grads)
+                ]
 
         grad_biases = [None] * ctx.num_gemms  # bias not supported on this path
 
@@ -644,14 +734,11 @@ class _GroupedLinear(torch.autograd.Function):
             recipe=FP8GlobalStateManager.get_fp8_recipe() if fp8 else None,
             use_bias=use_bias,
             backward_override=backward_override,
-            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
             cpu_offloading=cpu_offloading,
             save_original_input=save_original_input,
-            wgrad_store=wgrad_store,
             debug=debug,
             unpad_output=unpad_output,
             actual_m_splits=actual_m_splits,
-            m_splits=m_splits,
         ):
             return _GroupedLinear._forward_blockwise_fp8(
                 ctx,
@@ -662,6 +749,9 @@ class _GroupedLinear(torch.autograd.Function):
                 weight_quantizers=weight_quantizers,
                 activation_dtype=activation_dtype,
                 is_grad_enabled=is_grad_enabled,
+                fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                is_first_microbatch=is_first_microbatch,
+                wgrad_store=wgrad_store,
             )
 
         # Configure quantizers

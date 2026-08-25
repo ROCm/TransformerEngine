@@ -300,8 +300,6 @@ def test_grouped_linear_accuracy(
         pytest.skip("Triton grouped gemm is only supported on HIP.")
     if IS_HIP_EXTENSION and dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
         pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
@@ -321,7 +319,10 @@ def test_grouped_linear_accuracy(
             )
 
     if use_triton:
-        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        if recipe is not None and recipe.float8_block_scaling():
+            os.environ["NVTE_USE_BLOCKWISE_GMM_TRITON"] = "1"
+        else:
+            os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -385,8 +386,10 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
+    use_blockwise_triton = os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") == "1"
     if use_triton:
         os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+        os.environ.pop("NVTE_USE_BLOCKWISE_GMM_TRITON", None)
 
     atol, rtol = 0, 0
     if use_cutlass:
@@ -398,8 +401,19 @@ def test_grouped_linear_accuracy(
         if dtype == torch.float32:
             atol = 2.6e-6
             rtol = 5e-2
+    if use_blockwise_triton:
+        # tests/pytorch/triton_kernels/test_blockwise_fp8.py dequant checks.
+        atol, rtol = 0.25, 0.12
     for o, o_ref in zip(outputs, outputs_ref):
-        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+        if use_blockwise_triton:
+            if o is None:
+                assert o_ref is None
+                continue
+            mag = max(float(o.detach().abs().max()), float(o_ref.detach().abs().max()))
+            tensor_atol = max(atol, 0.05 * mag)
+            torch.testing.assert_close(o, o_ref, rtol=rtol, atol=tensor_atol)
+        else:
+            torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(
@@ -754,8 +768,6 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -836,8 +848,6 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )

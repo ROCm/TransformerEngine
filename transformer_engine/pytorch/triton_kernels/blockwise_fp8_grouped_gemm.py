@@ -377,6 +377,7 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     CACHE_MODIFIER: tl.constexpr,
+    ACCUMULATE: tl.constexpr,
 ):
     """Persistent grouped block-wise FP8 variable-K GEMM kernel (backward, CPU-sync-free).
 
@@ -476,12 +477,14 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
             RHS_BASE += BLOCK_SIZE_K * stride_rhs_m
 
         # ── Store output ──
-        c = acc.to(C.type.element_ty)
         rm_s = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rn_s = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         rn_s = tl.max_contiguous(tl.multiple_of(rn_s % OUT_N, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm_s[:, None] < OUT_M) & (rn_s[None, :] < OUT_N)
         C_ = C + group_idx.to(tl.int64) * stride_cg + rm_s[:, None] * stride_cm + rn_s[None, :] * stride_cn
+        c = acc.to(C.type.element_ty)
+        if ACCUMULATE:
+            c += tl.load(C_, mask=c_mask, other=0)
         tl.store(C_, c, c_mask)
 
 
@@ -496,24 +499,16 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     rhs_scales: torch.Tensor,
     group_offs: torch.Tensor,
     out_dtype: torch.dtype = torch.bfloat16,
+    out: torch.Tensor = None,
+    accumulate: bool = False,
 ) -> torch.Tensor:
     """Variable-K grouped block-wise FP8 GEMM (backward, 1D+1D scaling) using Triton.
 
     Computes: C[g] = lhs[offs[g]:offs[g+1]]^T @ rhs[offs[g]:offs[g+1]]
     with 1D+1D block-wise scaling applied in the K-loop.
 
-    Output: [G, OUT_M, OUT_N].
-
-    Args:
-        lhs: [M_padded_total, OUT_M] FP8 (segment-padded, each segment aligned to 128).
-        rhs: [M_padded_total, OUT_N] FP8.
-        lhs_scales: [ceil(M_padded/128), OUT_M] float32.
-        rhs_scales: [ceil(M_padded/128), OUT_N] float32.
-        group_offs: [G+1] int64 padded segment offsets.
-        out_dtype: Output dtype (default bfloat16).
-
-    Returns:
-        [G, OUT_M, OUT_N] output.
+    Output: [G, OUT_M, OUT_N]. When ``out`` is provided the kernel writes in-place
+    (and adds into it if ``accumulate``). ``out_dtype`` is ignored in that case.
     """
     if is_cdna4():
         set_triton_knobs_gfx950()
@@ -526,7 +521,13 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     OUT_N = rhs.shape[1]
     G = group_offs.shape[0] - 1
 
-    out = torch.empty((G, OUT_M, OUT_N), device=lhs.device, dtype=out_dtype)
+    if out is None:
+        assert not accumulate, "accumulate=True requires an existing out tensor"
+        out = torch.empty((G, OUT_M, OUT_N), device=lhs.device, dtype=out_dtype)
+    else:
+        assert out.shape == (G, OUT_M, OUT_N), (
+            f"out must be {(G, OUT_M, OUT_N)}, got {tuple(out.shape)}"
+        )
     num_sms = get_num_cus()
 
     # Use 128x128 tiles to reduce register pressure from double-accumulator
@@ -563,6 +564,7 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
         NUM_XCDS=NUM_XCDS,
         CHUNK_SIZE=32,
         CACHE_MODIFIER=".ca",
+        ACCUMULATE=accumulate,
         num_warps=4,
         num_stages=2,
         waves_per_eu=0,
