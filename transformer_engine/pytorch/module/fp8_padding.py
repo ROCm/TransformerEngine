@@ -6,7 +6,7 @@
 
 """FP8 Padding API"""
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -113,7 +113,8 @@ class Fp8Padding(torch.nn.Module):
         self,
         inp: torch.Tensor,
         m_splits: List[int],
-    ) -> Tuple[torch.Tensor, List[int]]:
+        m_splits_tensor: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Union[List[int], torch.Tensor]]:
         """
         Apply the padding to the input.
 
@@ -123,6 +124,10 @@ class Fp8Padding(torch.nn.Module):
                 Input tensor.
         m_splits : List[int]
                     List of integers representing the split of the input tensor.
+        m_splits_tensor : torch.Tensor, optional
+                    Device copy of ``m_splits``. When provided, the padded split sizes are
+                    returned as a tensor on the same device (rounded up on-device), instead
+                    of a Python list, so the caller can keep the splits on the GPU.
         """
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
@@ -136,6 +141,8 @@ class Fp8Padding(torch.nn.Module):
         ]
         # no padding needed
         if m_splits == padded_m_splits:
+            if m_splits_tensor is not None:
+                return inp, m_splits_tensor
             return inp, m_splits
 
         is_grad_enabled = torch.is_grad_enabled()
@@ -154,4 +161,7 @@ class Fp8Padding(torch.nn.Module):
         )
         out = fn(*autograd_ctx, inp, non_tensor_args)
 
+        if m_splits_tensor is not None:
+            align = self.align_size
+            return out, ((m_splits_tensor + (align - 1)) // align) * align
         return out, padded_m_splits
