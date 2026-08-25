@@ -103,9 +103,6 @@ def _require_triton():
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-DType = NewType("DType", jnp.dtype)
-Array = NewType("Array", jnp.ndarray)
-
 
 
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
