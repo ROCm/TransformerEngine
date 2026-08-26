@@ -5,6 +5,7 @@
 # Blockwise FP8 grouped GEMM Triton kernels (MoE), adapted from AMD Primus-Turbo
 # (primus_turbo/triton/grouped_gemm/grouped_gemm_fp8_kernel.py).
 
+import contextlib
 import os
 
 import torch
@@ -19,43 +20,69 @@ def get_num_cus() -> int:
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
-# AMD gfx950 compiler knobs.
-_KNOBS_SET = False
+# ── AMD compiler knobs (scoped) ──
+# The AMD codegen toggles live on ``triton.knobs.amd`` and are process-global: they
+# are read when a kernel is compiled, so leaving them set would silently change the
+# codegen of every unrelated Triton kernel compiled afterwards (cast, gmm, MXFP8,
+# ...). We therefore apply them only around our own launches and restore the prior
+# state on exit. Triton's setter keeps the backing env var in sync with the
+# attribute, so we snapshot/restore both.
+_AMD_KNOB_ENV = {
+    "use_async_copy": "TRITON_HIP_USE_ASYNC_COPY",
+    "scalarize_packed_fops": "AMDGCN_SCALARIZE_PACKED_FOPS",
+    "use_block_pingpong": "TRITON_HIP_USE_BLOCK_PINGPONG",
+}
 
 
-def _set_triton_knobs_gfx950() -> None:
-    """Force-on AMD compiler knobs for gfx950 (async_copy, block_pingpong, scalarize)."""
-    global _KNOBS_SET
-    if _KNOBS_SET:
-        return
-    _KNOBS_SET = True
-    os.environ["TRITON_HIP_USE_ASYNC_COPY"] = "1"
-    os.environ["AMDGCN_SCALARIZE_PACKED_FOPS"] = "1"
-    os.environ["TRITON_HIP_USE_BLOCK_PINGPONG"] = "1"
-    if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
-        triton.knobs.amd.use_async_copy = True
-        triton.knobs.amd.scalarize_packed_fops = True
-        triton.knobs.amd.use_block_pingpong = True
+def _amd_knob_overrides(*, is_tn: bool) -> dict:
+    """Knob values to apply for the enclosed GEMM launch.
 
-
-
-def _set_triton_knobs_gfx942(enable: bool = True):
-    """Set AMD Triton knobs on gfx942 (CDNA3).
-
-    ``use_async_copy`` / ``scalarize_packed_fops`` help NT/NN but regress
-    TN/wgrad ~5-8% on gfx942, so callers pass ``enable`` from layout.
+    gfx950 (CDNA4): force async_copy / scalarize / block_pingpong on.
+    gfx942 (CDNA3): async_copy / scalarize help NT/NN but regress TN/wgrad
+    ~5-8%, so gate them on the GEMM layout (block_pingpong left at its default).
     """
-    if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
-        triton.knobs.amd.use_async_copy = enable
-        triton.knobs.amd.scalarize_packed_fops = enable
-
-
-def _apply_amd_compiler_knobs(*, is_tn: bool) -> None:
-    """gfx942: knobs from GEMM layout. Else (gfx950): always-on gfx950 knobs."""
     if is_cdna3():
-        _set_triton_knobs_gfx942(enable=not is_tn)
-    else:
-        _set_triton_knobs_gfx950()
+        enable = not is_tn
+        return {"use_async_copy": enable, "scalarize_packed_fops": enable}
+    return {
+        "use_async_copy": True,
+        "scalarize_packed_fops": True,
+        "use_block_pingpong": True,
+    }
+
+
+@contextlib.contextmanager
+def _amd_compiler_knobs(*, is_tn: bool):
+    """Temporarily apply AMD Triton compiler knobs, restoring prior state on exit.
+
+    Scoped rather than set once because the knobs are process-global and read at
+    kernel compile time; leaving them set would leak into other kernels' codegen.
+    """
+    amd = getattr(getattr(triton, "knobs", None), "amd", None)
+    if amd is None:
+        yield
+        return
+    overrides = _amd_knob_overrides(is_tn=is_tn)
+    saved = {
+        name: (name in amd.__dict__, amd.__dict__.get(name), os.environ.get(env_key))
+        for name, env_key in _AMD_KNOB_ENV.items()
+        if name in overrides
+    }
+    try:
+        for name, value in overrides.items():
+            setattr(amd, name, value)
+        yield
+    finally:
+        for name, (had_override, override_val, env_val) in saved.items():
+            if had_override:
+                amd.__dict__[name] = override_val
+            else:
+                amd.__dict__.pop(name, None)
+            env_key = _AMD_KNOB_ENV[name]
+            if env_val is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = env_val
 
 
 NUM_XCDS = 8
@@ -260,6 +287,7 @@ def _bwd_autotune_configs():
 
 # Blockwise grouped FP8 kernel and public entrypoint
 
+
 @triton.autotune(configs=_get_grouped_blockwise_autotune_configs(), key=["G", "N", "K"])
 @triton.jit()
 def _grouped_blockwise_fp8_persistent_gemm_kernel(
@@ -371,8 +399,13 @@ def _grouped_blockwise_fp8_persistent_gemm_kernel(
         # ── K-loop with block-wise scaling (EVEN_K pattern) ──
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
+            # Full K-blocks only; the ragged tail is handled below. This can be 0
+            # (K < BLOCK_SIZE_K), so only assume non-negativity.
             loop_k -= 1
-        tl.assume(loop_k > 1)
+            tl.assume(loop_k >= 0)
+        else:
+            # K is a positive multiple of BLOCK_SIZE_K, so there is >= 1 full block.
+            tl.assume(loop_k >= 1)
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
@@ -400,7 +433,9 @@ def _grouped_blockwise_fp8_persistent_gemm_kernel(
         if not EVEN_K:
             # ── Last partial K-block (masked) ──
             rk_last = loop_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            A_LAST = A + m_start_g * stride_am + rm[:, None] * stride_am + rk_last[None, :] * stride_ak
+            A_LAST = (
+                A + m_start_g * stride_am + rm[:, None] * stride_am + rk_last[None, :] * stride_ak
+            )
             B_LAST = B + group_offset_b + rk_last[:, None] * stride_bk + rn[None, :] * stride_bn
             if stride_ak == 1:
                 A_LAST = tl.multiple_of(A_LAST, (1, 16))
@@ -434,7 +469,6 @@ def _grouped_blockwise_fp8_persistent_gemm_kernel(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-
 def grouped_gemm_fp8_blockwise_triton_kernel(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -461,9 +495,6 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     Returns:
         [M_total, N] output in out_dtype.
     """
-    # trans_a is always False here: NT if trans_b else NN (never TN).
-    _apply_amd_compiler_knobs(is_tn=False)
-
     assert a.ndim == 2, f"a must be 2D, got {a.shape}"
     assert b.ndim == 3, f"b must be 3D, got {b.shape}"
     assert b_scales.ndim == 3, f"b_scales must be 3D, got {b_scales.shape}"
@@ -527,20 +558,21 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     # Triton's autotune key is (G, N, K) only. Prime once with balanced offs
     # so the cached config is not locked to the first uneven MoE routing.
     warm_key = (G, N, K, even_k)
-    if warm_key not in _grouped_blockwise_warmed:
-        _grouped_blockwise_warmed.add(warm_key)
-        per = M_total // max(G, 1)
-        bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
-        bal_offs[-1] = M_total
-        _launch(torch.empty_like(out), bal_offs)
+    # trans_a is always False here: forward/dgrad are NT/NN (never TN). Scope the
+    # AMD knobs to these launches so they don't leak into other Triton kernels.
+    with _amd_compiler_knobs(is_tn=False):
+        if warm_key not in _grouped_blockwise_warmed:
+            _grouped_blockwise_warmed.add(warm_key)
+            per = M_total // max(G, 1)
+            bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
+            bal_offs[-1] = M_total
+            _launch(torch.empty_like(out), bal_offs)
 
-    _launch(out, group_offs)
+        _launch(out, group_offs)
     return out
 
 
 # ── Blockwise FP8 Variable-K Backward Public API ──
-
-
 
 
 @triton.autotune(
@@ -638,8 +670,12 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
         # ── Base pointers ──
-        LHS_BASE = LHS + m_start * stride_lhs_m + rm[:, None] * stride_lhs_n + rk[None, :] * stride_lhs_m
-        RHS_BASE = RHS + m_start * stride_rhs_m + rk[:, None] * stride_rhs_m + rn[None, :] * stride_rhs_n
+        LHS_BASE = (
+            LHS + m_start * stride_lhs_m + rm[:, None] * stride_lhs_n + rk[None, :] * stride_lhs_m
+        )
+        RHS_BASE = (
+            RHS + m_start * stride_rhs_m + rk[:, None] * stride_rhs_m + rn[None, :] * stride_rhs_n
+        )
 
         scale_row_start = m_start // BLOCK_SIZE_K
 
@@ -685,9 +721,14 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
         # ── Store output ──
         rm_s = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rn_s = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        rn_s = tl.max_contiguous(tl.multiple_of(rn_s % OUT_N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        rn_s = tl.max_contiguous(tl.multiple_of(rn_s, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm_s[:, None] < OUT_M) & (rn_s[None, :] < OUT_N)
-        C_ = C + group_idx.to(tl.int64) * stride_cg + rm_s[:, None] * stride_cm + rn_s[None, :] * stride_cn
+        C_ = (
+            C
+            + group_idx.to(tl.int64) * stride_cg
+            + rm_s[:, None] * stride_cm
+            + rn_s[None, :] * stride_cn
+        )
         c = acc.to(C.type.element_ty)
         if ACCUMULATE:
             c += tl.load(C_, mask=c_mask, other=0)
@@ -695,7 +736,6 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
 
 
 # ── Blockwise FP8 Forward Public API ──
-
 
 
 def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
@@ -716,9 +756,6 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     Output: [G, OUT_M, OUT_N]. When ``out`` is provided the kernel writes in-place
     (and adds into it if ``accumulate``). ``out_dtype`` is ignored in that case.
     """
-    # Variable-K wgrad is TN (lhs^T @ rhs).
-    _apply_amd_compiler_knobs(is_tn=True)
-
     assert lhs.ndim == 2 and rhs.ndim == 2
     assert lhs.shape[0] == rhs.shape[0]
     OUT_M = lhs.shape[1]
@@ -729,9 +766,11 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
         assert not accumulate, "accumulate=True requires an existing out tensor"
         out = torch.empty((G, OUT_M, OUT_N), device=lhs.device, dtype=out_dtype)
     else:
-        assert out.shape == (G, OUT_M, OUT_N), (
-            f"out must be {(G, OUT_M, OUT_N)}, got {tuple(out.shape)}"
-        )
+        assert out.shape == (
+            G,
+            OUT_M,
+            OUT_N,
+        ), f"out must be {(G, OUT_M, OUT_N)}, got {tuple(out.shape)}"
     num_sms = get_num_cus()
 
     def _launch(c_out, offs, accumulate_flag):
@@ -768,13 +807,16 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     # Autotune key is (G, OUT_M, OUT_N). Prime on a scratch buffer with
     # balanced padded offs so accumulate=True never benchmarks into ``out``.
     warm_key = (G, OUT_M, OUT_N, out.dtype, accumulate)
-    if warm_key not in _grouped_blockwise_vk_warmed:
-        _grouped_blockwise_vk_warmed.add(warm_key)
-        m_padded = lhs.shape[0]
-        per = max((m_padded // max(G, 1)) // 128 * 128, 128)
-        bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
-        bal_offs[-1] = m_padded
-        _launch(torch.zeros_like(out), bal_offs, False)
+    # Variable-K wgrad is TN (lhs^T @ rhs). Scope the AMD knobs to these launches
+    # so they don't leak into other Triton kernels.
+    with _amd_compiler_knobs(is_tn=True):
+        if warm_key not in _grouped_blockwise_vk_warmed:
+            _grouped_blockwise_vk_warmed.add(warm_key)
+            m_padded = lhs.shape[0]
+            per = max((m_padded // max(G, 1)) // 128 * 128, 128)
+            bal_offs = torch.arange(G + 1, device=group_offs.device, dtype=group_offs.dtype) * per
+            bal_offs[-1] = m_padded
+            _launch(torch.zeros_like(out), bal_offs, False)
 
-    _launch(out, group_offs, accumulate)
+        _launch(out, group_offs, accumulate)
     return out

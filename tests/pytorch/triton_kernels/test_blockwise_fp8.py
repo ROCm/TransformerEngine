@@ -247,6 +247,14 @@ def test_grouped_gemm_fp8_blockwise_matches_dequant_ref(splits, n, k, trans_b, i
         ([80, 176], 256, 128),
         ([0, 256], 256, 128),
         ([64, 96, 96], 128, 256),
+        # OUT_N == k == 192 is not a multiple of BLOCK_SIZE_N (128 or 256), so the
+        # wgrad kernel always hits an N tail tile regardless of the autotuned
+        # config. Covers tail-tile addressing / the un-wrapped store mask for both
+        # the fresh and ACCUMULATE paths. (Note: the wrapped-store race the mask
+        # removes converges to the correct value here, so this guards addressing,
+        # not the race itself.)
+        ([128, 128], 256, 192),
+        ([64, 96, 96], 128, 192),
     ],
 )
 @pytest.mark.parametrize("accumulate", [False, True])

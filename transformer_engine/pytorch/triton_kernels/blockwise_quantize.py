@@ -58,7 +58,9 @@ def quant_fp8_blockwise_kernel(
     x_tile = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
     x_tile_abs = tl.abs(x_tile)
 
-    x_fp8_tile, x_scales_tile = compute_scale_and_quant(x_tile, x_tile_abs, AXIS, FP8_MAX, ROUND_POW2)
+    x_fp8_tile, x_scales_tile = compute_scale_and_quant(
+        x_tile, x_tile_abs, AXIS, FP8_MAX, ROUND_POW2
+    )
 
     x_fp8_ptrs = x_fp8_ptr + offs_m[:, None] * N + offs_n[None, :]
     tl.store(x_fp8_ptrs, x_fp8_tile.to(x_fp8_ptr.dtype.element_ty), mask=mask)
@@ -96,8 +98,12 @@ def quant_fp8_blockwise_dual_kernel(
     x_tile = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
     x_tile_abs = tl.abs(x_tile)
 
-    x_fp8_row_tile, x_scales_row_tile = compute_scale_and_quant(x_tile, x_tile_abs, 1, FP8_MAX, ROUND_POW2)
-    x_fp8_col_tile, x_scales_col_tile = compute_scale_and_quant(x_tile, x_tile_abs, 0, FP8_MAX, ROUND_POW2)
+    x_fp8_row_tile, x_scales_row_tile = compute_scale_and_quant(
+        x_tile, x_tile_abs, 1, FP8_MAX, ROUND_POW2
+    )
+    x_fp8_col_tile, x_scales_col_tile = compute_scale_and_quant(
+        x_tile, x_tile_abs, 0, FP8_MAX, ROUND_POW2
+    )
 
     x_fp8_row_ptrs = x_fp8_row_ptr + offs_m[:, None] * N + offs_n[None, :]
     tl.store(x_fp8_row_ptrs, x_fp8_row_tile.to(x_fp8_row_ptr.dtype.element_ty), mask=mask)
@@ -159,10 +165,10 @@ def quant_fp8_blockwise_for_weight_kernel(
 
 @triton.jit
 def quant_fp8_blockwise_segment_m_kernel(
-    x_ptr,          # Input tensor [M_in, N]
-    x_fp8_ptr,      # Output tensor [M_out, N] (padded)
-    x_scales_ptr,   # Output scales [M_out // BLOCK_SIZE, N]
-    group_offs_ptr,         # Original group offsets [B+1]
+    x_ptr,  # Input tensor [M_in, N]
+    x_fp8_ptr,  # Output tensor [M_out, N] (padded)
+    x_scales_ptr,  # Output scales [M_out // BLOCK_SIZE, N]
+    group_offs_ptr,  # Original group offsets [B+1]
     padded_group_offs_ptr,  # Padded group offsets [B+1]
     N,
     num_groups,
@@ -231,7 +237,9 @@ def quant_fp8_blockwise_segment_m_kernel(
 # -----------------------------------------------------------------------------
 
 
-def quantize_fp8_blockwise_dual(x: torch.Tensor, dtype: torch.dtype, block_size: int = 128, pow2: bool = False):
+def quantize_fp8_blockwise_dual(
+    x: torch.Tensor, dtype: torch.dtype, block_size: int = 128, pow2: bool = False
+):
     """Blockwise-quantize a 2D tensor in BOTH row (1xB) and column (Bx1) modes in one pass.
 
     Returns (x_fp8_row, x_scales_row, x_fp8_col, x_scales_col); scales hold the
@@ -242,20 +250,33 @@ def quantize_fp8_blockwise_dual(x: torch.Tensor, dtype: torch.dtype, block_size:
     fp8_max = torch.finfo(dtype).max
 
     x_fp8_row = torch.empty((M, N), dtype=dtype, device=x.device)
-    x_scales_row = torch.empty((M, triton.cdiv(N, block_size)), dtype=torch.float32, device=x.device)
+    x_scales_row = torch.empty(
+        (M, triton.cdiv(N, block_size)), dtype=torch.float32, device=x.device
+    )
     x_fp8_col = torch.empty((M, N), dtype=dtype, device=x.device)
-    x_scales_col = torch.empty((triton.cdiv(M, block_size), N), dtype=torch.float32, device=x.device)
+    x_scales_col = torch.empty(
+        (triton.cdiv(M, block_size), N), dtype=torch.float32, device=x.device
+    )
 
     grid = (triton.cdiv(M, block_size), triton.cdiv(N, block_size))
     quant_fp8_blockwise_dual_kernel[grid](
-        x, x_fp8_row, x_scales_row, x_fp8_col, x_scales_col, M, N,
-        BLOCK_SIZE=block_size, FP8_MAX=fp8_max,
+        x,
+        x_fp8_row,
+        x_scales_row,
+        x_fp8_col,
+        x_scales_col,
+        M,
+        N,
+        BLOCK_SIZE=block_size,
+        FP8_MAX=fp8_max,
         ROUND_POW2=pow2,
     )
     return x_fp8_row, x_scales_row, x_fp8_col, x_scales_col
 
 
-def quantize_fp8_blockwise(x: torch.Tensor, dtype: torch.dtype, axis: int, block_size: int = 128, pow2: bool = False):
+def quantize_fp8_blockwise(
+    x: torch.Tensor, dtype: torch.dtype, axis: int, block_size: int = 128, pow2: bool = False
+):
     """Single-direction blockwise quantize. axis=1 -> rowwise (1xB), axis=0 -> colwise (Bx1)."""
     assert x.is_contiguous() and x.dim() == 2, "Input must be 2D and contiguous"
     M, N = x.shape
@@ -268,13 +289,22 @@ def quantize_fp8_blockwise(x: torch.Tensor, dtype: torch.dtype, axis: int, block
 
     grid = (triton.cdiv(M, block_size), triton.cdiv(N, block_size))
     quant_fp8_blockwise_kernel[grid](
-        x, x_fp8, scales, M, N, BLOCK_SIZE=block_size, FP8_MAX=fp8_max, AXIS=axis,
+        x,
+        x_fp8,
+        scales,
+        M,
+        N,
+        BLOCK_SIZE=block_size,
+        FP8_MAX=fp8_max,
+        AXIS=axis,
         ROUND_POW2=pow2,
     )
     return x_fp8, scales
 
 
-def quantize_fp8_blockwise_weight(w: torch.Tensor, dtype: torch.dtype, block_size: int = 128, pow2: bool = False):
+def quantize_fp8_blockwise_weight(
+    w: torch.Tensor, dtype: torch.dtype, block_size: int = 128, pow2: bool = False
+):
     """128x128 weight blockwise quantize. w is [B, M, N] (or [M, N], promoted to B=1)."""
     squeeze = False
     if w.dim() == 2:
@@ -287,11 +317,18 @@ def quantize_fp8_blockwise_weight(w: torch.Tensor, dtype: torch.dtype, block_siz
     w_fp8 = torch.empty((B, M, N), dtype=dtype, device=w.device)
     w_scales = torch.empty(
         (B, triton.cdiv(M, block_size), triton.cdiv(N, block_size)),
-        dtype=torch.float32, device=w.device,
+        dtype=torch.float32,
+        device=w.device,
     )
     grid = (B, triton.cdiv(M, block_size), triton.cdiv(N, block_size))
     quant_fp8_blockwise_for_weight_kernel[grid](
-        w, w_fp8, w_scales, M, N, BLOCK_SIZE=block_size, FP8_MAX=fp8_max,
+        w,
+        w_fp8,
+        w_scales,
+        M,
+        N,
+        BLOCK_SIZE=block_size,
+        FP8_MAX=fp8_max,
         ROUND_POW2=pow2,
     )
     if squeeze:
@@ -299,7 +336,9 @@ def quantize_fp8_blockwise_weight(w: torch.Tensor, dtype: torch.dtype, block_siz
     return w_fp8, w_scales
 
 
-def quantize_fp8_blockwise_segment_m(x, dtype, block_size, group_lens, group_offs, pow2: bool = False):
+def quantize_fp8_blockwise_segment_m(
+    x, dtype, block_size, group_lens, group_offs, pow2: bool = False
+):
     """Colwise blockwise quantize with per-segment (MoE group) M padding.
 
     Returns (x_fp8 [M_pad, N], x_scales, var_k_group_lens [B], var_k_group_offs [B+1]).
@@ -317,12 +356,21 @@ def quantize_fp8_blockwise_segment_m(x, dtype, block_size, group_lens, group_off
 
     m_padded_max = M + num_groups * block_size
     x_fp8 = torch.zeros((m_padded_max, N), dtype=dtype, device=x.device)
-    x_scales = torch.zeros((triton.cdiv(m_padded_max, block_size), N), dtype=torch.float32, device=x.device)
+    x_scales = torch.zeros(
+        (triton.cdiv(m_padded_max, block_size), N), dtype=torch.float32, device=x.device
+    )
 
     grid = (triton.cdiv(m_padded_max, block_size), triton.cdiv(N, block_size))
     quant_fp8_blockwise_segment_m_kernel[grid](
-        x, x_fp8, x_scales, group_offs, var_k_group_offs, N, num_groups,
-        BLOCK_SIZE=block_size, FP8_MAX=fp8_max,
+        x,
+        x_fp8,
+        x_scales,
+        group_offs,
+        var_k_group_offs,
+        N,
+        num_groups,
+        BLOCK_SIZE=block_size,
+        FP8_MAX=fp8_max,
         ROUND_POW2=pow2,
     )
     return x_fp8, x_scales, var_k_group_lens, var_k_group_offs

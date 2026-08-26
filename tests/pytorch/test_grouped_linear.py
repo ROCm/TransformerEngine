@@ -48,6 +48,7 @@ from utils import (
     skip_unsupported_backward_override,
 )
 from triton_kernels.test_common import get_tolerances
+from transformer_engine.pytorch.triton_kernels.common import get_torch_e4m3_type
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -401,17 +402,61 @@ def test_grouped_linear_accuracy(
         if dtype == torch.float32:
             atol = 2.6e-6
             rtol = 5e-2
-    if use_blockwise_triton:
-        # Sequential Linear uses TE Float8BlockQuantizer + TE GEMM; this path
-        # uses Triton quant + grouped GEMM. Budget two independent FP8 stacks.
-        atol, rtol = 0.25, 0.12
     for o, o_ref in zip(outputs, outputs_ref):
-        if use_blockwise_triton:
-            mag = max(float(o.detach().abs().max()), float(o_ref.detach().abs().max()))
-            tensor_atol = max(atol, 0.05 * mag)
-            torch.testing.assert_close(o, o_ref, rtol=rtol, atol=tensor_atol)
-        else:
-            torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.parametrize(
+    "in_features,out_features,expected",
+    [
+        (256, 512, True),
+        (384, 512, True),  # 384 % 128 == 0 (not a multiple of 256, still supported)
+        (192, 512, False),  # in_features not a multiple of 128
+        (256, 320, False),  # out_features not a multiple of 128
+    ],
+)
+def test_blockwise_fp8_gate_requires_128_aligned_features(
+    in_features, out_features, expected, monkeypatch
+):
+    """The forward/dgrad kernel applies one scalar B scale per 128-wide N-tile,
+    so non-128-aligned in/out features must fall back to the default path."""
+    from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+    supported = _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+        fp8=True,
+        recipe=recipe.Float8BlockScaling(),
+        use_bias=False,
+        backward_override=None,
+        cpu_offloading=False,
+        save_original_input=False,
+        debug=False,
+        unpad_output=False,
+        actual_m_splits=None,
+        in_features=in_features,
+        out_features=out_features,
+        fp8_weights=False,
+    )
+    assert supported is expected
+
+    # Quantized weight params (fp8_model_params) must always fall back to avoid
+    # dequantize -> re-quantize double quantization.
+    supported_fp8_weights = _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+        fp8=True,
+        recipe=recipe.Float8BlockScaling(),
+        use_bias=False,
+        backward_override=None,
+        cpu_offloading=False,
+        save_original_input=False,
+        debug=False,
+        unpad_output=False,
+        actual_m_splits=None,
+        in_features=in_features,
+        out_features=out_features,
+        fp8_weights=True,
+    )
+    assert supported_fp8_weights is False
 
 
 @pytest.mark.skipif(
@@ -483,6 +528,12 @@ def test_grouped_linear_accuracy_rocm_backends(
         and get_device_compute_capability() != (12, 5)
     ):
         pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
+
+    if recipe is not None and recipe.float8_block_scaling():
+        # The CUTLASS/HipKittens/CK grouped GEMM backends do not support FP8 block
+        # scaling (they abort at runtime). The blockwise path is covered by the
+        # default and Triton backends in test_grouped_linear_accuracy instead.
+        pytest.skip("CUTLASS/HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
 
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
