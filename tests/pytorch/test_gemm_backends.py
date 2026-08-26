@@ -42,7 +42,7 @@ import warnings
 import pytest
 import torch
 
-from transformer_engine.pytorch import Float8Tensor
+from transformer_engine.pytorch import Float8Tensor, is_mxfp8_available
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
@@ -92,14 +92,11 @@ if _flydsl_backend_selected:
 
 # --- Feature detection --------------------------------------------------------
 
-# MXFP8 requires the fp8-scaled MFMA instructions currently available only on
-# gfx950+ (compute capability >= 9.5). Name reflects the capability, not the
-# specific arch, so it stays meaningful if future archs also support it.
-_has_mxfp8_support = _CAP is not None and _CAP[0] == 9 and _CAP[1] >= 5
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 
 requires_mxfp8_support = pytest.mark.skipif(
-    not _has_mxfp8_support,
-    reason="MXFP8 requires hardware with fp8-scaled MFMA (gfx950+, cc >= 9.5)",
+    not mxfp8_available,
+    reason=reason_for_no_mxfp8,
 )
 
 # tl.dot_scaled()'s current API (RHS scale in [N, K//32] layout) is only
@@ -260,13 +257,6 @@ def _set_backend(active):
         os.environ.pop("NVTE_GEMM_BACKEND", None)
 
 
-# ==============================================================================
-# Triton backend (NVTE_GEMM_BACKEND=TRITON)
-# ==============================================================================
-
-# --- Triton helpers -----------------------------------------------------------
-
-
 def create_regular_tensors(M, K, N, layout, dtype=torch.float32):
     """Random (A, B) regular tensors sized for ``layout`` at ``(M, K, N)``.
 
@@ -279,7 +269,7 @@ def create_regular_tensors(M, K, N, layout, dtype=torch.float32):
     return A, B
 
 
-def create_triton_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b, a_scale=1.0, b_scale=1.0):
+def create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b, a_scale=1.0, b_scale=1.0):
     """Create Float8Tensor inputs and dequantized references.
 
     ``a_scale`` / ``b_scale`` set the per-tensor quantization scale. Non-unity
@@ -302,19 +292,23 @@ def create_triton_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b, a_scale
     return A_fp8, B_fp8, A_fp8.dequantize(), B_fp8.dequantize()
 
 
-def create_triton_mxfp8_tensors(M, K, N, layout):
-    """Create MXFP8Tensor inputs and dequantized references."""
+def create_mxfp8_tensors(
+    M, K, N, layout, fp8_dtype_a=tex.DType.kFloat8E4M3, fp8_dtype_b=tex.DType.kFloat8E4M3
+):
+    """Create independently typed MXFP8Tensor inputs and dequantized references."""
     A_f32, B_f32 = create_regular_tensors(M, K, N, layout, dtype=torch.float32)
 
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=True,
-        columnwise=True,
-    )
-    A_mxfp8 = quantizer(A_f32)
-    B_mxfp8 = quantizer(B_f32)
+    A_mxfp8 = MXFP8Quantizer(fp8_dtype=fp8_dtype_a, rowwise=True, columnwise=True)(A_f32)
+    B_mxfp8 = MXFP8Quantizer(fp8_dtype=fp8_dtype_b, rowwise=True, columnwise=True)(B_f32)
 
     return A_mxfp8, B_mxfp8, A_mxfp8.dequantize(), B_mxfp8.dequantize()
+
+
+# ==============================================================================
+# Triton backend (NVTE_GEMM_BACKEND=TRITON)
+# ==============================================================================
+
+# --- Triton helpers -----------------------------------------------------------
 
 
 def triton_call_gemm(A, B, layout, out_dtype, use_triton=True):
@@ -379,7 +373,7 @@ def test_triton_vs_pytorch_fp8(M, K, N, layout, fp8_format):
     """Test Triton GEMM vs torch.matmul for Float8Tensor inputs."""
     torch.manual_seed(42)
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_triton_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -413,7 +407,7 @@ def test_triton_vs_pytorch_fp8_scales(layout, a_scale, b_scale):
     """
     torch.manual_seed(42)
     M, K, N = 768, 768, 4096
-    A_fp8, B_fp8, A_deq, B_deq = create_triton_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M,
         K,
         N,
@@ -446,7 +440,7 @@ def test_triton_vs_pytorch_fp8_mixed(M, K, N, layout, fp8_format):
     """Test Triton GEMM vs torch.matmul for mixed Float8Tensor formats."""
     torch.manual_seed(42)
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_triton_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -469,7 +463,7 @@ def test_triton_vs_pytorch_fp8_mixed(M, K, N, layout, fp8_format):
 def test_triton_vs_pytorch_mxfp8(M, K, N, layout):
     """Test Triton GEMM vs torch.matmul for MXFP8Tensor inputs."""
     torch.manual_seed(42)
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_triton_mxfp8_tensors(M, K, N, layout)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
 
     output = triton_call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True)
     expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
@@ -507,7 +501,7 @@ def test_triton_mxfp8_alpha_beta_accumulate(M, K, N, layout, alpha, beta, accumu
     computed ``C = A @ B`` regardless.
     """
     torch.manual_seed(42)
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_triton_mxfp8_tensors(M, K, N, layout)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
 
     out_shape = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape
     d_init = torch.randn(out_shape, dtype=torch.bfloat16, device="cuda") * 0.5
@@ -553,7 +547,7 @@ def test_triton_mxfp8_bias(M, K, N, layout):
     post-hoc.
     """
     torch.manual_seed(42)
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_triton_mxfp8_tensors(M, K, N, layout)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
 
     out_features = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape[-1]
     bias = torch.randn(out_features, dtype=torch.bfloat16, device="cuda")
@@ -609,7 +603,7 @@ def test_triton_vs_cpp_fp8(M, K, N, layout, fp8_format):
     """Test Triton GEMM vs C++ generic_gemm for Float8Tensor inputs."""
     torch.manual_seed(42)
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, _, _ = create_triton_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+    A_fp8, B_fp8, _, _ = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
 
     triton_out = triton_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
     cpp_out = triton_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=False)
@@ -633,7 +627,7 @@ def test_triton_vs_cpp_fp8_mixed(M, K, N, layout, fp8_format):
     """Test Triton GEMM vs C++ generic_gemm for mixed Float8Tensor formats."""
     torch.manual_seed(42)
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, _, _ = create_triton_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+    A_fp8, B_fp8, _, _ = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
 
     triton_out = triton_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
     cpp_out = triton_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=False)
@@ -654,7 +648,7 @@ def test_triton_vs_cpp_fp8_mixed(M, K, N, layout, fp8_format):
 def test_triton_vs_cpp_mxfp8(M, K, N, layout):
     """Test Triton GEMM vs C++ generic_gemm for MXFP8Tensor inputs."""
     torch.manual_seed(42)
-    A_mxfp8, B_mxfp8, _, _ = create_triton_mxfp8_tensors(M, K, N, layout)
+    A_mxfp8, B_mxfp8, _, _ = create_mxfp8_tensors(M, K, N, layout)
 
     triton_out = triton_call_gemm(
         A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True
@@ -839,45 +833,6 @@ def _run_capturing_fallback(fn):
 # --- FlyDSL helpers -----------------------------------------------------------
 
 
-def create_flydsl_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b):
-    """Create independently typed Float8Tensor inputs and references."""
-    A_shape, B_shape = get_shapes(layout, M, K, N)
-    A_f32 = torch.randn(A_shape, dtype=torch.float32, device="cuda") * 0.5
-    B_f32 = torch.randn(B_shape, dtype=torch.float32, device="cuda") * 0.5
-
-    A_fp8 = Float8Quantizer(
-        scale=torch.full((1,), 1.0, dtype=torch.float32, device="cuda"),
-        amax=torch.empty((1,), dtype=torch.float32, device="cuda"),
-        fp8_dtype=fp8_dtype_a,
-    )(A_f32)
-    B_fp8 = Float8Quantizer(
-        scale=torch.full((1,), 1.0, dtype=torch.float32, device="cuda"),
-        amax=torch.empty((1,), dtype=torch.float32, device="cuda"),
-        fp8_dtype=fp8_dtype_b,
-    )(B_f32)
-
-    return A_fp8, B_fp8, A_fp8.dequantize(), B_fp8.dequantize()
-
-
-def _make_flydsl_mxfp8_quantizer(fp8_dtype):
-    """Create one independently typed MXFP8 quantizer with both orientations."""
-    quantizer = MXFP8Quantizer(fp8_dtype=fp8_dtype)
-    quantizer.set_usage(rowwise=True, columnwise=True)
-    return quantizer
-
-
-def create_flydsl_mxfp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b):
-    """Create independently typed MXFP8Tensor inputs and references."""
-    A_shape, B_shape = get_shapes(layout, M, K, N)
-    A_f32 = torch.randn(A_shape, dtype=torch.float32, device="cuda") * 0.5
-    B_f32 = torch.randn(B_shape, dtype=torch.float32, device="cuda") * 0.5
-
-    A_mxfp8 = _make_flydsl_mxfp8_quantizer(fp8_dtype_a)(A_f32)
-    B_mxfp8 = _make_flydsl_mxfp8_quantizer(fp8_dtype_b)(B_f32)
-
-    return A_mxfp8, B_mxfp8, A_mxfp8.dequantize(), B_mxfp8.dequantize()
-
-
 def _assert_flydsl_ran(use_flydsl, fell_back):
     """Fail if FlyDSL was requested for a supported config but silently fell back.
 
@@ -1020,7 +975,7 @@ def test_flydsl_vs_pytorch_fp8(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_flydsl_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1041,7 +996,7 @@ def test_flydsl_vs_pytorch_mxfp8(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1072,7 +1027,7 @@ def test_flydsl_mxfp8_unsupported_shape_falls_back():
 
     M, K, N = 128, 512, 256
     fp8_dtype = tex.DType.kFloat8E4M3
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, "TN", fp8_dtype, fp8_dtype
     )
 
@@ -1139,7 +1094,7 @@ def test_flydsl_vs_cpp_fp8(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, _, _ = create_flydsl_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+    A_fp8, B_fp8, _, _ = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
 
     flydsl_out = flydsl_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True)
     cpp_out = flydsl_call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=False)
@@ -1158,7 +1113,7 @@ def test_flydsl_vs_cpp_mxfp8(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, _, _ = create_flydsl_mxfp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+    A_mxfp8, B_mxfp8, _, _ = create_mxfp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
 
     flydsl_out = flydsl_call_gemm(
         A_mxfp8, B_mxfp8, layout, out_dtype=torch.float32, use_flydsl=True
@@ -1244,7 +1199,7 @@ def test_flydsl_vs_pytorch_fp8_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_flydsl_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1275,7 +1230,7 @@ def test_flydsl_vs_cpp_fp8_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_flydsl_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1303,7 +1258,7 @@ def test_flydsl_vs_pytorch_mxfp8_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1338,7 +1293,7 @@ def test_flydsl_vs_cpp_mxfp8_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1431,7 +1386,7 @@ def test_flydsl_vs_pytorch_fp8_gelu(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_flydsl_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1460,7 +1415,7 @@ def test_flydsl_vs_pytorch_fp8_gelu_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_fp8, B_fp8, A_deq, B_deq = create_flydsl_fp8_tensors(
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1494,7 +1449,7 @@ def test_flydsl_vs_pytorch_mxfp8_gelu(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 
@@ -1527,7 +1482,7 @@ def test_flydsl_vs_pytorch_mxfp8_gelu_bias(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
-    A_mxfp8, B_mxfp8, A_deq, B_deq = create_flydsl_mxfp8_tensors(
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
         M, K, N, layout, fp8_dtype_a, fp8_dtype_b
     )
 

@@ -140,6 +140,7 @@ def barrier(vmcnt=63, lgkmcnt=15):
     rocdl.s_barrier()
 
 
+# Swizzle assumes gfx950 in SPX mode (full 8-XCD config).
 def xcd_swizzle(num_pid_m, num_pid_n):
     NUM_XCDS = 8
     WGM = 4

@@ -17,17 +17,21 @@ _MAX_FLYDSL = (0, 4)  # exclusive upper bound
 
 def _check_flydsl_version() -> None:
     from importlib.metadata import version
+    from packaging.version import Version, InvalidVersion
 
-    # PackageNotFoundError subclasses ImportError, so a missing package is
-    # handled by the same fallback path as an unsupported one.
+    _min = Version(f"{_MIN_FLYDSL[0]}.{_MIN_FLYDSL[1]}")
+    _max = Version(f"{_MAX_FLYDSL[0]}.{_MAX_FLYDSL[1]}")
+
     installed = version("flydsl")
     try:
-        major_minor = tuple(int(part) for part in installed.split(".")[:2])
-    except ValueError:
-        # Unparseable version string: the package imported, so let it proceed
-        # rather than falsely block a valid install.
-        return
-    if not _MIN_FLYDSL <= major_minor < _MAX_FLYDSL:
+        parsed = Version(installed)
+    except InvalidVersion as e:
+        # A valid install exposes a PEP 440 version string; an unparseable one
+        # is a broken install, so block it rather than let it proceed.
+        raise ImportError(
+            f"flydsl version {installed!r} is not a valid PEP 440 version"
+        ) from e
+    if not _min <= parsed < _max:
         raise ImportError(
             f"flydsl {installed} is installed but the FlyDSL GEMM backend requires "
             f">= {_MIN_FLYDSL[0]}.{_MIN_FLYDSL[1]}, < {_MAX_FLYDSL[0]}.{_MAX_FLYDSL[1]}"

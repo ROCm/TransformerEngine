@@ -69,9 +69,9 @@ def _always(item) -> bool:
 # should be skipped (allows finer-grained control than "any fp32 param" for tests
 # with multiple dtype-like parameters).
 _KNOWN_BAD_FP32_ON_GFX942 = {
-    # tests/pytorch/gemm/test_gemm.py -- Triton vs torch.matmul
+    # tests/pytorch/test_gemm_backends.py -- Triton vs torch.matmul
     "test_triton_vs_pytorch_regular": _has_fp32_param,
-    # tests/pytorch/gemm/test_gemm.py -- Triton vs C++ backend
+    # tests/pytorch/test_gemm_backends.py -- Triton vs C++ backend
     "test_triton_vs_cpp_regular": _has_fp32_param,
     "test_triton_vs_cpp_bias_forward": _has_fp32_param,
     # tests/pytorch/triton_kernels/test_gemm_kernel.py -- low-level kernel
