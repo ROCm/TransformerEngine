@@ -371,7 +371,7 @@ def build_sparse_mla_fwd_v4_gfx1250(
                     k_frag = fx.Vector(kraw_c[wn][0]).shuffle(fx.Vector(kraw_c[wn][1]), list(range(16)))
                     s_accs[wn] = wmma_op(
                         T.vec(8, T.f32), k_frag, q_frag, s_accs[wn],
-                        signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
+                        reuseA=False, reuseB=False,
                     ).result
 
             # ---- Apply scale (log2e) ----
@@ -512,7 +512,7 @@ def build_sparse_mla_fwd_v4_gfx1250(
                 v_frag = fx.Vector(vraw_c[0]).shuffle(fx.Vector(vraw_c[1]), list(range(16)))
                 new_o[wl] = wmma_op(
                     T.vec(8, T.f32), v_frag, p_frags[ks], new_o[wl],
-                    signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
+                    reuseA=False, reuseB=False,
                 ).result
 
             gpu.barrier()

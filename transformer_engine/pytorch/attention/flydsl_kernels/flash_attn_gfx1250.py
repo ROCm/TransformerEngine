@@ -362,7 +362,7 @@ def build_flash_attn_gfx1250_module(
                     k_frag = load_kv_frag_tr(wn, ks)
                     s_accs[wn] = wmma_op(
                         T.vec(8, T.f32), k_frag, q_frag, s_accs[wn],
-                        signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
+                        reuseA=False, reuseB=False,
                     ).result
 
             # ---- Apply sm_scale (log2e) ----
@@ -471,7 +471,7 @@ def build_flash_attn_gfx1250_module(
                 v_frag = load_kv_frag_tr(wn, 0)  # ks=0, BLOCK_N=32=WMMA_K
                 new_o[wn] = wmma_op(
                     T.vec(8, T.f32), v_frag, p_frag, new_o[wn],
-                    signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
+                    reuseA=False, reuseB=False,
                 ).result
 
             gpu.barrier()
