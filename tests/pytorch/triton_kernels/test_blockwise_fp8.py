@@ -11,13 +11,12 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.triton_kernels.common import get_torch_e4m3_type
 from transformer_engine.pytorch.triton_kernels.blockwise_quantize import (
     quantize_fp8_blockwise,
-    quantize_fp8_blockwise_dual,
     quantize_fp8_blockwise_weight,
     quantize_fp8_blockwise_segment_m,
 )
 from transformer_engine.pytorch.triton_kernels.blockwise_fp8_grouped_gemm import (
-    grouped_gemm_fp8_blockwise_triton_kernel,
-    grouped_gemm_fp8_blockwise_variable_k_triton_kernel,
+    _grouped_gemm_fp8_blockwise_raw,
+    _grouped_gemm_fp8_blockwise_variable_k_raw,
 )
 
 pytestmark = pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm Triton blockwise kernels only")
@@ -43,7 +42,9 @@ def _group_offs(splits, device="cuda"):
     return offs
 
 
-def _ref_rowwise_quantize(x: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False):
+def _ref_rowwise_quantize(
+    x: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False
+):
     m, n = x.shape
     fp8_max = torch.finfo(dtype).max
     nb = _cdiv(n, block)
@@ -58,7 +59,9 @@ def _ref_rowwise_quantize(x: torch.Tensor, dtype: torch.dtype, block: int = BLOC
     return q, (1.0 / scale).contiguous()
 
 
-def _ref_colwise_quantize(x: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False):
+def _ref_colwise_quantize(
+    x: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False
+):
     m, n = x.shape
     fp8_max = torch.finfo(dtype).max
     mb = _cdiv(m, block)
@@ -73,7 +76,9 @@ def _ref_colwise_quantize(x: torch.Tensor, dtype: torch.dtype, block: int = BLOC
     return q, (1.0 / scale).contiguous()
 
 
-def _ref_weight_quantize(w: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False):
+def _ref_weight_quantize(
+    w: torch.Tensor, dtype: torch.dtype, block: int = BLOCK, pow2: bool = False
+):
     g, m, n = w.shape
     fp8_max = torch.finfo(dtype).max
     mb, nb = _cdiv(m, block), _cdiv(n, block)
@@ -113,30 +118,6 @@ def test_quantize_fp8_blockwise(shape, dtype, axis, pow2):
         dq_ref = _dequant_colwise(q_ref, s_ref, x.shape[0])
     torch.testing.assert_close(s, s_ref, atol=1e-5, rtol=1e-4)
     torch.testing.assert_close(dq, dq_ref, atol=0.10, rtol=0.10)
-
-
-@pytest.mark.parametrize("shape", [(128, 256), (200, 128)])
-@pytest.mark.parametrize("dtype", IN_DTYPES, ids=str)
-@pytest.mark.parametrize("pow2", [False, True])
-def test_quantize_fp8_blockwise_dual(shape, dtype, pow2):
-    x = torch.randn(*shape, dtype=dtype, device="cuda")
-    q_row, s_row, q_col, s_col = quantize_fp8_blockwise_dual(x, FP8_DTYPE, block_size=BLOCK, pow2=pow2)
-    q_row_ref, s_row_ref = _ref_rowwise_quantize(x, FP8_DTYPE, pow2=pow2)
-    q_col_ref, s_col_ref = _ref_colwise_quantize(x, FP8_DTYPE, pow2=pow2)
-    torch.testing.assert_close(s_row, s_row_ref, atol=1e-5, rtol=1e-4)
-    torch.testing.assert_close(s_col, s_col_ref, atol=1e-5, rtol=1e-4)
-    torch.testing.assert_close(
-        _dequant_rowwise(q_row, s_row, x.shape[1]),
-        _dequant_rowwise(q_row_ref, s_row_ref, x.shape[1]),
-        atol=0.10,
-        rtol=0.10,
-    )
-    torch.testing.assert_close(
-        _dequant_colwise(q_col, s_col, x.shape[0]),
-        _dequant_colwise(q_col_ref, s_col_ref, x.shape[0]),
-        atol=0.10,
-        rtol=0.10,
-    )
 
 
 @pytest.mark.parametrize("shape", [(2, 256, 256), (3, 128, 256), (1, 200, 192), (256, 256)])
@@ -222,7 +203,7 @@ def test_grouped_gemm_fp8_blockwise_matches_dequant_ref(splits, n, k, trans_b, i
     b_fp8, b_s = quantize_fp8_blockwise_weight(b, FP8_DTYPE, block_size=BLOCK)
     offs = _group_offs(splits)
 
-    out = grouped_gemm_fp8_blockwise_triton_kernel(
+    out = _grouped_gemm_fp8_blockwise_raw(
         a_fp8, b_fp8, a_s, b_s, offs, trans_b=trans_b, out_dtype=out_dtype
     )
     assert out.dtype == out_dtype
@@ -270,11 +251,9 @@ def test_variable_k_wgrad(splits, n, k, accumulate, in_dtype, out_dtype):
     go_col, go_s, _, vk_offs = quantize_fp8_blockwise_segment_m(
         dy, FP8_DTYPE, BLOCK, group_lens, group_offs
     )
-    x_col, x_s, _, _ = quantize_fp8_blockwise_segment_m(
-        x, FP8_DTYPE, BLOCK, group_lens, group_offs
-    )
+    x_col, x_s, _, _ = quantize_fp8_blockwise_segment_m(x, FP8_DTYPE, BLOCK, group_lens, group_offs)
 
-    fresh = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
+    fresh = _grouped_gemm_fp8_blockwise_variable_k_raw(
         go_col, x_col, go_s, x_s, vk_offs, out_dtype=out_dtype, accumulate=False
     )
     assert fresh.dtype == out_dtype
@@ -293,7 +272,7 @@ def test_variable_k_wgrad(splits, n, k, accumulate, in_dtype, out_dtype):
     if accumulate:
         main_grad = torch.randn(g, n, k, dtype=out_dtype, device="cuda")
         expected = main_grad.clone()
-        grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
+        _grouped_gemm_fp8_blockwise_variable_k_raw(
             go_col,
             x_col,
             go_s,
@@ -302,4 +281,6 @@ def test_variable_k_wgrad(splits, n, k, accumulate, in_dtype, out_dtype):
             out=main_grad,
             accumulate=True,
         )
-        torch.testing.assert_close(main_grad.float(), (expected + fresh).float(), atol=1e-3, rtol=1e-4)
+        torch.testing.assert_close(
+            main_grad.float(), (expected + fresh).float(), atol=1e-3, rtol=1e-4
+        )

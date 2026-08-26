@@ -439,6 +439,32 @@ class _GroupedLinear(torch.autograd.Function):
         return torch.stack([wt.to(dtype).contiguous() for wt in weights], 0).contiguous()
 
     @staticmethod
+    def _grouped_weight_blockwise_qtensor(weights, activation_dtype, dt, pow2_w):
+        """Packed 2D ``[G*N, K]`` grouped-weight ``Float8BlockwiseQTensor`` from a list
+        of per-expert blockwise ``Float8BlockwiseQTensor`` (``fp8_model_params``).
+
+        When the per-expert ``_rowwise_data`` / ``_rowwise_scale_inv`` are consecutive
+        slices of one contiguous buffer (``single_grouped_weight``), the packed
+        ``[G*N, K]`` data and ``[G*(N/128), K/128]`` scales are reconstructed as a
+        zero-copy view. Discrete params fall back to a ``torch.stack`` copy.
+        """
+        from ..triton_kernels.blockwise_fp8_grouped_gemm import _stack_weight_qtensors
+        from ..triton_kernels.blockwise_quantize import (
+            wrap_fp8_blockwise_grouped_weight_qtensor,
+        )
+        from ..triton_kernels.common import te_dtype_to_torch_dtype
+
+        # Zero-copy [G, N, K] / [G, bn, bk] views when the per-expert payloads are
+        # consecutive slices of one buffer; the wrap builder flattens them to 2D.
+        b_fp8 = _GroupedLinear._packed_3d_view([w._rowwise_data for w in weights])
+        b_scale = _GroupedLinear._packed_3d_view([w._rowwise_scale_inv for w in weights])
+        if b_fp8 is None or b_scale is None:
+            b_fp8, b_scale = _stack_weight_qtensors(weights, te_dtype_to_torch_dtype(dt))
+        return wrap_fp8_blockwise_grouped_weight_qtensor(
+            b_fp8, b_scale, activation_dtype, dt, pow2=pow2_w
+        )
+
+    @staticmethod
     def _handle_fused_wgrad(weight, main_grad):
         """Megatron DDP hook: mark wgrad as consumed and return a dummy (or None)."""
         if hasattr(weight, "grad_added_to_main_grad"):
@@ -463,7 +489,6 @@ class _GroupedLinear(torch.autograd.Function):
         actual_m_splits,
         in_features,
         out_features,
-        fp8_weights,
     ) -> bool:
         """ROCm Triton blockwise FP8 grouped GEMM: HIP, env, Float8BlockScaling 1x128/128x128."""
         return (
@@ -478,11 +503,6 @@ class _GroupedLinear(torch.autograd.Function):
                 recipe.grad_block_scaling_dim,
             )
             == (1, 2, 1)
-            # The path quantizes high-precision weights itself. Quantized weight
-            # params (fp8_model_params) would be dequantized here and re-quantized
-            # by the kernel (double quantization), so fall back to the default path
-            # until the stored rowwise_data + scales are consumed directly.
-            and not fp8_weights
             # The forward/dgrad kernel applies one scalar B scale per N-tile
             # (BLOCK_SIZE_N == 128 == scale-block-N), so an N that is not a
             # multiple of 128 would apply the wrong scale to the tail tile.
@@ -522,28 +542,31 @@ class _GroupedLinear(torch.autograd.Function):
 
         Selected from :meth:`forward` under the ``Float8BlockScaling`` recipe when
         :meth:`_is_blockwise_fp8_triton_grouped_gemm_supported` is true. Activations are
-        quantized rowwise (1x128 along K), weights 128x128; the backward wgrad (see
+        quantized rowwise (1x128 along K) and weights 128x128, both wrapped as
+        :class:`Float8BlockwiseQTensor`. When the weights are already blockwise-quantized
+        params (``fp8_model_params``) their stored rowwise data + scales are reused
+        directly instead of re-quantizing. The backward wgrad (see
         :meth:`_backward_blockwise_fp8_triton`) uses a segment-padded columnwise operand
-        quantized from the original high-precision input (no double-quantization).
+        quantized from the original high-precision input.
         """
-        from ..triton_kernels.common import te_dtype_to_torch_dtype
         from ..triton_kernels.blockwise_quantize import (
-            quantize_fp8_blockwise,
-            quantize_fp8_blockwise_weight,
-            quantize_fp8_blockwise_segment_m,
+            quantize_fp8_blockwise_act_operands,
+            quantize_fp8_blockwise_grouped_weight_qtensor,
         )
         from ..triton_kernels.blockwise_fp8_grouped_gemm import (
             grouped_gemm_fp8_blockwise_triton_kernel,
         )
+        from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
         num_gemms = len(m_splits)
 
-        # Resolve the FP8 torch dtype via the quantizer, normalizing through ``tex.DType``
-        # so ``te_dtype_to_torch_dtype`` picks the arch-correct variant (fnuz on CDNA3).
+        # Resolve the FP8 dtype from the weight quantizer as a TE ``DType`` (the
+        # QTensor's native dtype). The Triton builders map it to the arch-correct
+        # torch FP8 dtype only at the kernel/``.view`` boundary.
         if weight_quantizers and weight_quantizers[0] is not None:
-            dt = te_dtype_to_torch_dtype(tex.DType(int(weight_quantizers[0].dtype)))
+            dt = tex.DType(int(weight_quantizers[0].dtype))
         else:
-            dt = torch.float8_e4m3fn
+            dt = tex.DType.kFloat8E4M3
         in_features = weights[0].size(-1)
         out_features = weights[0].size(0)
         device = inp.device
@@ -558,25 +581,58 @@ class _GroupedLinear(torch.autograd.Function):
         group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
         group_offs[1:] = torch.cumsum(group_lens, 0)
 
-        w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
+        # Quantize the activation rowwise (1x128 along K) as a Float8BlockwiseQTensor.
+        # When gradients are needed the same pass also emits the segment-padded
+        # columnwise operand for the variable-K wgrad into ``qa``'s columnwise slots.
+        qa = quantize_fp8_blockwise_act_operands(
+            a,
+            dt,
+            128,
+            group_lens,
+            group_offs,
+            rowwise=True,
+            columnwise=is_grad_enabled,
+            pow2=pow2_x,
+        )
 
-        # Quantize: activation rowwise (1x128 along K), weights 128x128.
-        a_row, a_srow = quantize_fp8_blockwise(a, dt, axis=1, block_size=128, pow2=pow2_x)
-        b_fp8, b_scale = quantize_fp8_blockwise_weight(w, dt, block_size=128, pow2=pow2_w)
+        # Weight operand: a packed 2D [G*N, K] Float8BlockwiseQTensor. When the
+        # params are already blockwise-quantized (fp8_model_params) reuse their
+        # stored rowwise data + scales; otherwise quantize the high-precision
+        # weights once over the packed 3D view (zero-copy when
+        # ``single_grouped_weight``), no stack.
+        if isinstance(weights[0], Float8BlockwiseQTensor):
+            # fp8_model_params: reuse the stored rowwise data + scales directly (no
+            # re-quantization).
+            qw = _GroupedLinear._grouped_weight_blockwise_qtensor(
+                weights, activation_dtype, dt, pow2_w
+            )
+        else:
+            w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
+            qw = quantize_fp8_blockwise_grouped_weight_qtensor(w, dt, pow2=pow2_w)
 
         # Forward GEMM: out[seg] = A[seg] @ W[g]^T  (trans_b=True).
         out = grouped_gemm_fp8_blockwise_triton_kernel(
-            a_row, b_fp8, a_srow, b_scale, group_offs, trans_b=True, out_dtype=activation_dtype
+            qa, qw, group_offs, trans_b=True, out_dtype=activation_dtype
         )
 
         if is_grad_enabled:
             ctx.use_blockwise_fp8_triton = True
-            # Segment-padded columnwise activation for the variable-K wgrad.
-            a_col, a_scol, _vk_lens, vk_offs = quantize_fp8_blockwise_segment_m(
-                a, dt, 128, group_lens, group_offs, pow2=pow2_x
+            # The segment-padded columnwise activation for the variable-K wgrad rides
+            # in ``qa``'s columnwise slots (produced by the fused pass above). Save
+            # those raw fields plus the packed weight QTensor's 2D fields; both
+            # rewrapped into Float8BlockwiseQTensors in backward.
+            ctx.save_for_backward(
+                qa._columnwise_data,
+                qa._columnwise_scale_inv,
+                qw._rowwise_data,
+                qw._rowwise_scale_inv,
+                group_lens,
+                group_offs,
+                qa._vk_group_offs,
             )
-            ctx.save_for_backward(a_col, a_scol, b_fp8, b_scale, group_lens, group_offs, vk_offs)
             ctx.dt = dt
+            ctx.pow2_x = pow2_x
+            ctx.pow2_w = pow2_w
             ctx.pow2_grad = pow2_grad
             ctx.activation_dtype = activation_dtype
             ctx.num_gemms = num_gemms
@@ -607,8 +663,9 @@ class _GroupedLinear(torch.autograd.Function):
     def _backward_blockwise_fp8_triton(ctx, grad_output):
         """Backward path paired with :meth:`_forward_blockwise_fp8_triton`."""
         from ..triton_kernels.blockwise_quantize import (
-            quantize_fp8_blockwise,
-            quantize_fp8_blockwise_segment_m,
+            quantize_fp8_blockwise_act_operands,
+            wrap_fp8_blockwise_grouped_weight_qtensor,
+            wrap_fp8_blockwise_segment_m_qtensor,
         )
         from ..triton_kernels.blockwise_fp8_grouped_gemm import (
             grouped_gemm_fp8_blockwise_triton_kernel,
@@ -619,17 +676,31 @@ class _GroupedLinear(torch.autograd.Function):
         dt = ctx.dt
         g_out = grad_output.reshape(-1, ctx.out_features).contiguous()
 
+        # Grad-output operands in one QTensor (``qdgrad``): rowwise for dgrad and/or
+        # segment-padded columnwise (variable-K) for wgrad. When both grads are
+        # needed they share a single fused pass over g_out; otherwise only the
+        # requested operand is produced.
+        qdgrad = quantize_fp8_blockwise_act_operands(
+            g_out,
+            dt,
+            128,
+            group_lens,
+            group_offs,
+            rowwise=ctx.requires_dgrad,
+            columnwise=ctx.weight_requires_grad,
+            pow2=ctx.pow2_grad,
+        )
+
         # dgrad: dX[seg] = dY[seg] @ W[g]  (trans_b=False) -> [M_total, K].
         dgrad = None
         if ctx.requires_dgrad:
-            go_row, go_srow = quantize_fp8_blockwise(
-                g_out, dt, axis=1, block_size=128, pow2=ctx.pow2_grad
+            # Rewrap the saved packed weight fields as a 2D [G*N, K] QTensor.
+            qw = wrap_fp8_blockwise_grouped_weight_qtensor(
+                b_fp8, b_scale, ctx.activation_dtype, dt, pow2=ctx.pow2_w
             )
             dgrad = grouped_gemm_fp8_blockwise_triton_kernel(
-                go_row,
-                b_fp8,
-                go_srow,
-                b_scale,
+                qdgrad,
+                qw,
                 group_offs,
                 trans_b=False,
                 out_dtype=ctx.activation_dtype,
@@ -638,8 +709,10 @@ class _GroupedLinear(torch.autograd.Function):
         # wgrad: dW[g] = dY[g]^T @ X[g]  (variable-K) -> [G, N, K].
         wgrad_list = [None] * ctx.num_gemms
         if ctx.weight_requires_grad:
-            go_col, go_scol, _l, _o = quantize_fp8_blockwise_segment_m(
-                g_out, dt, 128, group_lens, group_offs, pow2=ctx.pow2_grad
+            # qdgrad carries the segment-padded columnwise grad output (wgrad operand).
+            # Rewrap the saved activation columnwise fields as a columnwise-only QTensor.
+            a_operand = wrap_fp8_blockwise_segment_m_qtensor(
+                a_col, a_scol, vk_offs, ctx.activation_dtype, dt, pow2=ctx.pow2_x
             )
             fuse = getattr(ctx, "fuse_wgrad_accumulation", False)
             origin_weights = [None] * ctx.num_gemms
@@ -680,11 +753,8 @@ class _GroupedLinear(torch.autograd.Function):
 
             def grouped_gemm_wgrad(*_unused):
                 dW = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
-                    go_col,
-                    a_col,
-                    go_scol,
-                    a_scol,
-                    vk_offs,
+                    qdgrad,
+                    a_operand,
                     out_dtype=out_dtype,
                     out=packed_out,
                     accumulate=accumulate and packed_out is not None and fuse,
@@ -703,7 +773,10 @@ class _GroupedLinear(torch.autograd.Function):
             wgrad_store = getattr(ctx, "wgrad_store", None)
             if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
                 # tensor_list[2] is the wgrad buffers backward_dw assigns to .grad.
-                wgrad_store.put([go_col, a_col, wgrad_list], grouped_gemm_wgrad)
+                wgrad_store.put(
+                    [qdgrad._columnwise_data, a_operand._columnwise_data, wgrad_list],
+                    grouped_gemm_wgrad,
+                )
             else:
                 grouped_gemm_wgrad()
 
@@ -799,7 +872,6 @@ class _GroupedLinear(torch.autograd.Function):
             actual_m_splits=actual_m_splits,
             in_features=weights[0].size(-1),
             out_features=weights[0].size(0),
-            fp8_weights=isinstance(weights[0], QuantizedTensorStorage),
         ):
             return _GroupedLinear._forward_blockwise_fp8_triton(
                 ctx,
@@ -2394,6 +2466,24 @@ class GroupedLinear(TransformerEngineBaseModule):
             if weight_tensors is None:
                 # TODO(ksivaman): Remove this after GEMM integration.
                 weight_tensors = grouped_weight.split_into_quantized_tensors()
+            # Members are views, not the Parameter, so mirror the grad state the
+            # autograd Function reads off ``weights[i]``: ``requires_grad`` (gates
+            # wgrad), ``main_grad`` (per-expert views into the grouped
+            # fuse-accumulation buffer), and ``overwrite_main_grad``.
+            want_grad = grouped_weight.requires_grad
+            main_grad = getattr(grouped_weight, "main_grad", None)
+            per_expert_main_grad = None
+            if main_grad is not None:
+                per_expert_main_grad = main_grad.view(
+                    self.num_gemms, self.out_features, self.in_features
+                )
+            for i, w in enumerate(weight_tensors):
+                if w.requires_grad != want_grad:
+                    w.requires_grad_(want_grad)
+                if per_expert_main_grad is not None:
+                    w.main_grad = per_expert_main_grad[i]
+                if hasattr(grouped_weight, "overwrite_main_grad"):
+                    w.overwrite_main_grad = grouped_weight.overwrite_main_grad
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
@@ -2414,6 +2504,10 @@ class GroupedLinear(TransformerEngineBaseModule):
             parts = grouped_bias.quantized_tensors
             if parts is None:
                 parts = grouped_bias.split_into_quantized_tensors()
+            want_grad = grouped_bias.requires_grad
+            for p in parts:
+                if p.requires_grad != want_grad:
+                    p.requires_grad_(want_grad)
             return [p.reshape(-1) for p in parts]
         return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 

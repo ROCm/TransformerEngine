@@ -48,7 +48,6 @@ from utils import (
     skip_unsupported_backward_override,
 )
 from triton_kernels.test_common import get_tolerances
-from transformer_engine.pytorch.triton_kernels.common import get_torch_e4m3_type
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -436,27 +435,8 @@ def test_blockwise_fp8_gate_requires_128_aligned_features(
         actual_m_splits=None,
         in_features=in_features,
         out_features=out_features,
-        fp8_weights=False,
     )
     assert supported is expected
-
-    # Quantized weight params (fp8_model_params) must always fall back to avoid
-    # dequantize -> re-quantize double quantization.
-    supported_fp8_weights = _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
-        fp8=True,
-        recipe=recipe.Float8BlockScaling(),
-        use_bias=False,
-        backward_override=None,
-        cpu_offloading=False,
-        save_original_input=False,
-        debug=False,
-        unpad_output=False,
-        actual_m_splits=None,
-        in_features=in_features,
-        out_features=out_features,
-        fp8_weights=True,
-    )
-    assert supported_fp8_weights is False
 
 
 @pytest.mark.skipif(

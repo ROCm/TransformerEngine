@@ -469,7 +469,7 @@ def _grouped_blockwise_fp8_persistent_gemm_kernel(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def grouped_gemm_fp8_blockwise_triton_kernel(
+def _grouped_gemm_fp8_blockwise_raw(
     a: torch.Tensor,
     b: torch.Tensor,
     a_scales: torch.Tensor,
@@ -477,6 +477,7 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     group_offs: torch.Tensor,
     trans_b: bool = True,
     out_dtype: torch.dtype = torch.bfloat16,
+    a_scales_pretransposed: bool = False,
 ) -> torch.Tensor:
     """Persistent grouped block-wise FP8 GEMM (CPU-sync-free) using Triton.
 
@@ -486,7 +487,9 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     Args:
         a: [M_total, K] FP8 input (trans_a=False always).
         b: [G, N, K] (if trans_b=True) or [G, K, N] FP8 weights.
-        a_scales: [M_total, K//128] float32, block-wise scale for A.
+        a_scales: [M_total, K//128] float32, block-wise scale for A. When
+            ``a_scales_pretransposed`` is True this is already ``[K//128, M_total]``
+            (the GEMM-ready layout) and the internal transpose is skipped.
         b_scales: [G, ceil(N/128), ceil(K/128)] or [G, ceil(K/128), ceil(N/128)] float32.
         group_offs: [G+1] int64 prefix sum of group lengths.
         trans_b: If True, b[g] is [N, K] (transposed).
@@ -519,7 +522,7 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     stride_ak = a.stride(1)
 
     out = torch.empty((M_total, N), device=a.device, dtype=out_dtype)
-    A_scales_t = a_scales.T.contiguous()
+    A_scales_t = a_scales if a_scales_pretransposed else a_scales.T.contiguous()
     num_sms = get_num_cus()
     even_k = K % 128 == 0
 
@@ -570,6 +573,75 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
 
         _launch(out, group_offs)
     return out
+
+
+def _stack_weight_qtensors(weights, torch_fp8_dtype):
+    """Stack per-expert weight ``Float8BlockwiseQTensor`` into packed grouped
+    buffers: FP8 data ``[G, N, K]`` and scales ``[G, ceil(N/128), ceil(K/128)]``."""
+    b_fp8 = torch.stack([w._rowwise_data.view(torch_fp8_dtype) for w in weights], 0)
+    b_scales = torch.stack([w._rowwise_scale_inv for w in weights], 0)
+    return b_fp8, b_scales
+
+
+def grouped_gemm_fp8_blockwise_triton_kernel(
+    a,
+    b,
+    group_offs: torch.Tensor,
+    trans_b: bool = True,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Grouped block-wise FP8 GEMM over ``Float8BlockwiseQTensor`` operands.
+
+    ``a`` is a 1x128 rowwise-scaled ``Float8BlockwiseQTensor`` (``[M_total, K]``);
+    its stored ``rowwise_scale_inv`` is already in the ``[K//128, M_total]`` GEMM
+    layout. ``b`` is the weight operand in one of three forms:
+
+    * a packed weight ``Float8BlockwiseQTensor`` -- either 2D ``[G*N, K]`` (scale
+      ``[G*(N/128), K/128]``, reshaped to ``[G, N, K]`` here using ``G`` from
+      ``group_offs``) or already 3D ``[G, N, K]``,
+    * a list of per-expert 128x128 weight ``Float8BlockwiseQTensor`` (stacked here), or
+    * a pre-stacked ``(b_fp8, b_scales)`` tuple of raw tensors (used by the backward
+      pass to reuse the buffers built during the forward pass).
+
+    Raw FP8 fields are extracted here and handed to
+    :func:`_grouped_gemm_fp8_blockwise_raw`.
+    """
+    import transformer_engine_torch as tex
+    from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+    from .common import te_dtype_to_torch_dtype
+
+    a_dt = te_dtype_to_torch_dtype(tex.DType(int(a._fp8_dtype)))
+    a_fp8 = a._rowwise_data.view(a_dt)
+    a_scales = a._rowwise_scale_inv  # already [K//128, M_total]
+
+    if isinstance(b, Float8BlockwiseQTensor):
+        b_dt = te_dtype_to_torch_dtype(tex.DType(int(b._fp8_dtype)))
+        b_fp8 = b._rowwise_data.view(b_dt)
+        b_scales = b._rowwise_scale_inv
+        if b_fp8.dim() == 2:
+            # Packed 2D [G*N, K] grouped weight: recover [G, N, K] using G from offs.
+            groups = group_offs.shape[0] - 1
+            n = b_fp8.shape[0] // groups
+            b_fp8 = b_fp8.view(groups, n, b_fp8.shape[1])
+            bn = b_scales.shape[0] // groups
+            b_scales = b_scales.view(groups, bn, b_scales.shape[1])
+    elif isinstance(b, (list, tuple)) and isinstance(b[0], Float8BlockwiseQTensor):
+        b_dt = te_dtype_to_torch_dtype(tex.DType(int(b[0]._fp8_dtype)))
+        b_fp8, b_scales = _stack_weight_qtensors(b, b_dt)
+    else:
+        # Pre-stacked raw (b_fp8, b_scales); b_fp8 already an FP8-typed tensor.
+        b_fp8, b_scales = b
+
+    return _grouped_gemm_fp8_blockwise_raw(
+        a_fp8,
+        b_fp8,
+        a_scales,
+        b_scales,
+        group_offs,
+        trans_b=trans_b,
+        out_dtype=out_dtype,
+        a_scales_pretransposed=True,
+    )
 
 
 # ── Blockwise FP8 Variable-K Backward Public API ──
@@ -739,6 +811,39 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
 
 
 def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
+    lhs,
+    rhs,
+    out_dtype: torch.dtype = torch.bfloat16,
+    out: torch.Tensor = None,
+    accumulate: bool = False,
+) -> torch.Tensor:
+    """Variable-K grouped block-wise FP8 GEMM (backward, 1D+1D scaling) using Triton.
+
+    ``lhs`` and ``rhs`` are ``Float8BlockwiseQTensor`` operands carrying the
+    segment-padded columnwise-quantized grad and activation in their columnwise
+    slots (``_columnwise_data`` ``[M_pad, N]``, ``_columnwise_scale_inv``
+    ``[ceil(M_pad/128), N]``) plus the shared padded segment offsets in
+    ``_vk_group_offs``. Raw FP8 fields are extracted here (uint8 data viewed back to
+    the FP8 dtype) and handed to :func:`_grouped_gemm_fp8_blockwise_variable_k_raw`.
+    """
+    import transformer_engine_torch as tex
+    from .common import te_dtype_to_torch_dtype
+
+    lhs_dt = te_dtype_to_torch_dtype(tex.DType(int(lhs._fp8_dtype)))
+    rhs_dt = te_dtype_to_torch_dtype(tex.DType(int(rhs._fp8_dtype)))
+    return _grouped_gemm_fp8_blockwise_variable_k_raw(
+        lhs._columnwise_data.view(lhs_dt),
+        rhs._columnwise_data.view(rhs_dt),
+        lhs._columnwise_scale_inv,
+        rhs._columnwise_scale_inv,
+        lhs._vk_group_offs,
+        out_dtype=out_dtype,
+        out=out,
+        accumulate=accumulate,
+    )
+
+
+def _grouped_gemm_fp8_blockwise_variable_k_raw(
     lhs: torch.Tensor,
     rhs: torch.Tensor,
     lhs_scales: torch.Tensor,
