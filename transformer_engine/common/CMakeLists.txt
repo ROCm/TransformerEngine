@@ -837,24 +837,16 @@ make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
-# Default ON for ROCm, OFF for CUDA. The norm/softmax hipRTC JIT now works on
-# ROCm, so these are no longer required -- they are kept ON as the fallback for
-# NVTE_DISABLE_NVRTC=1 while the JIT path is being validated on AMD hardware.
-# Flipping them OFF (matching CUDA) is what buys the build-time win, notably the
-# 556 static norm variants below; do that once the JIT is validated.
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
        "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
-       ${USE_ROCM})
+       OFF)
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
 
-# See above: ON for ROCm as a fallback, OFF for CUDA. Set ON to compile the
-# legacy static template instantiations, selected when NVRTC is disabled at
-# runtime. This compiles all 556 REGISTER_NORM_LAUNCHER variants up front.
 option(NVTE_BUILD_LEGACY_STATIC_NORM
        "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
-       ${USE_ROCM})
+       OFF)
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
