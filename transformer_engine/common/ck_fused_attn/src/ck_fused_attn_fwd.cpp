@@ -6,13 +6,65 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
+// Staged gfx1250 forward dispatch. When this build includes the CK-free V3
+// forward library (te_v3_libmha_fwd.so, built for gfx1250), declare its
+// namespaced entry point so ck_attn_fwd can route to it on gfx1250 devices at
+// runtime. The CK-full path (QOLA_NS(mha_fwd) == qola::te::mha_fwd) is used on
+// all other archs.
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+namespace qola { namespace te_v3 {
+float mha_fwd(const aiter::mha_fwd_args& args, const ck_tile::stream_config& stream_config);
+}}  // namespace qola::te_v3
+#endif
+
 namespace ck_fused_attn{
+
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+namespace {
+// True when the active device is gfx1250 (gcnArchName may carry feature
+// suffixes, e.g. "gfx1250:sramecc+", so match on prefix).
+bool is_gfx1250_device(){
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){ return false; }
+  hipDeviceProp_t prop{};
+  if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
+  return prop.major == 12 && prop.minor == 5;
+}
+
+// D64 gfx1250 fmha_fwd_with_sink_asm (ENABLE_SINK=1): requires non-null sink_ptr
+// of shape [nhead] fp32 in "AITER post-scale domain".  The kernel adds
+// exp(sink_val[h]) to every row's softmax denominator.  We initialize to
+// -1e30f so expf(-1e30f)=0.0f in fp32 — zero contribution, matching the
+// UnfusedDotProductAttention reference which has no sink term.
+// D128 (ENABLE_SINK=0): dispatch guard rejects sink_ptr!=nullptr; leave null.
+//
+// Single static buffer, allocated once, kept for the process lifetime.
+constexpr int kSinkBufMaxHeads = 256;
+static float*          s_sink_buf  = nullptr;
+static std::once_flag  s_sink_once;
+
+const void* get_gfx1250_sink_buf(){
+  std::call_once(s_sink_once, [](){
+    if(hipMalloc(&s_sink_buf, kSinkBufMaxHeads * sizeof(float)) != hipSuccess){
+      s_sink_buf = nullptr;
+      return;
+    }
+    std::vector<float> fill(kSinkBufMaxHeads, -1e30f);
+    hipMemcpy(s_sink_buf, fill.data(),
+              kSinkBufMaxHeads * sizeof(float), hipMemcpyHostToDevice);
+  });
+  return s_sink_buf;
+}
+}  // namespace
+#endif
 
 // print the fmha traits and fmha_args when calling ck apis
 void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, std::ostream* log_file){
@@ -154,6 +206,16 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
   fmha_args.sink_ptr = nullptr;
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // D64 (ENABLE_SINK=1): fmha_fwd_gfx1250_batched requires non-null sink_ptr and
+  // reads each element as a per-head logit added to the softmax denominator.
+  // We pass -1e30f so exp(-1e30f)=0.0f in fp32 — zero contribution, matching
+  // the UnfusedDotProductAttention reference.
+  // D128 (ENABLE_SINK=0): dispatch guard rejects sink_ptr!=nullptr, so leave null.
+  if(is_gfx1250_device() && args.d_qk == 64 && args.h <= kSinkBufMaxHeads) {
+    fmha_args.sink_ptr = get_gfx1250_sink_buf();
+  }
+#endif
   fmha_args.seqlen_k     = args.s_kv; // unused in group mode (or kvcache enabled)
   fmha_args.max_seqlen_q = args.s_q;
 
@@ -199,7 +261,13 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   fmha_args.is_group_mode   = args.is_group_mode();
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
+#if ENABLE_CK
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
+#else
+  // quant_scale_enum lives in the CK example headers (quant.hpp), absent in the
+  // CK-free build. no_scale == 0; this fwd path is unused on gfx1250 anyway.
+  fmha_args.qscale_type     = 0;
+#endif
   fmha_args.has_sink        = false;
   fmha_args.q_descale_ptr    = nullptr;
   fmha_args.k_descale_ptr    = nullptr;
@@ -219,11 +287,24 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 // launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
 // v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // The gfx1250 tier is asm-v3 by construction (CK-free, no v2 launcher to fall
+  // back to), so ck_attn_fwd always routes there on that device.
+  if(is_gfx1250_device()){
+    return true;
+  }
+#endif
+#if defined(NVTE_AITER_CK_FULL)
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
   fmha_args.v3_api_check = true;
   // No kernel is launched in check mode, so the stream/log flags are irrelevant.
   ck_tile::stream_config stream_config{nullptr, false, false};
   return QOLA_NS(mha_fwd)(fmha_args, stream_config) == 1;
+#else
+  // gfx1250-only build: no CK-full forward library to dry-run against.
+  (void)args;
+  return false;
+#endif
 }
 
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
@@ -255,7 +336,37 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   if(log_file){
      log_fwd_config(__FUNCTION__, has_dropout, fmha_args, log_file);
   }
-  float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
+
+  float average_runtime;
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // Pre-fill O and LSE before calling the gfx1250 ASM forward kernel.
+  // The kernel ABI requires a valid (allocated) LSE buffer regardless of
+  // return_lse; the kernel may touch lse_ptr even when return_lse=0.
+  // O/LSE pre-initialization is handled inside fmha_fwd_gfx1250_batched
+  // (in aiter/csrc/cpp_itfs/mha_fwd.cu) as part of the kernel calling convention.
+  if(is_gfx1250_device()){
+    if(fmha_args.lse_ptr == nullptr)
+      throw std::runtime_error(
+        "ck_fused_attn fwd: lse_ptr is null on gfx1250 — caller must allocate softmax LSE.");
+    if(fmha_args.o_ptr == nullptr)
+      throw std::runtime_error(
+        "ck_fused_attn fwd: o_ptr is null on gfx1250 — caller must allocate output.");
+    average_runtime = qola::te_v3::mha_fwd(fmha_args, stream_config);
+  } else
+#endif
+  {
+#if defined(NVTE_AITER_CK_FULL)
+    average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
+#else
+    // gfx1250-only build: no CK-full forward library exists (gfx1250 has no
+    // forward kernels). The unified backend selector never picks CK on gfx1250,
+    // so this path is unreachable at runtime; the guard only keeps the link
+    // closed when te_libmha_fwd.so is absent.
+    throw std::runtime_error(
+      "ck_fused_attn fwd: no CK-full AITER forward library in this build "
+      "(gfx1250 has no forward kernels).");
+#endif
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");

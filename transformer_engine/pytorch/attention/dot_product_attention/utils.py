@@ -1508,6 +1508,24 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
+    # ROCm: deterministic CK backward dispatches to the CK v2 launcher, which
+    # schedules self-deleting host nodes that are not HIP-graph-replay-safe. Under
+    # graph capture this corner is invisible to the C++ backend selector (determinism
+    # is not part of its signature), so fall back to the unfused backend here.
+    if (
+        use_fused_attention
+        and IS_HIP_EXTENSION
+        and deterministic
+        and cuda_graph
+        and is_training
+        and fused_attention_backend == FusedAttnBackend["CK"]
+    ):
+        logger.debug(
+            "Disabling FusedAttention (CK) for deterministic training under CUDA graph "
+            "capture; the CK v2 backward path is not graph-replay-safe"
+        )
+        use_fused_attention = False
+        fused_attention_backend = None
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
     use_flash_attention_3 = use_flash_attention and use_flash_attention_3

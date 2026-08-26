@@ -13,10 +13,36 @@
 #include <type_traits>
 #include <hip/hip_runtime.h>
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#include "ck_tile/host/pinned_host_releaser.hpp"
 #include "qola_mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
+// Staged gfx1250 backward dispatch. When this build includes the CK-free V3
+// backward library (te_v3_libmha_bwd.so, built for gfx1250), declare its
+// namespaced entry point so ck_attn_bwd can route to it on gfx1250 devices at
+// runtime. The CK-full path (QOLA_NS(mha_bwd) == qola::te::mha_bwd) is used on
+// all other archs.
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace qola { namespace te_v3 {
+float mha_bwd(const aiter::mha_bwd_args& args, const ck_tile::stream_config& stream_config);
+}}  // namespace qola::te_v3
+#endif
+
 namespace ck_fused_attn{
+
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace {
+// True when the active device is gfx1250 (gcnArchName may carry feature
+// suffixes, e.g. "gfx1250:sramecc+", so match on prefix).
+bool is_gfx1250_device(){
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){ return false; }
+  hipDeviceProp_t prop{};
+  if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
+  return std::string(prop.gcnArchName).rfind("gfx1250", 0) == 0;
+}
+}  // namespace
+#endif
 
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
@@ -329,9 +355,11 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
 
 namespace {
 
+#if ENABLE_CK
 // Trait subset that determines AITER's internal bwd workspace footprint. Mirrors
 // the fields ck_attn_bwd sets on mha_bwd_args so the size query and the dispatch
-// stay in lockstep.
+// stay in lockstep. fmha_bwd_traits lives in the CK example headers, absent in the
+// CK-free build (gfx1250 v3-only tier), which has no v2 launcher to size.
 ::fmha_bwd_traits make_bwd_traits(const CkAttnBwdArgs& args){
   bool has_dropout = (args.dropout_probability > 0.f);
   bool has_dbias = args.dbias_ptr != nullptr;
@@ -359,6 +387,7 @@ namespace {
     /* is_deterministic */ args.deterministic,
   };
 }
+#endif
 
 // dq_acc bytes the v3 asm path allocates via workspace_alloc. Mirrors aiter's
 // fmha_v3_bwd sizing (csrc/cpp_itfs/mha_bwd.cu); returns 0 when v3 can't run so
@@ -382,13 +411,19 @@ size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
 }  // namespace
 
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
+#if ENABLE_CK
   // v2 (CK launcher) reports its full device workspace (host metadata + dq_acc)
   // host-side; v3 (asm) allocates only dq_acc. v3 is tried first but may fall
   // back to v2, so reserve the larger of the two. The launcher symbol is forced
   // local by QoLA's export script, so the v2 size is queried through QoLA.
   const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
   const size_t v3_bytes = v3_dq_acc_bytes(args);
-  return std::max(v2_bytes, v3_bytes);
+  return v2_bytes > v3_bytes ? v2_bytes : v3_bytes;
+#else
+  // CK-free build (gfx1250 v3-only tier): there is no v2 launcher to query, so
+  // only the v3 asm dq_acc accumulator is reserved.
+  return v3_dq_acc_bytes(args);
+#endif
 }
 
 struct BwdFmhaArgs {
@@ -541,11 +576,24 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
 // launching any kernel. Builds the same args as ck_attn_bwd and relies on AITER's
 // v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args){
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+  // The gfx1250 tier is asm-v3 by construction (CK-free, no v2 launcher to fall
+  // back to), so ck_attn_bwd always routes there on that device.
+  if(is_gfx1250_device()){
+    return true;
+  }
+#endif
+#if defined(NVTE_AITER_CK_FULL)
   aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args).fmha_args;
   fmha_args.v3_api_check = true;
   // No kernel is launched in check mode, so the stream/log flags are irrelevant.
   ck_tile::stream_config stream_config{nullptr, false, false};
   return QOLA_NS(mha_bwd)(fmha_args, stream_config) == 1;
+#else
+  // gfx1250-only build: no CK-full backward library to dry-run against.
+  (void)args;
+  return false;
+#endif
 }
 
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
@@ -593,11 +641,13 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     if(bytes == 0){
       return nullptr;
     }
-    if(ws_base == nullptr || ws_offset + bytes > ws_capacity){
+    constexpr size_t kAlign = 256;
+    const size_t base = (ws_offset + kAlign - 1) & ~(kAlign - 1);
+    if(ws_base == nullptr || base + bytes > ws_capacity){
       throw std::runtime_error("ck_fused_attn bwd: AITER workspace request exceeds reserved AOT buffer.");
     }
-    void* ptr = static_cast<int8_t*>(ws_base) + ws_offset;
-    ws_offset += bytes;
+    void* ptr = static_cast<int8_t*>(ws_base) + base;
+    ws_offset = base + bytes;
     // Honor aiter's zero_init hint; aiter zeroes the dq_acc region itself in
     // prepare_workspace_async when the kernel requires it (deterministic splits,
     // atomic-add accumulation), given a correctly sized workspace.
@@ -608,12 +658,76 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     }
     return ptr;
   };
+  // Group mode needs a pinned host buffer for the async D2H seqstart pipeline.
+  // aiter keeps the shared_ptr alive past kernel completion via a stream-tail
+  // release; that release (and thus the deleter) fires from a HIP callback thread
+  // holding runtime locks, so calling any HIP API from it (including hipHostFree)
+  // would deadlock against concurrent main-thread HIP calls. Defer the free to
+  // ck_tile::pinned_host_releaser's worker thread, which frees each buffer once
+  // it is no longer in flight — small and group-mode-v2 only, but never leaked.
+  fmha_args.pinned_host_alloc = [](size_t bytes) -> std::shared_ptr<void> {
+    if(bytes == 0){
+      return {};
+    }
+    void* ptr = nullptr;
+    if(hipHostMalloc(&ptr, bytes, hipHostMallocDefault) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipHostMalloc failed for AITER pinned host buffer.");
+    }
+    return std::shared_ptr<void>(ptr, [](void* p){
+      ck_tile::pinned_host_releaser::instance().enqueue(p);
+    });
+  };
+
   // print ck traits and args when needed
   if(log_file){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
 
-  float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+  // Graph-capture safety net. The CK v2 launcher (fmha_bwd / prepare_workspace_async)
+  // schedules self-deleting hipLaunchHostFunc nodes that re-run and double-free on
+  // every graph replay, so it must never be captured. Only the v3 asm path is
+  // graph-replay-safe. Backend selection already steers graph-captured training off
+  // these configs, but context-parallel and direct callers bypass that path, so we
+  // refuse a v2-bound dispatch under active capture rather than corrupt memory on
+  // replay. Conditions mirror AITER's fmha_v3_bwd gate (csrc/cpp_itfs/mha_bwd.cu).
+  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
+  if(hipStreamIsCapturing(stream, &capture_status) == hipSuccess &&
+     capture_status != hipStreamCaptureStatusNone){
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    bool is_v3_arch = false;
+    if(hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&prop, dev) == hipSuccess){
+      std::string arch_name(prop.gcnArchName);
+      is_v3_arch = arch_name.find("gfx942") != std::string::npos ||
+                   arch_name.find("gfx950") != std::string::npos;
+    }
+    bool resolves_to_v3 = fmha_args.use_asm_v3 && !fmha_args.is_deterministic &&
+                          !fmha_args.has_dbias && fmha_args.bias_type == 0 &&
+                          !fmha_args.has_dropout && is_v3_arch;
+    if(!resolves_to_v3){
+      throw std::runtime_error(
+        "ck_fused_attn bwd: this configuration dispatches to the CK v2 launcher, which "
+        "is not HIP-graph-replay-safe (self-deleting host nodes in prepare_workspace_async). "
+        "Disable determinism/dropout/bias and run on gfx942/gfx950 with NVTE_CK_USES_BWD_V3=1 "
+        "to use the v3 asm path, or set NVTE_FUSED_ATTN_CK=0 under CUDA graphs.");
+    }
+  }
+
+  float average_runtime;
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+  if(is_gfx1250_device()){
+    average_runtime = qola::te_v3::mha_bwd(fmha_args, stream_config);
+  } else
+#endif
+  {
+#if defined(NVTE_AITER_CK_FULL)
+    average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+#else
+    throw std::runtime_error(
+      "ck_fused_attn bwd: this build has no CK-full AITER backward library "
+      "(no CDNA archs built); only the staged gfx1250 V3 path is present.");
+#endif
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
