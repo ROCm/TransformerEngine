@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .common import is_cdna4
+from .common import is_cdna3
 from .gmm.pid_preprocessing import remap_xcd_chunked
 
 
@@ -23,30 +23,39 @@ def get_num_cus() -> int:
 _KNOBS_SET = False
 
 
-def set_triton_knobs_gfx950() -> None:
-    """Enable AMD compiler knobs for gfx950 (async_copy, block_pingpong, scalarize)."""
+def _set_triton_knobs_gfx950() -> None:
+    """Force-on AMD compiler knobs for gfx950 (async_copy, block_pingpong, scalarize)."""
     global _KNOBS_SET
     if _KNOBS_SET:
         return
     _KNOBS_SET = True
+    os.environ["TRITON_HIP_USE_ASYNC_COPY"] = "1"
+    os.environ["AMDGCN_SCALARIZE_PACKED_FOPS"] = "1"
+    os.environ["TRITON_HIP_USE_BLOCK_PINGPONG"] = "1"
     if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
         triton.knobs.amd.use_async_copy = True
         triton.knobs.amd.scalarize_packed_fops = True
         triton.knobs.amd.use_block_pingpong = True
-    else:
-        os.environ.setdefault("TRITON_HIP_USE_ASYNC_COPY", "1")
-        os.environ.setdefault("AMDGCN_SCALARIZE_PACKED_FOPS", "1")
-        os.environ.setdefault("TRITON_HIP_USE_BLOCK_PINGPONG", "1")
 
 
-def _set_amd_knobs(enable: bool = True):
-    """Set AMD-specific Triton knobs (non-gfx950 fallback).
-    NOTE: use_async_copy and scalarize_packed_fops help NT/NN but regress
-    TN/wgrad ~5-8% on gfx942, so callers gate ``enable`` per layout.
+
+def _set_triton_knobs_gfx942(enable: bool = True):
+    """Set AMD Triton knobs on gfx942 (CDNA3).
+
+    ``use_async_copy`` / ``scalarize_packed_fops`` help NT/NN but regress
+    TN/wgrad ~5-8% on gfx942, so callers pass ``enable`` from layout.
     """
     if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
         triton.knobs.amd.use_async_copy = enable
         triton.knobs.amd.scalarize_packed_fops = enable
+
+
+def _apply_amd_compiler_knobs(*, is_tn: bool) -> None:
+    """gfx942: knobs from GEMM layout. Else (gfx950): always-on gfx950 knobs."""
+    if is_cdna3():
+        _set_triton_knobs_gfx942(enable=not is_tn)
+    else:
+        _set_triton_knobs_gfx950()
 
 
 NUM_XCDS = 8
@@ -452,10 +461,8 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     Returns:
         [M_total, N] output in out_dtype.
     """
-    if is_cdna4():
-        set_triton_knobs_gfx950()
-    else:
-        _set_amd_knobs(enable=True)
+    # trans_a is always False here: NT if trans_b else NN (never TN).
+    _apply_amd_compiler_knobs(is_tn=False)
 
     assert a.ndim == 2, f"a must be 2D, got {a.shape}"
     assert b.ndim == 3, f"b must be 3D, got {b.shape}"
@@ -709,10 +716,8 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     Output: [G, OUT_M, OUT_N]. When ``out`` is provided the kernel writes in-place
     (and adds into it if ``accumulate``). ``out_dtype`` is ignored in that case.
     """
-    if is_cdna4():
-        set_triton_knobs_gfx950()
-    else:
-        _set_amd_knobs(enable=False)
+    # Variable-K wgrad is TN (lhs^T @ rhs).
+    _apply_amd_compiler_knobs(is_tn=True)
 
     assert lhs.ndim == 2 and rhs.ndim == 2
     assert lhs.shape[0] == rhs.shape[0]

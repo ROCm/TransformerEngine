@@ -94,11 +94,11 @@ run_test_config(){
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
+    run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
     run_default_fa 1 triton_kernels/test_grouped_gemm.py
-    run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
