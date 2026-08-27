@@ -8,6 +8,7 @@
 #include "fused_ag_gemm_tn.cuh"
 #include "fused_ag_gemm_nn.cuh"
 #include "fused_ag_mxfp8_gemm_tn.cuh"
+#include "../kittens_kernel_common.cuh"
 
 #include <array>
 #include <cstdio>
@@ -189,10 +190,140 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
+// Packs raw scales into the lane-native layout the mxfp8 GEMM reads: one block per 256-row scale
+// tile packs its words into shared, then NG*64 lane threads emit one fp8e8m0_4 per (group, lane).
+// A: STEP=64,NG=4 (256 words/tile); B: STEP=32,NG=8 (512 words, hi/lo tile pair).
+// COLWISE=false: raw uint8 [dim, K/32] row-major; COLWISE=true: [K/32, dim] col-major.
+template <bool COLWISE, int STEP, int NG>
+__global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln,
+                                   int dim, int scale_K, int k_iters, int tiles_per_col) {
+    constexpr int TILE_WORDS = 256;
+    constexpr int PAD_WORDS  = (NG - 1) * STEP + 64;  // covers OOB pack_scales read
+    __shared__ uint32_t tile[PAD_WORDS];
+
+    const int tile_id = blockIdx.x;
+    if (tile_id >= k_iters * tiles_per_col) return;
+
+    const int k_iter  = tile_id / tiles_per_col;
+    const int cblk    = tile_id % tiles_per_col;
+    const int kb_base = k_iter * 4;
+    const int row0    = cblk * TILE_WORDS;
+
+    for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
+        uint32_t p = 0;
+        if (i < TILE_WORDS) {
+            const int row = row0 + i;
+            if constexpr (COLWISE) {
+                const int base = kb_base * dim + row;
+                p  =  (uint32_t)scales[base]                  | ((uint32_t)scales[base +     dim] << 8)
+                   | ((uint32_t)scales[base + 2 * dim] << 16) | ((uint32_t)scales[base + 3 * dim] << 24);
+            } else {
+                __builtin_memcpy(&p, &scales[(size_t)row * scale_K + kb_base], 4);
+            }
+        }
+        tile[i] = p;  // OOB tail (i>=256) zero-filled
+    }
+    __syncthreads();
+
+    const int tid = threadIdx.x, lane = tid % 64, grp = tid / 64;
+    kittens::fp8e8m0_4 out = kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
+    ln[((size_t)tile_id * NG + grp) * 64 + lane] = out;
+}
+
+template <bool COLWISE, int STEP, int NG>
+void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_K, int k_iters,
+                        hipStream_t stream) {
+    const int tiles_per_col = dim / 256;
+    pack_scales_kernel<COLWISE, STEP, NG><<<k_iters * tiles_per_col, NG * 64, 0, stream>>>(
+        scales, ln, dim, scale_K, k_iters, tiles_per_col);
+}
+
 bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     using namespace hk_mxfp8_ag_tn;
-    //TODO
-    return false;
+    
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+    const int m_local = M / tp_size;
+    const int tiles_m = M / BLOCK_ROW;
+    const int tiles_n = N_TOTAL / BLOCK_COL;
+
+    const int k_iters = K / K_STEP;
+    int scale_K = K / 32;
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    const PlanKey key{0, M, N_TOTAL, K, tp_size, args.rank, 1};
+    auto it = g_plans.find(key);
+    if (it == g_plans.end()) {
+        AgPlan plan;
+        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
+        if (plan.xcd_bucket) {
+            XcdBuckets bk{};
+            queue = bucketize_by_xcd(queue, bk);
+            for (int b = 0; b < NUM_XCDS_AFF; b++) {
+                plan.off[b] = bk.off[b];
+                plan.cnt[b] = bk.cnt[b];
+            }
+        }
+        if (!upload_plan(plan, queue)) return false;
+        it = g_plans.emplace(key, plan).first;
+    }
+    const AgPlan &plan = it->second;
+
+    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
+    // caller's budget we return false and fall back to hipBLASLt.
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+
+    const size_t arrive_bytes = static_cast<size_t>(tiles_m) * sizeof(unsigned int);
+    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+    int *tile_counter = static_cast<int *>(ws.take(sizeof(int)));
+    int *bucket_ctr   = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
+
+    const size_t counter_bytes = ws.used;
+    uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
+    uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
+    if (!ws.fits()) return false;
+
+    // pack mxfp8 scales
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sb, M, scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_A, packed_sa, N_TOTAL, scale_K, k_iters, args.stream);
+
+    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
+    if (!bases) return false;
+    PeerPtrs peers{};
+    for (int c = 0; c < tp_size; c++) {
+        peers.base[c] = static_cast<fp8e4m3 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+    }
+    peers.base[args.rank] = static_cast<fp8e4m3 *>(args.ub);
+
+    XcdBuckets buckets{};
+    for (int b = 0; b < NUM_XCDS_AFF; b++) {
+        buckets.off[b] = plan.off[b];
+        buckets.cnt[b] = plan.cnt[b];
+    }
+
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
+
+    if (args.arrive_peers && args.arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    get_persistent_fn(M, N_TOTAL, K)(
+        M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
+        static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
+        packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
+        tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes,
+        plan.xcd_bucket, buckets, bucket_ctr, args.stream);
+    return hipGetLastError() == hipSuccess;
 }
 
 struct NnSetup {
@@ -341,6 +472,12 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
 }
 
 bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args) {
-    //TODO
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+
+
+    //TODO: remove this
     return false;
 }
