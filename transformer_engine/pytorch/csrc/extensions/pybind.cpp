@@ -711,6 +711,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
+#else
+  m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
+        "Dummy function for python side annotations");
   m.def(
       "reset_fused_ag_gemm_cache",
       []() {
@@ -719,9 +722,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
       },
       "Drop cached fused AG+GEMM peer base pointers");
-#else
-  m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
-        "Dummy function for python side annotations");
 #endif
 
   // Experimental fused grouped MLP
