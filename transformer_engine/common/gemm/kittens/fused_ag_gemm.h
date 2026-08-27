@@ -13,6 +13,8 @@ struct KittensFusedAgGemmArgs {
     const void *A;
     void *ub;
     void *D;
+    const void *scale_A;
+    const void *scale_B;
     const void *peer_ub;
     int peer_first;
     int peer_count;
@@ -36,3 +38,5 @@ bool kittens_fused_ag_gemm_supported(int sm_arch);
 void kittens_fused_ag_gemm_reset();
 
 bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
+
+bool kittens_fused_ag_gemm_mxfp8(const KittensFusedAgGemmArgs &args);

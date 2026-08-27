@@ -635,12 +635,19 @@ def fused_ag_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether the fused AG+GEMM backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
     # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    if gelu or bias is not None:
+        return False
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    if fp8 and not mxfp8:
+        return False
+    # MXFP8 is TN-only in the fused kernel, so the NN dgrad direction falls back.
+    if mxfp8 and is_dgrad:
         return False
     if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
         return False

@@ -7,6 +7,7 @@
 #include "../fused_ag_gemm.h"
 #include "fused_ag_gemm_tn.cuh"
 #include "fused_ag_gemm_nn.cuh"
+#include "fused_ag_mxfp8_gemm_tn.cuh"
 
 #include <array>
 #include <cstdio>
@@ -188,6 +189,12 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
+bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
+    using namespace hk_mxfp8_ag_tn;
+    //TODO
+    return false;
+}
+
 struct NnSetup {
     const AgPlan *plan;
     hk_ag_nn::PeerPtrs peers;
@@ -331,4 +338,9 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     if (!ok) return false;
 
     return args.transa ? run_tn(args) : run_nn(args);
+}
+
+bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args) {
+    //TODO
+    return false;
 }

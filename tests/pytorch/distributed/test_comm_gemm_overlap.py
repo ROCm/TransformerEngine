@@ -511,16 +511,26 @@ def test_fused_ag_overlap_bf16(nprocs):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
-def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is currently outside the backend."""
-    if quantization == "fp8" and not fp8_available:
+def test_fused_ag_overlap_rejects_fp8(nprocs):
+    """Delayed-scaling FP8 is outside the backend; only MXFP8 1D scaling dispatches."""
+    if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
+    result = _run_fused_ag(quantization="fp8", nprocs=nprocs)
+    assert result.returncode != 0, "fused AG+GEMM accepted a delayed-scaling FP8 operand"
+    assert "only supports MXFP8_1D_SCALING" in result.stderr.decode(), result.stderr.decode()
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_reaches_mxfp8(nprocs):
+    """MXFP8 clears every validation gate and reaches the (unimplemented) MXFP8 kernel."""
+    if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    result = _run_fused_ag(quantization=quantization, nprocs=nprocs)
-    assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
-    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
+    result = _run_fused_ag(quantization="mxfp8", nprocs=nprocs)
+    stderr = result.stderr.decode()
+    assert result.returncode != 0, "MXFP8 fused AG+GEMM claimed success with no kernel"
+    # Every earlier bail-out has a distinct message, so this one pins the MXFP8 dispatch.
+    assert "fused AG+GEMM failed to launch" in stderr, stderr
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

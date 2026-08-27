@@ -1982,12 +1982,12 @@ class Linear(TransformerEngineBaseModule):
 
             if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
                 self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_fprop = False
             if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor, None,
-                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_dgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None

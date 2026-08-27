@@ -404,9 +404,11 @@ class _LayerNormMLP(torch.autograd.Function):
             fused_ag_gemm_eligible(
                 "fc1_fprop", inp, fc1_weight, None if bias_gelu_fusion else fc1_bias, 
                 activation_dtype, tp_size, fp8, gelu=activation == "gelu" and not bias_gelu_fusion,
+                mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
             )
             and fused_ag_gemm_eligible(
                 "fc2_dgrad", inp, fc2_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+                mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
             )
         ):
             ub_overlap_ag = False

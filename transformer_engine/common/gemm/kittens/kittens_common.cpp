@@ -9,6 +9,7 @@
 
 #ifdef KITTENS_HAVE_CDNA4
 bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args);
+bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args);
 void kittens_fused_ag_gemm_reset_cdna4();
 #endif
 
@@ -31,6 +32,15 @@ void kittens_fused_ag_gemm_reset() {
 bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args) {
 #ifdef KITTENS_HAVE_CDNA4
     return kittens_fused_ag_gemm_bf16_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
+
+bool kittens_fused_ag_gemm_mxfp8(const KittensFusedAgGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_fused_ag_gemm_mxfp8_cdna4(args);
 #else
     static_cast<void>(args);
     return false;

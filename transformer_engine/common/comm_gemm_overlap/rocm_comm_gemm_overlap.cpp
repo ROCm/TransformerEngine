@@ -251,16 +251,48 @@ static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is 
 
 #ifdef USE_HIPKITTENS_GEMM
 // Fused all-gather + GEMM, launched by fused_overlap_ag below.
-static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
+static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
                              const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
                              const TensorWrapper &ubuf, const TensorWrapper &chunk, communicator *comm,
                              int reg, int tp_id, int tp_size, uint64_t signal, cudaStream_t stream) {
   // TODO: Add bias support
+  NVTE_CHECK(B.dptr() == ubuf.dptr(),
+             "fused AG+GEMM reached with invalid B tensor!");
+
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
              "fused AG+GEMM reached with an unsupported epilogue");
-  NVTE_CHECK(A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16,
-             "fused AG+GEMM reached with a non-bf16 operand");
+  bool is_bf16 = A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16;
+  //TODO: Extend to E5M2 and mixed types
+  bool is_fp8 = A.dtype() == DType::kFloat8E4M3 && B.dtype() == DType::kFloat8E4M3 && D.dtype() == DType::kBFloat16;
+  NVTE_CHECK(is_bf16 || is_fp8,
+             "fused AG+GEMM reached with unsupported operand types");
+
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
+
+  NVTE_CHECK(A_tensor->scaling_mode == B_tensor->scaling_mode,
+             "fused AG+GEMM expects A and B tensors to have the same scaling mode");
+  if (is_fp8 && A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
+    NVTE_ERROR("fused AG+GEMM with fp8 UB only supports MXFP8_1D_SCALING recipe");
+  }
+
+  if (is_fp8 && !transa) {
+    NVTE_ERROR("fused AG+GEMM with MXFP8 only supports TN");
+  }
+
+  // MXFP8 is pinned to TN above, so both operands are consumed through their row-wise view.
+  if (is_fp8) {
+    NVTE_CHECK(A_tensor->has_data(), "fused AG+GEMM with MXFP8 reached with A missing row-wise usage");
+    NVTE_CHECK(B_tensor->has_data(), "fused AG+GEMM with MXFP8 reached with B missing row-wise usage");
+  }
+
+  const void* scale_A = nullptr;
+  const void* scale_B = nullptr;
+  if (is_fp8) {
+    scale_A = transa ? A_tensor->scale_inv.dptr : A_tensor->columnwise_scale_inv.dptr;
+    scale_B = transb ? B_tensor->columnwise_scale_inv.dptr : B_tensor->scale_inv.dptr;
+  }
 
   const size_t m       = (transa) ? A.size(0) : A.size(1);
   const size_t k       = (transa) ? A.size(1) : A.size(0);
@@ -271,7 +303,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensFusedAgGemmArgs args{
-      A.dptr(), ubuf.dptr(), D.dptr(),
+      A.dptr(), ubuf.dptr(), D.dptr(), scale_A, scale_B,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -279,6 +311,9 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
+  if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    return kittens_fused_ag_gemm_mxfp8(args);
+  }
   return kittens_fused_ag_gemm_bf16(args);
 }
 #endif
@@ -290,7 +325,7 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 cudaStream_t stream_main) {
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
-    const bool launched = hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy,
+    const bool launched = hk_fused_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, B_copy,
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
                                            _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
                                            stream_main);
