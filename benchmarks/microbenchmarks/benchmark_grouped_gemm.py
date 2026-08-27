@@ -9,13 +9,20 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     DTYPE_LIST,
+    build_recipes,
     time_func,
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
+    make_input,
 )
 
 BENCHMARK_LABEL = "Grouped GEMM"
+
+# Same precision sweep as benchmark_gemm.py, minus MXFP4 (GroupedLinear has no
+# MXFP4 grouped kernel). Each test case carries a recipe label; bf16 maps to
+# None (plain path) and unsupported precisions are skipped by build_recipes().
+RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8", "nvfp4"))
 
 def generate_grouped_gemm_group_lens(b, m, balance: bool):
     if balance:
@@ -59,16 +66,18 @@ def _generate_moe_test_cases(
         for M in GROUPED_GEMM_M_SIZE_LIST:
             for name, (N, K) in shapes_dict.items():
                 for dtype in DTYPE_LIST:
-                    test_cases.append(
-                        {
-                            "Case": name,
-                            "B": B,
-                            "M": M,
-                            "N": N,
-                            "K": K,
-                            "dtype": dtype,
-                        }
-                    )
+                    for recipe in RECIPES:
+                        test_cases.append(
+                            {
+                                "Case": name,
+                                "B": B,
+                                "M": M,
+                                "N": N,
+                                "K": K,
+                                "dtype": dtype,
+                                "recipe": recipe,
+                            }
+                        )
     return test_cases
 
 
@@ -98,8 +107,11 @@ def generate_grok_v2_test_cases():
     )
 
 
-def bench_grouped_gemm(Case, B, M, N, K, dtype):
+def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe):
     device = "cuda"
+
+    fp8_recipe = RECIPES[recipe]
+    use_fp8 = fp8_recipe is not None
 
     group_lens = generate_grouped_gemm_group_lens(B, M, balance=True)
     m_splits = [int(v) for v in group_lens.tolist()]
@@ -114,18 +126,23 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         params_dtype=dtype,
         device=device,
     )
-    x = torch.randn((sum_M, K), dtype=dtype, device=device, requires_grad=True)
+    # Rotate the activation buffer (on by default) so back-to-back grouped GEMMs 
+    # read different memory; GroupedLinear splits it internally per m_splits.
+    next_x = make_input((sum_M, K), dtype, device=device, requires_grad=True)
 
     def fwd_func_te():
-        return grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
+        with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
+            return grouped_linear(next_x(), m_splits, m_splits_tensor=m_splits_tensor)
 
     out_te = fwd_func_te()
     grad_out = torch.randn_like(out_te)
 
     def fwd_bwd_func_te():
-        out = grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
-        out.backward(grad_out)
-        x.grad = None
+        xb = next_x()
+        with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
+            out = grouped_linear(xb, m_splits, m_splits_tensor=m_splits_tensor)
+            out.backward(grad_out)
+        xb.grad = None
         for param in grouped_linear.parameters():
             param.grad = None
 
@@ -165,5 +182,5 @@ if __name__ == "__main__":
     run_benchmarks(
         test_cases=test_cases,
         bench_fn=bench_grouped_gemm,
-        param_columns=["Case", "B", "M", "N", "K", "dtype"],
+        param_columns=["Case", "B", "M", "N", "K", "dtype", "recipe"],
     )

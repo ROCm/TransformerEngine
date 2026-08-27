@@ -307,10 +307,10 @@ The backend shares the existing USE_HIPKITTENS_GEMM build option with MXFP8:
 * OFF - disable the HipKittens blockwise FP8 and MXFP8 GEMM backend;
 * ON - enable the HipKittens GEMM backend (default).
 
-On gfx950 there are two blockwise FP8 GEMM kernels, selected at runtime by the NVTE_BLOCKWISE_FP8_POWER_OF_2_SCALE environment variable:
+On gfx950 there are two blockwise FP8 GEMM kernels, selected at runtime by the NVTE_FP8_BLOCK_SCALING_FP32_SCALES environment variable, which also controls the scale produced by the Float8BlockScaling recipe:
 
-* 0 - compute the GEMM with the FP32 scales directly;
-* 1 - cast the incoming FP32 scales to E8M0 (power-of-2) and compute the GEMM with those scales (default).
+* 0 - cast the incoming FP32 scales to E8M0 (power-of-2) and compute the GEMM with those scales (default);
+* 1 - compute the GEMM with the FP32 scales directly.
 
 Two-stage amax Kernel
 ^^^^^^^^^^^^^^^^^^^^^

@@ -25,8 +25,11 @@ from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_c
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
+    fused_ag_gemm_eligible,
     get_ub,
+    get_ub_is_fp8,
     is_ub_initialized,
+    ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -396,6 +399,17 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
+        # bias_gelu_fusion moves both epilogues out of the FC1 GEMM
+        if ub_overlap_ag and not (
+            fused_ag_gemm_eligible(
+                "fc1_fprop", inp, fc1_weight, None if bias_gelu_fusion else fc1_bias, 
+                activation_dtype, tp_size, fp8, gelu=activation == "gelu" and not bias_gelu_fusion,
+            )
+            and fused_ag_gemm_eligible(
+                "fc2_dgrad", inp, fc2_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+            )
+        ):
+            ub_overlap_ag = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -2101,6 +2115,18 @@ class LayerNormMLP(TransformerEngineBaseModule):
             ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
 
+        # Layers with no overlap backend take the non-overlapped path.
+        if is_ub_initialized():
+            if ub_overlap_disabled("fc1_fprop") or ub_overlap_disabled("fc2_dgrad"):
+                self.ub_overlap_ag = False
+            if ub_overlap_disabled("fc2_fprop"):
+                self.ub_overlap_rs = False
+            if ub_overlap_disabled("fc1_dgrad"):
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled("fc1_wgrad"):
+                self.ub_bulk_wgrad = False
+
         if any(
             [
                 self.ub_overlap_ag,
@@ -2367,7 +2393,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fp8_output = False
         if self.ub_overlap_rs:
-            if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
+            if get_ub_is_fp8("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_output = True
 
         inp = self.prepare_forward(inp, num_gemms=2)

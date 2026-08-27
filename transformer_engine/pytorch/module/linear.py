@@ -21,8 +21,11 @@ from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    fused_ag_gemm_eligible,
+    ub_overlap_disabled,
     get_dummy_wgrad,
     get_ub,
+    get_ub_is_fp8,
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
@@ -122,6 +125,8 @@ class LinearFwdArgs:
     fp8_output: bool
     save_original_input: bool
     backward_override: Optional[str]
+    dgrad_use_split_accumulator: bool
+    wgrad_use_split_accumulator: bool
     custom: bool
     debug: bool
 
@@ -192,7 +197,8 @@ class LinearBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    fp8_recipe: Optional[Recipe] = None
+    dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
+    wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
     custom: bool = False
@@ -695,7 +701,8 @@ def _linear_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+    bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
+    bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     bwd_args.custom = fwd_args.custom
@@ -1001,11 +1008,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 weight_fp8.update_usage(columnwise_usage=True)
 
             # Choose whether to use GEMM kernel with split accumulator
-            use_split_accumulator = _2X_ACC_DGRAD
-            if bwd_args.fp8:
-                recipe = bwd_args.fp8_recipe
-                if hasattr(recipe, "fp8_gemm_dgrad"):
-                    use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+            use_split_accumulator = bwd_args.dgrad_use_split_accumulator
 
             # Update grad input quantizer
             if grad_input_quantizer is not None:
@@ -1178,11 +1181,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     grad_output = grad_output_quantizer(grad_output)
 
             # Figure out whether to use split accumulator
-            use_split_accumulator = _2X_ACC_WGRAD
-            if bwd_args.fp8:
-                recipe = bwd_args.fp8_recipe
-                if hasattr(recipe, "fp8_gemm_wgrad"):
-                    use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+            use_split_accumulator = bwd_args.wgrad_use_split_accumulator
 
             # Figure out whether to output wgrad GEMM directly into main grad
             if bwd_args.is_first_microbatch is not None:
@@ -1273,8 +1272,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 elif bwd_args.backward_input_needs_gather:
                     # Gathered input tensor is internal
                     clear_tensor_data(inputmat_total)
-                if bwd_args.parallel_mode == "row" and bwd_args.sequence_parallel:
-                    # Gathered grad output tensor is internal
+                if bwd_args.sequence_parallel and (
+                    bwd_args.parallel_mode == "row"
+                    or (bwd_args.parallel_mode == "column" and bwd_args.fp8)
+                ):
+                    # Gathered (row-SP) or quantized (column-SP FP8) grad_output is internal
                     clear_tensor_data(grad_output)
 
             # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1627,6 +1629,18 @@ class Linear(TransformerEngineBaseModule):
             self.parallel_mode == "row" and self.sequence_parallel and ub_overlap_ag
         )
 
+        # Layers with no overlap backend take the non-overlapped path.
+        if ub_name is not None and is_ub_initialized():
+            if ub_overlap_disabled(ub_name + "_fprop"):
+                self.ub_overlap_rs_fprop = False
+                self.ub_overlap_ag_fprop = False
+            if ub_overlap_disabled(ub_name + "_dgrad"):
+                self.ub_overlap_ag_dgrad = False
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled(ub_name + "_wgrad"):
+                self.ub_bulk_wgrad = False
+
         if any(
             [
                 self.ub_overlap_rs_fprop,
@@ -1888,14 +1902,10 @@ class Linear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         if self.ub_overlap_rs_fprop:
-            if get_ub(
-                self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_output = True
         if self.ub_overlap_rs_dgrad:
-            if get_ub(
-                self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_grad = True
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
@@ -1933,8 +1943,15 @@ class Linear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            dgrad_use_split_accumulator = _2X_ACC_DGRAD
+            wgrad_use_split_accumulator = _2X_ACC_WGRAD
             if self.fp8:
-                backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+                _recipe = FP8GlobalStateManager.get_fp8_recipe()
+                backward_override = _recipe.backward_override
+                if hasattr(_recipe, "fp8_gemm_dgrad"):
+                    dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
+                if hasattr(_recipe, "fp8_gemm_wgrad"):
+                    wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
             else:
                 backward_override = None
             custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
@@ -1962,6 +1979,17 @@ class Linear(TransformerEngineBaseModule):
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
+
+            if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
+                self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_overlap_ag_fprop = False
+            if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
+                self.ub_name + "_dgrad", inp, weight_tensor, None,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+            ):
+                ub_overlap_ag_dgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             fwd_args = LinearFwdArgs(
                 # tensors
@@ -1989,6 +2017,8 @@ class Linear(TransformerEngineBaseModule):
                 fp8_output=fp8_output,
                 save_original_input=self.save_original_input,
                 backward_override=backward_override,
+                dgrad_use_split_accumulator=dgrad_use_split_accumulator,
+                wgrad_use_split_accumulator=wgrad_use_split_accumulator,
                 custom=custom,
                 debug=debug,
                 # weight-workspace caching

@@ -834,7 +834,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
                  bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false);
+                 bool aggregate = false, bool fused = false);
 
   // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
   CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
