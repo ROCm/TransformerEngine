@@ -58,6 +58,18 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 seed = 1234
 reset_rng_states()
 
+if IS_HIP_EXTENSION:
+    from utils import EnvVarCleaner
+
+    @pytest.fixture(autouse=True)
+    def reset_grouped_gemm_backend():
+        # Snapshot/restore the process-global Triton grouped-GEMM env vars so a test
+        # that sets them (and may raise before its own cleanup) cannot leak the
+        # backend into unrelated tests.
+        env = EnvVarCleaner(["NVTE_USE_BLOCKWISE_GMM_TRITON", "NVTE_USE_GROUPED_GEMM_TRITON"])
+        yield
+
+
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
@@ -385,11 +397,6 @@ def test_grouped_linear_accuracy(
         fuse_wgrad_accumulation,
         delay_wgrad_compute,
     )
-
-    use_blockwise_triton = os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") == "1"
-    if use_triton:
-        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
-        os.environ.pop("NVTE_USE_BLOCKWISE_GMM_TRITON", None)
 
     atol, rtol = 0, 0
     if use_cutlass:
@@ -1990,6 +1997,68 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     y = grouped_linear(x, m_splits)
     y.backward(dy)
     grouped_linear.backward_dw()
+
+
+def test_single_grouped_weight_mirrors_grad_state(monkeypatch):
+    """Per-expert views must carry the grad state the autograd Function reads off
+    ``weights[i]`` / ``biases[i]``.
+
+    Regression for the generic ``single_grouped_weight`` fix: ``_get_weight_tensors`` /
+    ``_get_bias_tensors`` return split views of the grouped Parameter, which do not
+    inherit ``requires_grad`` (gates wgrad), ``main_grad`` (fuse-accumulation), or
+    ``overwrite_main_grad``. ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` is off by default, so a
+    regression here would otherwise land silently on both CUDA and ROCm.
+    """
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    num_gemms, in_features, out_features = 3, 128, 128
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=True,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        single_grouped_weight=True,
+        single_grouped_bias=True,
+    )
+    assert grouped_linear.single_grouped_weight and grouped_linear.single_grouped_bias
+
+    # Megatron-style fuse-accumulation buffer on the grouped weight Parameter.
+    grouped_linear.weight.main_grad = torch.zeros(
+        num_gemms * out_features, in_features, dtype=torch.float32, device="cuda"
+    )
+    grouped_linear.weight.overwrite_main_grad = False
+
+    weights = grouped_linear._get_weight_tensors()
+    assert len(weights) == num_gemms
+    for i, w in enumerate(weights):
+        assert w.requires_grad == grouped_linear.weight.requires_grad
+        assert w.overwrite_main_grad is False
+        # main_grad must be an aliasing view so per-expert wgrad accumulates in place.
+        w.main_grad.add_(i + 1.0)
+    grouped_main_grad = grouped_linear.weight.main_grad.view(num_gemms, out_features, in_features)
+    for i in range(num_gemms):
+        assert torch.all(grouped_main_grad[i] == (i + 1.0))
+
+    # requires_grad is mirrored (not merely coincidental): flip the Parameter and refetch.
+    grouped_linear.weight.requires_grad_(False)
+    for w in grouped_linear._get_weight_tensors():
+        assert w.requires_grad is False
+
+    # Bias views mirror requires_grad (bias never uses main_grad).
+    biases = grouped_linear._get_bias_tensors()
+    assert len(biases) == num_gemms
+    for b in biases:
+        assert b.requires_grad == grouped_linear.bias.requires_grad
+
+    # A main_grad that cannot alias as [G*out, in] must raise a clear error (an
+    # aliasing view is required; a silent copy would drop accumulation).
+    grouped_linear.weight.requires_grad_(True)
+    grouped_linear.weight.main_grad = torch.zeros(
+        num_gemms * out_features + 1, in_features, dtype=torch.float32, device="cuda"
+    )
+    with pytest.raises(RuntimeError, match="accumulate in place"):
+        grouped_linear._get_weight_tensors()
 
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)

@@ -534,6 +534,8 @@ class _GroupedLinear(torch.autograd.Function):
         fuse_wgrad_accumulation,
         is_first_microbatch,
         wgrad_store,
+        weight_workspaces=None,
+        cache_weight=False,
         pow2_x=True,
         pow2_w=True,
         pow2_grad=True,
@@ -600,6 +602,7 @@ class _GroupedLinear(torch.autograd.Function):
         # stored rowwise data + scales; otherwise quantize the high-precision
         # weights once over the packed 3D view (zero-copy when
         # ``single_grouped_weight``), no stack.
+        new_workspaces = [None] * num_gemms
         if isinstance(weights[0], Float8BlockwiseQTensor):
             # fp8_model_params: reuse the stored rowwise data + scales directly (no
             # re-quantization).
@@ -607,8 +610,17 @@ class _GroupedLinear(torch.autograd.Function):
                 weights, activation_dtype, dt, pow2_w
             )
         else:
-            w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
-            qw = quantize_fp8_blockwise_grouped_weight_qtensor(w, dt, pow2=pow2_w)
+            # High-precision weights: quantize the whole packed weight into a single
+            # Float8BlockwiseQTensor and cache it across microbatches.
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            cached_qw = weight_workspaces[0] if weight_workspaces else None
+            if not update_ws and isinstance(cached_qw, Float8BlockwiseQTensor):
+                qw = cached_qw
+            else:
+                w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
+                qw = quantize_fp8_blockwise_grouped_weight_qtensor(w, dt, pow2=pow2_w)
+            if cache_weight:
+                new_workspaces[0] = qw
 
         # Forward GEMM: out[seg] = A[seg] @ W[g]^T  (trans_b=True).
         out = grouped_gemm_fp8_blockwise_triton_kernel(
@@ -656,7 +668,6 @@ class _GroupedLinear(torch.autograd.Function):
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
 
-        new_workspaces = [None] * num_gemms
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
@@ -885,6 +896,8 @@ class _GroupedLinear(torch.autograd.Function):
                 fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                 is_first_microbatch=is_first_microbatch,
                 wgrad_store=wgrad_store,
+                weight_workspaces=weight_workspaces,
+                cache_weight=cache_weight,
                 # Match the recipe's scale rounding (pow2 by default) so the Triton
                 # path quantizes identically to the default Float8BlockScaling path.
                 pow2_x=blockwise_recipe.fp8_quant_fwd_inp.power_2_scale,
@@ -2466,19 +2479,29 @@ class GroupedLinear(TransformerEngineBaseModule):
             if weight_tensors is None:
                 # TODO(ksivaman): Remove this after GEMM integration.
                 weight_tensors = grouped_weight.split_into_quantized_tensors()
-            # Members are views, not the Parameter, so mirror the grad state the
-            # autograd Function reads off ``weights[i]``: ``requires_grad`` (gates
-            # wgrad), ``main_grad`` (per-expert views into the grouped
-            # fuse-accumulation buffer), and ``overwrite_main_grad``.
+            # ROCm + CUDA fix: Split views don't carry the grad state that the autograd Function reads
+            # off ``weights[i]``, so mirror it from the grouped Parameter (needed on
+            # every backend; transitional until ``_get_weight_tensors`` returns the
+            # Parameter directly).
             want_grad = grouped_weight.requires_grad
             main_grad = getattr(grouped_weight, "main_grad", None)
             per_expert_main_grad = None
             if main_grad is not None:
-                per_expert_main_grad = main_grad.view(
-                    self.num_gemms, self.out_features, self.in_features
-                )
+                # Must be an aliasing view (not a copy) so per-expert wgrad accumulates
+                # in place; requires a contiguous [num_gemms, out_features, in_features].
+                try:
+                    per_expert_main_grad = main_grad.view(
+                        self.num_gemms, self.out_features, self.in_features
+                    )
+                except RuntimeError as e:
+                    raise RuntimeError(
+                        "single_grouped_weight with fuse_wgrad_accumulation requires main_grad to "
+                        "be a contiguous [num_gemms * out_features, in_features] buffer so per-expert"
+                        f" wgrad can accumulate in place (got shape {tuple(main_grad.shape)})."
+                    ) from e
             for i, w in enumerate(weight_tensors):
-                if w.requires_grad != want_grad:
+                # ``requires_grad_`` only works on leaves.
+                if w.requires_grad != want_grad and w.is_leaf:
                     w.requires_grad_(want_grad)
                 if per_expert_main_grad is not None:
                     w.main_grad = per_expert_main_grad[i]
@@ -2504,9 +2527,12 @@ class GroupedLinear(TransformerEngineBaseModule):
             parts = grouped_bias.quantized_tensors
             if parts is None:
                 parts = grouped_bias.split_into_quantized_tensors()
+            # Mirror ``requires_grad`` onto the per-expert views (bias never uses
+            # ``main_grad``: fuse-accumulation is weights-only). ``requires_grad_``
+            # only works on leaves, so guard to avoid a RuntimeError on a non-leaf view.
             want_grad = grouped_bias.requires_grad
             for p in parts:
-                if p.requires_grad != want_grad:
+                if p.requires_grad != want_grad and p.is_leaf:
                     p.requires_grad_(want_grad)
             return [p.reshape(-1) for p in parts]
         return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
