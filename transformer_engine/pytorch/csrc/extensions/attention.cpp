@@ -835,8 +835,33 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: softmax_lse related operations
+ * Support Context Parallel: softmax_lse related operations
  **************************************************************************************************/
+
+void lse_correction(at::Tensor lse, const at::Tensor &lse_per_step, bool only_second_half) {
+  NVTE_CHECK(lse.is_cuda(), "lse must be a CUDA tensor");
+  NVTE_CHECK(lse_per_step.is_cuda(), "lse_per_step must be a CUDA tensor");
+  NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
+  NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
+  NVTE_CHECK(lse.is_contiguous(), "lse must be contiguous");
+  NVTE_CHECK(lse_per_step.is_contiguous(), "lse_per_step must be contiguous");
+  NVTE_CHECK(lse_per_step.dim() >= 1);
+  if (only_second_half) {
+    NVTE_CHECK(lse.dim() == lse_per_step.dim() + 1);
+    NVTE_CHECK(lse.size(-2) == 2);
+    NVTE_CHECK(lse.size(-1) == lse_per_step.size(-1));
+    for (int64_t i = 0; i + 1 < lse_per_step.dim(); ++i) {
+      NVTE_CHECK(lse.size(i) == lse_per_step.size(i));
+    }
+  } else {
+    NVTE_CHECK(lse.sizes() == lse_per_step.sizes());
+  }
+
+  auto te_lse = makeTransformerEngineTensor(lse);
+  auto te_lse_per_step = makeTransformerEngineTensor(lse_per_step);
+  nvte_cp_lse_correction(te_lse.data(), te_lse_per_step.data(), only_second_half,
+                         at::cuda::getCurrentCUDAStream());
+}
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
                                     const at::Tensor &cu_seqlens, bool lse_packed) {

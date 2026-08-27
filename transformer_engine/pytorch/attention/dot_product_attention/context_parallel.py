@@ -184,24 +184,33 @@ def flash_attn_fwd_second_half_out_correction(
     out_.add_(out_corrected)
 
 
-@jit_fuser
+_lse_correction_fuser = (lambda func: func) if IS_HIP_EXTENSION else jit_fuser
+
+
+@_lse_correction_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
 ):
     """Merge softmax stats of each step in Attention with context parallelism"""
+    if IS_HIP_EXTENSION:
+        tex.lse_correction(softmax_lse, softmax_lse_per_step, False)
+        return
     max_scale = torch.max(softmax_lse, softmax_lse_per_step)
     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
     softmax_lse.copy_(new_scale)
 
 
-@jit_fuser
+@_lse_correction_fuser
 def flash_attn_fwd_second_half_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
 ):
     """Merge second half of softmax stats of each step in Attention with context parallelism"""
+    if IS_HIP_EXTENSION:
+        tex.lse_correction(softmax_lse, softmax_lse_per_step, True)
+        return
     softmax_lse_ = softmax_lse[..., 1, :]
     max_scale = torch.max(softmax_lse_, softmax_lse_per_step)
     min_scale = torch.min(softmax_lse_, softmax_lse_per_step)
