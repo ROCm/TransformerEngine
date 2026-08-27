@@ -445,3 +445,97 @@ def test_multi_layer_with_overlap_fp8(
         num_layers,
         use_cublasmp=use_cublasmp,
     )
+
+
+# The fused AG+GEMM backend is deliberately exempt from MAX_GPUS_TO_USE.
+FUSED_MAX_GPUS_TO_USE = 8
+
+
+def _fused_shape_ok(nprocs: int) -> bool:
+    """The backend needs a 256-aligned per-rank chunk and a 256-aligned N."""
+    return (SEQ_LENGTH * BATCH_SIZE) % (256 * nprocs) == 0 and (NUM_HEADS * HEAD_DIM) % 256 == 0
+
+
+FUSED_PROC_COUNTS = [
+    n
+    for n in (4, 8)
+    if n <= min(torch.cuda.device_count(), FUSED_MAX_GPUS_TO_USE) and _fused_shape_ok(n)
+]
+
+fused_available = (
+    IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and len(FUSED_PROC_COUNTS) > 0
+)
+reason_for_no_fused = (
+    "Fused AG+GEMM overlap requires a gfx950 device, tp_size in (4, 8) and a 256-aligned per-rank chunk."
+)
+
+
+def _fused_launch_cmd(nprocs: int):
+    """Same form as LAUNCH_CMD, but at a rank count the fused tests choose."""
+    if tex.ubuf_built_with_mpi():
+        return ["mpirun", "-np", str(nprocs), "--oversubscribe", "--quiet", "python3"]
+    return ["torchrun", f"--nproc_per_node={nprocs}"]
+
+
+def _run_fused_ag(quantization="none", nprocs=None):
+    """Run the AG overlap harness with the fused backend, returning the completed process."""
+    test_cmd = _fused_launch_cmd(nprocs if nprocs is not None else FUSED_PROC_COUNTS[0]) + [
+        str(TEST_ROOT / "run_gemm_with_overlap.py"),
+        "--check-numerics",
+        f"--seed={RNG_SEED}",
+        f"--seq-length={SEQ_LENGTH}",
+        f"--batch-size={BATCH_SIZE}",
+        f"--num-heads={NUM_HEADS}",
+        f"--head-dim={HEAD_DIM}",
+        "--comm-type=AG",
+        "--p2p",
+        "--fused",
+        f"--quantization={quantization}",
+    ]
+    return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+
+
+def _assert_numerics_passed(result):
+    stdout, stderr = result.stdout.decode(), result.stderr.decode()
+    assert result.returncode == 0, f"non-zero exit\n{stderr}"
+    assert "NUMERICAL CHECK FAILED" not in stderr, stderr
+    assert "NUMERICAL CHECK PASSED" in stdout, stdout
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_bf16(nprocs):
+    """bf16 at an aligned shape: the fused backend runs and the result is correct."""
+    _assert_numerics_passed(_run_fused_ag(nprocs=nprocs))
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
+def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
+    """Non-bf16 is currently outside the backend."""
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_ag(quantization=quantization, nprocs=nprocs)
+    assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
+    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_is_deterministic(nprocs):
+    """Bitwise reproducibility across runs"""
+    first = _run_fused_ag(nprocs=nprocs)
+    _assert_numerics_passed(first)
+    second = _run_fused_ag(nprocs=nprocs)
+    _assert_numerics_passed(second)
+
+    def _hashes(out):
+        prefix = "OUTPUT HASH: "
+        return [ln.split(prefix, 1)[1].strip() for ln in out.decode().splitlines() if prefix in ln]
+
+    first_hashes, second_hashes = _hashes(first.stdout), _hashes(second.stdout)
+    assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
+    assert first_hashes == second_hashes, "two identical runs produced different outputs"
