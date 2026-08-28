@@ -511,6 +511,15 @@ def test_fused_ag_overlap_bf16(nprocs):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_mxfp8(nprocs):
+    """mxfp8 at an aligned shape: the fused backend runs and the result is correct."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(quantization="mxfp8", nprocs=nprocs))
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_ag_overlap_rejects_fp8(nprocs):
     """Delayed-scaling FP8 is outside the backend; only MXFP8 1D scaling dispatches."""
     if not fp8_available:

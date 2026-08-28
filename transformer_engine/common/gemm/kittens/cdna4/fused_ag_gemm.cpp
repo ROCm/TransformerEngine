@@ -276,8 +276,8 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
 
     // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
     // caller's budget we return false and fall back to hipBLASLt.
-    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
-    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
 
     const size_t arrive_bytes = static_cast<size_t>(tiles_m) * sizeof(unsigned int);
     Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
@@ -291,8 +291,8 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     if (!ws.fits()) return false;
 
     // pack mxfp8 scales
-    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sb, M, scale_K, k_iters, args.stream);
-    launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_A, packed_sa, N_TOTAL, scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
     if (!bases) return false;
@@ -477,7 +477,17 @@ bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args) {
     const int K       = args.k;
     const int tp_size = args.nranks;
 
+    // Shape and pointer requirements. Order matters: the tp_size range test has to short-circuit
+    // ahead of the M % tp_size and M / tp_size terms. The gathered region IS the [M,K] A operand,
+    // so chunk_bytes is pinned to it exactly -- a mis-sized region declines instead of silently
+    // gathering a fraction of itself.
+    const bool ok = tp_size >= 1 && tp_size <= 8 && tp_size <= args.peer_count &&
+                    args.rank >= 0 && args.rank < tp_size &&
+                    M % tp_size == 0 && M % 256 == 0 && N_TOTAL % 256 == 0 &&
+                    K % 128 == 0 && K >= 256 && (M / tp_size) % 256 == 0 &&
+                    args.workspace && args.ub && args.A && args.D && args.peer_ub &&
+                    args.chunk_bytes == static_cast<size_t>(M / tp_size) * K * sizeof(uint8_t);
+    if (!ok) return false;
 
-    //TODO: remove this
-    return false;
+    return run_mxfp8_tn(args);
 }

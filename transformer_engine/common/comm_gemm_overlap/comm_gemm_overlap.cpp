@@ -231,6 +231,11 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   const auto scaling_mode = source.scaling_mode();
   NVTE_CHECK(scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Unsupported tensor format (", to_string(scaling_mode), ").");
+#ifndef __HIP_PLATFORM_AMD__
+  // ROCm never swizzles MXFP8 scales (swizzle_scales_for_gemm is a no-op below sm_arch 125) and
+  // keeps them unpadded as [M, K/32], which is exactly the layout the per-chunk scale offsetting
+  // below assumes (chunk_offset / 32 with a {height, width / 32} shape). So the swizzled-scale
+  // precondition only applies off ROCm -- same carve-out as the 128-divisibility checks below.
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
     uint8_t has_swizzled_scales = false;
     nvte_get_tensor_param_v2(source.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
@@ -238,6 +243,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
     NVTE_CHECK(has_swizzled_scales,
                "Expected MXFP8 tensor to have scales in GEMM swizzled format.");
   }
+#endif
 
   // Tensor dimensions
   std::vector<size_t> shape = shape_to_vector(source.shape());
