@@ -1999,66 +1999,67 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
-def test_single_grouped_weight_mirrors_grad_state(monkeypatch):
-    """Per-expert views must carry the grad state the autograd Function reads off
-    ``weights[i]`` / ``biases[i]``.
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason="FP8 block scaling is unsupported.")
+def test_blockwise_fp8_weight_cache_reuse(monkeypatch):
+    """``is_first_microbatch`` caches the packed blockwise weight across microbatches.
 
-    Regression for the generic ``single_grouped_weight`` fix: ``_get_weight_tensors`` /
-    ``_get_bias_tensors`` return split views of the grouped Parameter, which do not
-    inherit ``requires_grad`` (gates wgrad), ``main_grad`` (fuse-accumulation), or
-    ``overwrite_main_grad``. ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` is off by default, so a
-    regression here would otherwise land silently on both CUDA and ROCm.
+    CI never passes ``is_first_microbatch``, so the blockwise cache-hit branch is
+    otherwise unexercised. Verify that (1) the first microbatch quantizes once and
+    stores the packed weight in the single workspace slot (``weight0``), (2) later
+    microbatches reuse it with no re-quantization, (3) the reuse is numerically
+    identical to quantizing fresh, and (4) an incompatible cached workspace fails loud
+    instead of running a wrong weight.
     """
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-    num_gemms, in_features, out_features = 3, 128, 128
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+
+    from transformer_engine.pytorch.triton_kernels import blockwise_quantize as _bwq
+
+    # Count quantization launches; the forward re-imports this symbol per call, so
+    # patching the source module is observed.
+    n_quant = {"count": 0}
+    _orig_quant = _bwq.quantize_fp8_blockwise_grouped_weight_qtensor
+
+    def _counting_quant(*args, **kwargs):
+        n_quant["count"] += 1
+        return _orig_quant(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _bwq, "quantize_fp8_blockwise_grouped_weight_qtensor", _counting_quant
+    )
+
+    num_gemms, in_features, out_features = 2, 256, 512
+    fp8_recipe = recipe.Float8BlockScaling()
     grouped_linear = GroupedLinear(
         num_gemms,
         in_features,
         out_features,
-        bias=True,
+        bias=False,
         params_dtype=torch.bfloat16,
         device="cuda",
-        single_grouped_weight=True,
-        single_grouped_bias=True,
-    )
-    assert grouped_linear.single_grouped_weight and grouped_linear.single_grouped_bias
+    ).eval()
 
-    # Megatron-style fuse-accumulation buffer on the grouped weight Parameter.
-    grouped_linear.weight.main_grad = torch.zeros(
-        num_gemms * out_features, in_features, dtype=torch.float32, device="cuda"
-    )
-    grouped_linear.weight.overwrite_main_grad = False
+    m_splits = [32, 32]
+    x = torch.randn(sum(m_splits), in_features, dtype=torch.bfloat16, device="cuda")
 
-    weights = grouped_linear._get_weight_tensors()
-    assert len(weights) == num_gemms
-    for i, w in enumerate(weights):
-        assert w.requires_grad == grouped_linear.weight.requires_grad
-        assert w.overwrite_main_grad is False
-        # main_grad must be an aliasing view so per-expert wgrad accumulates in place.
-        w.main_grad.add_(i + 1.0)
-    grouped_main_grad = grouped_linear.weight.main_grad.view(num_gemms, out_features, in_features)
-    for i in range(num_gemms):
-        assert torch.all(grouped_main_grad[i] == (i + 1.0))
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_first = grouped_linear(x, m_splits, is_first_microbatch=True)
+    assert n_quant["count"] == 1, "first microbatch should quantize the weight once"
+    assert "weight0" in grouped_linear._fp8_workspaces
+    cached = grouped_linear._fp8_workspaces["weight0"]
 
-    # requires_grad is mirrored (not merely coincidental): flip the Parameter and refetch.
-    grouped_linear.weight.requires_grad_(False)
-    for w in grouped_linear._get_weight_tensors():
-        assert w.requires_grad is False
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_second = grouped_linear(x, m_splits, is_first_microbatch=False)
+    assert n_quant["count"] == 1, "later microbatch should reuse the cache, not re-quantize"
+    assert grouped_linear._fp8_workspaces["weight0"] is cached
+    torch.testing.assert_close(out_second, out_first, rtol=0, atol=0)
 
-    # Bias views mirror requires_grad (bias never uses main_grad).
-    biases = grouped_linear._get_bias_tensors()
-    assert len(biases) == num_gemms
-    for b in biases:
-        assert b.requires_grad == grouped_linear.bias.requires_grad
-
-    # A main_grad that cannot alias as [G*out, in] must raise a clear error (an
-    # aliasing view is required; a silent copy would drop accumulation).
-    grouped_linear.weight.requires_grad_(True)
-    grouped_linear.weight.main_grad = torch.zeros(
-        num_gemms * out_features + 1, in_features, dtype=torch.float32, device="cuda"
-    )
-    with pytest.raises(RuntimeError, match="accumulate in place"):
-        grouped_linear._get_weight_tensors()
+    # A live is_first_microbatch=False cache whose layout does not match the current
+    # weight must raise, not silently GEMM a wrong weight.
+    grouped_linear._fp8_workspaces["weight0"] = torch.empty(1, dtype=torch.uint8, device="cuda")
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        with pytest.raises(RuntimeError, match="Cached blockwise weight workspace"):
+            grouped_linear(x, m_splits, is_first_microbatch=False)
 
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)

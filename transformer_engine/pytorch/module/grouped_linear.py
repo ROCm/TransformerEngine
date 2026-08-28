@@ -611,16 +611,28 @@ class _GroupedLinear(torch.autograd.Function):
             )
         else:
             # High-precision weights: quantize the whole packed weight into a single
-            # Float8BlockwiseQTensor and cache it across microbatches.
+            # Float8BlockwiseQTensor and cache it across microbatches. On a cache hit
+            # (``is_first_microbatch=False``) reuse the stored packed weight untouched so
+            # its identity is preserved; only a fresh quantization is staged for write-back.
             update_ws = is_first_microbatch is None or is_first_microbatch
             cached_qw = weight_workspaces[0] if weight_workspaces else None
-            if not update_ws and isinstance(cached_qw, Float8BlockwiseQTensor):
+            if not update_ws:
+                expected_wshape = (num_gemms * out_features, in_features)
+                if not (
+                    isinstance(cached_qw, Float8BlockwiseQTensor)
+                    and tuple(cached_qw.shape) == expected_wshape
+                ):
+                    raise RuntimeError(
+                        "Cached blockwise weight workspace is incompatible with the "
+                        "current weights; expected a Float8BlockwiseQTensor of shape "
+                        f"{expected_wshape}."
+                    )
                 qw = cached_qw
             else:
                 w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
                 qw = quantize_fp8_blockwise_grouped_weight_qtensor(w, dt, pow2=pow2_w)
-            if cache_weight:
-                new_workspaces[0] = qw
+                if cache_weight:
+                    new_workspaces[0] = qw
 
         # Forward GEMM: out[seg] = A[seg] @ W[g]^T  (trans_b=True).
         out = grouped_gemm_fp8_blockwise_triton_kernel(
