@@ -29,6 +29,7 @@ from build_tools.utils import (
     all_files_in_dir,
     cuda_archs,
     cuda_version,
+    cudnn_frontend_include_path,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -113,6 +114,11 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(
             f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', '3')}"
         )
+        # Norm and fused-softmax build as static kernels on ROCm. Upstream v2.18
+        # defaults both to NVRTC JIT (LEGACY_STATIC_* OFF); the hipRTC JIT path is
+        # not yet functional on ROCm, so force the static kernels here.
+        cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_NORM=ON")
+        cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON")
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
@@ -133,6 +139,11 @@ def setup_common_extension() -> CMakeExtension:
 
     else:
         cmake_flags.extend(("-DUSE_ROCM=OFF", "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)))
+
+        # Upstream v2.18 removed the 3rdparty/cudnn-frontend submodule; the common
+        # CMake now expects CUDNN_FRONTEND_INCLUDE_DIR from the caller, sourced from
+        # the nvidia-cudnn-frontend pip package. CUDA-only (ROCm uses a stub).
+        cmake_flags.append(f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}")
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
             assert (

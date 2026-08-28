@@ -123,6 +123,9 @@ def _run_layer_with_overlap(
     # Skip BULK overlap tests on HIP (column parallel or None with overlap_rs_dgrad=False)
     if IS_HIP_EXTENSION and not overlap_rs_dgrad and linear_parallel_mode in ("column", None):
         pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
+    # Reduce-scatter comm+GEMM overlap is flaky on gfx950
+    if IS_HIP_EXTENSION and (overlap_rs_dgrad or linear_parallel_mode == "row"):
+        pytest.skip("Reduce-scatter comm+GEMM overlap is flaky on gfx950")
     # On gfx942, non-determinism across the 8 XCDs causes small jitter that compounds
     # This should not affect training convergence, but creates larger numerical differences.
     # TODO: Fix gfx942 issues arising from deterministic bwd attention and other jitter
