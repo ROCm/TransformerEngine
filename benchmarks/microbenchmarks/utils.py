@@ -7,6 +7,7 @@
 """Shared utilities for microbenchmarks: model configs, timing, throughput, runner."""
 
 import argparse
+import importlib.util
 import itertools
 import math
 import torch
@@ -84,6 +85,91 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
                     "dtype": dtype,
                 })
     return test_cases
+
+
+# ---------------------------------------------------------------------------
+# Low-precision recipe sweep (shared by the dense and grouped GEMM benchmarks)
+# ---------------------------------------------------------------------------
+# Transformer Engine imports are deferred into the helpers so importing
+# utils.py stays free of a GPU / built TE (keeps the non-GEMM benchmarks and
+# offline tooling importable).
+
+
+def _check_mxfp4_support_with_aiter():
+    """MXFP4 gate: device support plus the aiter FP4 GEMM backend.
+
+    The MXFP4 GEMM path calls into aiter's a4w4 kernels, so a missing aiter
+    package would crash at benchmark time even on supported hardware.
+    """
+    from transformer_engine.pytorch.quantization import check_mxfp4_support
+
+    supported, reason = check_mxfp4_support()
+    if not supported:
+        return supported, reason
+    if importlib.util.find_spec("aiter") is None:
+        return False, "aiter is not installed (required for the MXFP4 GEMM backend)."
+    return True, ""
+
+
+def _precision_specs():
+    """Ordered sweep of (name, recipe factory | None, support check | None).
+
+    A ``None`` factory is the bf16 baseline (no autocast). The fp8 entry uses
+    HYBRID delayed scaling and is shared by the dense and grouped GEMM
+    benchmarks so their fp8 numbers stay comparable.
+    """
+    from transformer_engine.common.recipe import (
+        DelayedScaling,
+        Format,
+        MXFP4BlockScaling,
+        MXFP8BlockScaling,
+        NVFP4BlockScaling,
+    )
+    from transformer_engine.pytorch.quantization import (
+        check_fp8_support,
+        check_mxfp8_support,
+        check_nvfp4_support,
+    )
+
+    return (
+        ("bf16", None, None),
+        (
+            "fp8",
+            lambda: DelayedScaling(
+                fp8_format=Format.HYBRID,
+                amax_history_len=16,
+                amax_compute_algo="max",
+            ),
+            check_fp8_support,
+        ),
+        ("mxfp8", MXFP8BlockScaling, check_mxfp8_support),
+        ("mxfp4", MXFP4BlockScaling, _check_mxfp4_support_with_aiter),
+        ("nvfp4", NVFP4BlockScaling, check_nvfp4_support),
+    )
+
+
+def build_recipes(names=None):
+    """Build an ordered ``{name: recipe_or_None}`` sweep of supported precisions.
+
+    ``bf16`` maps to ``None`` (no autocast). Each low-precision entry is
+    included only when its support check passes on the current device;
+    unsupported ones are dropped with a short notice. Pass *names* to restrict
+    and order the sweep, e.g. ``("bf16", "fp8", "mxfp8", "nvfp4")`` for grouped
+    GEMM, which has no MXFP4 grouped kernel.
+    """
+    specs = _precision_specs()
+    if names is not None:
+        by_name = {spec[0]: spec for spec in specs}
+        specs = tuple(by_name[name] for name in names)
+    recipes = {}
+    for name, factory, support_check in specs:
+        if support_check is not None:
+            supported, reason = support_check()
+            if not supported:
+                print(f"Skipping {name} precision: {reason}")
+                continue
+        recipes[name] = factory() if factory is not None else None
+    return recipes
 
 
 # ---------------------------------------------------------------------------

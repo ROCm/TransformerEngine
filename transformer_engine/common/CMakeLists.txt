@@ -128,7 +128,8 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
 else()
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_HIP_STANDARD 20)
   #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
   project(transformer_engine LANGUAGES HIP CXX)
 
@@ -848,11 +849,13 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
-  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -Wno-unused-value -Wno-deprecated-anon-enum-enum-conversion")
+  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
+  # -Wno-unknown-warning-option is to suppress warning about -Wlifetime-safety-lifetimebound-violation
+  # pragma in CK headers which is not supported by the compiler used to build TE.
+  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-value -Wno-unknown-warning-option")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
   # Hide non-necessary symbols in shared object.
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
