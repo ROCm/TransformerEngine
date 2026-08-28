@@ -1,0 +1,2370 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# TE-ROCm divergence manifest
+metadata:
+  manifest_version: "2.4"
+  schema_version: "1.3"
+  classifier: canonical-v2
+  generator: gen_manifest (hunk classifier; regenerate per sync)
+  fork_repo: https://github.com/ROCm/TransformerEngine
+  fork_ref: dev
+  fork_sha: 8af6efcd9a40afdf49277a1471778c5dbe4ca704   # IFU-2.18 merge, 2026-08-27
+
+  # ---- BASE CORRECTED IN v2.4 -------------------------------------------------
+  # v2.3 and earlier measured against release_v2.18 TIP (27486e03). That is NOT what
+  # the fork merged. The IFU merge commit 3a49d650 has upstream parent 868d8d92,
+  # which is exactly merge-base(upstream/main, fork/dev) and the point release_v2.18
+  # branched off main. Measuring against the release tip charged 15 upstream commits
+  # (1,339 lines in scope) to ROCm, produced five wholly phantom entries, and inverted
+  # the divergence trend. See retired_entries and correction_provenance below.
+  upstream_repo: https://github.com/NVIDIA/TransformerEngine
+  upstream_ref: main
+  upstream_sha: 868d8d9216da361c666519652115e23688db5211
+  upstream_sha_derivation: >-
+    second parent of the fork's IFU merge commit; CI MUST assert it equals
+    merge-base(upstream/main, fork/dev). Never derive from a named release branch or tag.
+  upstream_sha_notes: >-
+    868d8d92 ("Fix FusedAdam empty tensor handling", #3212, 2026-07-20) is on main AND is
+    the branch point of release_v2.18. The fork does NOT contain the 15 release_v2.18
+    stabilisation commits - which is why VERSION is still 2.18.0.dev0. Whether to take
+    those 15 commits is an open Stage-0 decision (see open_decisions.release_218_gap).
+
+  diff_tool: >-
+    GNU diff. added = count of '^>' lines, removed = count of '^<' lines. The "lines"
+    figure in summary tables is added+removed. git's default Myers algorithm disagrees
+    with GNU diff on some files and MUST NOT be substituted: at this base it differs on
+    cpp_extensions/fused_attn.py by 1 line. Because M1 burn-down and the
+    divergence-regression CI alarm are line-count based, an unpinned algorithm can
+    false-trigger or mask the alarm.
+
+  generated: 2026-08-28
+  measured_scope:
+    - transformer_engine (ALL layers, including the package root and common/ Python)
+    - NVTE headers
+    - tests/pytorch (recursive)
+    - tests/cpp
+    - tests/cpp_distributed
+    - tests/jax
+  scope_notes: >-
+    v2.3 declared "transformer_engine (all layers)" but only carried entries for
+    pytorch/ and jax/. 281 lines of diverged vendored-upstream Python had no entry at
+    all - transformer_engine/__init__.py, common/__init__.py, common/recipe/__init__.py.
+    These are now CM-001..CM-003 and are the three files the plugin architecture depends
+    on most heavily. build_tools/ and setup.py are measured (see build_system_delta) but
+    remain build-system scope, not vendored-tree scope.
+
+  previous_baseline:
+    fork_sha_short: 87efe41            # dev of 2026-08-22
+    upstream_merged_sha: 2e559f062497bef768dfbe9d7e45548fadeca80a
+    upstream_merged_notes: >-
+      The 2.17 IFU merged a commit that is on release_v2.17 but NOT on main - confirmed
+      by the team as done the wrong way. It pulled 10 release-branch-only commits into
+      fork history. Content residue: NONE (merge-base(fork/dev, main) is now exactly
+      868d8d92 and the EP work from those commits is present at that base), so current
+      measurements are unaffected. Cost was conflict burden during that IFU.
+      v2.3's trend used release_v2.17 TIP, which was never merged either.
+
+  version_streams_note: >-
+    proposal (v2.2) and manifest (v2.4) version independently; the proposal pins the
+    manifest version it cites.
+
+  runtime_eligible_enum: [never, candidate, proven]
+  mechanism_enum: [backend-repo, relocate, custom-recipe, capability, feature-pr, compat-pr,
+                   upstream-pr, upstream-bugfix-pr, hold-nvidia, hold-internal, patch,
+                   test-overlay, build-system, delete, restructure, mixed]
+  mechanism_detail_fields: [pr_kind, capability_id, support_state, fallback_mechanism, future_options]
+  metric_class_enum: [m1, migration_volume, inventory_only]
+
+  added_class_status: MUST_REGENERATE
+  added_class_notes: >-
+    Every added_class triple in this file was computed against the WRONG base and is
+    retained only as a stale reference under stale_added_class. Hunk classification is
+    base-dependent: upstream changed several of these files between 868d8d92 and the
+    release tip, so added-line composition can shift even where the added COUNT is
+    unchanged. Re-run canonical-v2 against 868d8d92 before Stage 0 exit.
+
+  stage0_exit_requirements:
+    - every leaf (feature child AND unsplit file entry) carries risk, dependencies, test_ids, upstream_link, expiry_condition
+    - removed lines attributed at feature level (m1_removed_lines) or explicit removal-residue leaves
+    - all RESIDUE items characterized
+    - compound features split into independently retiring units (PT-006-FEAT, PT-009-FEAT)
+    - mechanisms normalized to mechanism_enum with details in mechanism_detail_fields
+    - owners assigned at workstream and leaf level; executive sponsor named
+    - backtest_plan thresholds numerically approved (before Stage 2 starts)
+    # --- added in v2.4 ---
+    - added_class regenerated against 868d8d92 for every entry (added_class_status == CURRENT)
+    - CM-001..CM-004 fully characterized and owned
+    - ABI-001 ctypes symbol inventory complete
+    - release_218_gap decision recorded
+    - CI asserts upstream_sha == merge-base(upstream/main, fork/dev)
+
+  correction_provenance:
+    corrected_by: base re-measurement against 868d8d92, 2026-08-28
+    entries_retired: 5
+    entries_renumbered: 0        # IDs are stable; retired IDs are never reused
+    entries_updated: 10
+    entries_added: 6             # CM-001..004, ABI-001, BK-001B
+    entries_unchanged: 49
+
+# Retired because they have ZERO divergence against the true base. Their entire v2.3
+# delta was upstream release_v2.18 work the fork never merged. IDs are burned, not reused.
+retired_entries:
+  note: >-
+    PT-005 was v2.3's headline "new 2.18 divergence front" and PT-014/015/016 were its
+    removal-dominant entries. The "fork removes upstream's symm-mem MemPool helpers"
+    characterization was wrong in kind: upstream ADDED those lines after the branch
+    point; the fork never had them and never removed them.
+  items:
+    - id: PT-005
+      path: transformer_engine/pytorch/ep.py
+      v23_delta: "85/74"
+      reason: "upstream PR #3187 NCCL EP zero-copy, landed on release_v2.18 after the branch point"
+    - id: PT-015
+      path: transformer_engine/pytorch/tensor/storage/float8_blockwise_tensor_storage.py
+      v23_delta: "0/56"
+      reason: "upstream FP8 block-scaling work (PR #3242 / #3171)"
+    - id: PT-016
+      path: transformer_engine/pytorch/newton_schulz.py
+      v23_delta: "8/34"
+      reason: "upstream cuSolverMp Newton-Schulz changes"
+    - id: PT-042
+      path: transformer_engine/pytorch/ops/op.py
+      v23_delta: "5/0"
+      reason: "upstream fusible-ops changes (PR #3242)"
+    - id: JX-018
+      path: transformer_engine/jax/router.py
+      v23_delta: "2/1"
+      reason: "upstream JAX MoE aux-loss change (PR #3237)"
+
+layer_totals:   # GNU diff, vs 868d8d92, modified files only
+  common_cpp:        {files: 85, added: 6023, removed: 297, sum: 6320}
+  common_python:     {files: 2,  added: 205,  removed: 36,  sum: 241}
+  nvte_headers:      {files: 9,  added: 329,  removed: 3,   sum: 332}
+  pytorch_csrc:      {files: 21, added: 1298, removed: 49,  sum: 1347}
+  jax_csrc:          {files: 15, added: 239,  removed: 25,  sum: 264}   # NEW: closes v2.3 open item
+  pytorch_python:    {files: 41, added: 2142, removed: 253, sum: 2395}
+  jax_python:        {files: 18, added: 563,  removed: 120, sum: 683}
+  te_root_python:    {files: 1,  added: 36,   removed: 4,   sum: 40}
+  tests_pytorch:     {files: 46, added: 2188, removed: 211, sum: 2399}
+  tests_cpp:         {files: 35, added: 1956, removed: 132, sum: 2088}
+  tests_jax:         {files: 13, added: 951,  removed: 73,  sum: 1024}
+  tests_cpp_distributed: {files: 0, added: 0, removed: 0,   sum: 0}
+  non_test_total_sum: 11622
+  all_in_scope_total_sum: 17133
+  build_system_delta:  {build_tools: {files: 6, added: 360, removed: 52}, setup_py: {files: 1, added: 128, removed: 23}}
+
+rocm_only_volume:   # added-only files; migration_volume, NOT overlap debt
+  pytorch_python:  {files: 22, lines: 8370}   # 18 triton_kernels (6566) + 4 MXFP4/fsdp2 (1804)
+  jax_python:      {files: 1,  lines: 37}     # jax/util.py - v2.3 estimated 120, actual 37
+  common_python:   {files: 1,  lines: 112}    # common/ck_fused_attn/check_aiter_mha_args.py
+  common_all:      {files: 65, lines: 20968}  # v2.3 said "~17,000 estimate, not line-counted"
+  pytorch_csrc:    {files: 2,  lines: 433}
+  jax_csrc:        {files: 0,  lines: 0}
+  tests_pytorch:   {files: 21, lines: 5314}
+  tests_cpp:       {files: 6,  lines: 3116}
+  rocm_only_trees_under_common:
+    ck_fused_attn: {files: 9, lines: 1956}
+    aotriton:      {files: 2, lines: 138}
+    rocshmem_api:  {files: 3, lines: 202}
+    amd_detail:    {files: 2, lines: 130}
+
+entries:
+  # ============================ PyTorch Python ============================
+  - id: PT-001
+    path: transformer_engine/pytorch/cpp_extensions/gemm.py
+    added_lines: 302
+    removed_lines: 1
+    v23_values: {added_lines: 312, removed_lines: 46}
+    stale_added_class: {sidecar: 265, guard: 35, unmarked: 12}
+    added_class: REGENERATE
+    disposition: custom-recipe+plugin
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 302
+    m1_removed_lines: 1
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-001-MXFP4
+        description: "MXFP4 GEMM wiring -> adapter quantizer + plugin tex.generic_gemm"
+        mechanism: custom-recipe+plugin
+        patch_timing: build
+        runtime_eligible: candidate
+        runtime_evidence: null
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-001-CAP
+        description: guarded branches
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-001-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-002
+    path: transformer_engine/pytorch/module/base.py
+    added_lines: 289
+    removed_lines: 23
+    v23_values: {added_lines: 289, removed_lines: 58}
+    stale_added_class: {sidecar: 14, guard: 264, unmarked: 11}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 289
+    m1_removed_lines: 23
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-002-CAP
+        description: "recipe/fp8-availability + arch guards -> capability queries"
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: 264
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-002-SIDE
+        description: MXFP4/triton wiring residue
+        mechanism: custom-recipe
+        patch_timing: build
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: 14
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-002-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: 11
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-003
+    path: transformer_engine/pytorch/module/grouped_linear.py
+    added_lines: 149
+    removed_lines: 36
+    v23_values: {added_lines: 162, removed_lines: 78}
+    stale_added_class: {sidecar: 5, guard: 44, unmarked: 113}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 149
+    m1_removed_lines: 36
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-003-TCACHE
+        description: transpose-cache
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-003-SPLITACC
+        description: split-accumulator
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-003-CAP
+        description: guarded branches
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-003-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-004
+    path: transformer_engine/pytorch/quantization.py
+    added_lines: 207
+    removed_lines: 4
+    stale_added_class: {sidecar: 146, guard: 31, unmarked: 30}
+    added_class: REGENERATE
+    disposition: custom-recipe
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 207
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-004-MXFP4
+        description: "MXFP4 recipe wiring -> CustomRecipe adapter"
+        mechanism: custom-recipe
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 146
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: [CM-003-MXFP4CLASS]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-004-CAP
+        description: guarded availability
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 31
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-004-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 30
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  # PT-005 RETIRED (see retired_entries)
+  - id: PT-006
+    path: transformer_engine/pytorch/module/layernorm_mlp.py
+    added_lines: 130
+    removed_lines: 20
+    v23_values: {added_lines: 130, removed_lines: 18}
+    stale_added_class: {sidecar: 8, guard: 42, unmarked: 80}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 130
+    m1_removed_lines: 20
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-006-FEAT
+        description: transpose-cache/fsdp2/split-acc analogs (COMPOUND - split in Stage 0)
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 50
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-006-UB
+        description: UserBuffers/fused-AG plumbing
+        mechanism: hold-nvidia
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 35
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: [HDR-B1]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-006-CAP
+        description: guarded
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 30
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-006-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 15
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-007
+    path: transformer_engine/pytorch/tensor/mxfp8_tensor.py
+    added_lines: 140
+    removed_lines: 5
+    stale_added_class: {sidecar: 13, guard: 124, unmarked: 3}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 140
+    m1_removed_lines: 5
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-008
+    path: transformer_engine/pytorch/module/linear.py
+    added_lines: 123
+    removed_lines: 10
+    v23_values: {added_lines: 123, removed_lines: 6}
+    stale_added_class: {sidecar: 0, guard: 46, unmarked: 77}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 123
+    m1_removed_lines: 10
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-008-NVFP4FIX
+        description: NVFP4 columnwise-at-quantization fix
+        mechanism: upstream-bugfix-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 20
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-008-TCACHE
+        description: transpose-cache toggle
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 28
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-008-SPLITACC
+        description: split-accumulator config
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 16
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-008-FSDP2
+        description: use_fsdp2 support
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 25
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: [REL-002]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-008-CAP
+        description: guarded branches
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 34
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-009
+    path: transformer_engine/pytorch/module/layernorm_linear.py
+    added_lines: 119
+    removed_lines: 12
+    v23_values: {added_lines: 119, removed_lines: 8}
+    stale_added_class: {sidecar: 4, guard: 41, unmarked: 74}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 119
+    m1_removed_lines: 12
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-009-FEAT
+        description: feature analogs (COMPOUND - split in Stage 0)
+        mechanism: feature-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 48
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-009-UB
+        description: UB plumbing
+        mechanism: hold-nvidia
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 30
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: [HDR-B1]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-009-CAP
+        description: guarded
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 32
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-009-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 9
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-010
+    path: transformer_engine/pytorch/attention/dot_product_attention/backends.py
+    added_lines: 75
+    removed_lines: 29
+    v23_values: {added_lines: 75, removed_lines: 41}
+    stale_added_class: {sidecar: 0, guard: 71, unmarked: 4}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 75
+    m1_removed_lines: 29
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-010-SEL
+        description: backend selection functions (plausible leaf-function override)
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: candidate
+        runtime_evidence: null
+        m1_added_lines: 71
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: [HDR-B2]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-010-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 4
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-011
+    path: transformer_engine/pytorch/attention/dot_product_attention/utils.py
+    added_lines: 70
+    removed_lines: 18
+    v23_values: {added_lines: 70, removed_lines: 30}
+    stale_added_class: {sidecar: 0, guard: 66, unmarked: 4}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 70
+    m1_removed_lines: 18
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-011-SEL
+        description: selection/support helpers (plausible leaf-function override)
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: candidate
+        runtime_evidence: null
+        m1_added_lines: 66
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: [HDR-B2]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-011-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 4
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-012
+    path: transformer_engine/pytorch/cpp_extensions/fused_attn.py
+    added_lines: 62
+    removed_lines: 15
+    stale_added_class: {sidecar: 0, guard: 60, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 62
+    m1_removed_lines: 15
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "diff-algorithm sensitive: GNU diff 62/15, git Myers 63/16. GNU diff is normative."
+    features:
+      - id: PT-012-SEL
+        description: fused-attn dispatch helpers (plausible leaf-function override)
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: candidate
+        runtime_evidence: null
+        m1_added_lines: 60
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: [HDR-B2]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-012-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 2
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-013
+    path: transformer_engine/pytorch/optimizers/__init__.py
+    added_lines: 62
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 62, unmarked: 0}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 62
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "one of the 9 early-binding 'from transformer_engine_torch import (...)' sites; facade must be installed before this module imports"
+    features:
+      - id: PT-013-CAP
+        description: fused-path availability guards
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 40
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-013-CUSTOM
+        description: multi-tensor custom wiring (AMD-private naming per review)
+        mechanism: relocate
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 22
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-014
+    path: transformer_engine/pytorch/distributed.py
+    added_lines: 4
+    removed_lines: 0
+    v23_values: {added_lines: 9, removed_lines: 51}
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 9}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 4
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: >-
+      RECHARACTERIZED in v2.4. v2.3 described this as "fork removes upstream's torch
+      symm-mem MemPool helpers" and booked 51 removed lines. That was a base artifact:
+      upstream ADDED those helpers in #3187 AFTER the branch point. The fork never had
+      them. Actual divergence is 4 added / 0 removed. The symm-mem capability question
+      still exists but belongs to the release_218_gap decision, not to this entry.
+  # PT-015, PT-016 RETIRED (see retired_entries)
+  - id: PT-017
+    path: transformer_engine/pytorch/tensor/float8_tensor.py
+    added_lines: 34
+    removed_lines: 4
+    stale_added_class: {sidecar: 19, guard: 12, unmarked: 3}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 34
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-017-SIDE
+        description: MXFP4/shuffle-adjacent wiring
+        mechanism: custom-recipe
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 19
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-017-CAP
+        description: guarded
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 12
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-017-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 3
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-018
+    path: transformer_engine/pytorch/constants.py
+    added_lines: 32
+    removed_lines: 3
+    stale_added_class: {sidecar: 0, guard: 30, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 32
+    m1_removed_lines: 3
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-019
+    path: transformer_engine/pytorch/setup.py
+    added_lines: 29
+    removed_lines: 6
+    stale_added_class: {sidecar: 0, guard: 21, unmarked: 8}
+    added_class: REGENERATE
+    disposition: build-system
+    patch_timing: n/a
+    runtime_eligible: never
+    fallback_mechanism: n/a
+    m1_added_lines: 29
+    m1_removed_lines: 6
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-020
+    path: transformer_engine/pytorch/optimizers/fused_adam.py
+    added_lines: 26
+    removed_lines: 8
+    stale_added_class: {sidecar: 0, guard: 18, unmarked: 8}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 26
+    m1_removed_lines: 8
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-020-CAP
+        description: guarded fused paths
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 18
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-020-RES2
+        description: chunk-metadata plumbing
+        mechanism: relocate
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 8
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-021
+    path: transformer_engine/pytorch/utils.py
+    added_lines: 33
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 31, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 33
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: >-
+      Contains one of THREE independent is_fp8_fnuz implementations (line 644). The other
+      two are CM-002 (ctypes) and JX-CAP (subprocess). Canonical first item for the
+      capability provider - see ABI-001.
+  - id: PT-022
+    path: transformer_engine/pytorch/ops/basic/grouped_linear.py
+    added_lines: 6
+    removed_lines: 0
+    v23_values: {added_lines: 14, removed_lines: 17}
+    stale_added_class: {sidecar: 0, guard: 7, unmarked: 7}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 6
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-023
+    path: transformer_engine/pytorch/module/_common.py
+    added_lines: 27
+    removed_lines: 4
+    stale_added_class: {sidecar: 12, guard: 6, unmarked: 9}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 27
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-023-SIDE
+        description: triton/mxfp4 wiring
+        mechanism: custom-recipe+plugin
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 18
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-023-RES2
+        description: unmarked residue
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 9
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-024
+    path: transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py
+    added_lines: 25
+    removed_lines: 6
+    stale_added_class: {sidecar: 0, guard: 23, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 25
+    m1_removed_lines: 6
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-025
+    path: transformer_engine/pytorch/tensor/float8_blockwise_tensor.py
+    added_lines: 20
+    removed_lines: 8
+    stale_added_class: {sidecar: 0, guard: 18, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 20
+    m1_removed_lines: 8
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-026
+    path: transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py
+    added_lines: 17
+    removed_lines: 6
+    stale_added_class: {sidecar: 0, guard: 15, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: candidate
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 17
+    m1_removed_lines: 6
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "2.15->2.17 convergence success case: 1,619 diverged lines -> 23. Retain as evidence convergence is achievable."
+  - id: PT-027
+    path: transformer_engine/pytorch/quantized_tensor.py
+    added_lines: 18
+    removed_lines: 3
+    stale_added_class: {sidecar: 0, guard: 9, unmarked: 9}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 18
+    m1_removed_lines: 3
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-028
+    path: transformer_engine/pytorch/graph.py
+    added_lines: 13
+    removed_lines: 7
+    stale_added_class: {sidecar: 0, guard: 3, unmarked: 10}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 13
+    m1_removed_lines: 7
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-029
+    path: transformer_engine/pytorch/triton/cross_entropy.py
+    added_lines: 15
+    removed_lines: 5
+    stale_added_class: {sidecar: 0, guard: 5, unmarked: 10}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 15
+    m1_removed_lines: 5
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-030
+    path: transformer_engine/pytorch/ops/basic/rmsnorm.py
+    added_lines: 14
+    removed_lines: 2
+    stale_added_class: {sidecar: 6, guard: 1, unmarked: 7}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 14
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "early-binding site: 'from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd'"
+  - id: PT-031
+    path: transformer_engine/pytorch/tensor/storage/nvfp4_tensor_storage.py
+    added_lines: 12
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 12}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 12
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-032
+    path: transformer_engine/pytorch/__init__.py
+    added_lines: 9
+    removed_lines: 4
+    stale_added_class: {sidecar: 1, guard: 6, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 9
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    dependencies: [CM-001]
+  - id: PT-033
+    path: transformer_engine/pytorch/ops/basic/layer_norm.py
+    added_lines: 11
+    removed_lines: 2
+    stale_added_class: {sidecar: 3, guard: 6, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 11
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "early-binding site: 'from transformer_engine_torch import layernorm_bwd, layernorm_fwd'"
+  - id: PT-034
+    path: transformer_engine/pytorch/module/fp8_padding.py
+    added_lines: 13
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 2, unmarked: 11}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 13
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-035
+    path: transformer_engine/pytorch/tensor/storage/mxfp8_tensor_storage.py
+    added_lines: 11
+    removed_lines: 1
+    stale_added_class: {sidecar: 6, guard: 3, unmarked: 2}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 11
+    m1_removed_lines: 1
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: PT-035-SIDE
+        description: shuffle/mxfp4-adjacent
+        mechanism: custom-recipe
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 6
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-035-CAP
+        description: guarded
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 3
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: PT-035-RESIDUE
+        description: uncharacterized residue (explicit remainder)
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 2
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+  - id: PT-036
+    path: transformer_engine/pytorch/tensor/utils.py
+    added_lines: 7
+    removed_lines: 4
+    stale_added_class: {sidecar: 0, guard: 2, unmarked: 5}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 7
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "early-binding site: 'from transformer_engine_torch import (...)'"
+  - id: PT-037
+    path: transformer_engine/pytorch/transformer.py
+    added_lines: 5
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 3, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 5
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-038
+    path: transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py
+    added_lines: 7
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 7}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 7
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "early-binding site importing CommOverlapType + bulk_overlap_ag_with_external_gemm; depends on HDR-B1 outcome"
+    dependencies: [HDR-B1]
+  - id: PT-039
+    path: transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
+    added_lines: 6
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 4, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: candidate
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 6
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-040
+    path: transformer_engine/pytorch/optimizers/multi_tensor_apply.py
+    added_lines: 4
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 4, unmarked: 0}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 4
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-041
+    path: transformer_engine/pytorch/tensor/nvfp4_tensor.py
+    added_lines: 5
+    removed_lines: 1
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 5}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 5
+    m1_removed_lines: 1
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  # PT-042 RETIRED (see retired_entries)
+  - id: PT-043
+    path: transformer_engine/pytorch/jit.py
+    added_lines: 4
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 2, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 4
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: PT-044
+    path: transformer_engine/pytorch/ops/fused/userbuffers_forward_linear.py
+    added_lines: 4
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 4}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 4
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    dependencies: [HDR-B1]
+  - id: PT-045
+    path: transformer_engine/pytorch/_extra_state.py
+    added_lines: 3
+    removed_lines: 0
+    stale_added_class: {sidecar: 1, guard: 0, unmarked: 2}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 3
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+
+  # =================== Vendored-tree Python OUTSIDE pytorch/ and jax/ ===================
+  # NEW IN v2.4. These 281 lines had no entry in v2.3 despite measured_scope claiming
+  # "all layers". They are the three files the plugin architecture depends on most.
+  - id: CM-001
+    path: transformer_engine/__init__.py
+    added_lines: 36
+    removed_lines: 4
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 36
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    risk: high
+    dependencies: [BOOT-001]
+    test_ids: []
+    upstream_link: null
+    expiry_condition: "upstream python-only/absent-native build mode"
+    notes: >-
+      THE ACTIVATION SEAM. Proposal Sec 3.2 places the in-package bootstrap here: detect the
+      embedded ROCm distribution marker, import te_rocm.bootstrap, install the facade,
+      then import the remaining TE Python. Stage 1 must prove production activation in
+      this file, not env-var activation.
+  - id: CM-002
+    path: transformer_engine/common/__init__.py
+    added_lines: 119
+    removed_lines: 31
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 119
+    m1_removed_lines: 31
+    owner: TBD
+    status: proposed
+    risk: high
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: >-
+      BOOT-001's real target. 150 diverged lines across 21 hunks - not the "2-3 file,
+      3-line" patch BOOT-001 previously estimated. Upstream file is 386 lines.
+    features:
+      - id: CM-002-LOADER
+        description: "native library loading; _load_core_library / _load_cuda_library gating"
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: [BOOT-001, BK-001]
+        test_ids: []
+        upstream_link: "NVIDIA/TransformerEngine#3401 (absent-native build mode ask)"
+        expiry_condition: "upstream ships a python-only / absent-native build mode"
+        status: proposed
+      - id: CM-002-PKGID
+        description: >-
+          PyPI package identity: get_te_core_package_info(rocm: bool) - upstream SIGNATURE
+          CHANGED, not extended - plus core packages transformer-engine-rocm7 /
+          transformer-engine-rocm10 and extras rocm_pytorch / rocm_jax.
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+        conflict: >-
+          DIRECTLY CONTRADICTS proposal Sec 3.2, which decides the ROCm distribution keeps the
+          canonical name `transformer-engine` with a PEP 440 local version. Stage 1 must
+          REWRITE this logic, not hook it. Resolve before the Stage-1 packaging design freezes.
+      - id: CM-002-ROCMFLAG
+        description: >-
+          te_rocm_build module-level global; set by package detection, then asserted at
+          import against the C ABI (nvte_is_rocm_build()).
+        mechanism: capability
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: [ABI-001]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+        notes: "import-time mutable module global with a cross-contract assertion; runtime_eligible is never"
+      - id: CM-002-FNUZ
+        description: "is_fp8_fnuz() - @functools.cache, calls nvte_uses_fp8_fnuz() over ctypes"
+        mechanism: capability
+        capability_id: te.fp8.fnuz
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: [ABI-001]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: "capability provider owns FNUZ detection for all three layers"
+        status: proposed
+        notes: >-
+          One of THREE independent is_fp8_fnuz implementations (see PT-021 and JX-CAP).
+          Canonical first item for the Sec 3.6 capability provider.
+  - id: CM-003
+    path: transformer_engine/common/recipe/__init__.py
+    added_lines: 86
+    removed_lines: 5
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 86
+    m1_removed_lines: 5
+    owner: TBD
+    status: proposed
+    risk: high
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: >-
+      CustomRecipe's home (686 upstream lines). Imported ~16 distinct ways across pytorch/
+      and jax/. Sec 3.7's entire quantization strategy rests on this file, which v2.3 did not
+      track at all.
+    features:
+      - id: CM-003-FNUZFMT
+        description: >-
+          FNUZ FP8 format handling: replaces upstream _FormatHelper(max_fwd=448, max_bwd=448)
+          with _FormatHelperFP8(fwd=(448,240), bwd=...) where max_fwd is a property doing
+          self.fwd[is_fp8_fnuz()]. Rewrites the enum member definitions of Format.
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 5
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: [CM-002-FNUZ, ABI-001]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+        notes: >-
+          Definition-time, import-sensitive - build tier by the Sec 3.4 rule, runtime_eligible
+          never. Design itself is sound (static value tuples, lazy selection at property
+          access). Renaming _FormatHelper -> _FormatHelperFP8 changes field names
+          (max_fwd/max_bwd -> fwd/bwd), so any upstream code touching _FormatHelper directly
+          breaks - include in the PY_CONTRACT typed inventory.
+      - id: CM-003-MXFP4CLASS
+        description: "MXFP4BlockScaling - a new Recipe subclass (~60 ln incl. docstring)"
+        mechanism: relocate
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: [REL-002]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: CM-003-RECIPEMXFP4
+        description: "Recipe.mxfp4() classmethod INJECTED into upstream's base Recipe class"
+        mechanism: patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: PENDING_RECLASSIFICATION
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+        conflict: >-
+          Sec 3.7 routes MXFP4 through the CustomRecipe adapter, but this is NOT a CustomRecipe -
+          it is a method grafted onto upstream's base Recipe class. CustomRecipe(qfactory=...)
+          does not discharge it; it needs a build-tier patch on an upstream class definition.
+          Sec 3.7 must be amended.
+  - id: CM-004
+    path: transformer_engine/common/ck_fused_attn/check_aiter_mha_args.py
+    metric_class: migration_volume
+    added_lines: 112
+    removed_lines: 0
+    disposition: relocate
+    patch_timing: n/a
+    runtime_eligible: never
+    fallback_mechanism: n/a
+    m1_added_lines: 0        # ROCm-only file: migration volume, not overlap debt
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    risk: low
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: "the only ROCm-only Python inside common/; relocates with the CK backend"
+
+  # ============================ JAX Python (beta track) ============================
+  - id: JX-001
+    path: transformer_engine/jax/triton_extensions/utils.py
+    added_lines: 215
+    removed_lines: 38
+    stale_added_class: {sidecar: 0, guard: 189, unmarked: 26}
+    added_class: REGENERATE
+    disposition: split-features
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 215
+    m1_removed_lines: 38
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    features:
+      - id: JX-001-COMPILE
+        description: target-neutral compile
+        mechanism: upstream-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 60
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: JX-001-GLUON
+        description: Gluon kernel support
+        mechanism: upstream-pr
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 40
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: null
+        status: proposed
+      - id: JX-001-HSACO
+        description: HSACO-as-file accommodation
+        mechanism: hold-internal
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 30
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: "ROCm JAX plugin fix lands"
+        status: proposed
+      - id: JX-001-PREWARM
+        description: multi-device prewarm race workaround
+        mechanism: hold-internal
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 85
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: medium
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: "ROCm JAX plugin fix lands"
+        status: proposed
+  - id: JX-002
+    path: transformer_engine/jax/sharding.py
+    added_lines: 79
+    removed_lines: 8
+    stale_added_class: {sidecar: 0, guard: 74, unmarked: 5}
+    added_class: REGENERATE
+    disposition: compat-pr
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 79
+    m1_removed_lines: 8
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-003
+    path: transformer_engine/jax/cpp_extensions/attention.py
+    added_lines: 49
+    removed_lines: 13
+    stale_added_class: {sidecar: 0, guard: 47, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 49
+    m1_removed_lines: 13
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-004
+    path: transformer_engine/jax/cpp_extensions/gemm.py
+    added_lines: 39
+    removed_lines: 12
+    stale_added_class: {sidecar: 0, guard: 30, unmarked: 9}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 39
+    m1_removed_lines: 12
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-005
+    path: transformer_engine/jax/moe.py
+    added_lines: 48
+    removed_lines: 0
+    stale_added_class: {sidecar: 46, guard: 0, unmarked: 2}
+    added_class: REGENERATE
+    disposition: upstream-pr
+    pr_kind: portability
+    patch_timing: build
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 48
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    notes: >-
+      CONFIRMED REAL at the corrected base (48/0 unchanged). The only genuine new 2.18
+      divergence front - PT-005 ep.py, its claimed counterpart, was phantom. AMD portability
+      header + lazy Triton-permutation imports (_require_triton) so PURE_JAX users need not
+      install triton. Vendor-neutral upstream-PR candidate.
+    features:
+      - id: JX-005-MOE
+        description: "lazy Triton-import portability for PURE_JAX backend users"
+        mechanism: upstream-pr
+        pr_kind: portability
+        fallback_mechanism: build-time source patch
+        patch_timing: build
+        runtime_eligible: never
+        m1_added_lines: 48
+        m1_removed_lines: 0
+        m2_lines: 0
+        risk: low
+        owner: TBD
+        dependencies: []
+        test_ids: []
+        upstream_link: null
+        expiry_condition: "upstream merges the lazy-import portability PR"
+        status: proposed
+  - id: JX-006
+    path: transformer_engine/jax/cpp_extensions/normalization.py
+    added_lines: 12
+    removed_lines: 30
+    stale_added_class: {sidecar: 0, guard: 1, unmarked: 11}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 12
+    m1_removed_lines: 30
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-007
+    path: transformer_engine/jax/quantize/helper.py
+    added_lines: 24
+    removed_lines: 4
+    stale_added_class: {sidecar: 0, guard: 19, unmarked: 5}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 24
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-008
+    path: transformer_engine/jax/setup.py
+    added_lines: 17
+    removed_lines: 4
+    stale_added_class: {sidecar: 0, guard: 15, unmarked: 2}
+    added_class: REGENERATE
+    disposition: build-system
+    patch_timing: n/a
+    runtime_eligible: never
+    fallback_mechanism: n/a
+    m1_added_lines: 17
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-009
+    path: transformer_engine/jax/cpp_extensions/misc.py
+    added_lines: 10
+    removed_lines: 4
+    stale_added_class: {sidecar: 0, guard: 4, unmarked: 6}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 10
+    m1_removed_lines: 4
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-010
+    path: transformer_engine/jax/cpp_extensions/flex_attention.py
+    added_lines: 13
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 11, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 13
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-011
+    path: transformer_engine/jax/permutation.py
+    added_lines: 9
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 9}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 9
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-012
+    path: transformer_engine/jax/quantize/dequantizer.py
+    added_lines: 9
+    removed_lines: 1
+    stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 9
+    m1_removed_lines: 1
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-013
+    path: transformer_engine/jax/quantize/scaling_modes.py
+    added_lines: 8
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 5, unmarked: 3}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 8
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-014
+    path: transformer_engine/jax/attention.py
+    added_lines: 9
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 9
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-015
+    path: transformer_engine/jax/quantize/device_utils.py
+    added_lines: 9
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 9
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-016
+    path: transformer_engine/jax/cpp_extensions/base.py
+    added_lines: 5
+    removed_lines: 2
+    stale_added_class: {sidecar: 0, guard: 3, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 5
+    m1_removed_lines: 2
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  - id: JX-017
+    path: transformer_engine/jax/cpp_extensions/quantization.py
+    added_lines: 6
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 4, unmarked: 2}
+    added_class: REGENERATE
+    disposition: capability
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 6
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+  # JX-018 RETIRED (see retired_entries)
+  - id: JX-019
+    path: transformer_engine/jax/cpp_extensions/activation.py
+    added_lines: 2
+    removed_lines: 0
+    stale_added_class: {sidecar: 0, guard: 0, unmarked: 2}
+    added_class: REGENERATE
+    disposition: patch
+    patch_timing: build
+    runtime_eligible: never
+    fallback_mechanism: build-time source patch
+    m1_added_lines: 2
+    m1_removed_lines: 0
+    owner: TBD
+    status: proposed
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+
+  # ============================ Structural entries ============================
+  - id: BOOT-001
+    metric_class: m1
+    path: "vendored-tree bootstrap patch"
+    disposition: patch
+    patch_timing: build
+    estimated_changed_lines: 190          # was 3
+    measurement_quality: approximate      # was (incorrectly) "exact"
+    owner: TBD
+    status: proposed
+    risk: high
+    dependencies: [CM-001, CM-002]
+    notes: >-
+      RESCOPED IN v2.4. v2.3 estimated 3 changed lines across "2-3 files" and marked the
+      figure `exact`. The real target surface is CM-001 (36/4) plus CM-002 (119/31) = 190
+      lines, spread over 21 hunks in common/__init__.py alone. The 3-line figure was a
+      design target for a redesigned hook, not a measurement, and it hid where the
+      remaining lines go. BOOT-001 must cover: native loading, PyPI package identity
+      (which conflicts with Sec 3.2 - see CM-002-PKGID), the te_rocm_build global, and
+      is_fp8_fnuz. Retires on upstream absent-native mode. Stage-1 scope = production bootstrap.
+  - id: BK-001
+    metric_class: m1
+    path: "common/ C++ ONLY -> backend repo as libtransformer_engine_rocm.so (SONAME, versioned, $ORIGIN)"
+    disposition: backend-repo
+    patch_timing: n/a
+    estimated_changed_lines: 6320         # was 6683; C++ only, headers and Python excluded
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    notes: >-
+      RESCOPED IN v2.4. v2.3 moved common/ "wholesale" (6,683 ln). But common/ is 223 files
+      of which 9 are PYTHON (3,887 upstream lines) that CANNOT go to a C++ backend repo -
+      they are vendored upstream Python imported by the framework layers. C++ is 85 modified
+      files / 6,320 lines plus 65 ROCm-only files / 20,968 lines. The Python is now BK-001B.
+      Semantic contract retained (TE_UPSTREAM_PY_CONTRACT emulation); AMD-maintained, partly
+      Apache-2.0-derived; origin ledger required.
+  - id: BK-001B
+    metric_class: m1
+    path: "common/ PYTHON stays in the vendored pure-Python wheel"
+    disposition: patch
+    patch_timing: build
+    estimated_changed_lines: 241
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    dependencies: [CM-002, CM-003, CM-004]
+    notes: >-
+      NEW IN v2.4. 9 upstream Python files, 3,887 lines, of which only 2 diverge (241 ln):
+      common/__init__.py (CM-002) and common/recipe/__init__.py (CM-003). common/triton/*.py
+      (6 files, 2,759 ln, imported directly by the pytorch layer) and common/utils.py (56 ln)
+      are VERBATIM - carry them unpatched. Plus ROCm-only CM-004 (112 ln).
+  - id: BK-002
+    metric_class: m1
+    path: "pytorch/csrc/ -> transformer_engine_torch_rocm; embeds TE_ROCM_EXTENSION_API + build-compat tuple"
+    disposition: backend-repo
+    patch_timing: n/a
+    estimated_changed_lines: 1347         # was 1370
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    notes: "Prebuilt wheels for certified matrix; sdist fallback. Plus 2 ROCm-only files / 433 ln."
+  - id: BK-003
+    metric_class: m1
+    path: "jax FFI handlers -> jax_ext (SEPARATE BETA TRACK); typed inventory beyond names"
+    disposition: backend-repo
+    patch_timing: n/a
+    estimated_changed_lines: 264          # was 0 / not-measured
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    notes: >-
+      MEASURED IN v2.4, closing a v2.3 open item: jax/csrc is 15 modified files /
+      239 added + 25 removed, with ZERO ROCm-only added files.
+  - id: ABI-001
+    metric_class: m1
+    path: "ROCm-private nvte_* C ABI symbols called by ctypes FROM vendored upstream Python"
+    disposition: capability
+    patch_timing: n/a
+    estimated_changed_lines: 0
+    measurement_quality: inventory-pending
+    owner: TBD
+    status: proposed
+    risk: high
+    known_symbols:
+      - {symbol: nvte_is_rocm_build,  defined_in: transformer_engine/common/amd_detail/system.cpp, declared_in_public_headers: false, called_from: transformer_engine/common/__init__.py}
+      - {symbol: nvte_uses_fp8_fnuz, defined_in: transformer_engine/common/amd_detail/system.cpp, declared_in_public_headers: false, called_from: transformer_engine/common/__init__.py}
+    notes: >-
+      NEW IN v2.4. Format.E4M3.max_fwd - a pure UPSTREAM Python API - resolves through
+      is_fp8_fnuz() -> ctypes -> nvte_uses_fp8_fnuz(), implemented in common/amd_detail/.
+      Neither symbol is declared in the public NVTE headers, so both fall outside the
+      332-line HDR-A/B/C accounting entirely. After the split these live in the backend .so,
+      so vendored-upstream Python reaches TE_ROCM_CORE_ABI directly, BYPASSING
+      TE_ROCM_EXTENSION_API. Sec 3.3's three contracts do not model this path.
+      REQUIRED: complete the ctypes symbol inventory and either (a) route these through the
+      extension API, or (b) define a fourth, explicitly-versioned "vendored-python -> core"
+      contract surface. Decide before Gate B.
+  - id: REL-001
+    metric_class: migration_volume
+    path: "triton_kernels/ -> plugin/kernels; registry entries AFTER compiled-only milestone"
+    disposition: relocate
+    patch_timing: n/a
+    estimated_changed_lines: 6566
+    measurement_quality: exact            # recounted at the corrected base: 18 files
+    owner: TBD
+    status: proposed
+  - id: REL-002
+    metric_class: migration_volume
+    path: "MXFP4 stack + fsdp2_allgather -> plugin; per-version CustomRecipe adapter; Stage-5 checkpoint gate"
+    disposition: relocate
+    patch_timing: n/a
+    estimated_changed_lines: 1804
+    measurement_quality: exact            # 4 files: quantization_mxfp4 592, mxfp4_tensor 772, mxfp4_tensor_storage 236, fsdp2_allgather_tensor 204
+    owner: TBD
+    status: proposed
+    dependencies: [CM-003-MXFP4CLASS]
+  - id: REL-003
+    metric_class: migration_volume
+    path: "jax/util.py -> plugin capability provider (Stage 7)"
+    disposition: relocate
+    patch_timing: n/a
+    estimated_changed_lines: 37           # was 120 (over-estimate); file is 37 lines
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    notes: >-
+      Contains the third is_fp8_fnuz implementation, which SHELLS OUT TO A SUBPROCESS
+      (python -c "import transformer_engine as te; exit(not te.common.is_fp8_fnuz())").
+      Retire together with CM-002-FNUZ and PT-021 under one capability provider.
+  - id: HDR-A
+    metric_class: m1
+    path: "headers bucket A: PRIMARY ask = opaque backend identifiers / versioned capability structs; enum-range fallback; *_cuda_custom -> AMD-private naming"
+    disposition: upstream-pr
+    patch_timing: n/a
+    estimated_changed_lines: 180
+    measurement_quality: approximate
+    owner: TBD
+    status: proposed
+    notes: "total public-header divergence is now 9 files / 332 lines (was 10 / 336); see ABI-001 for symbols NOT in public headers"
+  - id: HDR-B1
+    metric_class: m1
+    path: "comm_gemm_overlap.h -> #3401 contract negotiation (backend factory); stateful re-export CONDITIONAL"
+    disposition: hold-nvidia
+    patch_timing: n/a
+    estimated_changed_lines: 87           # 86 added + 1 removed; unchanged by the base correction
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+  - id: HDR-B2
+    metric_class: m1
+    path: "fused_attn backend enum -> capability query RFC"
+    disposition: capability
+    patch_timing: n/a
+    estimated_changed_lines: 34
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+  - id: HDR-C
+    metric_class: m1
+    path: "subtractive header debt -> delete under plugin model"
+    disposition: delete
+    patch_timing: n/a
+    estimated_changed_lines: 20
+    measurement_quality: approximate
+    owner: TBD
+    status: proposed
+    notes: >-
+      v2.3's "new small cast.h delta" was PHANTOM - cast.h drops out of the diverged set
+      entirely at the corrected base (10 diverged headers -> 9).
+  - id: TST-001
+    metric_class: m1
+    path: "tests/pytorch edits -> overlay pytest plugin; collection-time skips only; runtime refusal = FAILURE; xfail(strict); budgets; NAMED+VERSIONED no-overlay subset"
+    disposition: test-overlay
+    patch_timing: n/a
+    estimated_changed_lines: 2399         # was 2777
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+  - id: TST-002
+    metric_class: migration_volume
+    path: "ROCm-only tests + tests/cpp -> relocate / backend repo"
+    disposition: relocate+backend-repo
+    patch_timing: n/a
+    estimated_changed_lines: 2088         # tests/cpp modified; v2.3's 1815 did not reproduce at EITHER base
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    notes: "plus ROCm-only: tests/pytorch 21 files / 5,314 ln, tests/cpp 6 files / 3,116 ln"
+  - id: TST-003
+    metric_class: m1
+    path: "tests/jax edits -> overlay (Stage 7)"
+    disposition: test-overlay
+    patch_timing: n/a
+    estimated_changed_lines: 1024         # was 1274
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+  - id: CI-001
+    metric_class: inventory_only
+    path: two-job CI; Job B NON-GATING categorized; packaging lifecycle + import-order tests; branch protection on pinned tree; TERMINOLOGY LINT
+    disposition: restructure
+    patch_timing: n/a
+    estimated_changed_lines: 0
+    measurement_quality: not-measured
+    owner: TBD
+    status: proposed
+    required_checks:
+      - "upstream_sha == merge-base(upstream/main, fork/dev)  # NEW in v2.4: prevents the v2.3 base error recurring"
+      - "manifest regenerated with GNU diff (not git diff)     # NEW in v2.4"
+      - "no in-place edits inside the pinned tree outside the declared patch-building path"
+      - "import-order tests: direct-ext / TE-first / consumer-first / reload / fork"
+      - "packaging lifecycle: install / upgrade / downgrade / uninstall / mixed-index"
+
+# The 9 early-binding sites. The facade MUST be installed in sys.modules before any of
+# these modules import; `import transformer_engine_torch as tex` (44 sites) is late-bound
+# and tolerant, these are not.
+seam_early_binding_sites:
+  star_import:
+    - {path: transformer_engine/pytorch/cpp_extensions/__init__.py, line: 6, form: "from transformer_engine_torch import *"}
+  named_imports:
+    - transformer_engine/pytorch/cpp_extensions/fused_attn.py
+    - transformer_engine/pytorch/ops/_common.py                       # FP8TensorMeta
+    - transformer_engine/pytorch/ops/basic/layer_norm.py              # layernorm_bwd, layernorm_fwd
+    - transformer_engine/pytorch/ops/basic/rmsnorm.py                 # rmsnorm_bwd, rmsnorm_fwd
+    - transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py
+    - transformer_engine/pytorch/ops/fused/userbuffers_forward_linear.py
+    - transformer_engine/pytorch/optimizers/__init__.py
+    - transformer_engine/pytorch/tensor/utils.py
+  late_bound_sites: 44
+  implication: >-
+    The star-import copies the ENTIRE facade namespace into
+    transformer_engine.pytorch.cpp_extensions at import time. Facade __all__ fidelity is
+    therefore load-bearing, not cosmetic: any ROCm-extra symbol on the facade leaks into
+    that namespace. Include __all__ equality in the TE_ROCM_EXTENSION_API conformance test.
+
+capability_graph_ep:
+  nodes:
+    - {id: te.ep.build_enabled}
+    - {id: comm_lib.device_api}
+    - {id: torch.symm_mem.available}
+    - {id: arch.meets_ep_min}
+    - id: te.ep.eligible
+      depends_on: [te.ep.build_enabled, comm_lib.device_api, torch.symm_mem.available, arch.meets_ep_min]
+  status_note: >-
+    RETAINED but no longer evidenced by PT-005/PT-014, which were base artifacts. EP Python
+    (pytorch/ep.py, jax/ep.py, cpp_extensions/ep.py, flax/moe.py) is VERBATIM upstream in the
+    fork - zero delta - with the FFI define off on ROCm, and EP tests at all three levels are
+    verbatim. That makes EP a CLEANER demonstration of collection-time capability-driven skips
+    than v2.3 claimed: there is no fork divergence to retire at all, only a capability to model.
+
+open_decisions:
+  release_218_gap:
+    question: >-
+      The fork sits at the release_v2.18 BRANCH POINT, not the release. Do we take the 15
+      release_v2.18 commits (1,339 lines in scope) before pinning, or pin a later main commit?
+    why_it_matters: >-
+      The architecture vendors a PINNED upstream. Pinning 868d8d92 ships a distribution
+      labelled 2.18 that lacks 2.18's entire stabilisation - including FP8 block scaling for
+      fusible ops (#3242), the fused FP8 block-scaling path in GroupedLinear (#3171), NCCL EP
+      zero-copy (#3187), cuDNN D=256 BWD attention (#3056), a CP padding bugfix (#3269), and
+      the VERSION bump itself.
+    owner: TBD
+    due: Stage 0
+  ifu_sourcing_policy:
+    question: "Fix the IFU procedure: always merge from upstream main at a chosen SHA."
+    why_it_matters: >-
+      IFU 2.17 merged 2e559f06, which is on release_v2.17 but NOT on main - confirmed as done
+      the wrong way - pulling 10 non-main commits into fork history and contributing conflict
+      burden to the 2.18 IFU. IFU 2.18 merged a main commit but took the branch point.
+      Neither matches a stated policy because none exists.
+    owner: TBD
+    due: Stage 0
+  contract_surface_for_ctypes:
+    question: "Route ABI-001 symbols through TE_ROCM_EXTENSION_API, or define a fourth versioned contract?"
+    owner: TBD
+    due: Gate B
+  packaging_name_conflict:
+    question: >-
+      Sec 3.2 decides the canonical name `transformer-engine`; CM-002-PKGID currently implements
+      transformer-engine-rocm7 / -rocm10 with rocm_pytorch / rocm_jax extras. Which wins?
+    owner: TBD
+    due: Stage 1
+
+backtest_plan:
+  historical_inputs:
+    fork_pre_sync: reconstruct fork dev immediately before release-sync-v2.15-260630
+    upstream_base: >-
+      the commit the fork ACTUALLY merged for 2.15 - derive from that IFU merge commit's second
+      parent, exactly as upstream_sha_derivation prescribes. Do NOT use release_v2.15's tip.
+    result_state: fork dev at the 2.17 base (87efe41 lineage, true base 2e559f06)
+    do_not: project this 2.18 manifest backward
+  thresholds: TBD-stage-0
+  cases:
+    - {id: BOOT-001,  risk_role: bootstrap,                        expected: reapplies,                 ground_truth: import + smoke}
+    - {id: CM-002,    risk_role: loader/package-identity patch,    expected: partial-trip-by-id,        ground_truth: import + packaging lifecycle}
+    - {id: CM-003,    risk_role: class/definition-time patch,      expected: trip-by-id,                ground_truth: recipe numerics}
+    - {id: PT-002-CAP, risk_role: class/import-sensitive patch,    expected: partial-trip-by-id,        ground_truth: recipe tests}
+    - {id: PT-010-SEL, risk_role: runtime-override candidate,      expected: reapplies,                 ground_truth: attention selection tests}
+    - {id: PT-006-UB, risk_role: stateful-class call site,         expected: trip-by-id,                ground_truth: comm-overlap smoke}
+    - {id: PT-028,    risk_role: graph/compile-sensitive,          expected: reapplies,                 ground_truth: graph capture smoke}
+    - {id: HDR-A,     risk_role: symbol-contract change,           expected: inventory-diff-detected,   ground_truth: typed inventory}
+    - {id: ABI-001,   risk_role: ctypes cross-contract path,       expected: inventory-diff-detected,   ground_truth: Format.E4M3.max_fwd resolves}
+    - {id: PT-004-MXFP4, risk_role: custom-recipe retirement candidate, expected: reapplies,            ground_truth: recipe numerics}
+    - {id: PT-008-NVFP4FIX, risk_role: upstream-pr retirement candidate, expected: reapplies,           ground_truth: nvfp4 exact tests}
+  note: >-
+    case ids reference the 2.18 manifest for identity only; Stage 2 re-derives each against the
+    reconstructed 2.15 sources and records its historical location. CM-002/CM-003/ABI-001 were
+    added in v2.4 because the bootstrap, recipe and ctypes surfaces are the highest-risk items
+    and were entirely absent from the v2.3 case list.

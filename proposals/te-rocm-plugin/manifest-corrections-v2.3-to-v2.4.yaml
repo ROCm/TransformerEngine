@@ -1,0 +1,131 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# TE-ROCm divergence manifest — BASE CORRECTION (apply to manifest v2.3)
+# Generated 2026-08-28T19:39:10Z by re-measuring against the upstream commit the fork actually merged.
+#
+# ROOT CAUSE: manifest v2.3 measured against release_v2.18 tip (27486e03), but the fork's IFU
+# merge commit 3a49d650 took upstream parent 868d8d92 == merge-base(main, release_v2.18).
+# The 15 commits release_v2.18 took after that branch point (1339 lines in scope) were charged to ROCm.
+
+metadata_corrections:
+  upstream_ref:   {from: release_v2.18,  to: main}
+  upstream_sha:   {from: 27486e03cfc1fa41f6932dcecdc47c71c47eac3e, to: 868d8d9216da361c666519652115e23688db5211}
+  upstream_sha_derivation: "second parent of the IFU merge commit; verify == merge-base(upstream/main, fork/dev)"
+  upstream_sha_note: "868d8d92 is on main AND is the branch point of release_v2.18; the fork does NOT
+                    contain the 15 release_v2.18 stabilisation commits, hence VERSION is still 2.18.0.dev0"
+  diff_tool: "GNU diff (added = '^>' lines, removed = '^<'); git-default Myers disagrees - pin this"
+  added_class_status: MUST_REGENERATE   # hunk classification was computed against the wrong base
+
+entry_corrections:
+  - id: PT-001
+    path: transformer_engine/pytorch/cpp_extensions/gemm.py
+    action: UPDATE
+    added_lines:   {from: 312, to: 302}
+    removed_lines: {from: 46, to: 1}
+    m1_added_lines:   {from: 312, to: 302}
+    m1_removed_lines: {from: 46, to: 1}
+    added_class: REGENERATE
+  - id: PT-002
+    path: transformer_engine/pytorch/module/base.py
+    action: UPDATE
+    added_lines:   {from: 289, to: 289}
+    removed_lines: {from: 58, to: 23}
+    m1_added_lines:   {from: 289, to: 289}
+    m1_removed_lines: {from: 58, to: 23}
+    added_class: REGENERATE
+  - id: PT-003
+    path: transformer_engine/pytorch/module/grouped_linear.py
+    action: UPDATE
+    added_lines:   {from: 162, to: 149}
+    removed_lines: {from: 78, to: 36}
+    m1_added_lines:   {from: 162, to: 149}
+    m1_removed_lines: {from: 78, to: 36}
+    added_class: REGENERATE
+  - id: PT-005
+    path: transformer_engine/pytorch/ep.py
+    action: DELETE_ENTRY
+    reason: "zero divergence against the true base; entire delta (85 added/74 removed) is upstream
+             release_v2.18 work the fork never merged"
+  - id: PT-006
+    path: transformer_engine/pytorch/module/layernorm_mlp.py
+    action: UPDATE
+    added_lines:   {from: 130, to: 130}
+    removed_lines: {from: 18, to: 20}
+    m1_added_lines:   {from: 130, to: 130}
+    m1_removed_lines: {from: 18, to: 20}
+    added_class: REGENERATE
+  - id: PT-008
+    path: transformer_engine/pytorch/module/linear.py
+    action: UPDATE
+    added_lines:   {from: 123, to: 123}
+    removed_lines: {from: 6, to: 10}
+    m1_added_lines:   {from: 123, to: 123}
+    m1_removed_lines: {from: 6, to: 10}
+    added_class: REGENERATE
+  - id: PT-009
+    path: transformer_engine/pytorch/module/layernorm_linear.py
+    action: UPDATE
+    added_lines:   {from: 119, to: 119}
+    removed_lines: {from: 8, to: 12}
+    m1_added_lines:   {from: 119, to: 119}
+    m1_removed_lines: {from: 8, to: 12}
+    added_class: REGENERATE
+  - id: PT-010
+    path: transformer_engine/pytorch/attention/dot_product_attention/backends.py
+    action: UPDATE
+    added_lines:   {from: 75, to: 75}
+    removed_lines: {from: 41, to: 29}
+    m1_added_lines:   {from: 75, to: 75}
+    m1_removed_lines: {from: 41, to: 29}
+    added_class: REGENERATE
+  - id: PT-011
+    path: transformer_engine/pytorch/attention/dot_product_attention/utils.py
+    action: UPDATE
+    added_lines:   {from: 70, to: 70}
+    removed_lines: {from: 30, to: 18}
+    m1_added_lines:   {from: 70, to: 70}
+    m1_removed_lines: {from: 30, to: 18}
+    added_class: REGENERATE
+  - id: PT-014
+    path: transformer_engine/pytorch/distributed.py
+    action: UPDATE
+    added_lines:   {from: 9, to: 4}
+    removed_lines: {from: 51, to: 0}
+    m1_added_lines:   {from: 9, to: 4}
+    m1_removed_lines: {from: 51, to: 0}
+    added_class: REGENERATE
+  - id: PT-015
+    path: transformer_engine/pytorch/tensor/storage/float8_blockwise_tensor_storage.py
+    action: DELETE_ENTRY
+    reason: "zero divergence against the true base; entire delta (0 added/56 removed) is upstream
+             release_v2.18 work the fork never merged"
+  - id: PT-016
+    path: transformer_engine/pytorch/newton_schulz.py
+    action: DELETE_ENTRY
+    reason: "zero divergence against the true base; entire delta (8 added/34 removed) is upstream
+             release_v2.18 work the fork never merged"
+  - id: PT-022
+    path: transformer_engine/pytorch/ops/basic/grouped_linear.py
+    action: UPDATE
+    added_lines:   {from: 14, to: 6}
+    removed_lines: {from: 17, to: 0}
+    m1_added_lines:   {from: 14, to: 6}
+    m1_removed_lines: {from: 17, to: 0}
+    added_class: REGENERATE
+  - id: PT-042
+    path: transformer_engine/pytorch/ops/op.py
+    action: DELETE_ENTRY
+    reason: "zero divergence against the true base; entire delta (5 added/0 removed) is upstream
+             release_v2.18 work the fork never merged"
+  - id: JX-018
+    path: transformer_engine/jax/router.py
+    action: DELETE_ENTRY
+    reason: "zero divergence against the true base; entire delta (2 added/1 removed) is upstream
+             release_v2.18 work the fork never merged"
+
+summary:
+  entries_deleted:  [PT-005, PT-015, PT-016, PT-042, JX-018]
+  entries_updated:  [PT-001, PT-002, PT-003, PT-006, PT-008, PT-009, PT-010, PT-011, PT-014, PT-022]
+  entries_unchanged: 49
