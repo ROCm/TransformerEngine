@@ -62,6 +62,12 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
+)
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -69,6 +75,7 @@ from ._common import (
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
 )
 from ..quantized_tensor import (
@@ -81,6 +88,8 @@ from ..quantized_tensor import (
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -251,6 +260,8 @@ class _LayerNormLinear(torch.autograd.Function):
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
         custom = is_custom(input_quantizer)
+        hybrid = isinstance(input_quantizer, HybridQuantizer)
+        identity = isinstance(input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
@@ -258,6 +269,8 @@ class _LayerNormLinear(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and backward_override is None
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
+            and not hybrid
+            and not identity
         )
 
         # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
@@ -335,6 +348,11 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        origin_weight = weight
+        is_dist_weight = is_distributed_weight(origin_weight)
+        if is_dist_weight:
+            weight = materialize_weight_for_forward(weight)[0]
+            out_features = weight.shape[0]
         new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
@@ -544,10 +562,15 @@ class _LayerNormLinear(torch.autograd.Function):
             wt_save = weightmat
             if is_fsdp2 and weightmat is not weight:
                 wt_save = None
+            # Distributed weight (e.g. GTP): don't save the gathered quantized workspace;
+            # backward re-gathers from the saved (sharded) weight and re-quantizes.
+            if is_dist_weight:
+                wt_save = None
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 wt_save,
-                weight,
+                origin_weight,
                 bias,
                 ln_weight,
                 ln_out_to_save,
@@ -574,6 +597,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
+                elif is_dist_weight:
+                    ctx.main_grad_func = origin_weight.grad_buffer
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -672,6 +697,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_func_ctx(ctx)
 
+            is_dist_weight = is_distributed_weight(saved_weight)
+            if is_dist_weight:
+                weight = materialize_weight_for_backward(saved_weight)[0]
             # Restore from weakref to get original weight python object
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
             # Only needed when fuse_wgrad_accumulation is enabled.
@@ -689,7 +717,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ), "weight was removed while fuse_wgrad_accumulation=True"
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
-                if main_grad is not None:
+                if main_grad is not None and not is_dist_weight:
                     origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
@@ -795,12 +823,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.input_quantizer is not None and ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    if quantizer.supports_only_rowwise_all_gather():
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_dgrad,
@@ -961,7 +984,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.grad_output_quantizer is not None:
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.grad_output_quantizer)
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -1037,7 +1060,10 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.is_first_microbatch is not None:
+                if is_dist_weight:
+                    # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
+                    accumulate_wgrad_into_param_main_grad = False
+                elif ctx.is_first_microbatch is not None:
                     accumulate_wgrad_into_param_main_grad = (
                         ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                     )
@@ -1108,6 +1134,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
+
+                    if is_dist_weight:
+                        wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
 
                     # Update grad bias if needed
                     if grad_bias is None:
@@ -1811,6 +1840,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+            if weight_quantizer is not None and not debug:
+                weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizer, weight_tensor
+                )
 
             if is_grad_enabled:
                 fwd_fn = _LayerNormLinear.apply
@@ -2073,13 +2106,4 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 weight_quantizer.set_usage(columnwise=False)
             else:
                 weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
-        else:
-            # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-            # This wont work when primay weights are in fp8 because of 2 reasons
-            # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-            # currently dont support dequantization.
-            # 2. For FSDP2, quantized weight all-gather would need to be done in the
-            # unswizzled layout.
-            if not self.primary_weights_in_fp8:
-                weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]
