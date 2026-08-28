@@ -134,10 +134,6 @@ class CommOverlapCore {
 
   bool is_fp8_ubuf() { return _ubuf.element_size() == 1; }
 
-  virtual bool is_aggregate() {
-    NVTE_ERROR("Operation is not implemented.");
-  }
-
   virtual bool is_fused() { return false; }
 
   bool with_cublasmp() { return _with_cublasmp; }
@@ -429,8 +425,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main) override;
-
-  bool is_aggregate() { return _aggregate; } // needed for rocm pathing
 
   bool is_fused() override { return _fused; }
 
