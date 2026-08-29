@@ -65,3 +65,22 @@ These files carry an **AMD-only** header, deviating from the repo rule that new 
 NVIDIA lines. That rule targets source files in a tree derived from upstream; these are AMD-authored
 planning documents with no upstream provenance, so asserting NVIDIA copyright over them would be
 incorrect. Change it if the project prefers uniformity.
+
+## Seam inventory (static, no build required)
+
+`tools/seam_inventory.py` answers whether the ROCm extension exposes every name upstream's Python
+asks for — the coarse filter for `TE_ROCM_EXTENSION_API`. It AST-walks upstream at the pinned base
+for the demand side and parses the fork's pybind sources (`pytorch/csrc` **and** `common/util`,
+where the shared `NVTE_DECLARE_COMMON_PYBIND11_HANDLES` macro lives) for the supply side,
+tracking `#if` nesting so CUDA-only registrations are reported separately.
+
+```bash
+proposals/te-rocm-plugin/tools/seam_inventory.py --base 868d8d9216da361c666519652115e23688db5211
+```
+
+Result at `868d8d92` is in `seam-inventory-868d8d92.txt`: 161 demanded / 176 ROCm-reachable.
+**No genuine ROCm gap.** The single MISSING name (`tex.LayerNorm`) is unregistered in upstream's own
+csrc too — an upstream dead-code bug in `onnx_extensions.py`. Eight names are CUDA-only by design
+(cuSolverMp Newton-Schulz, cuBLASLt version, grouped-tensor GEMM) and every caller is
+capability-guarded upstream. Exits 1 while the surface is OPEN so it can gate CI once `LayerNorm`
+is allowlisted.
