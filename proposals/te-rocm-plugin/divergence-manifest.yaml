@@ -4,7 +4,7 @@
 
 # TE-ROCm divergence manifest
 metadata:
-  manifest_version: "2.4.1"
+  manifest_version: "2.4.2"
   schema_version: "1.3"
   classifier: canonical-v2
   generator: gen_manifest (hunk classifier; regenerate per sync)
@@ -22,9 +22,15 @@ metadata:
   upstream_repo: https://github.com/NVIDIA/TransformerEngine
   upstream_ref: main
   upstream_sha: 868d8d9216da361c666519652115e23688db5211
+  upstream_pin: 3rdparty/transformer_engine_nvidia        # git submodule, `update = none`; opt-in, non-recursive
   upstream_sha_derivation: >-
-    second parent of the fork's IFU merge commit; CI MUST assert it equals
-    merge-base(upstream/main, fork/dev). Never derive from a named release branch or tag.
+    SOURCE OF TRUTH is the submodule's recorded gitlink (`git -C 3rdparty/transformer_engine_nvidia
+    rev-parse HEAD`). CI MUST assert the three-way identity: submodule HEAD == this upstream_sha ==
+    merge-base(upstream/main, fork/dev). The merge-base is a cross-check that the pin is what the
+    fork actually merged, never the source. Never derive from a named release branch or tag.
+    The submodule carries `update = none` so the repo's documented `--init --recursive` skips it
+    and upstream's own cutlass/nccl/googletest never enter the build; the overlay assembler
+    initializes it explicitly and non-recursively.
   upstream_sha_notes: >-
     868d8d92 ("Fix FusedAdam empty tensor handling", #3212, 2026-07-20) is on main AND is
     the branch point of release_v2.18. The fork does NOT contain the 15 release_v2.18
@@ -71,9 +77,12 @@ metadata:
     manifest version it cites.
 
   runtime_eligible_enum: [never, candidate, proven]
-  mechanism_enum: [backend-repo, relocate, custom-recipe, capability, feature-pr, compat-pr,
+  mechanism_enum: [build-target, relocate, custom-recipe, capability, feature-pr, compat-pr,
                    upstream-pr, upstream-bugfix-pr, hold-nvidia, hold-internal, patch,
                    test-overlay, build-system, delete, restructure, mixed]
+  mechanism_enum_note: >-
+    v2.4.2 renamed `backend-repo` -> `build-target`. Decision 2026-08-29: all C++ stays in this
+    repository; the compiled layers become separate build targets / directories, never a separate repo.
   mechanism_detail_fields: [pr_kind, capability_id, support_state, fallback_mechanism, future_options]
   metric_class_enum: [m1, migration_volume, inventory_only]
 
@@ -100,7 +109,7 @@ metadata:
     - ABI-002 disposition decided (carry pybind_helper.h with the torch extension, or generate its inventory from backend headers)
     - TE_ROCM_EXTENSION_API conformance covers enum VALUES, not only enum names (ABI-002-FAENUM)
     - release_218_gap decision recorded
-    - CI asserts upstream_sha == merge-base(upstream/main, fork/dev)
+    - CI asserts submodule HEAD == upstream_sha == merge-base(upstream/main, fork/dev)
 
   correction_provenance:
     corrected_by: base re-measurement against 868d8d92, 2026-08-28
@@ -113,6 +122,13 @@ metadata:
     ABI-002 added from the static seam inventory (tools/seam_inventory.py). Not a base
     correction: a boundary finding. No layer_totals change - its 36 lines were already
     inside the common/ C++ bucket.
+  v242_addendum: >-
+    Two decisions recorded (2026-08-29), no measurement change. (1) Upstream is pinned as the
+    submodule 3rdparty/transformer_engine_nvidia and that gitlink is the source of truth for
+    upstream_sha. (2) All C++ stays in this repository: BK-001/002/003 re-dispositioned from
+    `backend-repo` to `build-target`; the enum value was renamed. The compatibility obligation,
+    SONAME, private core ABI and origin ledger are unchanged - they now describe build targets
+    inside one repo rather than a second repo.
 
 # Retired because they have ZERO divergence against the true base. Their entire v2.3
 # delta was upstream release_v2.18 work the fork never merged. IDs are burned, not reused.
@@ -2088,8 +2104,9 @@ entries:
       is_fp8_fnuz. Retires on upstream absent-native mode. Stage-1 scope = production bootstrap.
   - id: BK-001
     metric_class: m1
-    path: "common/ C++ ONLY -> backend repo as libtransformer_engine_rocm.so (SONAME, versioned, $ORIGIN)"
-    disposition: backend-repo
+    path: "common/ C++ ONLY -> separate BUILD TARGET in this repo: libtransformer_engine_rocm.so (SONAME, versioned, $ORIGIN)"
+    disposition: build-target
+    repo_decision: "2026-08-29: all C++ stays in ROCm/TransformerEngine; no separate backend repo. Separation is by build target and directory, not by repository."
     patch_timing: n/a
     estimated_changed_lines: 6320         # was 6683; C++ only, headers and Python excluded
     measurement_quality: exact
@@ -2122,8 +2139,8 @@ entries:
       are VERBATIM - carry them unpatched. Plus ROCm-only CM-004 (112 ln).
   - id: BK-002
     metric_class: m1
-    path: "pytorch/csrc/ -> transformer_engine_torch_rocm; embeds TE_ROCM_EXTENSION_API + build-compat tuple"
-    disposition: backend-repo
+    path: "pytorch/csrc/ -> transformer_engine_torch_rocm build target in this repo; embeds TE_ROCM_EXTENSION_API + build-compat tuple"
+    disposition: build-target
     patch_timing: n/a
     estimated_changed_lines: 1347         # was 1370
     measurement_quality: exact
@@ -2132,8 +2149,8 @@ entries:
     notes: "Prebuilt wheels for certified matrix; sdist fallback. Plus 2 ROCm-only files / 433 ln."
   - id: BK-003
     metric_class: m1
-    path: "jax FFI handlers -> jax_ext (SEPARATE BETA TRACK); typed inventory beyond names"
-    disposition: backend-repo
+    path: "jax FFI handlers -> jax extension build target in this repo (SEPARATE BETA TRACK); typed inventory beyond names"
+    disposition: build-target
     patch_timing: n/a
     estimated_changed_lines: 264          # was 0 / not-measured
     measurement_quality: exact

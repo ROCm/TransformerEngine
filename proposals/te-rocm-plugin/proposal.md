@@ -6,16 +6,17 @@ See LICENSE for license information.
 
 # TransformerEngine on ROCm: From Hard Fork to Pinned Upstream + Plugin
 
-**Proposal v2.2 — architecture, migration, implementation, and validation plan**
+**Proposal v2.3 — architecture, migration, implementation, and validation plan**
 
 | | |
 |---|---|
-| Status | v2.2 — execution charter for Stage 0-2 approval (three external review rounds plus a base-measurement audit; review changelog in a separate file) |
+| Status | v2.3 — execution charter for Stage 0-2 approval (three external review rounds, a base-measurement audit, and two repository decisions of 2026-08-29; review changelog in a separate file) |
 | Date | 2026-08-28 |
 | Author | Wen (+ team, TBD) |
 | Measurement base | `ROCm/TransformerEngine` `dev@8af6efc` (full SHA `8af6efcd9a40…`, 2026-08-27, **IFU-2.18 merge**, version base 2.18.0.dev0) vs **`NVIDIA/TransformerEngine` `main` at `868d8d9216da…`** — the upstream commit the fork's IFU merge actually took, and exactly `merge-base(upstream/main, release_v2.18)`. **This base changed in v2.2**; see §2.0. Upstream `main` at 2.20.0.dev0 at time of writing. |
-| Companion artifacts | `te-rocm-divergence-manifest.yaml` **v2.4** — file-complete ledger (41 PyTorch + 18 JAX + 3 vendored-root + 18 structural, rebased to the corrected base; five v2.3 entries retired as measurement artifacts), `te-rocm-divergence-manifest-summary.md` v2.4, `te-rocm-proposal-changelog.md` |
+| Companion artifacts | `divergence-manifest.yaml` **v2.4.2** — file-complete ledger, 81 entries (41 PyTorch + 18 JAX + 4 vendored-root/common + 18 structural, rebased to the corrected base; five v2.3 entries retired as measurement artifacts), `divergence-manifest-summary.md` v2.4, `implementation-plan.md`, `tools/measure_divergence.sh`, `tools/seam_inventory.py` |
 | v2.1.1 → v2.2 | **Measurement base corrected** (§2.0) — five phantom manifest entries retired, ten restated, the divergence trend reversed; `common/` Python↔C++ boundary resolved and BK-001 split; BOOT-001 rescoped 3 → ~190 lines; a fourth contract path (ABI-001) identified; §3.7 amended for base-class injection; four new open decisions |
+| v2.2 → v2.3 | **Two repository decisions** (2026-08-29): all C++ stays in `ROCm/TransformerEngine` — no separate backend repo; compiled layers become *build targets* (`backend-repo` → `build-target` throughout). Upstream pinned as the `3rdparty/transformer_engine_nvidia` submodule with `update = none`; its gitlink is the source of truth for the base. **§3.5 amended**: for the compiled-only milestone the seam is upstream's own loader plus a two-line alias, not a synthesized facade. ABI-002 (the `pybind_helper.h` boundary crossing) added to the manifest |
 
 ---
 
@@ -31,7 +32,8 @@ minor releases roughly monthly.
 
 This proposal restructures the project so that **pinned upstream TE Python is vendored with one
 bootstrap patch and a governed, versioned compatibility layer**, with all ROCm functionality delivered
-through a plugin occupying the framework-extension seam and an AMD-maintained compiled backend. The
+through a plugin occupying the framework-extension seam and an AMD-maintained compiled backend built
+as separate targets **within this same repository**. The
 refactor removes routine textual merge conflicts; it deliberately **replaces them with explicit,
 versioned compatibility surfaces** that this document designs.
 
@@ -45,7 +47,8 @@ define a stable multi-backend operator, quantization, or communication contract.
 **Projected structural effects derived from the measured divergence** (targets, to be validated by the
 Stage-2 historical backtest):
 
-- Compiled layers move to an **AMD-maintained backend repo**: `common/` **C++ only** (85 modified
+- Compiled layers become **separate build targets in this repository** (decided 2026-08-29: there is
+  no second repo): `common/` **C++ only** (85 modified
   files / 6,320 lines, plus 65 ROCm-only files / 20,968 lines) and `csrc/` (PyTorch 1,347; JAX 264).
   This removes routine textual merge overlap while **retaining an explicit semantic compatibility
   obligation**, managed through the versioned contracts of §3.3.
@@ -74,7 +77,8 @@ critical path**: the first production milestone runs the compiled backend exclus
 must produce a governance-complete, exact-SHA manifest with regenerated hunk classification, resolve
 the four open decisions of §11, and secure approved performance/backtest thresholds. Stage 2 provides
 Gate A evidence for funding Stage 3. A certified Stage 3 package provides Gate B evidence for backend
-extraction. This approval does not authorize backend movement, consumer migration, or fork sunset.*
+separation into build targets. This approval does not authorize that separation, consumer migration,
+or fork sunset.*
 
 ---
 
@@ -98,8 +102,10 @@ exactly `merge-base(upstream/main, release_v2.18)` — the point 2.18 branched o
 - **The divergence trend inverted** — see §2.2.
 - Ten further entries were inflated (largest: `cpp_extensions/gemm.py` 312/46 → 302/1).
 
-Two procedural fixes follow, both now Stage-0 gated: `upstream_sha` is **derived from the IFU merge
-commit's second parent** and CI asserts it equals `merge-base(upstream/main, fork/dev)`; and the diff
+Two procedural fixes follow, both now Stage-0 gated: the base is **the gitlink of the
+`3rdparty/transformer_engine_nvidia` submodule**, and CI asserts the three-way identity submodule HEAD
+== manifest `upstream_sha` == `merge-base(upstream/main, fork/dev)` (the merge-base is the cross-check
+that the pin is what the fork actually merged); and the diff
 tool is **pinned to GNU `diff`** (git's default Myers algorithm disagrees on some files, and M1
 burn-down plus the divergence-regression alarm are line-count based).
 
@@ -215,7 +221,7 @@ inference from "IFU took 3.5 weeks" to "the fork model costs 3.5 weeks per relea
                          │      TE_ROCM_CORE_ABI      │
                  ┌───────▼────────────────────────────▼──────────┐
                  │ libtransformer_engine_rocm.so                 │
-                 │ (common/ C++ only; AMD-maintained repo)       │
+                 │ (common/ C++ only; build target, same repo)   │
                  └───────────────────────────────────────────────┘
                          ▲
                          └── ABI-001: vendored Python reaches this
@@ -240,11 +246,20 @@ Principles:
 
 ### 3.2 Repositories and packaging
 
-Repo layout as v1 (backend/, torch_ext/, jax_ext/, plugin/{facade,jax,capabilities,recipes,kernels,
-patches,testing}, tests/, manifest/, ci/) with upstream pinned source-only under
-`3rdparty/transformer_engine` (no recursive submodule init). **CI asserts the submodule SHA matches the
-manifest's declared base *and* that the base equals `merge-base(upstream/main, fork/dev)`** — the check
-that would have caught the v2.1.1 base error.
+**One repository — decided 2026-08-29.** Everything lives in `ROCm/TransformerEngine`: the vendored
+upstream Python, the plugin, the patch queue, *and* the C++ backend. There is no separate backend
+repo; the compiled layers become separate **build targets** and directories within this tree (the
+v1 layout of backend/, torch_ext/, jax_ext/, plugin/{…}, patches/, manifest/ applies as a directory
+layout, not a repo split).
+
+Upstream is pinned as the source-only submodule **`3rdparty/transformer_engine_nvidia`** with
+`update = none` in `.gitmodules`. The repo's documented `git submodule update --init --recursive`
+therefore **skips it** — upstream's own `cutlass`, `nccl`, `googletest` never enter the build — and
+only the overlay assembler initializes it, explicitly and non-recursively. The submodule's recorded
+gitlink is the **source of truth** for the pinned base. **CI asserts the three-way identity:
+submodule HEAD == manifest `upstream_sha` == `merge-base(upstream/main, fork/dev)`** — the merge-base
+is a cross-check that the pin is what the fork actually merged, and the check that would have caught
+the v2.1.1 base error.
 
 **Package ownership — decided.** Two distributions installing into one `transformer_engine` package is
 unsafe. For the first production version the ROCm distribution **retains the canonical project name
@@ -304,8 +319,10 @@ tuple, not by the API inventory.
 > then either route these through the extension API or define a fourth, explicitly versioned
 > vendored-Python → core contract surface.
 
-Backend provenance discipline: the backend repo is **AMD-maintained, partly derived from upstream TE
-under Apache-2.0**; an **upstream-origin ledger** maps copied C++ files to their upstream ancestors.
+Backend provenance discipline: the backend build target is **AMD-maintained, partly derived from
+upstream TE under Apache-2.0**; an **upstream-origin ledger** maps each C++ file to its ancestor in the
+`3rdparty/transformer_engine_nvidia` submodule, so upstream security fixes and semantic changes stay
+reviewable once upstream's `common/` is no longer merged into ours.
 
 ### 3.4 The two-tier compatibility layer
 
@@ -330,8 +347,19 @@ checks run at build/certification time; production validates the certified bundl
 
 ### 3.5 PyTorch facade and dispatch contract
 
-Facade: registered as `transformer_engine_torch` (via #3401 hook or shim), delegating to
-`transformer_engine_torch_rocm`; **module attributes eagerly populated**, preserving `__all__`,
+> **Amendment (v2.3).** For the compiled-only milestone the facade is **not a synthesized module**.
+> Upstream's own loader, `common/__init__.py:load_framework_extension`, already finds the `.so` by
+> path, builds the module object and inserts it into `sys.modules` under a name it chooses — before
+> the first seam import (`pytorch/__init__.py:18`). The seam is therefore a two-line alias inside that
+> function (part of the CM-002 patch): load under the compiled name `transformer_engine_torch_rocm`,
+> then `sys.modules["transformer_engine_torch"] = solib`. Eager attributes, `__spec__`, `dir()` and
+> enum/class identity are automatic because the module *is* the extension. The description below —
+> derived from TE Lite and FlagOS, which *replaced* the extension and so had to synthesize a module —
+> applies from Stage 6, when the registry starts routing individual ops away from the compiled
+> extension. See the implementation plan, F3 and P2.
+
+Facade (Stage 6 form): registered as `transformer_engine_torch` (via #3401 hook or shim), delegating
+to `transformer_engine_torch_rocm`; **module attributes eagerly populated**, preserving `__all__`,
 `dir()`, `__spec__`, class `__module__`, and introspection; enums re-exported from the compiled
 extension. Stateful classes are **directly re-exported when the extension contract matches; otherwise a
 version-specific wrapper/factory adapts** them.
@@ -406,13 +434,15 @@ with zero upstream cooperation. `jax/csrc` is now measured: 15 files / 264 lines
 
 ## 4. Disposition of every ROCm modification, by layer
 
-Taxonomy: `backend-repo` | `relocate` | `custom-recipe` | `capability` | `feature-pr` | `compat-pr` |
+Taxonomy: `build-target` | `relocate` | `custom-recipe` | `capability` | `feature-pr` | `compat-pr` |
 `upstream-pr` | `hold-nvidia` | `hold-internal` | `patch` (with `patch_timing: build | runtime`) |
 `test-overlay` | `build-system` | `delete`.
 
 ### 4.1 C++ side — and the `common/` boundary
 
-**`common/` C++ → `backend-repo`** (85 modified files / 6,320 lines + 65 ROCm-only / 20,968). The move
+**`common/` C++ → `build-target`** (85 modified files / 6,320 lines + 65 ROCm-only / 20,968). It stays
+in this repository as the ROCm backend's source; upstream's `common/` is no longer merged into it but
+lives in the `3rdparty/transformer_engine_nvidia` submodule as the reference for the origin ledger. The change
 removes *routine textual merge overlap*, not the compatibility obligation, which is carried by the
 §3.3 contracts, the origin ledger, and Job-B conformance. Ships as `libtransformer_engine_rocm.so`
 (unique SONAME, `$ORIGIN` loading).
@@ -427,8 +457,8 @@ removes *routine textual merge overlap*, not the compatibility obligation, which
 > `common/utils.py` (56 lines) are verbatim — carry them unpatched.** ROCm-only
 > `ck_fused_attn/check_aiter_mha_args.py` (112 ln) relocates with the CK backend (CM-004).
 
-**`pytorch/csrc/` (1,347 ln) → `backend-repo`** as the standalone `transformer_engine_torch_rocm`
-extension embedding `TE_ROCM_EXTENSION_API`. **`jax/csrc/` (264 ln) → `backend-repo`** on the beta
+**`pytorch/csrc/` (1,347 ln) → `build-target`** as the `transformer_engine_torch_rocm` extension
+embedding `TE_ROCM_EXTENSION_API`. **`jax/csrc/` (264 ln) → `build-target`** on the beta
 track.
 
 **NVTE headers (332 ln)** — bucket A (~180, additive) → `upstream-pr`; primary ask: **opaque backend
@@ -554,7 +584,7 @@ baselines are not comparable.
 | **1. Seam proof inside the current fork** (3-5 day spike, then ~2 wk hardening) | BOOT-001 + the production in-package bootstrap (CM-001/CM-002); facade delegating 100% to the fork's existing compiled tex; vendored upstream Python at the pinned base; typed symbol inventory incl. `__all__`; **import-order tests against the nine early-binding sites**; **resolve `packaging_name_conflict`**; one Megatron smoke | Imports, stateful classes, symbols, compile/capture smoke, and checkpoint load work **without moving any C++**, against a **Stage-1 performance budget approved in Stage 0** |
 | **2. Historical sync backtest** (~2-3 wk) | A **counterfactual engineering experiment** (retrospective, hindsight-advantaged). Reconstruct actual historical inputs — **deriving the 2.15 base from that IFU merge commit's second parent, never from `release_v2.15`'s tip**. Build the layer over the risk-weighted entry set (now 11 cases incl. CM-002, CM-003, ABI-001); bump in certification mode | **Falsifiable numeric thresholds approved during Stage 0, before the backtest starts**: every selected incompatibility reapplies or fails loudly by item ID; zero silently dropped behavior; zero in-place edits outside the patch queue; repair effort below a stated fraction of reconstructed historical effort; contract inventory identifies every binary-rebuild requirement. **Gate A** input |
 | **3. Compatibility-layer productionization** (~4 wk; funded at Gate A) | Tiered patch queue + override registry with full governance; three contracts embedded **plus the ABI-001 resolution**; production bootstrap + package per §3.2; diagnostics; install/uninstall tests | Certified PyTorch package **using the existing fork backend** → **Gate B** input |
-| **4. Backend extraction** (~4-6 wk; authorized at Gate B) | Move `common/` **C++** + `csrc/`; keep `common/` Python vendored (BK-001B); SONAME; private versioned core ABI; prebuilt wheels; origin ledger | Same behavior and performance as Stage 3 |
+| **4. Backend separation** (~4-6 wk; authorized at Gate B) | `common/` **C++** + `csrc/` become independent build targets and directories **in this repo** (no move between repos); keep `common/` Python vendored (BK-001B); SONAME; private versioned core ABI; prebuilt wheels; origin ledger against the submodule | Same behavior and performance as Stage 3 |
 | **5. Sidecar retirement** (~3-4 wk) | CustomRecipe adapter; relocate MXFP4 + triton_kernels; **CM-003 recipe-class patches**; capability provider (PyTorch), starting with `te.fp8.fnuz` retiring all three `is_fp8_fnuz` copies | Measurable M2 reduction; Stage-5 checkpoint gate (§8.5) |
 | **6. Registry expansion** (ongoing) | AITER/Triton/reference implementations one op family at a time | Each family gated individually |
 | **7. JAX beta** (parallel from S3) | Handler dict, JIT policy, sharding registration, version matrix, inventory conformance | JAX tests + named MaxText-class workload |
@@ -641,7 +671,7 @@ around FlagGems assumptions without AMD input.
 | Upstream moves the seam | No cheap insurance; early warning = contract presence + nightly Job B; the pin controls when it enters our build |
 | Semantic contract drift post-split | Three versioned contracts; typed inventories; origin ledger; Job B |
 | **Vendored Python reaches the core ABI outside the extension API** | ABI-001: complete the ctypes inventory; route through the extension API or define a fourth versioned surface; resolve before Gate B |
-| **`common/` Python mistakenly relocated with the C++** | BK-001 is C++ only; BK-001B carries the Python; CI asserts no `.py` under the backend repo's `common/` import path |
+| **`common/` Python mistakenly built into the C++ target** | BK-001 is C++ only; BK-001B carries the Python; CI asserts no `.py` is sourced by the backend build target |
 | Import-sensitive patch applied at runtime | Two-tier rule: build-tier default; runtime requires proven late-boundness |
 | **Facade `__all__` drift leaks ROCm symbols via the star-import** | `__all__` equality in EXTENSION_API conformance; import-order tests on the nine sites |
 | Package co-ownership clobber | Sole-ownership decision + install-lifecycle tests; fingerprint as defense in depth |
@@ -662,8 +692,10 @@ default; three versioned contracts (plus an ABI-001 resolution pending); `libtra
 SONAME + origin ledger; sole `transformer_engine` package ownership on AMD indexes; automatic
 in-package activation with `NVTE_PLUGIN` functional only in non-certified debug mode; compiled-only
 registry first; JAX as separate beta; staged plan with Gate A and Gate B; two burn-down metrics; skip
-discipline per §4.4; **`common/` splits C++ (backend repo) from Python (stays vendored)**;
-**`upstream_sha` derivation and GNU-diff pinning**.
+discipline per §4.4; **`common/` splits C++ (backend build target) from Python (stays vendored)**;
+**`upstream_sha` derivation and GNU-diff pinning**; **one repository — no separate backend repo**
+(2026-08-29); **upstream pinned as the `3rdparty/transformer_engine_nvidia` submodule with
+`update = none`, its gitlink the source of truth** (2026-08-29).
 
 **Open — four now carry due dates:**
 

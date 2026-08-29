@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # Implementation plan — Stages 0–2
 
-**For:** proposal v2.2 / manifest v2.4.1. **Scope:** the work authorized by the Stage 0-2 approval:
+**For:** proposal v2.3 / manifest v2.4.2. **Scope:** the work authorized by the Stage 0-2 approval:
 a working prototype of the seam (Stage 1), the governance that makes its results trustworthy
 (Stage 0), and the backtest that produces Gate A evidence (Stage 2). Nothing here moves C++, migrates
 a consumer, or touches the fork's release line.
@@ -34,7 +34,7 @@ If any of these stop being true, the affected work packages change.
 | F8 | Recipe dispatch is classmethod-based (`recipe.delayed()/.mxfp8()/.nvfp4()/.custom()`), with `recipe.custom()` → `CustomRecipeState` | upstream `pytorch/quantization.py:1317-1327` at `868d8d92`; fork equivalent at `:1439-1451` with `recipe.mxfp4()` inserted at `:1447` | MXFP4 has a legitimate hook (`custom()`); the fork's injected `Recipe.mxfp4()` is a shortcut that must become a build-tier patch until CustomRecipe absorbs it (Stage 5) |
 | F9 | Vendored-Python divergence is 41 PyTorch + 18 JAX + 3 root/common files, 2,142+253 / 563+120 / 241+40 lines | manifest v2.4.1 | That is the patch queue's upper bound. PyTorch-only prototype: **44 files** |
 | F10 | This workstation has an MI350X and torch 2.12.0+rocm7.14.0 but **no TE build**; the repo rule is build only in the designated container | `CLAUDE.md` | Pure-Python work packages run here; anything that builds or runs kernels needs the container named first |
-| F11 | The upstream base `868d8d92` is an **ancestor of `origin/dev`** — the fork merged it, so every clone of the fork already holds upstream's full tree at the base in its own object store | `git merge-base --is-ancestor 868d8d92 origin/dev` | **No upstream submodule for the prototype.** The assembler extracts the vendored tree with `git archive <base> transformer_engine/` from the fork's own history: offline, no new submodule, and the merge-base assertion is checkable in the same repo. `3rdparty/transformer_engine` as a source-only submodule (proposal §3.2) is the shape for the *standalone* plugin repo (Stage 4+), which will not share history with the fork |
+| F11 | Upstream is pinned as the submodule **`3rdparty/transformer_engine_nvidia`** at `868d8d92`, with `update = none` in `.gitmodules`. The repo's documented `git submodule update --init --recursive` (`CLAUDE.md:69`, three CI sites) therefore **skips it**; only the assembler initializes it, explicitly and non-recursively, so upstream's own `cutlass`/`nccl`/`googletest` never enter the build (proposal §3.2). The base also happens to be an ancestor of `origin/dev`, but that is a **cross-check, not the source of truth** | `.gitmodules`, `git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD` | The pin is explicit and governed: CI asserts `submodule HEAD == manifest upstream_sha == merge-base(upstream/main, dev)`. The vendored tree is read from the submodule, never from the fork's history. **All C++ stays in this repo** — there is no separate backend repo; Stage 4 becomes build-target separation inside this tree |
 
 ---
 
@@ -145,11 +145,12 @@ vendoring is a one-command operation from day one.
 
 ```
 proposals/te-rocm-plugin/tools/assemble_overlay.py
-  --upstream <sha>            extracted with `git archive <sha> transformer_engine/` from THIS repo's history
-                              (F11) - no submodule, no network. A SHA not yet merged into the fork
-                              (the release_218_gap 'pin later' option) is first `git fetch`ed as a bare
-                              object from NVIDIA/TE; still no submodule. The 3rdparty/transformer_engine
-                              submodule is the Stage-4 standalone-repo shape, not a prototype concern.
+  --upstream <sha>            read from the 3rdparty/transformer_engine_nvidia submodule (F11). The assembler
+                              runs `git submodule update --init --checkout 3rdparty/transformer_engine_nvidia`
+                              itself - explicitly, NON-recursive - then asserts the submodule's HEAD equals
+                              <sha> and equals the manifest's upstream_sha; refuses to run otherwise.
+                              Moving the pin (release_218_gap) = checkout a new SHA in the submodule +
+                              update the manifest; the assembler catches any disagreement between them.
   --patches  patches/         ordered queue; one file per manifest entry: PT-002.patch, CM-003.patch ...
   --out      build/overlay/   assembled transformer_engine/ tree
   --check                     dry run: report per-patch applicability, exit 1 on any failure
@@ -259,9 +260,12 @@ into `tools/` so this stops being a manual step.
 
 ### G2 · CI base assertion — 0.5 day
 
-Add a job to the existing GitHub workflow that runs `tools/measure_divergence.sh` (exits 2 on
-merge-base mismatch) and `tools/seam_inventory.py` (exits 1 while OPEN — allowlist `LayerNorm` so
-it can be made blocking). Non-gating for one cycle, then gating.
+Add a job to the existing GitHub workflow that asserts the three-way pin identity —
+`git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD` == manifest `upstream_sha` ==
+`merge-base(upstream/main, dev)` — then runs `tools/measure_divergence.sh --base <submodule HEAD>`
+and `tools/seam_inventory.py` (exits 1 while OPEN — allowlist `LayerNorm` so it can be made
+blocking). Non-gating for one cycle, then gating. The job must initialize the submodule itself,
+non-recursively; the workflow's existing `--init --recursive` skips it by design (F11).
 
 ### G3 · Freeze on in-place edits — 1 day
 
@@ -363,7 +367,10 @@ extension contract are production-ready — that is Gate B's question, answered 
 - **Runtime override registry** — exists as an empty module; nothing is `proven` yet.
 - **AITER/Triton registry entries** — compiled-only (proposal §3.5).
 - **CustomRecipe adapter** — MXFP4 goes in via CM-003 patches (F8); the adapter is Stage 5.
-- **Backend extraction, SONAME, origin ledger** — Stage 4.
+- **Backend separation, SONAME, origin ledger** — Stage 4. Decided: **the C++ stays in this repo**;
+  there is no separate backend repo. Stage 4 separates by build target and directory, not by
+  repository. The manifest's `backend-repo` dispositions (BK-001/002/003) and proposal §3.2/§4.1
+  need re-wording to match — flagged, not yet done.
 - **JAX** — separate beta track; the prototype is PyTorch-only. The assembler is framework-neutral
   so Stage 7 reuses it.
 - **Packaging** (sole-ownership, local version, prebuilt wheels) — Stage 3. The prototype installs

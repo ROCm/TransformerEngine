@@ -33,3 +33,7 @@
 [submodule "3rdparty/nccl"]
 	path = 3rdparty/nccl
 	url = https://github.com/NVIDIA/nccl.git
+[submodule "3rdparty/transformer_engine"]
+	path = 3rdparty/transformer_engine_nvidia
+	url = https://github.com/NVIDIA/TransformerEngine.git
+	update = none
