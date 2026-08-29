@@ -12,7 +12,7 @@ plus a ROCm plugin and an AMD-maintained compiled backend**.
 | File | What it is |
 |---|---|
 | [`proposal.md`](proposal.md) | **v2.2** — architecture, migration, implementation and validation plan. The document requesting Stage 0-2 approval. |
-| [`divergence-manifest.yaml`](divergence-manifest.yaml) | **v2.4** / schema 1.3 — file-complete ledger, 80 entries, machine-readable governance. |
+| [`divergence-manifest.yaml`](divergence-manifest.yaml) | **v2.4.1** / schema 1.3 — file-complete ledger, 81 entries, machine-readable governance. |
 | [`divergence-manifest-summary.md`](divergence-manifest-summary.md) | **v2.4** — reviewer-facing summary of the manifest. |
 | [`manifest-corrections-v2.3-to-v2.4.yaml`](manifest-corrections-v2.3-to-v2.4.yaml) | Field-level audit trail of the v2.3 → v2.4 restatement. |
 | [`tools/measure_divergence.sh`](tools/measure_divergence.sh) | Regenerates every figure in the above. Run it per sync. |

@@ -170,6 +170,36 @@ and REL-003 `jax/util.py:25`, which **shells out to a subprocess**. Strongest co
 
 ---
 
+## New in v2.4.1: ABI-002 — part of the PyTorch seam is defined under `common/`
+
+Found by the static seam inventory (`tools/seam_inventory.py`). `pybind.cpp:216` expands
+**`NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)`**, a macro in `common/util/pybind_helper.h` that
+registers 17 names on the `transformer_engine_torch` module — 10 enums, 3 stateful `CommOverlap*`
+classes, 4 functions — **11 of them demanded by upstream Python**, including `DType`, all six `NVTE_*`
+attention enums, `CommOverlapType`, and `get_stream_priority_range`. The first inventory pass scanned
+only `pytorch/csrc` and reported all of them as missing.
+
+That header sits in the `common/` C++ bucket — the **backend** side of the BK-001 split. So a
+substantive part of the torch extension's Python surface is defined by a file that moves to the
+backend repo. Same family as ABI-001: a contract crossing the manifest didn't model. Stage 0 must
+decide whether the torch extension carries the header, or the extension API's inventory is generated
+from backend headers.
+
+**The fork's entire divergence in that file (25/11) is the `NVTE_Fused_Attn_Backend` enum split**
+(ABI-002-FAENUM). The fork's macro binds *different members* per branch — CUDA
+`{F16_max512_seqlen, F16_arbitrary_seqlen, FP8, No_Backend}`, ROCm `{AOTriton, CK, No_Backend}` —
+under the same Python name. Upstream Python early-binds this enum and compares against members that
+don't exist on ROCm, which is the real reason the PT-010/011/012 attention patches exist. Two
+consequences:
+
+- §3.5's "enums re-exported from the compiled extension" does not resolve it — it re-exports an
+  enum with the wrong members. Until HDR-B2 lands, the facade ships an enum with **both** member
+  sets, or PT-010/011/012 remain build-tier patches.
+- A **name-only** inventory reports this enum as supplied. `TE_ROCM_EXTENSION_API` conformance
+  must cover enum *values*. Added as backtest case 12 and a Stage-0 exit requirement.
+
+---
+
 ## New: the seam's early-binding surface
 
 Upstream has **44** late-bound `import transformer_engine_torch as tex` sites and **9** early-binding

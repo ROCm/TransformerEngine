@@ -4,7 +4,7 @@
 
 # TE-ROCm divergence manifest
 metadata:
-  manifest_version: "2.4"
+  manifest_version: "2.4.1"
   schema_version: "1.3"
   classifier: canonical-v2
   generator: gen_manifest (hunk classifier; regenerate per sync)
@@ -97,6 +97,8 @@ metadata:
     - added_class regenerated against 868d8d92 for every entry (added_class_status == CURRENT)
     - CM-001..CM-004 fully characterized and owned
     - ABI-001 ctypes symbol inventory complete
+    - ABI-002 disposition decided (carry pybind_helper.h with the torch extension, or generate its inventory from backend headers)
+    - TE_ROCM_EXTENSION_API conformance covers enum VALUES, not only enum names (ABI-002-FAENUM)
     - release_218_gap decision recorded
     - CI asserts upstream_sha == merge-base(upstream/main, fork/dev)
 
@@ -105,8 +107,12 @@ metadata:
     entries_retired: 5
     entries_renumbered: 0        # IDs are stable; retired IDs are never reused
     entries_updated: 10
-    entries_added: 6             # CM-001..004, ABI-001, BK-001B
+    entries_added: 7             # CM-001..004, ABI-001, BK-001B; v2.4.1 adds ABI-002
     entries_unchanged: 49
+  v241_addendum: >-
+    ABI-002 added from the static seam inventory (tools/seam_inventory.py). Not a base
+    correction: a boundary finding. No layer_totals change - its 36 lines were already
+    inside the common/ C++ bucket.
 
 # Retired because they have ZERO divergence against the true base. Their entire v2.3
 # delta was upstream release_v2.18 work the fork never merged. IDs are burned, not reused.
@@ -2096,6 +2102,9 @@ entries:
       files / 6,320 lines plus 65 ROCm-only files / 20,968 lines. The Python is now BK-001B.
       Semantic contract retained (TE_UPSTREAM_PY_CONTRACT emulation); AMD-maintained, partly
       Apache-2.0-derived; origin ledger required.
+      v2.4.1: this bucket also contains common/util/pybind_helper.h, which DEFINES part of the
+      PyTorch extension's Python surface (17 names, 11 upstream-demanded). It is split out as
+      ABI-002; its 36 lines remain counted here to keep layer_totals reconcilable.
   - id: BK-001B
     metric_class: m1
     path: "common/ PYTHON stays in the vendored pure-Python wheel"
@@ -2156,6 +2165,85 @@ entries:
       REQUIRED: complete the ctypes symbol inventory and either (a) route these through the
       extension API, or (b) define a fourth, explicitly-versioned "vendored-python -> core"
       contract surface. Decide before Gate B.
+  - id: ABI-002
+    metric_class: m1
+    path: transformer_engine/common/util/pybind_helper.h
+    disposition: split-features
+    patch_timing: n/a
+    added_lines: 25
+    removed_lines: 11
+    estimated_changed_lines: 36
+    measurement_quality: exact
+    owner: TBD
+    status: proposed
+    risk: high
+    last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
+    consumers:
+      - {file: transformer_engine/pytorch/csrc/extensions/pybind.cpp, line: 213, form: "#include", note: "PyTorch only; jax/csrc does not use it"}
+    registers:   # via NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m), expanded at pybind.cpp:216
+      enums:     [DType, NVTE_Bias_Type, NVTE_Mask_Type, NVTE_QKV_Format, NVTE_QKV_Layout,
+                  NVTE_Softmax_Type, NVTE_Fused_Attn_Backend, CommOverlapType, CommOverlapAlgo,
+                  Float8BlockScaleTensorFormat]
+      classes:   [CommOverlapCore, CommOverlapBase, CommOverlapP2PBase]
+      functions: [device_supports_multicast, get_stream_priority_range, ubuf_built_with_mpi,
+                  nvte_built_with_cublasmp]
+      demanded_by_upstream: 11 of 17
+      demanded: [CommOverlapType, DType, NVTE_Bias_Type, NVTE_Fused_Attn_Backend, NVTE_Mask_Type,
+                 NVTE_QKV_Format, NVTE_QKV_Layout, NVTE_Softmax_Type, device_supports_multicast,
+                 get_stream_priority_range, ubuf_built_with_mpi]
+      not_demanded: [CommOverlapAlgo, CommOverlapBase, CommOverlapCore, CommOverlapP2PBase,
+                     Float8BlockScaleTensorFormat, nvte_built_with_cublasmp]   # leak via star-import
+      not_demanded_note: >-
+        The three CommOverlap* CLASSES are stateful C++ objects (HDR-B1's comm-gemm-overlap
+        hierarchy) registered from the backend-side header; upstream Python reaches them only
+        via module/base.py's UB initialization, not by name. Sec 3.5's "stateful classes
+        directly re-exported" applies to these.
+    notes: >-
+      NEW IN v2.4.1, found by tools/seam_inventory.py. A substantive part of the PyTorch
+      seam's SUPPLY is defined here, under common/ - i.e. on the BACKEND side of the BK-001
+      split - not under pytorch/csrc: 17 registered names, 11 demanded by upstream. The first
+      inventory pass scanned only pytorch/csrc and reported 16 phantom "missing" names
+      (DType, NVTE_Fused_Attn_Backend, CommOverlapType...) for exactly this reason.
+      Upstream file (158 ln); PyTorch-only consumer.
+      Boundary consequence: when common/ moves to the backend repo, the torch extension
+      must either (a) carry this header with it (it is a pybind11 template header, not a
+      compiled symbol, so the dependency is on the ENUM DEFINITIONS it binds, which live in
+      the public NVTE headers), or (b) the macro's contents become part of
+      TE_ROCM_EXTENSION_API's canonical inventory, generated from the backend's headers.
+      Same family as ABI-001: a contract crossing the manifest did not model.
+    features:
+      - id: ABI-002-FAENUM
+        description: >-
+          The fork's ENTIRE divergence in this file is the NVTE_Fused_Attn_Backend enum split:
+          a new NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m) macro with DIFFERENT MEMBERS per
+          branch - CUDA binds {F16_max512_seqlen, F16_arbitrary_seqlen, FP8, No_Backend},
+          ROCm binds {AOTriton, CK, No_Backend}. Same Python name, incompatible value sets.
+        mechanism: capability
+        patch_timing: n/a
+        runtime_eligible: never
+        runtime_evidence: null
+        m1_added_lines: 25
+        m1_removed_lines: 11
+        m2_lines: 0
+        risk: high
+        owner: TBD
+        dependencies: [HDR-B2]
+        test_ids: []
+        upstream_link: null
+        expiry_condition: "HDR-B2 capability-query RFC lands upstream (backend identity becomes opaque)"
+        status: proposed
+        notes: >-
+          This is HDR-B2 surfacing on the pybind side. Upstream Python does
+          `from transformer_engine_torch import NVTE_Fused_Attn_Backend` (early-bound) and
+          compares against members like NVTE_F16_arbitrary_seqlen that DO NOT EXIST on the
+          ROCm enum. Callers at PT-010/PT-011/PT-012 are therefore patched in the fork to
+          tolerate the ROCm member set - that is the real reason those three entries exist.
+          The facade re-exporting the enum "from the compiled extension" (Sec 3.5) does not
+          resolve this: it re-exports an enum with the wrong members. Until HDR-B2 lands,
+          the facade must ship an enum carrying BOTH member sets, or PT-010/011/012 stay
+          as build-tier patches. Include enum VALUE inventory, not just enum NAMES, in the
+          TE_ROCM_EXTENSION_API conformance test - a name-only inventory reports this enum
+          as supplied.
   - id: REL-001
     metric_class: migration_volume
     path: "triton_kernels/ -> plugin/kernels; registry entries AFTER compiled-only milestone"
@@ -2216,6 +2304,10 @@ entries:
     measurement_quality: exact
     owner: TBD
     status: proposed
+    notes: >-
+      v2.4.1: the same enum divergence reaches Python through ABI-002-FAENUM (the pybind
+      binding in common/util/pybind_helper.h), which is what forces the PT-010/011/012
+      attention patches. Retiring HDR-B2 retires ABI-002-FAENUM and unblocks those three.
   - id: HDR-C
     metric_class: m1
     path: "subtractive header debt -> delete under plugin model"
@@ -2361,6 +2453,7 @@ backtest_plan:
     - {id: PT-028,    risk_role: graph/compile-sensitive,          expected: reapplies,                 ground_truth: graph capture smoke}
     - {id: HDR-A,     risk_role: symbol-contract change,           expected: inventory-diff-detected,   ground_truth: typed inventory}
     - {id: ABI-001,   risk_role: ctypes cross-contract path,       expected: inventory-diff-detected,   ground_truth: Format.E4M3.max_fwd resolves}
+    - {id: ABI-002-FAENUM, risk_role: enum member-set divergence,   expected: inventory-diff-detected,   ground_truth: "NVTE_Fused_Attn_Backend value inventory diff, not name-only"}
     - {id: PT-004-MXFP4, risk_role: custom-recipe retirement candidate, expected: reapplies,            ground_truth: recipe numerics}
     - {id: PT-008-NVFP4FIX, risk_role: upstream-pr retirement candidate, expected: reapplies,           ground_truth: nvfp4 exact tests}
   note: >-
