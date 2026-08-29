@@ -277,13 +277,16 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
     NVTE_ERROR("fused AG+GEMM with fp8 UB only supports MXFP8_1D_SCALING recipe");
   }
 
-  if (is_fp8 && !transa) {
-    NVTE_ERROR("fused AG+GEMM with MXFP8 only supports TN");
-  }
-
-  // MXFP8 is pinned to TN above, so both operands are consumed through their row-wise view.
+  // MXFP8 supports TN and NN. B is consumed row-wise in both (transb is false either way);
+  // A is row-wise for TN and column-wise for NN, matching the scale selection just below.
   if (is_fp8) {
-    NVTE_CHECK(A_tensor->has_data(), "fused AG+GEMM with MXFP8 reached with A missing row-wise usage");
+    if (transa) {
+      NVTE_CHECK(A_tensor->has_data(),
+                 "fused AG+GEMM with MXFP8 reached with A missing row-wise usage");
+    } else {
+      NVTE_CHECK(A_tensor->has_columnwise_data(),
+                 "fused AG+GEMM with MXFP8 reached with A missing column-wise usage");
+    }
     NVTE_CHECK(B_tensor->has_data(), "fused AG+GEMM with MXFP8 reached with B missing row-wise usage");
   }
 
@@ -302,8 +305,12 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
              " tp_size=", tp_size, ")");
 
   const int rank_round_tp = comm->myrank - tp_id;
+  // Row-wise and column-wise MXFP8 data are quantized independently, so the operand buffer has to
+  // come from the same usage as the scales picked above: row-wise for TN, column-wise for NN.
+  // TensorWrapper::dptr() is hard-wired to the row-wise buffer -- see cublaslt_gemm.cu:185 for the
+  // same pairing on the non-overlapped path.
   KittensFusedAgGemmArgs args{
-      A.dptr(), ubuf.dptr(), D.dptr(), scale_A, scale_B,
+      (is_fp8 && !transa) ? A.columnwise_dptr() : A.dptr(), ubuf.dptr(), D.dptr(), scale_A, scale_B,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,

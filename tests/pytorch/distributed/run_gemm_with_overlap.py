@@ -80,6 +80,13 @@ def _parse_args(argv=None, namespace=None):
         "--atomic", action="store_true", default=False, help="Test overlap with atomic GEMM."
     )
     parser.add_argument(
+        "--layout",
+        type=str.upper,
+        default="TN",
+        choices=["TN", "NN"],
+        help="GEMM layout. NN stores the weight as (N, K/P) and dispatches the NN kernel.",
+    )
+    parser.add_argument(
         "--fused",
         action="store_true",
         default=False,
@@ -426,8 +433,13 @@ def _main(opts):
             bulk_inp_shape = (outer_size, hidden_size)
     else:
         if opts.comm_type == tex.CommOverlapType.AG:
-            # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
-            local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
+            # TN: (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
+            # NN: same result, weight stored un-transposed as (N, K/P)
+            local_kernel_t_shape = (
+                (hidden_size, ffn_hidden_size // tp_size)
+                if opts.layout == "NN"
+                else (ffn_hidden_size // tp_size, hidden_size)
+            )
             local_inp_shape = (outer_size // tp_size, hidden_size)
             if ub_obj2 is not None:
                 local_kernel2_t_shape = (hidden_size, ffn_hidden_size // tp_size)
@@ -502,6 +514,7 @@ def _main(opts):
             inp_g,
             out_dtype=torch.bfloat16,
             use_split_accumulator=ref_use_split_accumulator,
+            layout=opts.layout,
         )
         if opts.comm_type == tex.CommOverlapType.RS:
             # Apply non-overlapped reduce-scatter to local reference GEMM output
@@ -691,6 +704,7 @@ def _main(opts):
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
+            layout=opts.layout,
         )
 
     def _fp8_gemm2(gemm1_out):
@@ -719,6 +733,7 @@ def _main(opts):
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
+            layout=opts.layout,
         )
 
     # Trigger GEMM
