@@ -15,6 +15,7 @@ plus a ROCm plugin and an AMD-maintained compiled backend**.
 | [`divergence-manifest.yaml`](divergence-manifest.yaml) | **v2.4.1** / schema 1.3 — file-complete ledger, 81 entries, machine-readable governance. |
 | [`divergence-manifest-summary.md`](divergence-manifest-summary.md) | **v2.4** — reviewer-facing summary of the manifest. |
 | [`manifest-corrections-v2.3-to-v2.4.yaml`](manifest-corrections-v2.3-to-v2.4.yaml) | Field-level audit trail of the v2.3 → v2.4 restatement. |
+| [`implementation-plan.md`](implementation-plan.md) | Work breakdown for Stages 0–2: prototype track (P0–P8, two exits), governance track (G0–G6), backtest track (B1–B3), environment matrix, gate criteria. |
 | [`tools/measure_divergence.sh`](tools/measure_divergence.sh) | Regenerates every figure in the above. Run it per sync. |
 
 ## Measurement rules (normative — read before quoting any number)
