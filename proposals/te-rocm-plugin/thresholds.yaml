@@ -17,7 +17,7 @@ stage1_performance_budget:      # P8; compared fork build vs overlay build, same
   seam_call_overhead:
     value: 0
     unit: ns
-    how: "asserted by identity: tex.<fn> is transformer_engine_torch_rocm.<fn> for every demanded name; microbench kept as evidence only"
+    how: "asserted by identity: tex.<fn> is transformer_engine_rocm_torch.<fn> for every demanded name; microbench kept as evidence only"
   import_time_increase:
     max_relative: 0.10           # +10 %
     how: "python -X importtime -c 'import transformer_engine.pytorch', median of 5, fork vs overlay"

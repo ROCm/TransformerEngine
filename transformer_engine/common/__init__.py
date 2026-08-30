@@ -113,6 +113,9 @@ def _get_shared_object_file(library: str) -> Path:
     assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
     if library == "core":
         so_prefix = "libtransformer_engine"
+    elif te_rocm_build and library == "torch":
+        # ROCm seam (P2): the PyTorch extension is built as transformer_engine_rocm_torch.
+        so_prefix = f"transformer_engine_rocm_{library}"
     else:
         so_prefix = f"transformer_engine_{library}"
 
@@ -215,10 +218,19 @@ def load_framework_extension(framework: str) -> None:
         )
 
     # After all checks are completed, load the shared object file.
-    spec = importlib.util.spec_from_file_location(module_name, _get_shared_object_file(framework))
+    # ROCm seam (plugin prototype, P2): the compiled extension is built under its own name
+    # (transformer_engine_rocm_torch) so it never occupies upstream's module name. Load it under
+    # that name - PyInit_<name> must match spec.name - then alias it to the name upstream's
+    # Python imports. The module object is the extension itself, so attributes, __spec__ and
+    # enum/class identity need no reconstruction.
+    compiled_name = module_name
+    if te_rocm_build and framework == "torch":
+        compiled_name = f"transformer_engine_rocm_{framework}"
+    spec = importlib.util.spec_from_file_location(compiled_name, _get_shared_object_file(framework))
     solib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = solib
+    sys.modules[compiled_name] = solib
     spec.loader.exec_module(solib)
+    sys.modules[module_name] = solib  # the seam: upstream's name -> ROCm's module
 
 
 def sanity_checks_for_pypi_installation() -> None:
