@@ -13,9 +13,10 @@ plus a ROCm plugin and an AMD-maintained compiled backend**.
 |---|---|
 | [`proposal.md`](proposal.md) | **v2.3** — architecture, migration, implementation and validation plan. The document requesting Stage 0-2 approval. |
 | [`divergence-manifest.yaml`](divergence-manifest.yaml) | **v2.4.3** / schema 1.4 — file-complete ledger, 81 entries, machine-readable governance. |
-| [`divergence-manifest-summary.md`](divergence-manifest-summary.md) | **v2.4** — reviewer-facing summary of the manifest. |
+| [`divergence-manifest-summary.md`](divergence-manifest-summary.md) | **v2.4.3** — reviewer-facing summary of the manifest. |
 | [`manifest-corrections-v2.3-to-v2.4.yaml`](manifest-corrections-v2.3-to-v2.4.yaml) | Field-level audit trail of the v2.3 → v2.4 restatement. |
 | [`implementation-plan.md`](implementation-plan.md) | Work breakdown for Stages 0–2: prototype track (P0–P8, two exits), governance track (G0–G6), backtest track (B1–B3), environment matrix, gate criteria. |
+| [`thresholds.yaml`](thresholds.yaml) | **Signed 2026-08-30** — Stage-1 performance budget, Stage-2 backtest thresholds, C++ arm reporting bands. P8 and B2 refuse to run if unsigned. |
 | [`tools/measure_divergence.sh`](tools/measure_divergence.sh) | Regenerates every figure in the above. Run it per sync. |
 
 ## Measurement rules (normative — read before quoting any number)
@@ -55,9 +56,9 @@ the corrected base — hunk composition is base-dependent, so every v2.3 triple 
 
 | # | Decision | Due |
 |---|---|---|
-| 1 | `release_218_gap` — the fork sits at the 2.18 **branch point**, missing 2.18's stabilisation (#3242, #3171, #3187, #3056, #3269, and the VERSION bump). Take those 15 commits before pinning, or pin a later `main` commit? | Stage 0 |
-| 2 | `ifu_sourcing_policy` — 2.17 merged off-`main`; 2.18 merged a branch point. Write the policy: always merge upstream `main` at a chosen SHA. | Stage 0 |
-| 3 | `packaging_name_conflict` — proposal §3.2 keeps the canonical `transformer-engine` name, but `common/__init__.py` implements `transformer-engine-rocm7`/`-rocm10`. | Stage 1 |
+| 1 | `release_218_gap` — **decided 2026-08-30**: prototype pins `868d8d92`; stabilisation commits belong on the release branch under the two-track policy. | done |
+| 2 | `ifu_sourcing_policy` — **decided 2026-08-30, two-track**: `dev` ← upstream `main`; `release_vX_rocm` ← upstream `release_vX`; never release→dev; release-only fixes cherry-picked as tracked patches. | done |
+| 3 | `packaging_name_conflict` — **decided 2026-08-30**: keep the current `transformer_engine_rocm7/_rocm10/_rocm_jax` names; the canonical-name scheme is withdrawn. | done |
 | 4 | `contract_surface_for_ctypes` — ABI-001: vendored upstream Python reaches the core ABI by ctypes, bypassing the extension API. | Gate B |
 | 5 | `cxx_maintenance_strategy` — how the 85 hipified, guard-laden upstream C++ files are maintained after the split. **Provisional B**: patch queue over the submodule, then hipify. Decided on the backtest's C++ arm (trip rate of guard patches across 2.15→2.17). | Stage 4 |
 

@@ -109,8 +109,8 @@ metadata:
     - all RESIDUE items characterized
     - compound features split into independently retiring units (PT-006-FEAT, PT-009-FEAT)
     - mechanisms normalized to mechanism_enum with details in mechanism_detail_fields
-    - owners assigned at workstream and leaf level; executive sponsor named
-    - backtest_plan thresholds numerically approved (before Stage 2 starts)
+    - "owners assigned at workstream and leaf level; executive sponsor named  -- DEFERRED 2026-08-30: no owners at this stage; `owner: TBD` fields are inert"
+    - "backtest_plan thresholds numerically approved (before Stage 2 starts)  -- DONE 2026-08-30: thresholds.yaml, signed"
     # --- added in v2.4 ---
     - added_class regenerated against 868d8d92 for every entry (added_class_status == CURRENT)
     - CM-001..CM-004 fully characterized and owned
@@ -118,7 +118,7 @@ metadata:
     - ABI-002 disposition decided (carry pybind_helper.h with the torch extension, or generate its inventory from backend headers)
     - TE_ROCM_EXTENSION_API conformance covers enum VALUES, not only enum names (ABI-002-FAENUM)
     - backtest_plan.cxx_arm reporting bands approved (before Stage 2); cxx_strategy set on BK-001 (provisional allowed)
-    - release_218_gap decision recorded
+    - "release_218_gap decision recorded  -- DONE 2026-08-30 (see open_decisions)"
     - CI asserts submodule HEAD == upstream_sha == merge-base(upstream/main, fork/dev)
 
   correction_provenance:
@@ -2452,8 +2452,16 @@ open_decisions:
       fusible ops (#3242), the fused FP8 block-scaling path in GroupedLinear (#3171), NCCL EP
       zero-copy (#3187), cuDNN D=256 BWD attention (#3056), a CP padding bugfix (#3269), and
       the VERSION bump itself.
-    owner: TBD
+    owner: none    # 2026-08-30: no owners assigned at this stage
     due: Stage 0
+    status: DECIDED
+    decided_on: 2026-08-30
+    decision: >-
+      Prototype pins 868d8d92 (matches the compiled C++ exactly; no confound). The shipping pin
+      follows ifu_sourcing_policy: `dev` tracks upstream main, so dev stays at a main SHA; a ROCm
+      release branch tracks the matching upstream release branch and therefore takes the
+      stabilisation commits (the 15 for 2.18) there. The 'gap' is resolved by branch policy,
+      not by moving dev's pin.
   ifu_sourcing_policy:
     question: "Fix the IFU procedure: always merge from upstream main at a chosen SHA."
     why_it_matters: >-
@@ -2461,8 +2469,18 @@ open_decisions:
       the wrong way - pulling 10 non-main commits into fork history and contributing conflict
       burden to the 2.18 IFU. IFU 2.18 merged a main commit but took the branch point.
       Neither matches a stated policy because none exists.
-    owner: TBD
+    owner: none
     due: Stage 0
+    status: DECIDED
+    decided_on: 2026-08-30
+    decision: >-
+      Two-track. `dev` IFUs merge upstream `main` at a chosen SHA. A ROCm release branch
+      (release_vX_rocm) IFUs merge the matching upstream `release_vX` branch. Release branches are
+      never merged into dev; a release-only fix that dev needs is cherry-picked as a
+      manifest-tracked patch. The 3rdparty/transformer_engine_nvidia gitlink records the pin on
+      each branch, and the CI identity check is branch-aware: on dev, merge-base against
+      upstream/main; on release_vX_rocm, against upstream/release_vX.
+    note: "this policy retroactively explains the 2.17 history (release tracking release) and makes it correct going forward"
   contract_surface_for_ctypes:
     question: "Route ABI-001 symbols through TE_ROCM_EXTENSION_API, or define a fourth versioned contract?"
     owner: TBD
@@ -2471,8 +2489,18 @@ open_decisions:
     question: >-
       Sec 3.2 decides the canonical name `transformer-engine`; CM-002-PKGID currently implements
       transformer-engine-rocm7 / -rocm10 with rocm_pytorch / rocm_jax extras. Which wins?
-    owner: TBD
+    owner: none
     due: Stage 1
+    status: DECIDED
+    decided_on: 2026-08-30
+    decision: >-
+      Keep the current names: distributions transformer_engine_rocm7 / transformer_engine_rocm10 /
+      transformer_engine_rocm_jax with extras rocm / rocm7 / rocm10 (setup.py:444-446,
+      build_tools/utils.py:579-581, common/__init__.py:144). Proposal Sec 3.2's canonical-name +
+      PEP 440 local-version scheme is WITHDRAWN. CM-002-PKGID is therefore not a conflict: the
+      bootstrap patch carries the current logic unchanged. Residual co-install risk with an NVIDIA
+      `transformer-engine` wheel is accepted and mitigated by the load-time provenance fingerprint
+      (defense in depth) and the loud-failure property of the seam.
   cxx_maintenance_strategy:
     question: >-
       After the Python seam decouples them, how are the 85 hipified, guard-laden upstream C++ files
@@ -2494,7 +2522,7 @@ backtest_plan:
       parent, exactly as upstream_sha_derivation prescribes. Do NOT use release_v2.15's tip.
     result_state: fork dev at the 2.17 base (87efe41 lineage, true base 2e559f06)
     do_not: project this 2.18 manifest backward
-  thresholds: TBD-stage-0
+  thresholds: thresholds.yaml   # signed 2026-08-30 (stage2_backtest section)
   cases:
     - {id: BOOT-001,  risk_role: bootstrap,                        expected: reapplies,                 ground_truth: import + smoke}
     - {id: CM-002,    risk_role: loader/package-identity patch,    expected: partial-trip-by-id,        ground_truth: import + packaging lifecycle}
@@ -2524,7 +2552,7 @@ backtest_plan:
       - transformer_engine/common/cast/dispatch/quantize.cuh
       - transformer_engine/common/cast/fp8_blockwise/group_quantize_fp8_blockwise.cuh
       - transformer_engine/common/util/pybind_helper.h
-    thresholds: TBD-stage-0   # informational, but the reporting bands (what counts as 'high' trip rate) are fixed BEFORE B2, like all others
+    thresholds: thresholds.yaml   # cxx_arm_reporting_bands, signed 2026-08-30: <0.30 mechanized / 0.30-0.60 discuss / >0.60 relabelled IFU
     outcome_feeds: open_decisions.cxx_maintenance_strategy
   note: >-
     case ids reference the 2.18 manifest for identity only; Stage 2 re-derives each against the

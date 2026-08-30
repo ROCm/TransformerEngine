@@ -1,0 +1,56 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+# Numeric gates for Stage 1 (P8) and Stage 2 (B2/B3). Signed BEFORE the measurements they
+# govern are taken - that is the whole point. P8 and B2 read this file and refuse to run
+# while `approved_by` is empty. Change a number only with a new signature line.
+
+approval:
+  approved_by: Wen Chen
+  approved_on: 2026-08-30
+  scope: "Stage-1 performance budget and Stage-2 backtest thresholds, proposal v2.3 / plan Track P+B"
+  history:
+    - {on: 2026-08-30, by: Wen Chen, note: "initial values, proposed 2026-08-30 and accepted as-is"}
+
+stage1_performance_budget:      # P8; compared fork build vs overlay build, same container
+  seam_call_overhead:
+    value: 0
+    unit: ns
+    how: "asserted by identity: tex.<fn> is transformer_engine_torch_rocm.<fn> for every demanded name; microbench kept as evidence only"
+  import_time_increase:
+    max_relative: 0.10           # +10 %
+    how: "python -X importtime -c 'import transformer_engine.pytorch', median of 5, fork vs overlay"
+  e2e_throughput_margin:
+    max_relative_loss: 0.01      # 1 %
+    how: "tokens/sec, one Megatron-LM(ROCm) LLaMA-class config, 8 GPUs, N steps, median of 3"
+  graph_breaks:
+    max_increase: 0
+    how: "TORCH_LOGS=graph_breaks on te.Linear + te.LayerNormMLP under torch.compile; count"
+  hip_graph_capture:
+    requirement: "tests/pytorch/test_cuda_graphs.py subset passes"
+  checkpoint_continuation:
+    steps: 50
+    loss_band_relative: 1.0e-3
+    how: "save BF16 + FP8-delayed state on the fork build; load + continue on the overlay; compare per-step loss"
+
+stage2_backtest:                 # B2/B3; Gate A input
+  case_outcome_rule:
+    requirement: "every selected case either reapplies cleanly or trips loudly BY ID"
+    silent_failures_allowed: 0
+  repair_effort:
+    max_fraction_of_historical: 0.25
+    historical_reference: "release-sync-v2.15-260630 branch activity, mid-July -> Aug 22 2026"
+  certification_budget:
+    max_engineer_days: 5
+  in_place_edits_outside_patch_queue:
+    allowed: 0
+    how: "assembler verifies overlay tree by hash against upstream + applied patches"
+
+cxx_arm_reporting_bands:         # informational at Gate A; evidence for open_decisions.cxx_maintenance_strategy
+  metric: "fraction of sampled guard patches that TRIP (fail to reapply or apply-but-fail-to-hipify/compile) across 2.15 -> 2.17"
+  bands:
+    mechanized:     {trip_rate_below: 0.30, reading: "strategy B is a genuine mechanization of the IFU"}
+    discuss:        {trip_rate_between: [0.30, 0.60], reading: "mixed; decide per file, expect more C"}
+    relabelled_ifu: {trip_rate_above: 0.60, reading: "B is the old IFU with new labels; weight C heavily"}
+  also_report: "repair hours per tripped file; which files fell in the apply-but-fails class"

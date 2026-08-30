@@ -33,7 +33,7 @@ If any of these stop being true, the affected work packages change.
 | F7 | 17 seam names are registered from `common/util/pybind_helper.h` (backend side of BK-001), 11 upstream-demanded | ABI-002 | Extension build must keep including that header; not a Stage 1 problem, a Stage 4 one |
 | F8 | Recipe dispatch is classmethod-based (`recipe.delayed()/.mxfp8()/.nvfp4()/.custom()`), with `recipe.custom()` → `CustomRecipeState` | upstream `pytorch/quantization.py:1317-1327` at `868d8d92`; fork equivalent at `:1439-1451` with `recipe.mxfp4()` inserted at `:1447` | MXFP4 has a legitimate hook (`custom()`); the fork's injected `Recipe.mxfp4()` is a shortcut that must become a build-tier patch until CustomRecipe absorbs it (Stage 5) |
 | F9 | Vendored-Python divergence is 41 PyTorch + 18 JAX + 3 root/common files, 2,142+253 / 563+120 / 241+40 lines | manifest v2.4.1 | That is the patch queue's upper bound. PyTorch-only prototype: **44 files** |
-| F10 | This workstation has an MI350X and torch 2.12.0+rocm7.14.0 but **no TE build**; the repo rule is build only in the designated container | `CLAUDE.md` | Pure-Python work packages run here; anything that builds or runs kernels needs the container named first |
+| F10 | This session already runs **inside the build container** (Ubuntu 24.04.4, HIP 7.14, 8 × gfx950, torch 2.12.0+rocm7.14.0) but TE is **not yet built** | P0 record | Nothing in Track P is blocked on environment. P0 (build + baseline) can start immediately; the build itself is the first expensive step |
 | F11 | Upstream is pinned as the submodule **`3rdparty/transformer_engine_nvidia`** at `868d8d92`, with `update = none` in `.gitmodules`. The repo's documented `git submodule update --init --recursive` (`CLAUDE.md:69`, three CI sites) therefore **skips it**; only the assembler initializes it, explicitly and non-recursively, so upstream's own `cutlass`/`nccl`/`googletest` never enter the build (proposal §3.2). The base also happens to be an ancestor of `origin/dev`, but that is a **cross-check, not the source of truth** | `.gitmodules`, `git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD` | The pin is explicit and governed: CI asserts `submodule HEAD == manifest upstream_sha == merge-base(upstream/main, dev)`. The vendored tree is read from the submodule, never from the fork's history. **All C++ stays in this repo** — there is no separate backend repo; Stage 4 becomes build-target separation inside this tree |
 | F12 | The 85 modified upstream C++ files are **all hipified** (none in the native-excluded dirs); **78 carry ROCm guards, ~480 sites** (287 `#ifdef __HIP_PLATFORM_AMD__`, 179 `#ifndef`); no generated `_hip.*` files are in the tree. The 65 ROCm-only files (20,968 ln) have no upstream ancestor | `measure_divergence.sh`, `grep` over the modified set | The post-split C++ maintenance strategy (proposal §4.1a) is **provisional B — patch queue over the submodule, then hipify** — and is decided at Stage 4 on the strength of the backtest's **C++ arm** (B2 step 5). The prototype does not touch the C++ tree |
 
@@ -70,7 +70,7 @@ Two exits inside Stage 1, deliberately:
 
 | | |
 |---|---|
-| Do | Record container image/tag, ROCm, GPU arch, TE commit, submodule state (repo rule). Build the fork as-is. Run the representative suite (§3.9) and capture pass/fail + wall time as the baseline. Capture import time (`python -X importtime -c "import transformer_engine.pytorch"`). |
+| Do | Record container image/tag, ROCm, GPU arch, TE commit, submodule state (repo rule). **Recorded 2026-08-30**: host `cv350-rck-g03-e05-18`, Ubuntu 24.04.4, HIP 7.14.60850, **8 × gfx950 (MI350X)**, Python 3.12.3, torch 2.12.0+rocm7.14.0, TE `wen/dev-plugin`, submodule `868d8d92`; image tag not exposed in the environment — record it from the launcher. Build the fork as-is. Run the representative suite (§3.9) and capture pass/fail + wall time as the baseline. Capture import time (`python -X importtime -c "import transformer_engine.pytorch"`). |
 | Exit | Baseline numbers committed to `proposals/te-rocm-plugin/baselines/<date>-fork.json`. |
 | Blocks | Everything in Track P that runs code. |
 
@@ -248,10 +248,11 @@ Against the budget approved in G6 — the budget must exist *before* this runs.
 
 | | Decision | Needed by | Default if undecided |
 |---|---|---|---|
-| G0.1 | `release_218_gap` — pin `868d8d92`, or take the 15 release commits / a later `main` SHA | **P5** (it's the vendoring SHA) | Prototype pins `868d8d92` as measured; decision recorded as provisional. Re-vendoring is one assembler run |
-| G0.2 | `ifu_sourcing_policy` — always merge upstream `main` at a chosen SHA | Before the next IFU | Write it now; one paragraph in `CONTRIBUTING.rst` |
-| G0.3 | `packaging_name_conflict` — canonical `transformer-engine` vs the fork's `-rocm7/-rocm10` | **P5.1** (CM-002-PKGID is in that patch) | Prototype keeps the fork's current names; patch is marked `provisional`. Stage 3 rewrites |
-| G0.4 | `contract_surface_for_ctypes` (ABI-001) | Gate B | Not needed for the prototype; `is_fp8_fnuz` stays as-is in CM-002 |
+| G0.1 | `release_218_gap` | **P5** | **DECIDED 2026-08-30**: prototype pins `868d8d92`; shipping pin follows the two-track branch policy (stabilisation commits land on the release branch, not `dev`) |
+| G0.2 | `ifu_sourcing_policy` | Before the next IFU | **DECIDED 2026-08-30**: two-track — `dev` ← upstream `main`; `release_vX_rocm` ← upstream `release_vX`; never release→dev; release-only fixes cherry-picked as tracked patches. Remaining action: make G2's identity check branch-aware; write the paragraph into `CONTRIBUTING.rst` (location to confirm) |
+| G0.3 | `packaging_name_conflict` | **P5.1** | **DECIDED 2026-08-30**: keep `transformer_engine_rocm7/_rocm10/_rocm_jax`; v2.2 scheme withdrawn. CM-002-PKGID is no longer a conflict. Follow-up: turn the `get_te_core_package_info(rocm: bool)` signature change into an additive helper so the patch stops tripping |
+| G0.4 | `contract_surface_for_ctypes` (ABI-001) | Gate B | Open. Leaning: tiny versioned core-introspection C API (~3 symbols) in a public header. Not needed for the prototype |
+| G0.5 | `cxx_maintenance_strategy` | Stage 4 | Open, provisional B; evidence from B2's C++ arm |
 
 ### G1 · Regenerate `added_class` against 868d8d92 — 1 day · needs the **canonical-v2 classifier** (not in repo)
 
@@ -300,6 +301,12 @@ Two documents, both signed before the measurement they govern:
 Written into `proposals/te-rocm-plugin/thresholds.yaml` with a `approved_by` / `approved_on` field.
 P8 and B2 read the file and refuse to run if it is unsigned.
 
+**DONE 2026-08-30.** `thresholds.yaml` is signed: seam overhead 0 (by identity); import time ≤ +10 %;
+e2e throughput ≤ 1 % loss; graph breaks +0; checkpoint continuation 50 steps within 1e-3 relative;
+backtest zero silent failures, repair ≤ 25 % of historical, certification ≤ 5 engineer-days; C++ arm
+bands < 0.30 mechanized / 0.30–0.60 discuss / > 0.60 relabelled IFU. Owners are **deferred** — no
+sponsor or workstream owners at this stage; `owner: TBD` fields are inert.
+
 ---
 
 ## 5. Track B — the historical backtest (Stage 2)
@@ -347,8 +354,8 @@ P7/P8 results is the **Gate A** packet.
 | P0, P1, P3, P5 loop, P6 (running), P7, P8 microbench/import/compile/ckpt, B2 | | ✔ | |
 | P8 e2e smoke | | ✔ | ✔ 8 GPUs |
 
-Per the repo rule, the container image/tag and launch command are needed before P0. Nothing in the
-left column is blocked on it.
+This session already runs in the container (F10); the "workstation" column is retained only to mark
+which packages do not need a TE build or GPUs at all. Nothing is blocked on environment.
 
 ---
 

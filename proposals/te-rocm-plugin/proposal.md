@@ -166,6 +166,16 @@ refactor is meant to remove is therefore procedural and fixable **immediately**,
 proposal — which strengthens the case for writing the policy down in Stage 0, and slightly weakens the
 inference from "IFU took 3.5 weeks" to "the fork model costs 3.5 weeks per release."
 
+**The policy, decided 2026-08-30 — two-track.** `dev` IFUs merge upstream **`main`** at a chosen SHA.
+A ROCm release branch (`release_vX_rocm`) IFUs merge the matching upstream **`release_vX`** branch.
+Release branches are never merged into `dev`; a release-only fix that `dev` needs is cherry-picked as
+a manifest-tracked patch. The `3rdparty/transformer_engine_nvidia` gitlink records the pin on each
+branch, and the CI identity check is branch-aware — `merge-base` against `upstream/main` on `dev`,
+against `upstream/release_vX` on a release branch. Read this way, the 2.17 history (release
+tracking release) was *correct*; what was missing was the rule that says so, and the consequence
+that `dev` must never absorb a release-branch merge. It also settles `release_218_gap` without
+moving `dev`'s pin: the 2.18 stabilisation commits belong on `release_v2.18_rocm`, not on `dev`.
+
 ### 2.3 Key characterization findings
 
 1. `csrc/` is lightly modified, heavily extended; genuine shim-behavior modification is a minority of
@@ -261,17 +271,23 @@ submodule HEAD == manifest `upstream_sha` == `merge-base(upstream/main, fork/dev
 is a cross-check that the pin is what the fork actually merged, and the check that would have caught
 the v2.1.1 base error.
 
-**Package ownership — decided.** Two distributions installing into one `transformer_engine` package is
-unsafe. For the first production version the ROCm distribution **retains the canonical project name
-`transformer-engine`, served from the AMD index as the primary/only index**, with a PEP 440 local
-version (e.g. `2.18.0+rocm7.0.amd1`; exact qualifier fixed in Stage 1).
-`transformer-engine-rocm` as a *different* project name is rejected for certified deployments.
+**Package naming — decided 2026-08-30: keep the current names.** The ROCm distributions remain
+`transformer_engine_rocm7` / `transformer_engine_rocm10` / `transformer_engine_rocm_jax` with extras
+`rocm` / `rocm7` / `rocm10` (`setup.py:444-446`, `build_tools/utils.py:579-581`,
+`common/__init__.py:144`). The v2.2 scheme — canonical project name `transformer-engine` with a
+PEP 440 local version — is **withdrawn**. Consequence: `CM-002-PKGID` is no longer a conflict; the
+bootstrap patch carries the current package-identity logic unchanged. The residual risk that v2.2's
+scheme was designed against — an NVIDIA `transformer-engine` wheel co-installed into the same
+`transformer_engine` import package — is accepted, and mitigated by the load-time provenance
+fingerprint (defense in depth) plus the seam's loud-failure property (§3.5 amendment): a wrong
+install fails at `load_framework_extension`, it does not split-brain.
 
-> **Open conflict (new in v2.2).** The fork's `common/__init__.py` currently implements the *rejected*
-> scheme: core packages `transformer-engine-rocm7` / `transformer-engine-rocm10`, extras
-> `rocm_pytorch` / `rocm_jax`, and a **changed upstream function signature**
-> (`get_te_core_package_info(rocm: bool)`). Stage 1 must **rewrite** this logic, not hook it. Tracked
-> as manifest `CM-002-PKGID` and open decision `packaging_name_conflict`.
+> **Resolved (2026-08-30).** v2.2 flagged the fork's `common/__init__.py` as implementing a *rejected*
+> naming scheme. With the current names retained, that logic is simply what the `CM-002-PKGID`
+> patch carries. One item survives from the flag: the fork **changes an upstream function
+> signature** (`get_te_core_package_info(rocm: bool)`), which is a patch-fingerprint hazard on
+> every pin bump — it should become an additive helper rather than a signature change, so the
+> patch stops tripping whenever upstream touches that function.
 
 **Wheels** (unchanged in shape): `te-rocm-core` (binary, unique SONAME, `$ORIGIN` loading); torch
 extension (prebuilt for the certified matrix, sdist fallback); jax extension; pure-Python (vendored
@@ -730,14 +746,22 @@ discipline per §4.4; **`common/` splits C++ (backend build target) from Python 
 (2026-08-29); **upstream pinned as the `3rdparty/transformer_engine_nvidia` submodule with
 `update = none`, its gitlink the source of truth** (2026-08-29).
 
-**Open — four now carry due dates:**
+**Decided 2026-08-30** (recorded in the manifest's `open_decisions` with full text):
+
+| # | Decision | Outcome |
+|---|---|---|
+| 1 | `release_218_gap` | Prototype pins `868d8d92`. The shipping pin follows the branch policy below: `dev` stays at a `main` SHA; a ROCm release branch takes the matching upstream release branch, and with it the stabilisation commits. The gap is resolved by branch policy, not by moving `dev`'s pin. |
+| 2 | `ifu_sourcing_policy` | **Two-track.** `dev` IFUs merge upstream `main` at a chosen SHA; `release_vX_rocm` IFUs merge upstream `release_vX`. Release branches are never merged into `dev`; a release-only fix `dev` needs is cherry-picked as a manifest-tracked patch. The submodule gitlink records the pin per branch; the CI identity check is branch-aware. This retroactively explains the 2.17 history and makes it correct going forward. |
+| 3 | `packaging_name_conflict` | Keep the current `transformer_engine_rocm7/_rocm10/_rocm_jax` names; the v2.2 canonical-name scheme is withdrawn (§3.2). |
+| — | Owners | **Deferred** — no owners assigned at this stage; `owner: TBD` fields are inert. |
+| — | Thresholds | **Signed** — `thresholds.yaml`, 2026-08-30 (Stage-1 budget, Stage-2 backtest, C++ arm bands). |
+
+**Open — two remain:**
 
 | # | Decision | Due |
 |---|---|---|
-| 1 | **`release_218_gap`** — take the 15 `release_v2.18` commits before pinning, or pin a later `main` commit? The fork currently ships a tree labelled 2.18 that lacks 2.18's stabilisation. | Stage 0 |
-| 2 | **`ifu_sourcing_policy`** — always merge upstream `main` at a chosen SHA; never a release tip. Fixes a live, self-inflicted cost source. | Stage 0 |
-| 3 | **`packaging_name_conflict`** — §3.2's canonical `transformer-engine` vs the fork's `transformer-engine-rocm7/-rocm10` + `rocm_pytorch/rocm_jax` extras. | Stage 1 |
-| 4 | **`contract_surface_for_ctypes`** — route ABI-001 symbols through `TE_ROCM_EXTENSION_API`, or define a fourth versioned contract? | Gate B |
+| 4 | **`contract_surface_for_ctypes`** — route ABI-001 symbols through `TE_ROCM_EXTENSION_API`, or define a fourth versioned contract? Leaning: a deliberately tiny, versioned "core introspection" C API (~3 symbols) declared in a public header, because `common/__init__.py` needs `te_rocm_build` *before* any framework extension loads. | Gate B |
+| 5 | **`cxx_maintenance_strategy`** — provisional B (§4.1a); decided on the backtest's C++ arm. | Stage 4 |
 
 Also open: workstream owners; fork freeze date; pilot order; exact numeric bands; FL adopt-vs-reimplement;
 `qa/`, `docs/`, `examples/`, `benchmarks/` audit; backtest entry selection finalized.
