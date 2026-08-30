@@ -35,6 +35,7 @@ If any of these stop being true, the affected work packages change.
 | F9 | Vendored-Python divergence is 41 PyTorch + 18 JAX + 3 root/common files, 2,142+253 / 563+120 / 241+40 lines | manifest v2.4.1 | That is the patch queue's upper bound. PyTorch-only prototype: **44 files** |
 | F10 | This workstation has an MI350X and torch 2.12.0+rocm7.14.0 but **no TE build**; the repo rule is build only in the designated container | `CLAUDE.md` | Pure-Python work packages run here; anything that builds or runs kernels needs the container named first |
 | F11 | Upstream is pinned as the submodule **`3rdparty/transformer_engine_nvidia`** at `868d8d92`, with `update = none` in `.gitmodules`. The repo's documented `git submodule update --init --recursive` (`CLAUDE.md:69`, three CI sites) therefore **skips it**; only the assembler initializes it, explicitly and non-recursively, so upstream's own `cutlass`/`nccl`/`googletest` never enter the build (proposal §3.2). The base also happens to be an ancestor of `origin/dev`, but that is a **cross-check, not the source of truth** | `.gitmodules`, `git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD` | The pin is explicit and governed: CI asserts `submodule HEAD == manifest upstream_sha == merge-base(upstream/main, dev)`. The vendored tree is read from the submodule, never from the fork's history. **All C++ stays in this repo** — there is no separate backend repo; Stage 4 becomes build-target separation inside this tree |
+| F12 | The 85 modified upstream C++ files are **all hipified** (none in the native-excluded dirs); **78 carry ROCm guards, ~480 sites** (287 `#ifdef __HIP_PLATFORM_AMD__`, 179 `#ifndef`); no generated `_hip.*` files are in the tree. The 65 ROCm-only files (20,968 ln) have no upstream ancestor | `measure_divergence.sh`, `grep` over the modified set | The post-split C++ maintenance strategy (proposal §4.1a) is **provisional B — patch queue over the submodule, then hipify** — and is decided at Stage 4 on the strength of the backtest's **C++ arm** (B2 step 5). The prototype does not touch the C++ tree |
 
 ---
 
@@ -311,6 +312,7 @@ P8 and B2 read the file and refuse to run if it is unsigned.
 | Upstream 2.15 base | **second parent of that IFU merge commit** — the rule from Appendix A; `measure_divergence.sh --base` will assert it. Do **not** use `release_v2.15`'s tip |
 | Upstream 2.17 target | the second parent of the 2.17 IFU merge = `2e559f06` (on `release_v2.17`, not `main` — record this as a known deviation, since the experiment must replay history, not correct it) |
 | Historical effort | the branch's commit dates + PR review timeline: mid-July → Aug 22 |
+| **C++ arm inputs** | the guard edits in the pre-sync fork's `common/` C++ vs the 2.15 base, expressed as one patch per file by the P4 assembler (same format as the Python queue, `cxx_strategy: patch-queue`). Sample = the manifest's `backtest_plan.cxx_arm` selection rule; confirm the candidate files against actual 2.15→2.17 upstream churn in `common/` |
 
 ### B2 · Replay — 5-7 days
 
@@ -320,12 +322,20 @@ P8 and B2 read the file and refuse to run if it is unsigned.
 3. Record per patch: reapplied cleanly / tripped by ID / silently wrong (the last is found by the
    P6 tests, which is why B2 depends on P6).
 4. Repair only tripped patches; log engineer-hours per repair.
+5. **C++ arm.** Bump the C++ patch set (B1 inputs) the same way; for each file record re-applied /
+   tripped / applied-but-hipify-or-compile-fails (the third is the C++ analogue of "silently wrong"
+   and needs the container). Report the **trip rate** and the repair hours per tripped file. This
+   number is the evidence for the Stage-4 `cxx_maintenance_strategy` decision (proposal §4.1a): a
+   high trip rate means strategy B is a relabelled IFU; a low one means it is a real mechanization.
+   The arm is **informational at Gate A**, not pass/fail — the C++ strategy is not a Stage 0-2
+   deliverable.
 
 ### B3 · Report against G6 thresholds — 1 day
 
-Every threshold pass/fail, every case's outcome, the effort fraction vs historical, and — stated
-plainly — what the backtest could not test (long-tail patches, package behaviour, the full extension
-contract). That report plus the P7/P8 results is the **Gate A** packet.
+Every threshold pass/fail, every case's outcome, the effort fraction vs historical, **the C++ arm's
+trip rate and per-file outcomes (informational)**, and — stated plainly — what the backtest could
+not test (long-tail patches, package behaviour, the full extension contract). That report plus the
+P7/P8 results is the **Gate A** packet.
 
 ---
 
@@ -369,8 +379,10 @@ extension contract are production-ready — that is Gate B's question, answered 
 - **CustomRecipe adapter** — MXFP4 goes in via CM-003 patches (F8); the adapter is Stage 5.
 - **Backend separation, SONAME, origin ledger** — Stage 4. Decided: **the C++ stays in this repo**;
   there is no separate backend repo. Stage 4 separates by build target and directory, not by
-  repository. The manifest's `backend-repo` dispositions (BK-001/002/003) and proposal §3.2/§4.1
-  need re-wording to match — flagged, not yet done.
+  repository (manifest BK-001/002/003 and proposal §3.2/§4.1 updated accordingly).
+- **The C++ maintenance strategy** (proposal §4.1a) — provisional **B** (patch queue over the
+  submodule, then hipify), C selectively, A never as policy. Decided at Stage 4 with the backtest's
+  C++ arm in hand (B2 step 5). The prototype builds the fork's C++ exactly as today.
 - **JAX** — separate beta track; the prototype is PyTorch-only. The assembler is framework-neutral
   so Stage 7 reuses it.
 - **Packaging** (sole-ownership, local version, prebuilt wheels) — Stage 3. The prototype installs

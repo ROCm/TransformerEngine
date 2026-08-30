@@ -4,8 +4,8 @@
 
 # TE-ROCm divergence manifest
 metadata:
-  manifest_version: "2.4.2"
-  schema_version: "1.3"
+  manifest_version: "2.4.3"
+  schema_version: "1.4"
   classifier: canonical-v2
   generator: gen_manifest (hunk classifier; regenerate per sync)
   fork_repo: https://github.com/ROCm/TransformerEngine
@@ -85,6 +85,15 @@ metadata:
     repository; the compiled layers become separate build targets / directories, never a separate repo.
   mechanism_detail_fields: [pr_kind, capability_id, support_state, fallback_mechanism, future_options]
   metric_class_enum: [m1, migration_volume, inventory_only]
+  cxx_strategy_enum: [freeze, patch-queue, native-hip]   # schema 1.4; proposal Sec 4.1a options A / B / C
+  cxx_strategy_note: >-
+    Per-file maintenance strategy for the 85 modified upstream C++ files after the split (all are
+    hipified; 78 carry ROCm guards, ~480 sites). `patch-queue` = vendored upstream source from the
+    submodule + build-time guard patches keyed by manifest ID, then hipify as today. `native-hip` =
+    converted to a native HIP source and excluded from hipify. `freeze` = stop merging, port by hand -
+    never acceptable as a blanket policy. Default is PROVISIONAL patch-queue pending the backtest
+    C++ arm (open_decisions.cxx_maintenance_strategy). The 65 ROCm-only native files carry no
+    cxx_strategy: they have no upstream ancestor.
 
   added_class_status: MUST_REGENERATE
   added_class_notes: >-
@@ -108,6 +117,7 @@ metadata:
     - ABI-001 ctypes symbol inventory complete
     - ABI-002 disposition decided (carry pybind_helper.h with the torch extension, or generate its inventory from backend headers)
     - TE_ROCM_EXTENSION_API conformance covers enum VALUES, not only enum names (ABI-002-FAENUM)
+    - backtest_plan.cxx_arm reporting bands approved (before Stage 2); cxx_strategy set on BK-001 (provisional allowed)
     - release_218_gap decision recorded
     - CI asserts submodule HEAD == upstream_sha == merge-base(upstream/main, fork/dev)
 
@@ -129,6 +139,11 @@ metadata:
     `backend-repo` to `build-target`; the enum value was renamed. The compatibility obligation,
     SONAME, private core ABI and origin ledger are unchanged - they now describe build targets
     inside one repo rather than a second repo.
+  v243_addendum: >-
+    C++ maintenance strategy made explicit (proposal Sec 4.1a). Schema 1.4 adds cxx_strategy
+    (freeze | patch-queue | native-hip), set PROVISIONALLY to patch-queue on BK-001 with measured
+    cxx_facts; new open decision cxx_maintenance_strategy (due Stage 4); new backtest_plan.cxx_arm
+    supplying its evidence. No measurement change.
 
 # Retired because they have ZERO divergence against the true base. Their entire v2.3
 # delta was upstream release_v2.18 work the fork never merged. IDs are burned, not reused.
@@ -2107,6 +2122,14 @@ entries:
     path: "common/ C++ ONLY -> separate BUILD TARGET in this repo: libtransformer_engine_rocm.so (SONAME, versioned, $ORIGIN)"
     disposition: build-target
     repo_decision: "2026-08-29: all C++ stays in ROCm/TransformerEngine; no separate backend repo. Separation is by build target and directory, not by repository."
+    cxx_strategy: patch-queue            # PROVISIONAL default for all 85 files; per-file overrides allowed
+    cxx_strategy_status: provisional     # becomes `decided` at Stage 4 via open_decisions.cxx_maintenance_strategy
+    cxx_facts:
+      modified_upstream_cxx_files: 85
+      all_hipified: true                 # none in ck_fused_attn/, amd_detail/, rocshmem_api/ (those are ROCm-only ADDED files)
+      files_with_rocm_guards: 78
+      guard_sites: {ifdef_HIP_PLATFORM_AMD: 287, ifndef_HIP_PLATFORM_AMD: 179, if_defined_HIP_PLATFORM_AMD: 12, ifndef_USE_ROCM: 1, ifdef_HIPCC: 1}
+      generated_hipify_files_in_tree: 0  # build artifacts only, per CLAUDE.md
     patch_timing: n/a
     estimated_changed_lines: 6320         # was 6683; C++ only, headers and Python excluded
     measurement_quality: exact
@@ -2450,6 +2473,18 @@ open_decisions:
       transformer-engine-rocm7 / -rocm10 with rocm_pytorch / rocm_jax extras. Which wins?
     owner: TBD
     due: Stage 1
+  cxx_maintenance_strategy:
+    question: >-
+      After the Python seam decouples them, how are the 85 hipified, guard-laden upstream C++ files
+      maintained? A freeze / B patch-queue over the submodule then hipify / C de-guard to native HIP.
+    working_default: "B for all 85, C selectively, A never as blanket policy - PROVISIONAL, open for discussion"
+    evidence_required: "backtest_plan.cxx_arm trip rate and repair hours (Stage 2, informational at Gate A)"
+    why_it_matters: >-
+      B keeps upstream's commodity kernels flowing under the same governance as the Python queue,
+      but does not shrink the divergence: the guards ARE the divergence. Whether B is a mechanized
+      IFU or a relabelled one is an empirical question the C++ arm answers.
+    owner: TBD
+    due: Stage 4
 
 backtest_plan:
   historical_inputs:
@@ -2473,6 +2508,24 @@ backtest_plan:
     - {id: ABI-002-FAENUM, risk_role: enum member-set divergence,   expected: inventory-diff-detected,   ground_truth: "NVTE_Fused_Attn_Backend value inventory diff, not name-only"}
     - {id: PT-004-MXFP4, risk_role: custom-recipe retirement candidate, expected: reapplies,            ground_truth: recipe numerics}
     - {id: PT-008-NVFP4FIX, risk_role: upstream-pr retirement candidate, expected: reapplies,           ground_truth: nvfp4 exact tests}
+  cxx_arm:   # NEW v2.4.3 - evidence for open_decisions.cxx_maintenance_strategy; INFORMATIONAL at Gate A
+    method: >-
+      Express the pre-2.15-sync fork's guard edits in common/ C++ as one patch per file (P4
+      assembler, same format as the Python queue). Bump to the 2.17 target in certification mode.
+      Per file record: reapplied / tripped-by-id / applied-but-hipify-or-compile-fails. Report trip
+      rate and repair hours per tripped file.
+    selection_rule: >-
+      Risk-weighted, 8-12 files: (a) the 3 highest guard-density files; (b) 3 files with the highest
+      upstream churn in common/ over the actual 2.15->2.17 span (measure in B1); (c) 2 files with a
+      single small guard (the easy case, as control); (d) common/util/pybind_helper.h (ABI-002 - a
+      header whose divergence is the fused-attn enum split); (e) one public NVTE header (HDR-A).
+    candidate_files_to_confirm_in_B1:   # churn-prone in the 15 post-branch-point commits; confirm against 2.15->2.17
+      - transformer_engine/common/fused_attn/fused_attn.cpp
+      - transformer_engine/common/cast/dispatch/quantize.cuh
+      - transformer_engine/common/cast/fp8_blockwise/group_quantize_fp8_blockwise.cuh
+      - transformer_engine/common/util/pybind_helper.h
+    thresholds: TBD-stage-0   # informational, but the reporting bands (what counts as 'high' trip rate) are fixed BEFORE B2, like all others
+    outcome_feeds: open_decisions.cxx_maintenance_strategy
   note: >-
     case ids reference the 2.18 manifest for identity only; Stage 2 re-derives each against the
     reconstructed 2.15 sources and records its historical location. CM-002/CM-003/ABI-001 were

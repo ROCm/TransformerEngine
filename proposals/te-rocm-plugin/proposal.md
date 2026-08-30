@@ -16,7 +16,7 @@ See LICENSE for license information.
 | Measurement base | `ROCm/TransformerEngine` `dev@8af6efc` (full SHA `8af6efcd9a40…`, 2026-08-27, **IFU-2.18 merge**, version base 2.18.0.dev0) vs **`NVIDIA/TransformerEngine` `main` at `868d8d9216da…`** — the upstream commit the fork's IFU merge actually took, and exactly `merge-base(upstream/main, release_v2.18)`. **This base changed in v2.2**; see §2.0. Upstream `main` at 2.20.0.dev0 at time of writing. |
 | Companion artifacts | `divergence-manifest.yaml` **v2.4.2** — file-complete ledger, 81 entries (41 PyTorch + 18 JAX + 4 vendored-root/common + 18 structural, rebased to the corrected base; five v2.3 entries retired as measurement artifacts), `divergence-manifest-summary.md` v2.4, `implementation-plan.md`, `tools/measure_divergence.sh`, `tools/seam_inventory.py` |
 | v2.1.1 → v2.2 | **Measurement base corrected** (§2.0) — five phantom manifest entries retired, ten restated, the divergence trend reversed; `common/` Python↔C++ boundary resolved and BK-001 split; BOOT-001 rescoped 3 → ~190 lines; a fourth contract path (ABI-001) identified; §3.7 amended for base-class injection; four new open decisions |
-| v2.2 → v2.3 | **Two repository decisions** (2026-08-29): all C++ stays in `ROCm/TransformerEngine` — no separate backend repo; compiled layers become *build targets* (`backend-repo` → `build-target` throughout). Upstream pinned as the `3rdparty/transformer_engine_nvidia` submodule with `update = none`; its gitlink is the source of truth for the base. **§3.5 amended**: for the compiled-only milestone the seam is upstream's own loader plus a two-line alias, not a synthesized facade. ABI-002 (the `pybind_helper.h` boundary crossing) added to the manifest |
+| v2.2 → v2.3 | **Two repository decisions** (2026-08-29): all C++ stays in `ROCm/TransformerEngine` — no separate backend repo; compiled layers become *build targets* (`backend-repo` → `build-target` throughout). Upstream pinned as the `3rdparty/transformer_engine_nvidia` submodule with `update = none`; its gitlink is the source of truth for the base. **§3.5 amended**: for the compiled-only milestone the seam is upstream's own loader plus a two-line alias, not a synthesized facade. ABI-002 (the `pybind_helper.h` boundary crossing) added to the manifest. **§4.1a added**: the post-split C++ maintenance strategy made explicit — provisional B (patch queue over the submodule, then hipify), decided at Stage 4 on the backtest's new **C++ arm** |
 
 ---
 
@@ -471,6 +471,39 @@ discussion; B2 fused-attn enum (34) → capability RFC; C (~20) → `delete`. *v
 
 **ROCm-private symbols not in any header** → `ABI-001`. See §3.3.
 
+### 4.1a How the C++ is maintained after the split (new in v2.3 — **provisional, open for discussion**)
+
+§4.1 says upstream's `common/` is "no longer merged into ours" but did not say what replaces the
+merge. The measured shape of the C++ makes that the real question:
+
+- The **85 modified upstream C++ files are all hipified** — none live in the native-excluded dirs.
+  They are upstream CUDA sources with ROCm guards interleaved: **78 of 85 carry guards, ~480 sites**
+  (287 `#ifdef __HIP_PLATFORM_AMD__`, 179 `#ifndef`), transformed at build time by `hipify_torch`.
+  They are a merge product, not a backend AMD owns.
+- The **65 ROCm-only files** (`ck_fused_attn/`, `aotriton/`, `rocshmem_api/`, `amd_detail/`;
+  20,968 lines) have no upstream ancestor, are excluded from hipify, and are the actual AMD backend.
+  Nothing below applies to them.
+
+Three strategies exist for the 85, recorded per file in the manifest as `cxx_strategy`:
+
+| | Strategy | Hipify | Upstream kernel changes | Cost |
+|---|---|---|---|---|
+| **A** | **Freeze** — stop merging; the tree becomes AMD-owned as-is | unchanged | ported by hand via the origin ledger against the submodule | unbounded C++ drift; CUDA-shaped sources kept forever but never built as CUDA. **Not acceptable as a blanket policy** |
+| **B** | **C++ patch queue** — vendored upstream `.cu/.cuh/.cpp` from `3rdparty/transformer_engine_nvidia` + build-time patches carrying the guard edits, keyed by manifest ID, *then* hipify as today | unchanged, runs after assembly | flow in on every pin bump; tripped patches fail loudly by ID | mechanizes today's IFU — conflicts become attributable patch failures. **Does not shrink the magnitude**: the guards *are* the divergence, and upstream edits near a guard still trip |
+| **C** | **De-guard to native HIP**, per file — convert to a native source like `amd_detail/`, add to hipify's exclusion list, own it outright | removed for that file | "port" becomes "reimplement" | largest one-time cost; sensible only where AMD already replaces the kernel (CK/AITER) or guard density is extreme |
+
+**Working default: B for the 85, C selectively, A never as policy.** This is deliberately *not*
+decided here (`open_decisions.cxx_maintenance_strategy`, due Stage 4). B keeps upstream's commodity
+kernels — cast, activation, normalization, transpose — flowing with the same governance as the
+Python patch queue, and the submodule makes it possible. But B's value rests on one number nobody
+has measured: **the trip rate of guard patches across a real upstream delta.** The Stage-2 backtest
+therefore gains a **C++ arm** (§7, Stage 2): express the guard edits at the 2.15 base as patches,
+bump to 2.17, and count re-applied vs tripped, per file. If the trip rate is high, B is a relabelled
+IFU and C deserves more weight; if low, B is a genuine mechanization. The Stage-4 decision is made
+with that number, not before.
+
+For the prototype nothing changes: Stage 1 builds the fork's C++ tree exactly as today.
+
 ### 4.2 PyTorch Python (41 files; 2,142 added / 253 removed)
 
 ROCm-only additions (8,370 ln) → `relocate`: `triton_kernels/` (18 files, 6,566 ln) → `plugin/kernels/`,
@@ -582,7 +615,7 @@ baselines are not comparable.
 |---|---|---|
 | **0. Baseline + control** (~2 wk, overlaps all) | Complete atomic manifest; **regenerate `added_class` against the corrected base**; **resolve the four open decisions of §11**; **write the IFU sourcing policy**; freeze new in-place edits, enforced by branch protection/CI; name an **executive sponsor**; capture baselines. Upstream engagement starts: NVFP4 bugfix PR; #3401 comments; #3113 capability push; ROCm-JAX-plugin issues filed internally | Manifest meets its encoded `stage0_exit_requirements` (now incl. regenerated classification, CM-001..004 characterized, ABI-001 inventory complete, `release_218_gap` decided, CI asserting the merge-base identity); freeze enforced in CI |
 | **1. Seam proof inside the current fork** (3-5 day spike, then ~2 wk hardening) | BOOT-001 + the production in-package bootstrap (CM-001/CM-002); facade delegating 100% to the fork's existing compiled tex; vendored upstream Python at the pinned base; typed symbol inventory incl. `__all__`; **import-order tests against the nine early-binding sites**; **resolve `packaging_name_conflict`**; one Megatron smoke | Imports, stateful classes, symbols, compile/capture smoke, and checkpoint load work **without moving any C++**, against a **Stage-1 performance budget approved in Stage 0** |
-| **2. Historical sync backtest** (~2-3 wk) | A **counterfactual engineering experiment** (retrospective, hindsight-advantaged). Reconstruct actual historical inputs — **deriving the 2.15 base from that IFU merge commit's second parent, never from `release_v2.15`'s tip**. Build the layer over the risk-weighted entry set (now 11 cases incl. CM-002, CM-003, ABI-001); bump in certification mode | **Falsifiable numeric thresholds approved during Stage 0, before the backtest starts**: every selected incompatibility reapplies or fails loudly by item ID; zero silently dropped behavior; zero in-place edits outside the patch queue; repair effort below a stated fraction of reconstructed historical effort; contract inventory identifies every binary-rebuild requirement. **Gate A** input |
+| **2. Historical sync backtest** (~2-3 wk) | A **counterfactual engineering experiment** (retrospective, hindsight-advantaged). Reconstruct actual historical inputs — **deriving the 2.15 base from that IFU merge commit's second parent, never from `release_v2.15`'s tip**. Build the layer over the risk-weighted entry set (12 cases incl. CM-002, CM-003, ABI-001, ABI-002-FAENUM); bump in certification mode. **Plus the C++ arm** (§4.1a): the guard edits at the 2.15 base as one patch per file for 8–12 risk-weighted `common/` files, bumped the same way; per-file reapplied / tripped / applied-but-fails-to-hipify-or-compile, trip rate and repair hours | **Falsifiable numeric thresholds approved during Stage 0, before the backtest starts**: every selected incompatibility reapplies or fails loudly by item ID; zero silently dropped behavior; zero in-place edits outside the patch queue; repair effort below a stated fraction of reconstructed historical effort; contract inventory identifies every binary-rebuild requirement. **Gate A** input. The C++ arm is **informational** at Gate A — its reporting bands are fixed in Stage 0 like all others, but it feeds the Stage-4 `cxx_maintenance_strategy` decision, not Gate A's pass/fail |
 | **3. Compatibility-layer productionization** (~4 wk; funded at Gate A) | Tiered patch queue + override registry with full governance; three contracts embedded **plus the ABI-001 resolution**; production bootstrap + package per §3.2; diagnostics; install/uninstall tests | Certified PyTorch package **using the existing fork backend** → **Gate B** input |
 | **4. Backend separation** (~4-6 wk; authorized at Gate B) | `common/` **C++** + `csrc/` become independent build targets and directories **in this repo** (no move between repos); keep `common/` Python vendored (BK-001B); SONAME; private versioned core ABI; prebuilt wheels; origin ledger against the submodule | Same behavior and performance as Stage 3 |
 | **5. Sidecar retirement** (~3-4 wk) | CustomRecipe adapter; relocate MXFP4 + triton_kernels; **CM-003 recipe-class patches**; capability provider (PyTorch), starting with `te.fp8.fnuz` retiring all three `is_fp8_fnuz` copies | Measurable M2 reduction; Stage-5 checkpoint gate (§8.5) |

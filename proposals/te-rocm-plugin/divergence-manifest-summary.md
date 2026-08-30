@@ -200,6 +200,26 @@ consequences:
 
 ---
 
+## v2.4.2 / v2.4.3: two repository decisions and the C++ strategy
+
+**One repository.** All C++ stays in `ROCm/TransformerEngine`; the compiled layers become build
+targets, not a second repo. BK-001/002/003 re-dispositioned `backend-repo` → `build-target`.
+
+**Upstream is a submodule.** `3rdparty/transformer_engine_nvidia` at `868d8d92`, with
+`update = none` so the repo's `--init --recursive` skips it (upstream's `cutlass`/`nccl` never enter
+the build); the assembler initializes it explicitly. Its gitlink is now the **source of truth** for
+`upstream_sha`; the merge-base is a cross-check. CI asserts the three-way identity.
+
+**C++ maintenance strategy — provisional.** The 85 modified upstream C++ files are all hipified and
+78 carry ROCm guards (~480 sites); they are a merge product, not an AMD backend. Schema 1.4 adds
+`cxx_strategy` (`freeze` | `patch-queue` | `native-hip`), set **provisionally to `patch-queue`** on
+BK-001 — vendored upstream source from the submodule + build-time guard patches, then hipify as
+today. Open for discussion as `open_decisions.cxx_maintenance_strategy` (due Stage 4); the new
+**`backtest_plan.cxx_arm`** measures the guard-patch trip rate across 2.15→2.17 to decide it.
+The 65 ROCm-only native files carry no `cxx_strategy` — they have no upstream ancestor.
+
+---
+
 ## New: the seam's early-binding surface
 
 Upstream has **44** late-bound `import transformer_engine_torch as tex` sites and **9** early-binding
