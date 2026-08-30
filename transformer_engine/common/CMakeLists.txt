@@ -739,6 +739,47 @@ else() # USE_ROCM
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
+
+  # MXFP8 grouped GEMM backends are architecture specific: CK's TDM pipeline only
+  # compiles for gfx1250, so it cannot be built for every architecture in
+  # CMAKE_HIP_ARCHITECTURES like the rest of the library. Compile each backend
+  # into its own object library pinned to its architecture, as gemm/kittens does
+  # for its CDNA3/CDNA4 kernels, and tell the dispatcher which ones exist.
+  set(_mx_grouped_gemm_arch_objs "")
+  set(_mx_grouped_gemm_have_defs "")
+
+  function(mx_grouped_gemm_add_arch GFX SOURCE)
+    if(NOT "${GFX}" IN_LIST CMAKE_HIP_ARCHITECTURES)
+      return()
+    endif()
+    string(TOUPPER "${GFX}" _gfx_upper)
+    set(_target "mx_grouped_gemm_${GFX}")
+
+    add_library(${_target} OBJECT ${SOURCE})
+    set_source_files_properties(${SOURCE} PROPERTIES LANGUAGE HIP)
+    set_target_properties(${_target} PROPERTIES
+        HIP_ARCHITECTURES "${GFX}" POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(${_target} PRIVATE
+        $<TARGET_PROPERTY:transformer_engine,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(${_target} PRIVATE
+        $<TARGET_PROPERTY:transformer_engine,COMPILE_DEFINITIONS>)
+    target_compile_options(${_target} PRIVATE -fno-gpu-rdc)
+    target_link_libraries(${_target} PRIVATE hip::host hip::device)
+
+    set(_mx_grouped_gemm_arch_objs ${_mx_grouped_gemm_arch_objs}
+        $<TARGET_OBJECTS:${_target}> PARENT_SCOPE)
+    set(_mx_grouped_gemm_have_defs ${_mx_grouped_gemm_have_defs}
+        NVTE_HAVE_MX_GROUPED_GEMM_${_gfx_upper} PARENT_SCOPE)
+  endfunction()
+
+  mx_grouped_gemm_add_arch(gfx950
+      gemm/ck_grouped_gemm/ck_mx_grouped_gemm_gfx950_hip.cpp)
+  mx_grouped_gemm_add_arch(gfx1250
+      gemm/ck_grouped_gemm/ck_mx_grouped_gemm_gfx1250_hip.cpp)
+
+  target_sources(transformer_engine PRIVATE ${_mx_grouped_gemm_arch_objs})
+  target_compile_definitions(transformer_engine PRIVATE ${_mx_grouped_gemm_have_defs})
+
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()
 
