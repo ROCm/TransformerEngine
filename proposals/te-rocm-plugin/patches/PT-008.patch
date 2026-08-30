@@ -1,0 +1,310 @@
+# manifest: PT-008
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: split-features
+# expiry: see features
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (5 feature sub-entries)
+--- a/transformer_engine/pytorch/module/linear.py
++++ b/transformer_engine/pytorch/module/linear.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -19,6 +21,8 @@
+ 
+ from .base import (
+     fill_userbuffers_buffer_for_all_gather,
++    fused_ag_gemm_eligible,
++    ub_overlap_disabled,
+     get_dummy_wgrad,
+     get_ub,
+     get_ub_is_fp8,
+@@ -66,10 +70,12 @@
+     QuantizedTensorStorage,
+     Quantizer,
+     prepare_for_saving,
++    restore_from_saved,
+     restore_from_func_ctx,
+ )
+ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+ from ..tensor.mxfp8_tensor import MXFP8Quantizer
++from ..tensor.nvfp4_tensor import NVFP4Quantizer
+ from ..tensor.utils import clear_columnwise_cache, is_custom
+ from ..export import is_in_onnx_export_mode, assert_warmed_up
+ from ..cpu_offload import (
+@@ -79,6 +85,7 @@
+     mark_activation_offload,
+ )
+ from ...debug.pytorch.debug_state import TEDebugState
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ 
+ __all__ = ["Linear"]
+ 
+@@ -158,6 +165,10 @@
+     cpu_offloading: bool
+     is_grad_enabled: bool
+ 
++    # --- ROCm feature fields ---
++    keep_fp8_weight_transpose_cache: bool
++    use_fsdp2: bool
++
+ 
+ @dataclass(slots=True)
+ class LinearBwdArgs:
+@@ -228,6 +239,11 @@
+     cpu_offloading: bool = False
+     owns_input: bool = False
+ 
++    # --- ROCm feature fields ---
++    keep_fp8_weight_transpose_cache: bool = True
++    use_fsdp2: bool = False
++    autocast_fp8_reduction_skipped: bool = False
++
+     # --- Per-backward scratch state (populated inside _linear_backward) ---
+     ub_obj_gradout: Optional[Any] = None
+ 
+@@ -287,6 +303,8 @@
+     debug = args.debug
+     backward_override = args.backward_override
+     is_fsdp2 = args.is_fsdp2
++    keep_fp8_weight_transpose_cache = args.keep_fp8_weight_transpose_cache
++    use_fsdp2 = args.use_fsdp2
+     if backward_override == "high_precision":
+         save_original_input = True
+     elif backward_override == "dequantized":
+@@ -420,14 +438,25 @@
+         # No need to set the quantizer states if weight is already quantized
+         # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+         if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
+-            columnwise_usage = is_grad_enabled and inp.requires_grad and not is_fsdp2
++            columnwise_usage = (
++                is_grad_enabled
++                and inp.requires_grad
++                and not is_fsdp2
++                and keep_fp8_weight_transpose_cache
++            )
+             if backward_override is not None:
+                 columnwise_usage = False
+-            if not columnwise_usage:
++            if not columnwise_usage and keep_fp8_weight_transpose_cache:
+                 columnwise_usage = (
+                     is_fp8_activation_recompute_enabled()
+                     and not in_fp8_activation_recompute_phase()
+                 )
++            # NVFP4 must produce columnwise data at quantization time
++            # (no lazy transpose like Float8Tensor), but only when backward actually needs it.
++            # In dequantized/high_precision backward_override modes the weight is dequantized
++            # before the dgrad GEMM, so columnwise data is not required.
++            if not columnwise_usage and backward_override is None and isinstance(weight_quantizer, NVFP4Quantizer):
++                columnwise_usage = is_grad_enabled and inp.requires_grad
+             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+         elif isinstance(weight, QuantizedTensor):
+             weight_quantizer = weight._quantizer
+@@ -488,6 +517,12 @@
+     # Forward GEMM
+     # Note: y = x * w^T
+     # ------------------------------------------------------
++    # NVFP4TensorStorage doesn't have _transpose (no lazy transpose like Float8Tensor),
++    # so guard with hasattr.
++    if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache and hasattr(weightmat, '_transpose'):
++        assert weightmat._transpose is None or weightmat._transpose.numel() == 0, \
++            "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
++
+     nvtx_range_push(f"{nvtx_label}.gemm")
+     gemm_out, *_, reduce_scatter_out = general_gemm(
+         weightmat,
+@@ -576,6 +611,12 @@
+         if backward_needs_input:
+             saved_inputmat = inputmat
+ 
++        # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
++        # Not needed in backward override modes since the weight is used in high-precision there.
++        if backward_override is None and inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
++            if isinstance(weightmat, QuantizedTensorStorage):
++                weightmat.update_usage(columnwise_usage=True)
++
+         if cpu_offloading and saved_inputmat is not None:
+             mark_activation_offload(saved_inputmat)
+ 
+@@ -683,6 +724,10 @@
+     bwd_args.sequence_parallel = fwd_args.sequence_parallel
+     bwd_args.backward_input_needs_gather = fwd_args.backward_input_needs_gather
+ 
++    # ROCm feature fields
++    bwd_args.keep_fp8_weight_transpose_cache = fwd_args.keep_fp8_weight_transpose_cache
++    bwd_args.use_fsdp2 = fwd_args.use_fsdp2
++
+     # Userbuffers
+     bwd_args.ub_name = fwd_args.ub_name
+     bwd_args.ub_overlap_ag = fwd_args.ub_overlap_ag_dgrad
+@@ -1037,6 +1082,8 @@
+             )
+             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+ 
++            if bwd_args.fp8 and not bwd_args.keep_fp8_weight_transpose_cache:
++                weight_fp8.update_usage(columnwise_usage=False)
+             # FSDP2 only handles deallocation all-gathered weights that it allocates.
+             # Columnwise data is derived from rowwise data after allgather for fp8
+             # and 2d block-scaled weights in TE managed memory. So we need to clear
+@@ -1360,14 +1407,19 @@
+             ctx.save_for_backward(*tensors_to_save)
+             ctx.tensor_objects = tensor_objects
+             ctx.backward_objects = bwd_args
++            bwd_args.autocast_fp8_reduction_skipped = False
+             if fwd_args.fp8 and (
+                 fwd_args.input_requires_grad
+                 or fwd_args.weight_requires_grad
+                 or fwd_args.bias_requires_grad
+             ):
+                 bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
++                bwd_args.autocast_fp8_reduction_skipped = (
++                    FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
++                )
+             if fwd_args.backward_override is not None:
+                 bwd_args.reduce_and_update_bwd_fp8_tensors = False
++                bwd_args.autocast_fp8_reduction_skipped = False
+ 
+         return out, new_weight_workspace
+ 
+@@ -1386,6 +1438,7 @@
+             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
+         result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
+         reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
++        autocast_fp8_reduction_skipped = bwd_args.autocast_fp8_reduction_skipped
+         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
+         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
+         ctx.backward_objects = None
+@@ -1393,7 +1446,10 @@
+         if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
+             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
++            if autocast_fp8_reduction_skipped:
++                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
+             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
++
+         return result
+ 
+ 
+@@ -1477,6 +1533,20 @@
+                    This can help in latency bound communication situations.
+                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
+                    is used.
++    keep_fp8_weight_transpose_cache: bool, default = `True`
++                Controls whether to cache the FP8 weight transpose buffer during training.
++
++                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation,
++                which can improve performance but significantly increases memory usage.
++                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed.
++                This reduces memory consumption, especially during checkpoint loading and runtime.
++
++                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training.
++                Caching FP8 weight transposes can double memory usage for modules such as `Linear`,
++                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and
++                reduced efficiency of PyTorch's caching allocator.
++
++                Use this setting to balance memory usage and performance based on your training configuration.
+     save_original_input : bool, default = False
+                        If set to ``True``, always saves the original input tensor rather than the
+                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
+@@ -1511,6 +1581,8 @@
+         symmetric_ar_type: Optional[str] = None,
+         save_original_input: bool = False,
+         name: Optional[str] = None,
++        keep_fp8_weight_transpose_cache: bool = True,
++        use_fsdp2: bool = False
+     ) -> None:
+         super().__init__(name)
+ 
+@@ -1527,6 +1599,8 @@
+         self.save_original_input = save_original_input
+ 
+         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
++        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
++        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
+ 
+         if device == "meta":
+             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
+@@ -1581,6 +1655,18 @@
+             self.parallel_mode == "row" and self.sequence_parallel and ub_overlap_ag
+         )
+ 
++        # Layers with no overlap backend take the non-overlapped path.
++        if ub_name is not None and is_ub_initialized():
++            if ub_overlap_disabled(ub_name + "_fprop"):
++                self.ub_overlap_rs_fprop = False
++                self.ub_overlap_ag_fprop = False
++            if ub_overlap_disabled(ub_name + "_dgrad"):
++                self.ub_overlap_ag_dgrad = False
++                self.ub_overlap_rs_dgrad = False
++                self.ub_bulk_dgrad = False
++            if ub_overlap_disabled(ub_name + "_wgrad"):
++                self.ub_bulk_wgrad = False
++
+         if any(
+             [
+                 self.ub_overlap_rs_fprop,
+@@ -1917,6 +2003,17 @@
+             linear_bias_tensor = (
+                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
+             )
++
++            if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
++                self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
++                self.activation_dtype, self.tp_size, self.fp8,
++            ):
++                ub_overlap_ag_fprop = False
++            if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
++                self.ub_name + "_dgrad", inp, weight_tensor, None,
++                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
++            ):
++                ub_overlap_ag_dgrad = False
+             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
+             fwd_args = LinearFwdArgs(
+                 # tensors
+@@ -1977,6 +2074,9 @@
+                 # misc
+                 cpu_offloading=is_cpu_offload_enabled(),
+                 is_grad_enabled=is_grad_enabled,
++                # ROCm feature fields
++                keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache,
++                use_fsdp2=self.use_fsdp2,
+             )
+             out, new_weight_workspace = linear_fn(
+                 *autograd_ctx,
+@@ -2155,12 +2255,25 @@
+             return [None]
+         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+         weight_quantizer.internal = True
+-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+-        # This wont work when primay weights are in fp8 because of 2 reasons
+-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+-        # currently dont support dequantization.
+-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+-        # unswizzled layout.
+-        if not self.primary_weights_in_fp8:
+-            weight_quantizer.optimize_for_gemm = True
++        if IS_HIP_EXTENSION:
++            # NVFP4 must produce columnwise data at quantization time (no lazy transpose like
++            # Float8Tensor), but only when the backward will actually use it in FP4 form.
++            # In dequantized/high_precision backward_override modes the weight is dequantized
++            # before the dgrad GEMM, so columnwise data is not required.
++            is_nvfp4 = isinstance(weight_quantizer, NVFP4Quantizer)
++            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
++            backward_override = fp8_recipe.backward_override if fp8_recipe is not None else None
++            if is_nvfp4 and backward_override is not None:
++                weight_quantizer.set_usage(columnwise=False)
++            else:
++                weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
++        else:
++            # Preswizzle the weights during quantization instead of lazily inside every GEMM.
++            # This wont work when primay weights are in fp8 because of 2 reasons
++            # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
++            # currently dont support dequantization.
++            # 2. For FSDP2, quantized weight all-gather would need to be done in the
++            # unswizzled layout.
++            if not self.primary_weights_in_fp8:
++                weight_quantizer.optimize_for_gemm = True
+         return [weight_quantizer]

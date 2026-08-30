@@ -1,0 +1,30 @@
+# manifest: PT-038
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: patch
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py
++++ b/transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py
+@@ -18,6 +18,7 @@
+     _2X_ACC_WGRAD,
+     fill_userbuffers_buffer_for_all_gather,
+     get_ub,
++    ub_overlap_disabled,
+     using_cublasmp_backend,
+ )
+ from ...quantized_tensor import Quantizer
+@@ -678,6 +679,12 @@
+             linear = window[0]
+             if linear._userbuffers_options is None:
+                 continue
++            # No buffer was registered for these names, so there is nothing to overlap with.
++            comm_name = linear._userbuffers_options["comm_name"]
++            if ub_overlap_disabled(comm_name + "_dgrad") or ub_overlap_disabled(
++                comm_name + "_wgrad"
++            ):
++                continue
+ 
+             # Check if next op is bias
+             bias = None

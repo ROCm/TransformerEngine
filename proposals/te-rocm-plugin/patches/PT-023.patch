@@ -1,0 +1,85 @@
+# manifest: PT-023
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: split-features
+# expiry: see features
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (2 feature sub-entries)
+--- a/transformer_engine/pytorch/module/_common.py
++++ b/transformer_engine/pytorch/module/_common.py
+@@ -1,20 +1,32 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+ 
+ """Internal function used by multiple modules."""
+ 
++
+ import dataclasses
+ import queue
+ from typing import Any, Callable, List, Optional, Tuple, Union
+ 
+ import torch
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ 
+ from .. import cpp_extensions as tex
+ from ..constants import TE_DType
+ from ..export import is_in_onnx_export_mode
+ from ..utils import get_default_init_method
+ 
++if IS_HIP_EXTENSION:
++    from ..triton_kernels.norms_common import (
++        te_layernorm_fwd_triton,
++        te_layernorm_bwd_triton,
++        te_rmsnorm_fwd_triton,
++        te_rmsnorm_bwd_triton
++    )
++    import os
+ 
+ def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
+     """Set the amax reduction group on a quantizer; no-op if it doesn't support it.
+@@ -32,13 +44,15 @@
+ 
+ 
+ def _get_normalization_func(normalization: str, forward: bool):
++    use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
++    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
+     fwd_normalization_funcs = {
+-        "LayerNorm": tex.layernorm_fwd,
+-        "RMSNorm": tex.rmsnorm_fwd,
++        "LayerNorm":  te_layernorm_fwd_triton if use_layernorm_triton else tex.layernorm_fwd,
++        "RMSNorm": te_rmsnorm_fwd_triton if use_rmsnorm_triton else tex.rmsnorm_fwd,
+     }
+     bwd_normalization_funcs = {
+-        "LayerNorm": tex.layernorm_bwd,
+-        "RMSNorm": tex.rmsnorm_bwd,
++        "LayerNorm": te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd,
++        "RMSNorm": te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd,
+     }
+ 
+     if forward:
+@@ -145,6 +159,7 @@
+ 
+         # Out-of-place concatenation if tensor properties do not match
+         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
++        numel = tensors[0].numel()
+         for tensor in tensors[1:]:
+             if (
+                 tensor.dtype != dtype
+@@ -154,6 +169,14 @@
+             ):
+                 return torch.cat(tensors, dim=dim)
+             data_ptr += tensor.size(dim) * data_ptr_stride
++            numel += tensor.numel()
++
++        # Out-of-place concatenation and reallocation if storage size is not sufficient
++        if tensors[0].untyped_storage().size() < numel*tensors[0].element_size():
++            out = torch.cat(tensors, dim=dim)
++            for tensor, (split_start, split_end) in zip(tensors, split_ranges):
++                tensor.data = out[split_start:split_end]
++            return out
+ 
+         # No-op concatenation
+         out = tensors[0].as_strided(out_shape, strides)

@@ -1,0 +1,74 @@
+# manifest: JX-008
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: build-system
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/jax/setup.py
++++ b/transformer_engine/jax/setup.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -48,13 +50,17 @@
+     shutil.copyfile(license_src, license_dst)
+ 
+ 
+-from build_tools.build_ext import get_build_ext
++from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
+ from build_tools.utils import copy_common_headers, min_python_version_str
++from build_tools.utils import rocm_build, rocm_version
+ from build_tools.te_version import te_version
+ from build_tools.jax import setup_jax_extension, install_requirements, test_requirements
+ 
+ from pybind11.setup_helpers import build_ext as BuildExtension
+ 
++if rocm_build():
++    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
++
+ os.environ["NVTE_PROJECT_BUILDING"] = "1"
+ CMakeBuildExtension = get_build_ext(BuildExtension, True)
+ 
+@@ -112,6 +118,8 @@
+     # Extensions
+     common_headers_dir = "common_headers"
+     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
++    if rocm_build():
++        copy_hipify_tools(current_file_path.parent.parent, current_file_path)
+     ext_modules = [
+         setup_jax_extension(
+             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
+@@ -123,16 +131,19 @@
+     # us to detect CUDA version dynamically during compilation and
+     # choose the correct wheel for te core lib.
+     __version__ = te_version()
+-    te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
++    if not rocm_build():
++        te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
++    else:
++        te_core = f"transformer_engine_rocm{rocm_version()[0]}=={__version__}"
+     install_requires = install_requirements() + [te_core]
+ 
+     # Configure package
+     setuptools.setup(
+-        name="transformer_engine_jax",
++        name="transformer_engine_rocm_jax" if rocm_build() else "transformer_engine_jax",
+         version=__version__,
+         description="Transformer acceleration library - Jax Lib",
+         ext_modules=ext_modules,
+-        cmdclass={"build_ext": CMakeBuildExtension},
++        cmdclass={"build_ext": CMakeBuildExtension, "sdist": SdistWithLocalVersion},
+         python_requires=f">={min_python_version_str()}",
+         install_requires=install_requires,
+         tests_require=test_requirements(),
+@@ -141,5 +152,7 @@
+     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
+         shutil.rmtree(common_headers_dir)
+         shutil.rmtree("build_tools")
++        if rocm_build():
++            clear_hipify_tools_copy(current_file_path)
+         if license_dst.is_file():
+             license_dst.unlink()

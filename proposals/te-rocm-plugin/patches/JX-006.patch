@@ -1,0 +1,97 @@
+# manifest: JX-006
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: patch
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/jax/cpp_extensions/normalization.py
++++ b/transformer_engine/jax/cpp_extensions/normalization.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -6,6 +8,7 @@
+ import warnings
+ import operator
+ from functools import partial, cache, reduce
++from packaging import version
+ from typing import Optional, Union
+ 
+ import jax
+@@ -14,6 +17,7 @@
+ from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
+ from jax.interpreters.mlir import ir
+ from jax.sharding import PartitionSpec
++from .misc import is_hip_extension
+ 
+ import transformer_engine_jax
+ from transformer_engine_jax import NVTE_Norm_Type
+@@ -382,8 +386,12 @@
+         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+             scaling_mode
+         ).get_scale_shape_2x(x.shape, is_padded=False)
+-        # slice out padding for mxfp8, noop for DelayedScaling
+-        scale_inv = scale_inv.flatten()[: reduce(operator.mul, rowwise_scale_inv_shape, 1)].reshape(
++        # Slice out the padding for mxfp8 -- the kernel writes to strided 2D
++        # positions, not contiguous. For 1D MXFP8: allocated [padded_rows,
++        # padded_cols], kernel writes [:actual_rows, :actual_cols]
++        scale_inv = jax.lax.slice(
++            scale_inv,
++            [0] * scale_inv.ndim,
+             rowwise_scale_inv_shape
+         )
+         if quantize_layout.has_colwise:
+@@ -672,6 +680,8 @@
+         value_types,
+         result_types,
+     ):
++        if version.parse(jax.__version__) < version.parse("0.5.0"):
++            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
+         del (
+             zero_centered_gamma,
+             epsilon,
+@@ -1172,20 +1182,6 @@
+         )
+         colwise_scale_inv = rowwise_scale_inv
+ 
+-    # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
+-    # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
+-    # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
+-    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+-        rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
+-            x.shape, is_padded=False
+-        )
+-        rowwise_scale_inv = rowwise_scale_inv.flatten()[
+-            : reduce(operator.mul, rowwise_unpadded_shape)
+-        ].reshape(rowwise_unpadded_shape)
+-        colwise_scale_inv = colwise_scale_inv.flatten()[
+-            : reduce(operator.mul, colwise_unpadded_shape)
+-        ].reshape(colwise_unpadded_shape)
+-
+     scaled_tensor = ScaledTensorFactory.create(
+         data=rowwise_casted_output,
+         scale_inv=rowwise_scale_inv,
+@@ -1426,20 +1422,6 @@
+         )
+         colwise_scale_inv = rowwise_scale_inv
+ 
+-    # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
+-    # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
+-    # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
+-    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+-        rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
+-            x.shape, is_padded=False
+-        )
+-        rowwise_scale_inv = rowwise_scale_inv.flatten()[
+-            : reduce(operator.mul, rowwise_unpadded_shape)
+-        ].reshape(rowwise_unpadded_shape)
+-        colwise_scale_inv = colwise_scale_inv.flatten()[
+-            : reduce(operator.mul, colwise_unpadded_shape)
+-        ].reshape(colwise_unpadded_shape)
+-
+     scaled_tensor = ScaledTensorFactory.create(
+         data=rowwise_casted_output,
+         scale_inv=rowwise_scale_inv,

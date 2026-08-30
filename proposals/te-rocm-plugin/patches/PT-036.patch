@@ -1,0 +1,52 @@
+# manifest: PT-036
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: patch
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/tensor/utils.py
++++ b/transformer_engine/pytorch/tensor/utils.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -20,7 +22,7 @@
+ from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+ from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
+ from ..optimizers.multi_tensor_apply import multi_tensor_applier
+-from ..utils import is_non_tn_fp8_gemm_supported
++from ..utils import is_non_tn_fp8_gemm_supported, is_fp8_fnuz
+ from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
+ 
+ 
+@@ -368,7 +370,7 @@
+     # Step 3: Update scales and scale_invs.
+     # ---------------------------------------------------------------------------------------------
+     if fp8_dtype == DType.kFloat8E4M3:
+-        max_fp8 = 448.0
++        max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
+     elif fp8_dtype == DType.kFloat8E5M2:
+         max_fp8 = 57344.0
+     else:
+@@ -531,7 +533,7 @@
+     # Step 3: Update scales and scale_invs.
+     # ---------------------------------------------------------------------------------------------
+     if fp8_dtype == DType.kFloat8E4M3:
+-        max_fp8 = 448.0
++        max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
+     elif fp8_dtype == DType.kFloat8E5M2:
+         max_fp8 = 57344.0
+     else:
+@@ -952,7 +954,8 @@
+         if isinstance(model_weight, Float8Tensor):
+             # Delayed scaling and per-tensor current scaling: if backend does not support
+             # non-transposed FP8 GEMM, pre-create the transpose.
+-            if not is_non_tn_fp8_gemm_supported():
++            # ROCm: add check for columnwise_usage from the quantizer since keep_fp8_weight_transpose_cache can be false.
++            if model_weight._quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported():
+                 model_weight._create_transpose()
+         elif isinstance(model_weight, Float8BlockwiseQTensor):
+             # Blockwise scaling: create column-wise storage.

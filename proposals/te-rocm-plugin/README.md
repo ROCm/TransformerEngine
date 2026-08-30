@@ -18,6 +18,8 @@ plus a ROCm plugin and an AMD-maintained compiled backend**.
 | [`implementation-plan.md`](implementation-plan.md) | Work breakdown for Stages 0–2: prototype track (P0–P8, two exits), governance track (G0–G6), backtest track (B1–B3), environment matrix, gate criteria. |
 | [`implementation-plan-stages-3-9.md`](implementation-plan-stages-3-9.md) | Work breakdown for Stages 3–9 with contingency tags (`[GATE-A]`, `[GATE-B]`, `[EVIDENCE: …]`); adds facts F13–F20, incl. that the extension is not linked against the core lib (F13) and the JAX handler-dict seam (F16). |
 | [`thresholds.yaml`](thresholds.yaml) | **Signed 2026-08-30** — Stage-1 performance budget, Stage-2 backtest thresholds, C++ arm reporting bands. P8 and B2 refuse to run if unsigned. |
+| [`tools/assemble_overlay.py`](tools/assemble_overlay.py) | Builds the pure-Python overlay: upstream tree from the submodule + `patches/` in dependency order + fork-only files + symlinked binaries. `check` / `build` / `gen` / `diff-fork`. |
+| [`patches/`](patches/) | The build-tier patch queue, one file per manifest entry, seeded from the fork's divergence. P5 shrinks and splits these. |
 | [`tools/measure_divergence.sh`](tools/measure_divergence.sh) | Regenerates every figure in the above. Run it per sync. |
 
 ## Measurement rules (normative — read before quoting any number)

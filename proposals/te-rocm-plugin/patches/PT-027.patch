@@ -1,0 +1,63 @@
+# manifest: PT-027
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/quantized_tensor.py
++++ b/transformer_engine/pytorch/quantized_tensor.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -5,6 +7,8 @@
+ """Pure Python base classes for quantization."""
+ 
+ from __future__ import annotations
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
++import os
+ from typing import Optional, Tuple, Iterable, Any, Dict, Union
+ import abc
+ import warnings
+@@ -508,7 +512,13 @@
+         # Calculate stride from shape if not provided. When creating this object from
+         # C++ code, we provide the stride computed from shape in C++ to avoid the
+         # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
+-        stride = _stride_from_shape(shape) if stride is None else stride
++        if stride is None:
++            stride = _stride_from_shape(shape)
++        if IS_HIP_EXTENSION and device == torch.device("cuda"):
++            # Without passing explicit device index to _make_wrapper_subclass tests fail with
++            # RuntimeError at autograd: 0 <= device.index() &&
++            # device.index() < static_cast<c10::DeviceIndex>(device_ready_queues_.size())
++            device = torch.device("cuda", torch.cuda.current_device())
+         instance = torch.Tensor._make_wrapper_subclass(
+             cls,
+             shape,
+@@ -713,7 +723,7 @@
+         # New empty op (used by DCP async staging to create CPU copies)
+         if func == torch.ops.aten.new_empty.default:
+             tensor = args[0]
+-            size = args[1]
++            size = torch.Size(args[1])
+             dtype = kwargs.get("dtype", tensor.dtype)
+             device = kwargs.get("device", tensor.device)
+             pin_memory = kwargs.get("pin_memory", False)
+@@ -722,8 +732,13 @@
+                     f"{type(tensor).__name__} does not have a quantizer; "
+                     "cannot create new_empty QuantizedTensor"
+                 )
++            # torch's async-DCP StateDictStager calls new_empty([]) as a rank-0
++            # placeholder then copies the source buffers onto it; a rank-0 shape
++            # can't form a valid quantized tensor, so shape it like the source.
++            if len(size) == 0:
++                size = tensor.shape
+             out = tensor._quantizer.make_empty(
+-                shape=torch.Size(size),
++                shape=size,
+                 dtype=dtype,
+                 device=device,
+                 requires_grad=tensor.requires_grad,

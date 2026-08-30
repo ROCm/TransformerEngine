@@ -1,0 +1,101 @@
+# manifest: PT-019
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: build-system
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/setup.py
++++ b/transformer_engine/pytorch/setup.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -13,7 +15,10 @@
+ import platform
+ import urllib
+ import setuptools
+-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
++try:
++    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
++except ImportError:
++    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+ from packaging.version import parse
+ 
+ try:
+@@ -49,7 +54,8 @@
+     shutil.copyfile(license_src, license_dst)
+ 
+ 
+-from build_tools.build_ext import get_build_ext
++from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
++from build_tools.utils import rocm_build, rocm_version
+ from build_tools.utils import copy_common_headers, min_python_version_str
+ from build_tools.te_version import te_version
+ from build_tools.pytorch import (
+@@ -58,6 +64,10 @@
+     test_requirements,
+ )
+ 
++if rocm_build():
++    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
++    PACKAGE_NAME = "transformer_engine_rocm_torch"
++
+ 
+ os.environ["NVTE_PROJECT_BUILDING"] = "1"
+ CMakeBuildExtension = get_build_ext(BuildExtension, True)
+@@ -123,6 +133,10 @@
+ 
+     def run(self):
+         """Acts a proxy before _bdist_wheel.run() and downloads a prebuilt wheel if available."""
++        if rocm_build():
++            print("ROCm build detected, building from source...")
++            return super().run()
++
+         if FORCE_BUILD:
+             super().run()
+             return
+@@ -156,6 +170,8 @@
+     # Extensions
+     common_headers_dir = "common_headers"
+     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
++    if rocm_build():
++        copy_hipify_tools(current_file_path.parent.parent, current_file_path)
+     ext_modules = [
+         setup_pytorch_extension(
+             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
+@@ -167,9 +183,13 @@
+     # us to detect CUDA version dynamically during compilation and
+     # choose the correct wheel for te core lib.
+     __version__ = te_version()
+-    cuda_major_version = parse(torch.version.cuda).major
+-    assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
+-    te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
++    if not rocm_build():
++        cuda_major_version = parse(torch.version.cuda).major
++        assert cuda_major_version in (12, 13), f"Unsupported cuda version {torch.version.cuda}."
++        te_core = f"transformer_engine_cu{cuda_major_version}=={__version__}"
++        install_requires = install_requirements() + [te_core]
++    else:
++        te_core = f"transformer_engine_rocm{rocm_version()[0]}=={__version__}"
+     install_requires = install_requirements() + [te_core]
+ 
+     # Configure package
+@@ -178,7 +198,8 @@
+         version=__version__,
+         description="Transformer acceleration library - Torch Lib",
+         ext_modules=ext_modules,
+-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand},
++        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": CachedWheelsCommand,
++                  "sdist": SdistWithLocalVersion},
+         python_requires=f">={min_python_version_str()}",
+         install_requires=install_requires,
+         tests_require=test_requirements(),
+@@ -189,3 +210,5 @@
+         shutil.rmtree("build_tools")
+         if license_dst.is_file():
+             license_dst.unlink()
++        if rocm_build():
++            clear_hipify_tools_copy(current_file_path)

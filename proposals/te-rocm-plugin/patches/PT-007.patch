@@ -1,0 +1,212 @@
+# manifest: PT-007
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/tensor/mxfp8_tensor.py
++++ b/transformer_engine/pytorch/tensor/mxfp8_tensor.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -6,6 +8,7 @@
+ from __future__ import annotations
+ from collections.abc import Iterable
+ import math
++
+ from typing import Optional, Tuple, Union, Any
+ import warnings
+ 
+@@ -15,12 +18,17 @@
+ 
+ from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
+ from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
+-from ..utils import devices_match, round_up_to_nearest_multiple
++from ..utils import devices_match, get_device_compute_capability, round_up_to_nearest_multiple
+ from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
+ from ..quantized_tensor import QuantizedTensor, Quantizer
+ from ..dynamo import register_value_opaque_quantizer
+ from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+ 
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
++if IS_HIP_EXTENSION:
++    import os
++    from ..triton_kernels.cast import te_quantize_triton
++
+ aten = torch.ops.aten
+ 
+ 
+@@ -75,7 +83,12 @@
+             src = src.contiguous()
+ 
+         # Launch cast kernel
+-        tex.quantize(src, self, dst, noop_flag)
++        if IS_HIP_EXTENSION:
++            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
++            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
++            quantize_func(src, self, dst, noop_flag)
++        else:
++            tex.quantize(src, self, dst, noop_flag)
+ 
+         # Update FP8 dtype
+         dst._fp8_dtype = self.dtype
+@@ -84,7 +97,13 @@
+ 
+     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+         """Quantize tensor implementation"""
+-        return tex.quantize(tensor, self)
++        if IS_HIP_EXTENSION:
++            from ..triton_kernels.cast import te_quantize_triton
++            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
++            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
++            return quantize_func(tensor, self)
++        else:
++            return tex.quantize(tensor, self)
+ 
+     def is_quantizable(self, inp: torch.Tensor) -> bool:
+         """Returns whether or not given inp can be quantized"""
+@@ -96,6 +115,102 @@
+             return False
+         return True
+ 
++    def make_empty(
++        self,
++        shape: Iterable[int],
++        *,
++        dtype: torch.dtype = torch.float32,
++        device: Optional[torch.device] = None,
++        requires_grad: bool = False,
++        pin_memory: bool = False,
++    ) -> MXFP8Tensor:
++
++        # Canonicalize tensor attributes
++        if device is None:
++            device = torch.device("cuda")
++
++        assert (
++            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
++            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
++        ), (
++            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
++            f" {MXFP8_BLOCK_SCALING_SIZE}"
++        )
++
++        # Allocate FP8 data
++        data = None
++        scale_inv = None
++        if self.rowwise_usage:
++            data = torch.empty(shape, dtype=torch.uint8, device=device)
++            # ROCm TE does not implement fuse padding zeros so use zero tensor here
++            if IS_HIP_EXTENSION:
++                m_dim = math.prod(shape[:-1])
++                k_scale = math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE)
++                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
++                if get_device_compute_capability() == (12, 5):
++                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
++                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
++                scale_inv = torch.zeros(
++                    m_dim,
++                    k_scale,
++                    dtype=torch.uint8,
++                    device=device,
++                    pin_memory=pin_memory,
++                )
++            else:
++                scale_inv = torch.empty(
++                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
++                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
++                dtype=torch.uint8,
++                device=device,
++                pin_memory=pin_memory,
++            )
++
++        # Allocate FP8 data transpose if needed
++        columnwise_data = None
++        columnwise_scale_inv = None
++        if self.columnwise_usage:
++            columnwise_data = torch.empty(
++                shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
++            )
++            # ROCm TE does not implement fuse padding zeros so use zero tensor here
++            if IS_HIP_EXTENSION:
++                k_scale = math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE)
++                m_dim = shape[-1]
++                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
++                if get_device_compute_capability() == (12, 5):
++                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
++                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
++                columnwise_scale_inv = torch.zeros(
++                    k_scale,
++                    m_dim,
++                    dtype=torch.uint8,
++                    device=device,
++                    pin_memory=pin_memory,
++                )
++            else:
++                columnwise_scale_inv = torch.empty(
++                    round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
++                    round_up_to_nearest_multiple(shape[-1], 128),
++                    dtype=torch.uint8,
++                    device=device,
++                    pin_memory=pin_memory,
++                )
++
++        # Construct FP8 tensor
++        return MXFP8Tensor(
++            shape=shape,
++            dtype=dtype,
++            fp8_dtype=self.dtype,
++            rowwise_data=data,
++            rowwise_scale_inv=scale_inv,
++            columnwise_data=columnwise_data,
++            columnwise_scale_inv=columnwise_scale_inv,
++            quantizer=self,
++            requires_grad=requires_grad,
++            with_gemm_swizzled_scales=self.optimize_for_gemm,
++        )
++
+     def calibrate(self, tensor: torch.Tensor) -> None:
+         # TODO(ksivamani): No calibration needed for mxfp8?
+         pass
+@@ -125,6 +240,16 @@
+         Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
+         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
+         """
++        if IS_HIP_EXTENSION:
++            if columnwise:
++                return (
++                    math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
++                    shape[-1],
++                )
++            return (
++                math.prod(shape[:-1]),
++                shape[-1] // MXFP8_BLOCK_SCALING_SIZE,
++            )
+         if columnwise:
+             # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
+             # with padding to multiples of [4, 128]
+@@ -419,8 +544,18 @@
+ 
+             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
+             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
+-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
+-            padding_multiples = [128, 4]
++            if IS_HIP_EXTENSION:
++                if get_device_compute_capability() == (12, 5):
++                    # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
++                    padding_multiples = [4, 4]
++                else:
++                    # ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
++                    # so applying the padding here would produce a per-shard scale-inv whose dim-0
++                    # does not match the destination scale-inv allocated for the FSDP2 local shard.
++                    padding_multiples = [1, 1]
++            else:
++                # Padding requirements: rowwise dim0 should be divisible by 128, columnwise dim0 should be divisible by 4
++                padding_multiples = [128, 4]
+             for scale_inv, scale_split_size, pad_multiple in zip(
+                 scale_invs, split_sizes_for_scale, padding_multiples
+             ):

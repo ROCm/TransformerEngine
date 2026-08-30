@@ -1,0 +1,78 @@
+# manifest: JX-007
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/jax/quantize/helper.py
++++ b/transformer_engine/jax/quantize/helper.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -22,7 +24,14 @@
+ import jax.numpy as jnp
+ from flax.core.frozen_dict import FrozenDict
+ 
+-from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
++from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
++
++from transformer_engine_jax import DType
++if not is_hip_extension():
++    from transformer_engine_jax import (
++        get_cublasLt_version,
++        get_cuda_version,
++    )
+ from transformer_engine.common.recipe import (
+     Recipe,
+     DelayedScaling,
+@@ -78,6 +87,11 @@
+     Returns:
+         A tuple of (bool, str) indicating support and any error message
+     """
++    if is_hip_extension():
++        if gpu_arch in [94, 95]:
++            return True, ""
++        else:
++            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
+     if gpu_arch < 89:  # pre-ada
+         return False, "Device compute capability 8.9 or higher required for FP8 execution."
+     if get_cublasLt_version() < 120103:
+@@ -96,6 +110,10 @@
+     Returns:
+         A tuple of (bool, str) indicating support and any error message
+     """
++    if is_hip_extension():
++        if gpu_arch >= 95:
++            return True, ""
++        return False, "FP8 block scaled gemm not yet supported for ROCm"
+     if gpu_arch < 99:  # pre-blackwell
+         return False, "Device compute capability 9.9 or higher required for MXFP8 execution."
+     if get_cublasLt_version() < 120800:
+@@ -109,6 +127,8 @@
+ 
+ def _check_fp4_support(gpu_arch) -> Tuple[bool, str]:
+     """Check if FP4 is supported for the given GPU architecture."""
++    if is_hip_extension():
++        return False, "FP4 not yet supported for ROCm"
+     if gpu_arch < 100:  # pre-blackwell
+         return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
+     if get_cublasLt_version() < 120800:
+@@ -267,11 +287,11 @@
+         A tuple of (forward_dtype, backward_dtype) for the given format
+     """
+     if format_ == Format.E4M3:
+-        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
++        return get_jnp_float8_e4m3_type(), get_jnp_float8_e4m3_type()
+     if format_ == Format.E5M2:
+-        return jnp.float8_e5m2, jnp.float8_e5m2
++        return get_jnp_float8_e5m2_type(), get_jnp_float8_e5m2_type()
+     if format_ == Format.HYBRID:
+-        return jnp.float8_e4m3fn, jnp.float8_e5m2
++        return get_jnp_float8_e4m3_type(), get_jnp_float8_e5m2_type()
+     if format_ == Format.E2M1:
+         return jnp.float4_e2m1fn, jnp.float4_e2m1fn
+     return jnp.bfloat16, jnp.bfloat16

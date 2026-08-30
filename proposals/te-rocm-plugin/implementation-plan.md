@@ -139,7 +139,7 @@ of ours in the path** except the alias line.
 | Seam-order tests | (a) `import transformer_engine.pytorch` first — the only order upstream uses; (b) `import transformer_engine_torch` **first**, on a clean install → must raise `ModuleNotFoundError`. This asserts the loud-failure property (F3): a wrong order fails, it does not split-brain; (c) a consumer that imports `torch`, then `transformer_engine.pytorch.module.linear` directly; (d) `importlib.reload(transformer_engine.pytorch.cpp_extensions)` then `dir()` equality against pre-reload. |
 | If it fails | Stop. Diagnose by which of F1-F4 broke. This is the cheapest falsification point in the whole program and it must be reported as such, not worked around. |
 
-### P4 · Overlay assembly tooling — 2 days · **this workstation**
+### P4 · Overlay assembly tooling — 2 days — **DONE 2026-08-30** (`tools/assemble_overlay.py`; 62 seed patches; self-test 224/224 files identical; overlay imports and runs on GPU)
 
 The pure-Python wheel is *upstream tree + patch queue*. Build the assembler before vendoring, so
 vendoring is a one-command operation from day one.

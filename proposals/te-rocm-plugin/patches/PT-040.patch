@@ -1,0 +1,32 @@
+# manifest: PT-040
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/optimizers/multi_tensor_apply.py
++++ b/transformer_engine/pytorch/optimizers/multi_tensor_apply.py
+@@ -1,10 +1,12 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+ 
+ """Multi-tensor apply entry."""
+ from torch.distributed._tensor import DTensor
+-
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ 
+ class MultiTensorApply:  # pylint: disable=too-few-public-methods
+     """Multi-tensor apply entry."""
+@@ -16,7 +18,7 @@
+         for i, ts in enumerate(tensor_lists):
+             for j, t in enumerate(ts):
+                 if isinstance(t, DTensor):
+-                    tensor_lists[i][j] = t._local_tensor
++                    tensor_lists[i][j] = t._local_tensor.data if IS_HIP_EXTENSION else t._local_tensor
+ 
+         if any(len(tensors) != len(tensor_lists[0]) for tensors in tensor_lists):
+             raise RuntimeError("Expected aligned multi-tensor lists.")

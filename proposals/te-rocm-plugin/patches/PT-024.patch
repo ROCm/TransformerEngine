@@ -1,0 +1,86 @@
+# manifest: PT-024
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: TBD
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+--- a/transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py
++++ b/transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -12,6 +14,10 @@
+ from transformer_engine.pytorch.custom_recipes import quantization
+ from transformer_engine.pytorch.custom_recipes import utils
+ from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
++
++if IS_HIP_EXTENSION:
++    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
+ 
+ 
+ def nvfp4_ref_rht_2d_quantizer_factory(role):
+@@ -136,9 +142,15 @@
+     TODO(etsykunov): Make less unintuitive.
+     """
+     decode_scale = decode_scale * global_amax
+-    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
++    if IS_HIP_EXTENSION:
++        FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=decode_scale.device, dtype=torch.float32)
++    else:
++        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+     decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+-    return decode_scale.to(torch.float8_e4m3fn)
++    if IS_HIP_EXTENSION:
++        return decode_scale.to(get_torch_float8_e4m3_type())
++    else:
++        return decode_scale.to(torch.float8_e4m3fn)
+ 
+ 
+ def high_precision_gemm_ref(
+@@ -696,7 +708,10 @@
+             )  # (128, 8, 1)
+         x = x.view(m, n // tile_len_x, tile_len_x)
+         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
+-        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
++        if IS_HIP_EXTENSION:
++            FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x.device, dtype=torch.float32)
++        else:
++            FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+         global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
+         GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+             global_scale_e4m3_max, device=x.device, dtype=torch.float32
+@@ -763,7 +778,10 @@
+                 ),
+             )
+             decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+-            decode_scale = decode_scale.to(torch.float8_e4m3fn)
++            if IS_HIP_EXTENSION:
++                decode_scale = decode_scale.to(get_torch_float8_e4m3_type())
++            else:
++                decode_scale = decode_scale.to(torch.float8_e4m3fn)
+ 
+             encode_scale = torch.min(
+                 torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
+@@ -1155,14 +1173,15 @@
+                 "nvfp4_e4m3_max",
+                 getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
+             )
++            default_fp8_max = 240.0 if (IS_HIP_EXTENSION and is_fp8_fnuz()) else 448.0
+             if qresult_x_nvfp4_use_4over6:
+                 fp8_max_x = float(qresult_x_e4m3_max)
+             else:
+-                fp8_max_x = 448.0
++                fp8_max_x = default_fp8_max
+             if qresult_w_nvfp4_use_4over6:
+                 fp8_max_w = float(qresult_w_e4m3_max)
+             else:
+-                fp8_max_w = 448.0
++                fp8_max_w = default_fp8_max
+             factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
+ 
+             if gemm_type == quantization.GEMMType.WGRAD:

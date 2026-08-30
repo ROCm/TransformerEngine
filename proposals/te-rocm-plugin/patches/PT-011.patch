@@ -1,0 +1,241 @@
+# manifest: PT-011
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: capability
+# expiry: see features
+# tests: TBD
+# owner: TBD
+# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (2 feature sub-entries)
+--- a/transformer_engine/pytorch/attention/dot_product_attention/utils.py
++++ b/transformer_engine/pytorch/attention/dot_product_attention/utils.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -19,6 +21,7 @@
+ import torch
+ import torch.distributed as dist
+ import torch.nn.functional as F
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ import transformer_engine_torch as tex
+ import transformer_engine as te
+ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+@@ -142,6 +145,7 @@
+ (1) git clone https://github.com/Dao-AILab/flash-attention.git
+ (2) cd flash-attention/hopper && python setup.py install"""
+     v3_warning_printed = False
++    use_aiter_triton = False #ROCm
+ 
+     v4_is_installed = False
+     fa4_version = PkgVersion("0")
+@@ -338,6 +342,8 @@
+     ----------
+     use_flash_attention : bool
+         Whether the `FlashAttention` backend has been selected.
++    flash_attention_backend: PkgVersion
++        If `use_flash_attention = True`, the version of the selected `FlashAttention` backend.
+     use_fused_attention : bool
+         Whether the `FusedAttention` backend has been selected.
+     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+@@ -485,19 +491,19 @@
+         use_flash_attention = False
+ 
+     # Filter: Compute capability
+-    if device_compute_capability < (8, 0):
++    if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
+         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+             logger.debug("Disabling FlashAttention 2 for compute capability < sm80")
+         use_flash_attention_2 = False
+         if use_fused_attention:
+             logger.debug("Disabling FusedAttention for compute capability < sm80")
+             use_fused_attention = False
+-    if device_compute_capability != (9, 0):
++    if not IS_HIP_EXTENSION and device_compute_capability != (9, 0):
+         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
+             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
+         use_flash_attention_3 = False
+     # FA4 supports SM80, SM90, SM100, SM120
+-    if device_compute_capability < (8, 0):
++    if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
+         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+             logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
+         use_flash_attention_4 = False
+@@ -590,7 +596,7 @@
+             if not allow_emulation:
+                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                 use_unfused_attention = False
+-        if use_fused_attention and fp8_recipe.delayed():
++        if use_fused_attention and fp8_recipe.delayed() and not IS_HIP_EXTENSION:
+             if (
+                 device_compute_capability >= (10, 0)
+                 and deterministic
+@@ -601,7 +607,7 @@
+                     " determinism for cuDNN < 9.18.0"
+                 )
+                 use_fused_attention = False
+-        if use_fused_attention and fp8_recipe.float8_current_scaling():
++        if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
+             if device_compute_capability < (10, 0):
+                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
+                 use_fused_attention = False
+@@ -618,7 +624,7 @@
+                             " for cuDNN < 9.18.0"
+                         )
+                         use_fused_attention = False
+-        if use_fused_attention and fp8_recipe.mxfp8():
++        if use_fused_attention and fp8_recipe.mxfp8() and not IS_HIP_EXTENSION:
+             if device_compute_capability < (10, 0):
+                 logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
+                 use_fused_attention = False
+@@ -636,11 +642,15 @@
+                 elif qkv_format == "thd":
+                     logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
+                     use_fused_attention = False
+-        if use_fused_attention and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()):
++        if (
++            use_fused_attention
++            and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4())
++            and not IS_HIP_EXTENSION
++        ):
+             logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
+             use_fused_attention = False
+ 
+-        if device_compute_capability == (12, 0):
++        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
+             if use_flash_attention:
+                 logger.debug(
+                     "Disabling FlashAttention as FP8 is not supported"
+@@ -831,6 +841,7 @@
+             device_compute_capability == (12, 0)
+             and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+             and is_training
++            and not IS_HIP_EXTENSION
+         ):
+             if use_fused_attention:
+                 logger.debug(
+@@ -849,7 +860,8 @@
+             fa2_padded_head_dim > 256
+             or fa2_padded_head_dim % 8 != 0
+             or (
+-                fa2_padded_head_dim > 192
++                not IS_HIP_EXTENSION
++                and fa2_padded_head_dim > 192
+                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+             )
+         )
+@@ -989,7 +1001,10 @@
+             if use_unfused_attention:
+                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
+             use_unfused_attention = False
+-        if device_compute_capability == (12, 0):
++            # ROCm does not support FA3 with thd + padding between sequences
++            if IS_HIP_EXTENSION:
++                use_flash_attention = False
++        if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
+             if cudnn_version < (9, 18, 1):
+                 if use_fused_attention:
+                     logger.debug(
+@@ -1043,7 +1058,7 @@
+                     softmax_type,
+                 )
+                 use_unfused_attention = False
+-        if qkv_format == "thd" and cudnn_version < (9, 18, 0):
++        if qkv_format == "thd" and not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
+             logger.debug(
+                 "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
+                 " version < 9.18",
+@@ -1252,7 +1267,7 @@
+                 " on sm < 100 with cuDNN version < 9.21"
+             )
+             use_fused_attention = False
+-        elif attention_dropout != 0.0:
++        elif not IS_HIP_EXTENSION and attention_dropout != 0.0:
+             logger.debug(
+                 "Disabling FusedAttention as it only supports sliding window attention "
+                 "without dropout"
+@@ -1342,7 +1357,12 @@
+         ):
+             fu_core_attention_bias_shape = "bhss"
+ 
+-    if (
++    # rocm ck backend supports 4 bias shapes (11ss, 1hss, b1ss, and bhss)
++    if IS_HIP_EXTENSION:
++        if use_fused_attention and fu_core_attention_bias_shape == "111s":
++            logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
++            use_fused_attention = False
++    elif (
+         use_fused_attention
+         and fu_core_attention_bias_type == "post_scale_bias"
+         and fu_core_attention_bias_shape != "1hss"
+@@ -1396,6 +1416,34 @@
+             )
+             use_fused_attention = False
+             fused_attention_backend = None
++        if (
++            use_fused_attention
++            and (not IS_HIP_EXTENSION)
++            and window_size is not None
++            and window_size[0] != -1
++            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
++        ):
++            logger.debug(
++                "Disabling FusedAttention as only sub-backend %s does not support "
++                "slidng window attention",
++                int(fused_attention_backend),
++            )
++            use_fused_attention = False
++            fused_attention_backend = None
++        if (
++            use_fused_attention
++            and (not IS_HIP_EXTENSION)
++            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
++            and fu_core_attention_bias_type == "post_scale_bias"
++            and fu_core_attention_bias_shape != "1hss"
++        ):
++            logger.debug(
++                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
++                " [1, H, S, S] shape"
++            )
++            use_fused_attention = False
++            fused_attention_backend = None
++
+     # Filter: Determinism
+     # backend                      | deterministic
+     # ---------------------------------------------
+@@ -1427,7 +1475,7 @@
+                 head_dim_v,
+             )
+             use_flash_attention_3 = False
+-    if use_fused_attention and deterministic:
++    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
+         if softmax_type != "vanilla":
+             logger.debug(
+                 "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
+@@ -1460,7 +1508,6 @@
+             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
+             use_fused_attention = False
+             fused_attention_backend = None
+-
+     # use_flash_attention may have been set above
+     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
+     use_flash_attention_3 = use_flash_attention and use_flash_attention_3
+@@ -1540,10 +1587,15 @@
+     )
+ 
+     # Select FusedAttention for performance
+-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
++    prefer_fused_attention = (
++        # On ROCm, FusedAttention (aiter asm) is much faster than flash-attn for MLA-style unequal head dims.
++        head_dim_qk != head_dim_v
++        if IS_HIP_EXTENSION
++        else device_compute_capability >= (9, 0)
++    )
++    if use_flash_attention and use_fused_attention and prefer_fused_attention:
+         logger.debug(
+-            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
+-            "for performance reasons"
++            "Disabling FlashAttention to give FusedAttention preference for performance reasons"
+         )
+         use_flash_attention = False
+ 
