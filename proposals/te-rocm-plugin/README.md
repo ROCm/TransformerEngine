@@ -16,6 +16,7 @@ plus a ROCm plugin and an AMD-maintained compiled backend**.
 | [`divergence-manifest-summary.md`](divergence-manifest-summary.md) | **v2.4.3** — reviewer-facing summary of the manifest. |
 | [`manifest-corrections-v2.3-to-v2.4.yaml`](manifest-corrections-v2.3-to-v2.4.yaml) | Field-level audit trail of the v2.3 → v2.4 restatement. |
 | [`implementation-plan.md`](implementation-plan.md) | Work breakdown for Stages 0–2: prototype track (P0–P8, two exits), governance track (G0–G6), backtest track (B1–B3), environment matrix, gate criteria. |
+| [`implementation-plan-stages-3-9.md`](implementation-plan-stages-3-9.md) | Work breakdown for Stages 3–9 with contingency tags (`[GATE-A]`, `[GATE-B]`, `[EVIDENCE: …]`); adds facts F13–F20, incl. that the extension is not linked against the core lib (F13) and the JAX handler-dict seam (F16). |
 | [`thresholds.yaml`](thresholds.yaml) | **Signed 2026-08-30** — Stage-1 performance budget, Stage-2 backtest thresholds, C++ arm reporting bands. P8 and B2 refuse to run if unsigned. |
 | [`tools/measure_divergence.sh`](tools/measure_divergence.sh) | Regenerates every figure in the above. Run it per sync. |
 
