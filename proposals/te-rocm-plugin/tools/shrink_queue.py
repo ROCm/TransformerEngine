@@ -123,10 +123,27 @@ def run_py(code: str, overlay: Path, timeout=300) -> tuple[bool, str]:
     return ("SMOKE_OK" in r.stdout), (r.stderr.strip().splitlines() or ["?"])[-1][:200]
 
 
+def known_failures() -> list[str]:
+    """Tests that FAIL on the fork baseline (P0). A removal is not blamed for those - otherwise
+    every patch mapped to test_custom_recipe.py reads NEEDED because of the pre-existing
+    dpa_fp8 capability gap (verified: PT-024 was a false NEEDED for exactly this reason)."""
+    base = PROP / "baselines" / "2026-08-30-fork.json"
+    if not base.exists():
+        return []
+    d = json.loads(base.read_text()); out = []
+    for f, tests in d["tests"].items():
+        for tid, st in tests.items():
+            if st in ("fail", "error") and "<binary-param" not in tid:
+                cls, _, name = tid.partition("::")
+                out.append(f"{cls.replace('.', '/')}.py::{name}")
+    return out
+
+
 def run_tests(cmds: list[str], overlay: Path) -> tuple[bool, str]:
     summ = []
+    desel = " ".join(f"--deselect '{t}'" for t in known_failures())
     for c in cmds:
-        r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x {c}", shell=True, capture_output=True,
+        r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x {desel} {c}", shell=True, capture_output=True,
                            text=True, cwd=str(ROOT), env={**ENV, "PYTHONPATH": str(overlay)})
         last = (r.stdout.strip().splitlines() or ["?"])[-1][:120]
         summ.append(f"{c.split()[0].split('/')[-1]}: {last}")

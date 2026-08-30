@@ -169,7 +169,7 @@ proposals/te-rocm-plugin/tools/assemble_overlay.py
 
 | Exit | `--check` against an *unpatched* upstream tree applies zero patches cleanly and reports the full queue as "target present"; applying all patches produces a tree that `python -m py_compile`s. |
 
-### P5 · Vendor 868d8d92 + build the patch queue — 5-7 days · **this workstation** for patches, **container** for the loop
+### P5 · Vendor 868d8d92 + build the patch queue — 5-7 days — **SHRINK DONE 2026-08-30**: 62 seed patches → 35 (27 retired on executed-test evidence, 3 of them gfx950-only; 7 kept as untested; 9 needed). Feature-level splitting of compound entries still to do
 
 This is the bulk of Stage 1. Order is chosen so the tree imports as early as possible, then runs.
 
@@ -220,7 +220,7 @@ each `enum_<>` with the same `#if` tracking).
 
 | Exit | All six green in the container against the P5 overlay, with `NVTE_Fused_Attn_Backend` in the expected-diff file. |
 
-### P7 · EXIT-B — the Stage 1 gate — iterate, ~3 days · **container**
+### P7 · EXIT-B — the Stage 1 gate — **REACHED 2026-08-30** at the shrunk queue: upstream 868d8d92 Python + 35 patches passes the representative suite with 0 outcome flips vs P0; import 2.64 s (`baselines/2026-08-30-p5-phase-c.json`)
 
 Loop: run representative suite on the overlay → triage failures by manifest ID → fix patch → rerun.
 

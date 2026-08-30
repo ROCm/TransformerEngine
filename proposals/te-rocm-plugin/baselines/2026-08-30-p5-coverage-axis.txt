@@ -1,0 +1,48 @@
+ID       shrink verdict     added  exec  coverage verdict   target
+CM-001   NEEDED(smoke)         27    20   74%  executed                                 __init__.py
+CM-002   NEEDED(smoke)        103    66   64%  executed                                 common/__init__.py
+CM-003   NEEDED(smoke)         70    40   57%  executed                                 common/recipe/__init__.py
+PT-001   RETIRE-CANDIDATE     241   173   72%  executed                                 pytorch/cpp_extensions/gemm.py
+PT-002   NEEDED(smoke)        239    42   18%  WEAK                                     pytorch/module/base.py
+PT-003   RETIRE-CANDIDATE     136    34   25%  executed                                 pytorch/module/grouped_linear.py
+PT-004   NEEDED(smoke)        178   125   70%  executed                                 pytorch/quantization.py
+PT-006   RETIRE-CANDIDATE     102    62   61%  executed                                 pytorch/module/layernorm_mlp.py
+PT-007   RETIRE-CANDIDATE     117    14   12%  WEAK -> retire verdict is thin evidence  pytorch/tensor/mxfp8_tensor.py
+PT-008   RETIRE-CANDIDATE      87    57   66%  executed                                 pytorch/module/linear.py
+PT-009   RETIRE-CANDIDATE      84    49   58%  executed                                 pytorch/module/layernorm_linear.py
+PT-010   RETIRE-CANDIDATE      64    16   25%  executed                                 pytorch/attention/dot_product_attention/backends.py
+PT-011   NEEDED(smoke)         64    48   75%  executed                                 pytorch/attention/dot_product_attention/utils.py
+PT-012   NEEDED(smoke)         55    13   24%  WEAK                                     pytorch/cpp_extensions/fused_attn.py
+PT-013   RETIRE-CANDIDATE      48    13   27%  executed                                 pytorch/optimizers/__init__.py
+PT-014   RETIRE-CANDIDATE       1     0    0%  UNTESTED -> retire verdict is thin evidence pytorch/distributed.py
+PT-017   RETIRE-CANDIDATE      30    26   87%  executed                                 pytorch/tensor/float8_tensor.py
+PT-018   RETIRE-CANDIDATE      23    22   96%  executed                                 pytorch/constants.py
+PT-019   RETIRE-CANDIDATE      25     0    0%  UNTESTED -> retire verdict is thin evidence pytorch/setup.py
+PT-020   RETIRE-CANDIDATE      21    20   95%  executed                                 pytorch/optimizers/fused_adam.py
+PT-021   NEEDED(smoke)         25    19   76%  executed                                 pytorch/utils.py
+PT-022   RETIRE-CANDIDATE       3     3  100%  executed                                 pytorch/ops/basic/grouped_linear.py
+PT-023   RETIRE-CANDIDATE      22    18   82%  executed                                 pytorch/module/_common.py
+PT-024   RETIRE-CANDIDATE      22    12   55%  executed                                 pytorch/custom_recipes/quantization_ref_nvfp4.py
+PT-025   RETIRE-CANDIDATE      17     1    6%  WEAK -> retire verdict is thin evidence  pytorch/tensor/float8_blockwise_tensor.py
+PT-026   RETIRE-CANDIDATE      15     1    7%  WEAK -> retire verdict is thin evidence  pytorch/attention/dot_product_attention/context_parallel.py
+PT-027   RETIRE-CANDIDATE      10     6   60%  executed                                 pytorch/quantized_tensor.py
+PT-028   RETIRE-CANDIDATE      10     6   60%  executed                                 pytorch/graph.py
+PT-029   RETIRE-CANDIDATE      10     6   60%  executed                                 pytorch/triton/cross_entropy.py
+PT-030   RETIRE-CANDIDATE      11     9   82%  executed                                 pytorch/ops/basic/rmsnorm.py
+PT-031   RETIRE-CANDIDATE       6     0    0%  UNTESTED -> retire verdict is thin evidence pytorch/tensor/storage/nvfp4_tensor_storage.py
+PT-032   RETIRE-CANDIDATE       7     3   43%  executed                                 pytorch/__init__.py
+PT-033   RETIRE-CANDIDATE       9     6   67%  executed                                 pytorch/ops/basic/layer_norm.py
+PT-034   RETIRE-CANDIDATE       9     1   11%  WEAK -> retire verdict is thin evidence  pytorch/module/fp8_padding.py
+PT-035   RETIRE-CANDIDATE       7     3   43%  executed                                 pytorch/tensor/storage/mxfp8_tensor_storage.py
+PT-036   RETIRE-CANDIDATE       4     1   25%  executed                                 pytorch/tensor/utils.py
+PT-037   RETIRE-CANDIDATE       3     3  100%  executed                                 pytorch/transformer.py
+PT-038   RETIRE-CANDIDATE       6     1   17%  WEAK -> retire verdict is thin evidence  pytorch/ops/fused/userbuffers_backward_linear.py
+PT-039   RETIRE-CANDIDATE       3     3  100%  executed                                 pytorch/attention/dot_product_attention/dot_product_attention.py
+PT-040   RETIRE-CANDIDATE       2     1   50%  executed                                 pytorch/optimizers/multi_tensor_apply.py
+PT-041   RETIRE-CANDIDATE       3     3  100%  executed                                 pytorch/tensor/nvfp4_tensor.py
+PT-043   RETIRE-CANDIDATE       2     2  100%  executed                                 pytorch/jit.py
+PT-044   RETIRE-CANDIDATE       3     1   33%  executed                                 pytorch/ops/fused/userbuffers_forward_linear.py
+PT-045   NEEDED(tests)          1     1  100%  executed                                 pytorch/_extra_state.py
+
+written: build/shrink/coverage_verdicts.json
+retire candidates: 35 total = 27 executed (>=25% of added lines ran), 5 weak (<25%), 3 untested (0 lines ran)
