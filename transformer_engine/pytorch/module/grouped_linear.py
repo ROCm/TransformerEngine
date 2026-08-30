@@ -25,6 +25,7 @@ from transformer_engine.pytorch.tensor.grouped_tensor import (
 from .base import (
     get_dummy_wgrad,
     quantize_weight,
+    quantize_multi_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -638,20 +639,20 @@ class _GroupedLinear(torch.autograd.Function):
         weights_fp8: list
         new_workspaces = [None] * num_gemms
         if fp8 or debug:
-            weights_fp8 = []
+            # FP8 cast to workspace buffer. For delayed-scaling FP8 the whole group is
+            # cast and transposed with a single fused multi_cast_transpose kernel, and on
+            # ROCm an MXFP8 group is quantized with a single fused multi-quantize kernel;
+            # other cases fall back to a per-weight quantize inside quantize_multi_weight.
             update_ws = is_first_microbatch is None or is_first_microbatch
-            for i in range(num_gemms):
-                weight_fp8, new_workspaces[i] = quantize_weight(
-                    tensor=weights[i],
-                    quantizer=weight_quantizers[i],
-                    workspace=weight_workspaces[i] if weight_workspaces else None,
-                    update_workspace=update_ws,
-                    skip_update_flag=skip_fp8_weight_update,
-                    workspace_dtype=activation_dtype,
-                    cache=cache_weight,
-                )
-                weights_fp8.append(weight_fp8)
-
+            weights_fp8, new_workspaces = quantize_multi_weight(
+                tensors=list(weights),
+                quantizers=weight_quantizers,
+                workspaces=weight_workspaces if weight_workspaces else [None] * num_gemms,
+                update_workspace=update_ws,
+                skip_update_flag=skip_fp8_weight_update,
+                workspace_dtype=activation_dtype,
+                cache=cache_weight,
+            )
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
