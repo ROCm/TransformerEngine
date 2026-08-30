@@ -99,9 +99,9 @@ metadata:
   added_class_notes: >-
     REGENERATED 2026-08-30 against 868d8d92 by tools/classify_hunks.py (hunk-granular = canonical-v2
     compatible; added_class_line = strict line-granular). Recovery test on 8 files whose delta is
-    identical at both bases: sums v2.3 159/459/46 vs 158/454/36 (+16 header lines v2.3 folded into
+    identical at both bases: sums v2.3 159/459/46 vs 135/477/36 (+16 header lines v2.3 folded into
     guard); the unmarked bucket matches per file. Residual per-file deltas are sidecar<->guard
-    swaps of <=16 lines. Prior text follows for history:
+    swaps, largest 29 lines (PT-004 quantization.py); unmarked never differs by more than 2. Prior text follows for history:
     Every added_class triple in this file was computed against the WRONG base and is
     retained only as a stale reference under stale_added_class. Hunk classification is
     base-dependent: upstream changed several of these files between 868d8d92 and the
