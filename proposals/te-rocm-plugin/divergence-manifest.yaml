@@ -2272,6 +2272,10 @@ entries:
       REQUIRED: complete the ctypes symbol inventory and either (a) route these through the
       extension API, or (b) define a fourth, explicitly-versioned "vendored-python -> core"
       contract surface. Decide before Gate B.
+    resolution_2026_08_30: >-
+      DOWNGRADED. See open_decisions.contract_surface_for_ctypes. The symbols join a 3-function
+      core-introspection API (nvte_rocm.h) that doubles as the load-time TE_ROCM_CORE_ABI
+      version check; seam_inventory.py now reports ctypes demand. Work item S3.3, not a gate.
   - id: ABI-002
     metric_class: m1
     path: transformer_engine/common/util/pybind_helper.h
@@ -2550,8 +2554,20 @@ open_decisions:
     note: "this policy retroactively explains the 2.17 history (release tracking release) and makes it correct going forward"
   contract_surface_for_ctypes:
     question: "Route ABI-001 symbols through TE_ROCM_EXTENSION_API, or define a fourth versioned contract?"
-    owner: TBD
-    due: Gate B
+    owner: none
+    due: Stage 3          # was Gate B; downgraded to a work item (S3.3)
+    status: DECIDED
+    decided_on: 2026-08-30
+    decision: >-
+      Neither. Downgraded from a contract-model gap to a bookkeeping item. Upstream's own Python
+      never calls an nvte_* symbol via ctypes; the fork adds two (nvte_is_rocm_build,
+      nvte_uses_fp8_fnuz). ctypes needs no header - the only real issue is that these symbols
+      were in NO inventory, so a core-wheel reuse decision could not see them. Resolution (plan
+      S3.3): (1) a tiny versioned core-introspection C API in one public header nvte_rocm.h -
+      nvte_is_rocm_build, nvte_uses_fp8_fnuz, and a new nvte_rocm_core_abi_version - which is
+      ALSO how TE_ROCM_CORE_ABI is enforced at load time, since the extension is not linked
+      against the core lib and nothing binds by SONAME (plan F13); (2) seam_inventory.py scans
+      the fork's Python for _TE_LIB_CTYPES.<name> so ctypes demand is always inventoried.
   packaging_name_conflict:
     question: >-
       Sec 3.2 decides the canonical name `transformer-engine`; CM-002-PKGID currently implements

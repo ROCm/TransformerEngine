@@ -106,6 +106,26 @@ def collect_demand(base: str) -> tuple[dict[str, dict], list[str]]:
     return demand, star_files
 
 
+CTYPES_RE = re.compile(r"_TE_LIB_CTYPES\.([A-Za-z_]\w*)")
+
+
+def collect_ctypes_demand(root: Path) -> dict[str, list[str]]:
+    """nvte_* symbols the FORK's Python calls on the core .so via ctypes (ABI-001).
+
+    Upstream calls none; these exist only in patched files. They bind by symbol name at load,
+    so they appear in no pybind inventory - this scan is what keeps them from being invisible
+    to a core-wheel reuse decision. Supply is the core .so's export table (needs a build:
+    `nm -D libtransformer_engine*.so | grep ' T nvte_'`), reported here as demand only."""
+    out: dict[str, list[str]] = {}
+    for p in sorted((root / "transformer_engine").rglob("*.py")):
+        for m in CTYPES_RE.finditer(p.read_text(errors="replace")):
+            name = m.group(1)
+            if name in ("restype", "argtypes"):
+                continue
+            out.setdefault(name, []).append(str(p.relative_to(root)))
+    return out
+
+
 # ----------------------------------------------------------------- supply ---
 
 DEF_RE = re.compile(r'\b(\w+)\.def\(\s*"([A-Za-z_]\w*)"', re.S)
@@ -241,6 +261,13 @@ def main():
     early = sorted(n for n, d in demand.items() if "from-import" in d["forms"])
     print(f"--- early-bound names (from-import; copied at import time): {len(early)} ---")
     print("  " + ", ".join(early))
+    print()
+
+    ctypes_demand = collect_ctypes_demand(root)
+    print(f"--- ctypes demand on the CORE .so from the fork's Python (ABI-001; not pybind, not in any header): {len(ctypes_demand)} ---")
+    for n, files in sorted(ctypes_demand.items()):
+        print(f"  {n}    {', '.join(sorted(set(files)))}")
+    print("  supply check needs a built core lib: nm -D libtransformer_engine*.so | grep ' T nvte_'")
     print()
 
     verdict = "CLOSED" if not missing and not cuda_only_demanded else "OPEN"
