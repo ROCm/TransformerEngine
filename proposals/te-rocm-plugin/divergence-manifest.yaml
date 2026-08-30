@@ -2229,7 +2229,7 @@ entries:
       are VERBATIM - carry them unpatched. Plus ROCm-only CM-004 (112 ln).
   - id: BK-002
     metric_class: m1
-    path: "pytorch/csrc/ -> transformer_engine_torch_rocm build target in this repo; embeds TE_ROCM_EXTENSION_API + build-compat tuple"
+    path: "pytorch/csrc/ -> transformer_engine_rocm_torch build target in this repo; embeds TE_ROCM_EXTENSION_API + build-compat tuple"
     disposition: build-target
     patch_timing: n/a
     estimated_changed_lines: 1347         # was 1370

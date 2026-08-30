@@ -367,7 +367,7 @@ checks run at build/certification time; production validates the certified bundl
 > Upstream's own loader, `common/__init__.py:load_framework_extension`, already finds the `.so` by
 > path, builds the module object and inserts it into `sys.modules` under a name it chooses — before
 > the first seam import (`pytorch/__init__.py:18`). The seam is therefore a two-line alias inside that
-> function (part of the CM-002 patch): load under the compiled name `transformer_engine_torch_rocm`,
+> function (part of the CM-002 patch): load under the compiled name `transformer_engine_rocm_torch`,
 > then `sys.modules["transformer_engine_torch"] = solib`. Eager attributes, `__spec__`, `dir()` and
 > enum/class identity are automatic because the module *is* the extension. The description below —
 > derived from TE Lite and FlagOS, which *replaced* the extension and so had to synthesize a module —
@@ -375,7 +375,7 @@ checks run at build/certification time; production validates the certified bundl
 > extension. See the implementation plan, F3 and P2.
 
 Facade (Stage 6 form): registered as `transformer_engine_torch` (via #3401 hook or shim), delegating
-to `transformer_engine_torch_rocm`; **module attributes eagerly populated**, preserving `__all__`,
+to `transformer_engine_rocm_torch`; **module attributes eagerly populated**, preserving `__all__`,
 `dir()`, `__spec__`, class `__module__`, and introspection; enums re-exported from the compiled
 extension. Stateful classes are **directly re-exported when the extension contract matches; otherwise a
 version-specific wrapper/factory adapts** them.
@@ -473,7 +473,7 @@ removes *routine textual merge overlap*, not the compatibility obligation, which
 > `common/utils.py` (56 lines) are verbatim — carry them unpatched.** ROCm-only
 > `ck_fused_attn/check_aiter_mha_args.py` (112 ln) relocates with the CK backend (CM-004).
 
-**`pytorch/csrc/` (1,347 ln) → `build-target`** as the `transformer_engine_torch_rocm` extension
+**`pytorch/csrc/` (1,347 ln) → `build-target`** as the `transformer_engine_rocm_torch` extension
 embedding `TE_ROCM_EXTENSION_API`. **`jax/csrc/` (264 ln) → `build-target`** on the beta
 track.
 

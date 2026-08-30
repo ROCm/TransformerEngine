@@ -147,7 +147,7 @@ def setup_pytorch_extension(
     from torch.utils.cpp_extension import CppExtension
 
     return CppExtension(
-        name="transformer_engine_torch",
+        name="transformer_engine_rocm_torch",
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},

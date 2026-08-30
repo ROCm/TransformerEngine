@@ -78,7 +78,7 @@ Two exits inside Stage 1, deliberately:
 
 | | |
 |---|---|
-| Do | `build_tools/pytorch.py:150`: `name="transformer_engine_torch"` → `"transformer_engine_torch_rocm"`. **Delete any existing `transformer_engine_torch*.so` from the package dir before rebuilding** — the loader's finder matches by prefix and returns the first hit (`common/__init__.py:_find_shared_object_in_te_dir`), so a stale old `.so` would be loaded and mask the failure this step exists to observe. Rebuild. Confirm `import transformer_engine.pytorch` now **fails** at `load_framework_extension` because `PyInit_transformer_engine_torch` is absent from the renamed `.so`. |
+| Do | `build_tools/pytorch.py:150`: `name="transformer_engine_torch"` → `"transformer_engine_rocm_torch"`. **Delete any existing `transformer_engine_torch*.so` from the package dir before rebuilding** — the loader's finder matches by prefix and returns the first hit (`common/__init__.py:_find_shared_object_in_te_dir`), so a stale old `.so` would be loaded and mask the failure this step exists to observe. Rebuild. Confirm `import transformer_engine.pytorch` now **fails** at `load_framework_extension` because `PyInit_transformer_engine_torch` is absent from the renamed `.so`. |
 | Why | Makes the old name genuinely absent, so a seam bug fails loudly (the clean-install property from F3) instead of being masked by the compiled module answering under the old name. |
 | Exit | The failure is observed and its traceback names one of the 9 early-bound sites or the root. |
 
@@ -105,7 +105,7 @@ sys.modules[module_name] = solib                       # <-- the seam: upstream'
 ```
 
 Free by construction, because the module *is* the extension: eager attributes, `__spec__`/`__file__`,
-`dir()`, and enum/class **identity** (`tex.DType is transformer_engine_torch_rocm.DType`). Nothing to
+`dir()`, and enum/class **identity** (`tex.DType is transformer_engine_rocm_torch.DType`). Nothing to
 reconstruct, nothing that can be reconstructed wrongly.
 
 Deliberately **not** done in the prototype — each is a later-stage item, and adding it now would
@@ -121,12 +121,12 @@ put our code in the path EXIT-A is meant to test:
   compiled extension (Stage 6).
 
 One visible effect of the rename, to be **asserted, not hidden**: every pybind class now reports
-`__module__ == "transformer_engine_torch_rocm"`. Checked for checkpoint impact — `get_extra_state`
+`__module__ == "transformer_engine_rocm_torch"`. Checked for checkpoint impact — `get_extra_state`
 (`module/base.py:1424`) pickles a recipe dataclass, CPU tensors and a dict, **no pybind objects** — so
 existing checkpoints are unaffected. (Recipe *class* paths are a separate matter: CM-003 / §8.5
 Stage 5.)
 
-| Exit | `python -c "import sys, transformer_engine.pytorch; a = sys.modules['transformer_engine_torch']; b = sys.modules['transformer_engine_torch_rocm']; assert a is b; import transformer_engine_torch as tex; assert tex is a and tex.DType is b.DType"`. |
+| Exit | `python -c "import sys, transformer_engine.pytorch; a = sys.modules['transformer_engine_torch']; b = sys.modules['transformer_engine_rocm_torch']; assert a is b; import transformer_engine_torch as tex; assert tex is a and tex.DType is b.DType"`. |
 
 ### P3 · EXIT-A — the seam holds with the fork's own Python — 1 day · **container**
 
@@ -209,7 +209,7 @@ tests/te_rocm/test_seam_signatures.py  for each demanded function: inspect.signa
                                         parse vs upstream call-site arity (coarse; exact is Stage 3)
 tests/te_rocm/test_import_order.py     the four P3 orders incl. the loud-failure assertion, + fork/reload
 tests/te_rocm/test_seam_identity.py    sys.modules alias is-identity; every pybind class reports
-                                        __module__ == "transformer_engine_torch_rocm" (documents the rename);
+                                        __module__ == "transformer_engine_rocm_torch" (documents the rename);
                                         pickle round-trip of one enum and one class
 tests/te_rocm/test_overlay_bundle.py   bundle hash matches overlay-manifest.json; every applied patch's
                                         manifest ID is status: proposed|active (not retired)
@@ -233,7 +233,7 @@ Against the budget approved in G6 — the budget must exist *before* this runs.
 
 | Check | How |
 |---|---|
-| Seam call overhead | **Expected zero by construction** — the alias means `tex.<fn> is transformer_engine_torch_rocm.<fn>`; assert that identity for every demanded function. Keep a 1e6-call microbench (direct vs via `tex`) only as evidence for the record; a non-zero delta means the alias was replaced by something else and is a bug, not a cost |
+| Seam call overhead | **Expected zero by construction** — the alias means `tex.<fn> is transformer_engine_rocm_torch.<fn>`; assert that identity for every demanded function. Keep a 1e6-call microbench (direct vs via `tex`) only as evidence for the record; a non-zero delta means the alias was replaced by something else and is a bug, not a cost |
 | Import time | `-X importtime` total for `transformer_engine.pytorch`, fork vs overlay |
 | Graph breaks | `torch.compile` on `te.Linear` + `te.LayerNormMLP` with `TORCH_LOGS=graph_breaks`; count must not increase |
 | hipGraph capture | `tests/pytorch/test_cuda_graphs.py` subset passes |

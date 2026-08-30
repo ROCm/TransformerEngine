@@ -130,7 +130,7 @@ Today: one Python distribution `transformer_engine` (source tree) + core wheel
 |---|---|---|
 | `transformer_engine` (pure Python, `py3-none-any`) | overlay (vendored upstream + patches) + `te_rocm/` plugin + `overlay-manifest.json` | every pin bump — and *only* this |
 | `transformer_engine_rocm{major}` (existing) | `libtransformer_engine_rocm.so` (renamed in S4; in S3 still `libtransformer_engine.so`) | backend changes |
-| `transformer_engine_rocm_pytorch` (**new**) | `transformer_engine_torch_rocm` extension + build-compat tuple | torch/ROCm/ABI tuple changes |
+| `transformer_engine_rocm_pytorch` (**new**) | `transformer_engine_rocm_torch` extension + build-compat tuple | torch/ROCm/ABI tuple changes |
 | `transformer_engine_rocm_jax` (existing name) | JAX extension | S7 |
 
 Work: `setup.py` learns to emit the pure-Python wheel from `build/overlay/` (BuildPy already
