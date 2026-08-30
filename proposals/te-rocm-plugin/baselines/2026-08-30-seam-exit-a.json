@@ -9,9 +9,9 @@
   "torch": "2.12.0+rocm7.14.0",
   "upstream_pin": "868d8d9216da361c666519652115e23688db5211"
  },
- "import_time_us": 2918869,
- "label": "2026-08-30-fork",
- "note": "P0 fork baseline: NVTE_FRAMEWORK=pytorch editable build 15.6 min; GPU 0 of 8x gfx950; representative suite sec 3.9. Pre-existing failure: test_custom_recipe_dpa_fp8 (no FP8 DPA backend on gfx950 - capability gap, TST-001 skip candidate). checkpoint fixtures generated on this build (test_checkpoint.py --save-checkpoint all).",
+ "import_time_us": 2625780,
+ "label": "2026-08-30-seam-exit-a",
+ "note": "EXIT-A: fork's own Python unchanged; extension renamed transformer_engine_rocm_torch (P1) + loader alias (P2). Same suite, same GPU; checkpoint fixtures saved on the fork build. Suite wall-times not comparable to P0 (CK_JIT cache warm on this run).",
  "summary": {
   "per_file": {
    "attention": {
@@ -11924,5 +11924,5 @@
    "tests.pytorch.test_torch_compile::test_value_quantizer_rejects_process_group": "pass"
   }
  },
- "written": "2026-08-30T03:21:30+00:00"
+ "written": "2026-08-30T03:21:31+00:00"
 }

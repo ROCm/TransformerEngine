@@ -51,13 +51,31 @@ def env_facts() -> dict:
     return facts
 
 
+import re as _re
+_BINARY_PARAM = _re.compile(r"\[(.*)\]$", _re.S)
+
+
+def _stable_id(classname: str, name: str, seen: dict) -> str:
+    """Parametrize IDs that embed raw bytes (pickle payloads with torch storage object ids)
+    differ in every process. Replace such a param with an ordinal per base test name so the
+    same logical test gets the same id across runs. Verified on test_recipe::
+    test_stateful_unknown_or_malformed_pickled_extra_state_requires_opt_in."""
+    m = _BINARY_PARAM.search(name)
+    if m and ("\\x" in m.group(1) or "\x80" in m.group(1)):
+        base = name[: m.start()]
+        k = seen[base] = seen.get(base, 0) + 1
+        name = f"{base}[<binary-param #{k}>]"
+    return f"{classname}::{name}"
+
+
 def parse_junit(d: Path) -> dict[str, dict]:
     """{file_label: {test_id: 'pass'|'fail'|'error'|'skip'}}"""
     out: dict[str, dict] = {}
     for x in sorted(d.glob("*.xml")):
         tests = {}
+        seen: dict = {}
         for tc in ET.parse(x).getroot().iter("testcase"):
-            tid = f"{tc.get('classname')}::{tc.get('name')}"
+            tid = _stable_id(tc.get("classname"), tc.get("name"), seen)
             if tc.find("failure") is not None:
                 st = "fail"
             elif tc.find("error") is not None:
