@@ -140,9 +140,11 @@ def parse_header(text: str) -> dict:
     return hdr
 
 
-def load_patches(entries, base_sha: str) -> list[dict]:
+def load_patches(entries, base_sha: str, exclude: set[str] = frozenset()) -> list[dict]:
     out = []
     for p in sorted(PATCHES.glob("*.patch")):
+        if p.stem in exclude:
+            continue                     # --exclude: build "without this patch" (P5 shrink), race-free
         text = p.read_text()
         hdr = parse_header(text)
         pid = hdr["manifest"]
@@ -237,7 +239,9 @@ def build(args, d, entries, base_sha: str, check_only: bool):
     print(f"targets       : {len(present)} manifest file entries have their upstream target present"
           + (f"; ABSENT: {absent}" if absent else ""))
 
-    patches = topo(load_patches(entries, base_sha))
+    patches = topo(load_patches(entries, base_sha, exclude=set(getattr(args, "exclude", None) or [])))
+    if getattr(args, "exclude", None):
+        print(f"excluded      : {', '.join(args.exclude)}")
     ok_n, bad = 0, []
     for p in patches:
         ok, msg = apply_patch(p["path"], tree, check_only=check_only)
@@ -328,6 +332,7 @@ def diff_fork(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=str(ROOT / "build" / "overlay"))
+    ap.add_argument("--exclude", action="append", metavar="ID", help="leave this patch out (repeatable)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check"); sub.add_parser("build"); sub.add_parser("diff-fork")
     g = sub.add_parser("gen"); g.add_argument("ids", nargs="*"); g.add_argument("--all", action="store_true")
