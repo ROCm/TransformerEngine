@@ -70,12 +70,17 @@ env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
+# No workflow-level concurrency: rocm-ci.yml already gates PRs; sharing the same group
+# with a parent reusable workflow causes GitHub deadlock detection.
+
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
   build-rocm-wheels:
     name: Build ROCm Docker image and TransformerEngine wheels
     runs-on: build-only-te
+    env:
+      NVTE_AITER_PREBUILT_BASE_URL: ${{ vars.NVTE_AITER_PREBUILT_BASE_URL }}
 
     steps:
       - name: Checkout repository
@@ -90,6 +95,19 @@ jobs:
             3rdparty/hipify_torch \
             3rdparty/hipkittens \
             3rdparty/composable_kernel
+
+      # Verify this runner can reach Artifactory for anonymous prebuilt downloads
+      - name: "Preflight: Artifactory download reachability"
+        if: ${{ inputs.use_prebuilt_aiter }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if bash .github/scripts/aiter_prebuild_upload.sh --preflight --download; then
+            echo "::notice::Preflight download reachability succeeded"
+            exit 0
+          fi
+          echo "::warning::Preflight download reachability failed"
+          exit 1
 
       - name: Derive Docker image tag
         id: set-tag
@@ -189,7 +207,7 @@ jobs:
       # The container writes all wheels and logs under /wheelhouse.
       - name: Build TransformerEngine wheels
         run: |
-          NVTE_AITER_PREBUILT_BASE_URL="https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts"
+          set -euo pipefail
           docker run --rm \
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \

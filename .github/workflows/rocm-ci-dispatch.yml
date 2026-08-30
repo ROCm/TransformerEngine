@@ -6,12 +6,74 @@ name: PR Automatic CI
 
 on:
   pull_request:
-    types: [ labeled, synchronize, reopened ]
+    # Include opened: push-only types miss PR creation (first commit uses synchronize only after push).
+    types: [ opened, labeled, synchronize, reopened ]
 
 permissions:
   contents: read
+  pull-requests: read
+
 
 jobs:
+  # To determine whether to upload AITER prebuilt to Artifactory
+  aiter_prebuilt_upload_trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      trigger_aiter_upload: ${{ steps.set.outputs.trigger_aiter_upload }}
+    steps:
+      - name: Detect PR changes under 3rdparty/aiter
+        uses: dorny/paths-filter@v4
+        id: paths
+        if: github.event.action == 'synchronize'
+        with:
+          # Include gitlink path: submodule bumps appear as `3rdparty/aiter`, not under **.
+          filters: |
+            aiter:
+              - '3rdparty/aiter/**'
+              - '3rdparty/aiter'
+
+      - name: Detect skip_aiter_upload label
+        id: skip_label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const labels = context.payload.pull_request?.labels || [];
+            const skip = labels.some((l) => l.name === 'skip_aiter_upload');
+            core.info(`skip_aiter_upload label : ${skip}`);
+            core.setOutput('skip', skip ? 'true' : 'false');
+
+      - name: Set trigger_aiter_upload from paths and labels
+        id: set
+        run: |
+          set -euo pipefail
+          ACTION='${{ github.event.action }}'
+          echo "PR action=${ACTION}"
+
+          if [ "$ACTION" != "synchronize" ]; then
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "Not synchronize - trigger_aiter_upload = false"
+            exit 0
+          fi
+
+          SKIP='${{ steps.skip_label.outputs.skip }}'
+          echo "skip_aiter_upload label : ${SKIP}"
+
+          if [ "$SKIP" = 'true' ]; then
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "skip_aiter_upload label set - trigger_aiter_upload = false"
+            exit 0
+          fi
+
+          AITER_PATHS='${{ steps.paths.outputs.aiter }}'
+
+          if [ "$AITER_PATHS" = "false" ]; then
+            echo "trigger_aiter_upload=true" >> "$GITHUB_OUTPUT"
+            echo "3rdparty/aiter changed on PR - trigger_aiter_upload = true"
+          else
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "No 3rdparty/aiter changes on PR - trigger_aiter_upload = false"
+          fi
+
   determine_level:
     runs-on: ubuntu-latest
     outputs:
@@ -53,9 +115,12 @@ jobs:
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
     if: ${{ needs.determine_level.outputs.test_level != '' }}
-    needs: determine_level
+    needs: [determine_level, aiter_prebuilt_upload_trigger]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
+      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
+      # true = select_image + optional AITER upload only (skip wheels/GPU). Keep false on default branch.
+      aiter_flow_test_only: true

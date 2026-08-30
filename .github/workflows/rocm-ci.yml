@@ -26,6 +26,16 @@ on:
         required: false
         default: false
         type: boolean
+      trigger_aiter_upload:
+        description: 'True when 3rdparty/aiter changed on the PR (set by rocm-ci-dispatch)'
+        required: false
+        default: false
+        type: boolean
+      aiter_flow_test_only:
+        description: 'Skip wheel build + GPU tests (AITER path validation only). Cannot use env in job if; use this input.'
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
@@ -40,9 +50,14 @@ on:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
         type: boolean
         default: false
+      aiter_flow_test_only:
+        description: 'Skip wheel build + GPU tests (AITER path validation only)'
+        type: boolean
+        default: false
 
+# Single concurrency anchor for this PR/branch pipeline. Nested reusable workflows
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -98,13 +113,28 @@ jobs:
           echo "Selected base image tag: $IMAGE_BASE"
           echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
+  upload_aiter_prebuilt:
+    name: Build and upload AITER prebuilt
+    needs: select_image
+    # Gate on inputs only: reusable runs from PR may report github.event_name as pull_request, not workflow_call.
+    # push-triggered runs leave inputs.trigger_aiter_upload unset/false (default).
+    if: ${{ inputs.trigger_aiter_upload == true || inputs.trigger_aiter_upload == 'true' }}
+    uses: ./.github/workflows/aiter-prebuilt-upload.yml
+    with:
+      docker_image: ${{ needs.select_image.outputs.image-tag }}
+    secrets: inherit
+
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    needs: [select_image, upload_aiter_prebuilt]
+    # job.if cannot use env.* — use inputs.aiter_flow_test_only; push runs skip that input (full CI).
+    if: ${{ (github.event_name == 'push' || inputs.aiter_flow_test_only != true) && always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success') }}
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
+    if: ${{ github.event_name == 'push' || inputs.aiter_flow_test_only != true }}
     needs: [select_image, build]
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
@@ -260,6 +290,7 @@ jobs:
 
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
+    if: ${{ github.event_name == 'push' || inputs.aiter_flow_test_only != true }}
     needs: [select_image, build]
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
