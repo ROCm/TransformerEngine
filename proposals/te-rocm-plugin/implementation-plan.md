@@ -66,7 +66,7 @@ Two exits inside Stage 1, deliberately:
 
 ## 3. Track P — the prototype (Stage 1)
 
-### P0 · Environment and baseline — 1 day · **container**
+### P0 · Environment and baseline — 1 day · **container** — **DONE 2026-08-30** (`baselines/2026-08-30-fork.json`)
 
 | | |
 |---|---|
@@ -74,7 +74,7 @@ Two exits inside Stage 1, deliberately:
 | Exit | Baseline numbers committed to `proposals/te-rocm-plugin/baselines/<date>-fork.json`. |
 | Blocks | Everything in Track P that runs code. |
 
-### P1 · Rename the extension — 0.5 day · **container**
+### P1 · Rename the extension — 0.5 day · **container** — **DONE 2026-08-30** (name: `transformer_engine_rocm_torch`, 2.3 min)
 
 | | |
 |---|---|
@@ -82,7 +82,7 @@ Two exits inside Stage 1, deliberately:
 | Why | Makes the old name genuinely absent, so a seam bug fails loudly (the clean-install property from F3) instead of being masked by the compiled module answering under the old name. |
 | Exit | The failure is observed and its traceback names one of the 9 early-bound sites or the root. |
 
-### P2 · The seam: an alias in upstream's loader — 0.5 day · **this workstation**, verified in container
+### P2 · The seam: an alias in upstream's loader — 0.5 day — **DONE 2026-08-30** (two edits in `common/__init__.py`)
 
 **No new modules.** An earlier draft of this plan specified `te_rocm/facade.py`, `te_rocm/bootstrap.py`
 and a top-level `transformer_engine_torch` bootstrap package. They were designed from the proposal's
@@ -128,7 +128,7 @@ Stage 5.)
 
 | Exit | `python -c "import sys, transformer_engine.pytorch; a = sys.modules['transformer_engine_torch']; b = sys.modules['transformer_engine_rocm_torch']; assert a is b; import transformer_engine_torch as tex; assert tex is a and tex.DType is b.DType"`. |
 
-### P3 · EXIT-A — the seam holds with the fork's own Python — 1 day · **container**
+### P3 · EXIT-A — the seam holds with the fork's own Python — 1 day — **REACHED 2026-08-30**: 0 outcome flips vs P0 across 10 files; import 2.92 s → 2.63 s; all four import orders; fork-saved checkpoints load (`baselines/2026-08-30-seam-exit-a.json`)
 
 The fork's current `transformer_engine/pytorch/*.py` is left **completely untouched**. Only P1 + P2
 are applied — which means EXIT-A now tests **upstream's own mechanism under a rename, with nothing
