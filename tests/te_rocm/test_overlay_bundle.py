@@ -59,7 +59,13 @@ def test_no_stray_edits_in_the_overlay(overlay):
     root, om = overlay
     import tempfile, filecmp
     tmp = tempfile.mkdtemp(prefix="overlay-verify-")
-    r = subprocess.run(["python3", str(REPO / "proposals/te-rocm-plugin/tools/assemble_overlay.py"), "--out", tmp, "build"],
+    # rebuild with the SAME patch set the overlay records: every active patch not applied is excluded
+    applied = {p["id"] for p in om["patches"]}
+    active = {p.stem for p in (REPO / "proposals/te-rocm-plugin/patches").glob("*.patch")}
+    excl = []
+    for pid in sorted(active - applied):
+        excl += ["--exclude", pid]
+    r = subprocess.run(["python3", str(REPO / "proposals/te-rocm-plugin/tools/assemble_overlay.py"), "--out", tmp, *excl, "build"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-600:]
     diffs = []
