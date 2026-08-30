@@ -95,8 +95,13 @@ metadata:
     C++ arm (open_decisions.cxx_maintenance_strategy). The 65 ROCm-only native files carry no
     cxx_strategy: they have no upstream ancestor.
 
-  added_class_status: MUST_REGENERATE
+  added_class_status: CURRENT
   added_class_notes: >-
+    REGENERATED 2026-08-30 against 868d8d92 by tools/classify_hunks.py (hunk-granular = canonical-v2
+    compatible; added_class_line = strict line-granular). Recovery test on 8 files whose delta is
+    identical at both bases: sums v2.3 159/459/46 vs 158/454/36 (+16 header lines v2.3 folded into
+    guard); the unmarked bucket matches per file. Residual per-file deltas are sidecar<->guard
+    swaps of <=16 lines. Prior text follows for history:
     Every added_class triple in this file was computed against the WRONG base and is
     retained only as a stale reference under stale_added_class. Hunk classification is
     base-dependent: upstream changed several of these files between 868d8d92 and the
@@ -215,7 +220,8 @@ entries:
     removed_lines: 1
     v23_values: {added_lines: 312, removed_lines: 46}
     stale_added_class: {sidecar: 265, guard: 35, unmarked: 12}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 247, guard: 49, unmarked: 4}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 6, guard: 82, unmarked: 212}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: custom-recipe+plugin
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -279,7 +285,8 @@ entries:
     removed_lines: 23
     v23_values: {added_lines: 289, removed_lines: 58}
     stale_added_class: {sidecar: 14, guard: 264, unmarked: 11}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 156, guard: 76, unmarked: 55}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 4, guard: 69, unmarked: 214}   # line-granular (strict); guard incl. 12 else-branch lines
     disposition: capability
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -343,7 +350,8 @@ entries:
     removed_lines: 36
     v23_values: {added_lines: 162, removed_lines: 78}
     stale_added_class: {sidecar: 5, guard: 44, unmarked: 113}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 5, guard: 31, unmarked: 111}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 21, unmarked: 126}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -418,7 +426,8 @@ entries:
     added_lines: 207
     removed_lines: 4
     stale_added_class: {sidecar: 146, guard: 31, unmarked: 30}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 117, guard: 60, unmarked: 28}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 25, guard: 38, unmarked: 142}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: custom-recipe
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -480,7 +489,8 @@ entries:
     removed_lines: 20
     v23_values: {added_lines: 130, removed_lines: 18}
     stale_added_class: {sidecar: 8, guard: 42, unmarked: 80}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 8, guard: 42, unmarked: 78}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 1, guard: 24, unmarked: 103}   # line-granular (strict); guard incl. 3 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -555,7 +565,8 @@ entries:
     added_lines: 140
     removed_lines: 5
     stale_added_class: {sidecar: 13, guard: 124, unmarked: 3}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 18, guard: 118, unmarked: 2}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 76, unmarked: 62}   # line-granular (strict); guard incl. 17 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -571,7 +582,8 @@ entries:
     removed_lines: 10
     v23_values: {added_lines: 123, removed_lines: 6}
     stale_added_class: {sidecar: 0, guard: 46, unmarked: 77}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 46, unmarked: 75}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 19, unmarked: 102}   # line-granular (strict); guard incl. 2 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -662,7 +674,8 @@ entries:
     removed_lines: 12
     v23_values: {added_lines: 119, removed_lines: 8}
     stale_added_class: {sidecar: 4, guard: 41, unmarked: 74}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 4, guard: 41, unmarked: 72}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 20, unmarked: 97}   # line-granular (strict); guard incl. 2 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -738,7 +751,8 @@ entries:
     removed_lines: 29
     v23_values: {added_lines: 75, removed_lines: 41}
     stale_added_class: {sidecar: 0, guard: 71, unmarked: 4}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 71, unmarked: 2}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 62, unmarked: 11}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: capability
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -785,7 +799,8 @@ entries:
     removed_lines: 18
     v23_values: {added_lines: 70, removed_lines: 30}
     stale_added_class: {sidecar: 0, guard: 66, unmarked: 4}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 65, unmarked: 3}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 52, unmarked: 16}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: capability
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -831,7 +846,8 @@ entries:
     added_lines: 62
     removed_lines: 15
     stale_added_class: {sidecar: 0, guard: 60, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 59, unmarked: 1}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 54, unmarked: 6}   # line-granular (strict); guard incl. 13 else-branch lines
     disposition: capability
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -878,7 +894,8 @@ entries:
     added_lines: 62
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 62, unmarked: 0}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 60, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 47, unmarked: 13}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -925,7 +942,8 @@ entries:
     removed_lines: 0
     v23_values: {added_lines: 9, removed_lines: 51}
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 9}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 2}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 2}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -947,7 +965,8 @@ entries:
     added_lines: 34
     removed_lines: 4
     stale_added_class: {sidecar: 19, guard: 12, unmarked: 3}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 31, guard: 0, unmarked: 1}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 25, unmarked: 7}   # line-granular (strict); guard incl. 4 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1007,7 +1026,8 @@ entries:
     added_lines: 32
     removed_lines: 3
     stale_added_class: {sidecar: 0, guard: 30, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 30, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 5, unmarked: 25}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1022,7 +1042,8 @@ entries:
     added_lines: 29
     removed_lines: 6
     stale_added_class: {sidecar: 0, guard: 21, unmarked: 8}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 21, unmarked: 6}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 16, unmarked: 11}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: build-system
     patch_timing: n/a
     runtime_eligible: never
@@ -1037,7 +1058,8 @@ entries:
     added_lines: 26
     removed_lines: 8
     stale_added_class: {sidecar: 0, guard: 18, unmarked: 8}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 11, guard: 7, unmarked: 6}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 1, guard: 14, unmarked: 9}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1082,7 +1104,8 @@ entries:
     added_lines: 33
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 31, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 31, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 21, unmarked: 10}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1102,7 +1125,8 @@ entries:
     removed_lines: 0
     v23_values: {added_lines: 14, removed_lines: 17}
     stale_added_class: {sidecar: 0, guard: 7, unmarked: 7}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 4, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 1}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1117,7 +1141,8 @@ entries:
     added_lines: 27
     removed_lines: 4
     stale_added_class: {sidecar: 12, guard: 6, unmarked: 9}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 8, guard: 3, unmarked: 14}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 8, unmarked: 17}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1162,7 +1187,8 @@ entries:
     added_lines: 25
     removed_lines: 6
     stale_added_class: {sidecar: 0, guard: 23, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 21, unmarked: 2}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 15, unmarked: 8}   # line-granular (strict); guard incl. 4 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1177,7 +1203,8 @@ entries:
     added_lines: 20
     removed_lines: 8
     stale_added_class: {sidecar: 0, guard: 18, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 18, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 10, unmarked: 8}   # line-granular (strict); guard incl. 2 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1192,7 +1219,8 @@ entries:
     added_lines: 17
     removed_lines: 6
     stale_added_class: {sidecar: 0, guard: 15, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 15, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 10, unmarked: 5}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: candidate
@@ -1208,7 +1236,8 @@ entries:
     added_lines: 18
     removed_lines: 3
     stale_added_class: {sidecar: 0, guard: 9, unmarked: 9}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 9, unmarked: 7}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 14}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1223,7 +1252,8 @@ entries:
     added_lines: 13
     removed_lines: 7
     stale_added_class: {sidecar: 0, guard: 3, unmarked: 10}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 3, unmarked: 8}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 1, unmarked: 10}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1238,7 +1268,8 @@ entries:
     added_lines: 15
     removed_lines: 5
     stale_added_class: {sidecar: 0, guard: 5, unmarked: 10}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 5, unmarked: 8}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 10}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1253,7 +1284,8 @@ entries:
     added_lines: 14
     removed_lines: 2
     stale_added_class: {sidecar: 6, guard: 1, unmarked: 7}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 6, guard: 1, unmarked: 5}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 5, unmarked: 7}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1269,7 +1301,8 @@ entries:
     added_lines: 12
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 12}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 10}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 10}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1284,7 +1317,8 @@ entries:
     added_lines: 9
     removed_lines: 4
     stale_added_class: {sidecar: 1, guard: 6, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 1, guard: 6, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 1, guard: 5, unmarked: 1}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1300,7 +1334,8 @@ entries:
     added_lines: 11
     removed_lines: 2
     stale_added_class: {sidecar: 3, guard: 6, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 3, guard: 6, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 7}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1316,7 +1351,8 @@ entries:
     added_lines: 13
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 2, unmarked: 11}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 11}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 11}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1331,7 +1367,8 @@ entries:
     added_lines: 11
     removed_lines: 1
     stale_added_class: {sidecar: 6, guard: 3, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 6, guard: 2, unmarked: 1}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 6}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1391,7 +1428,8 @@ entries:
     added_lines: 7
     removed_lines: 4
     stale_added_class: {sidecar: 0, guard: 2, unmarked: 5}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 5, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 2}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1407,7 +1445,8 @@ entries:
     added_lines: 5
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 3, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 3, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 3}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1422,7 +1461,8 @@ entries:
     added_lines: 7
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 7}
-    added_class: REGENERATE
+    added_class: {header: 0, sidecar: 0, guard: 0, unmarked: 7}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 0, sidecar: 0, guard: 0, unmarked: 7}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1439,7 +1479,8 @@ entries:
     added_lines: 6
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 4, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 4, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 2}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: candidate
@@ -1454,7 +1495,8 @@ entries:
     added_lines: 4
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 4, unmarked: 0}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 2, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 1, unmarked: 1}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1469,7 +1511,8 @@ entries:
     added_lines: 5
     removed_lines: 1
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 5}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 3}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 3}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1485,7 +1528,8 @@ entries:
     added_lines: 4
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 2, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 2, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 1, unmarked: 1}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1500,7 +1544,8 @@ entries:
     added_lines: 4
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 4}
-    added_class: REGENERATE
+    added_class: {header: 0, sidecar: 0, guard: 0, unmarked: 4}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 0, sidecar: 0, guard: 0, unmarked: 4}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1516,7 +1561,8 @@ entries:
     added_lines: 3
     removed_lines: 0
     stale_added_class: {sidecar: 1, guard: 0, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 1, guard: 0, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 1, guard: 0, unmarked: 0}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1534,7 +1580,8 @@ entries:
     path: transformer_engine/__init__.py
     added_lines: 36
     removed_lines: 4
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 10, unmarked: 24}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 1, unmarked: 33}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1558,7 +1605,8 @@ entries:
     path: transformer_engine/common/__init__.py
     added_lines: 119
     removed_lines: 31
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 98, unmarked: 19}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 62, unmarked: 55}   # line-granular (strict); guard incl. 2 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1650,7 +1698,8 @@ entries:
     path: transformer_engine/common/recipe/__init__.py
     added_lines: 86
     removed_lines: 5
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 58, guard: 23, unmarked: 3}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 8, guard: 0, unmarked: 76}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1747,7 +1796,8 @@ entries:
     added_lines: 215
     removed_lines: 38
     stale_added_class: {sidecar: 0, guard: 189, unmarked: 26}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 180, unmarked: 33}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 49, unmarked: 164}   # line-granular (strict); guard incl. 12 else-branch lines
     disposition: split-features
     patch_timing: build
     fallback_mechanism: build-time source patch
@@ -1822,7 +1872,8 @@ entries:
     added_lines: 79
     removed_lines: 8
     stale_added_class: {sidecar: 0, guard: 74, unmarked: 5}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 72, unmarked: 5}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 18, unmarked: 59}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: compat-pr
     patch_timing: build
     runtime_eligible: never
@@ -1837,7 +1888,8 @@ entries:
     added_lines: 49
     removed_lines: 13
     stale_added_class: {sidecar: 0, guard: 47, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 47, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 38, unmarked: 9}   # line-granular (strict); guard incl. 6 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1852,7 +1904,8 @@ entries:
     added_lines: 39
     removed_lines: 12
     stale_added_class: {sidecar: 0, guard: 30, unmarked: 9}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 30, unmarked: 7}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 25, unmarked: 12}   # line-granular (strict); guard incl. 2 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1867,7 +1920,8 @@ entries:
     added_lines: 48
     removed_lines: 0
     stale_added_class: {sidecar: 46, guard: 0, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 46}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 46}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: upstream-pr
     pr_kind: portability
     patch_timing: build
@@ -1905,7 +1959,8 @@ entries:
     added_lines: 12
     removed_lines: 30
     stale_added_class: {sidecar: 0, guard: 1, unmarked: 11}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 3, unmarked: 7}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 8}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1920,7 +1975,8 @@ entries:
     added_lines: 24
     removed_lines: 4
     stale_added_class: {sidecar: 0, guard: 19, unmarked: 5}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 19, unmarked: 3}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 16, unmarked: 6}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1935,7 +1991,8 @@ entries:
     added_lines: 17
     removed_lines: 4
     stale_added_class: {sidecar: 0, guard: 15, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 13, unmarked: 2}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 10, unmarked: 5}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: build-system
     patch_timing: n/a
     runtime_eligible: never
@@ -1950,7 +2007,8 @@ entries:
     added_lines: 10
     removed_lines: 4
     stale_added_class: {sidecar: 0, guard: 4, unmarked: 6}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 4, unmarked: 4}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 5}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1965,7 +2023,8 @@ entries:
     added_lines: 13
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 11, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 11, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 4, unmarked: 7}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -1980,7 +2039,8 @@ entries:
     added_lines: 9
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 9}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 7}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 7}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
@@ -1995,7 +2055,8 @@ entries:
     added_lines: 9
     removed_lines: 1
     stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 7, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 5, unmarked: 2}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2010,7 +2071,8 @@ entries:
     added_lines: 8
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 5, unmarked: 3}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 5, unmarked: 1}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 3}   # line-granular (strict); guard incl. 1 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2025,7 +2087,8 @@ entries:
     added_lines: 9
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 7, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 4}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2040,7 +2103,8 @@ entries:
     added_lines: 9
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 7, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 7, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 3, unmarked: 4}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2055,7 +2119,8 @@ entries:
     added_lines: 5
     removed_lines: 2
     stale_added_class: {sidecar: 0, guard: 3, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 3, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 1}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2070,7 +2135,8 @@ entries:
     added_lines: 6
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 4, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 4, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 2}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
     runtime_eligible: never
@@ -2086,7 +2152,8 @@ entries:
     added_lines: 2
     removed_lines: 0
     stale_added_class: {sidecar: 0, guard: 0, unmarked: 2}
-    added_class: REGENERATE
+    added_class: {header: 2, sidecar: 0, guard: 0, unmarked: 0}   # hunk-granular (canonical-v2 compatible); classify_hunks.py
+    added_class_line: {header: 2, sidecar: 0, guard: 0, unmarked: 0}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: patch
     patch_timing: build
     runtime_eligible: never
