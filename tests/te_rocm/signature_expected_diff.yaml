@@ -1,0 +1,18 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+# Seam functions whose ROCm registration is a PLACEHOLDER: registered so the name exists for
+# Python-side annotations, but with a `() -> None` "Dummy function" signature. Upstream calls
+# them with real arguments, so an unguarded call raises TypeError rather than a capability
+# error. Each entry names the upstream caller that must stay guarded, and the manifest item.
+# test_seam_signatures fails if a placeholder appears that is not listed here, or if a listed
+# one stops being a placeholder (then delete the entry).
+placeholders:
+  bulk_overlap_ag_with_external_gemm:
+    registered_at: transformer_engine/pytorch/csrc/extensions/pybind.cpp:732   # #else branch of the USE_ROCM guard
+    upstream_callers: [transformer_engine/pytorch/module/linear.py, transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py]
+    upstream_call_shape: "3 positional"
+    manifest: HDR-B1          # comm-gemm-overlap hierarchy; hold-nvidia
+    guard: "only reached when a UB fused-AG overlap method is configured; ROCm never selects it"
+    desired: "a capability refusal with a reason (proposal sec 3.6), not a TypeError"

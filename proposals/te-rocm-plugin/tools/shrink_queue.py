@@ -140,11 +140,21 @@ def known_failures() -> list[str]:
 
 
 def run_tests(cmds: list[str], overlay: Path) -> tuple[bool, str]:
+    """Runs from /tmp with ABSOLUTE test paths. From the repo root the cwd lands first on
+    sys.path and shadows PYTHONPATH, so the tests would import the fork tree instead of the
+    overlay - which silently invalidated the first Phase B/C run (2026-08-30)."""
     summ = []
-    desel = " ".join(f"--deselect '{t}'" for t in known_failures())
+    desel = " ".join(f"--deselect '{ROOT / t}'" for t in known_failures())
     for c in cmds:
-        r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x {desel} {c}", shell=True, capture_output=True,
-                           text=True, cwd=str(ROOT), env={**ENV, "PYTHONPATH": str(overlay)})
+        parts = c.split(" ", 1); abs_c = str(ROOT / parts[0]) + (" " + parts[1] if len(parts) > 1 else "")
+        env = {**ENV, "PYTHONPATH": str(overlay),
+               "NVTE_TEST_CHECKPOINT_ARTIFACT_PATH": os.environ.get("NVTE_TEST_CHECKPOINT_ARTIFACT_PATH", "")}
+        r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x --rootdir {ROOT} {desel} {abs_c}", shell=True,
+                           capture_output=True, text=True, cwd="/tmp", env=env)
+        te_seen = subprocess.run([sys.executable, "-c", "import transformer_engine as t; print(t.__file__)"],
+                                 capture_output=True, text=True, cwd="/tmp", env=env).stdout
+        if str(overlay) not in te_seen:
+            return False, f"OVERLAY NOT IMPORTED (got {te_seen.strip()[:80]}) - environment bug, verdict void"
         last = (r.stdout.strip().splitlines() or ["?"])[-1][:120]
         summ.append(f"{c.split()[0].split('/')[-1]}: {last}")
         if r.returncode:

@@ -1,0 +1,13 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+# Known enum-member differences between the ROCm extension and upstream's Python expectations.
+# Manifest ABI-002-FAENUM / HDR-B2. When upstream's capability-query RFC lands and the enums
+# converge, test_documented_diff_is_still_true fails - that is the signal to delete the entry.
+NVTE_Fused_Attn_Backend:
+  # members upstream's PYTHON references and ROCm lacks (NVTE_F16_max512_seqlen also differs
+  # but no upstream Python line references it, so it is not part of the demanded set)
+  missing_on_rocm: [NVTE_F16_arbitrary_seqlen, NVTE_FP8]
+  present_on_rocm_only: [NVTE_AOTriton, NVTE_CK]
+  why: "common/util/pybind_helper.h binds different member sets per #ifdef USE_ROCM branch; upstream Python early-binds this enum and compares against CUDA members - carried by patches PT-010/011/012"

@@ -206,6 +206,7 @@ def main():
     ap.add_argument("--csrc", action="append",
                     help="pybind source dir; repeatable. Default: pytorch/csrc + common/util")
     ap.add_argument("--json", help="write full inventory here")
+    ap.add_argument("--values", action="store_true", help="also list enum members per #if branch (static)")
     args = ap.parse_args()
 
     root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"],
@@ -262,6 +263,23 @@ def main():
     print(f"--- early-bound names (from-import; copied at import time): {len(early)} ---")
     print("  " + ", ".join(early))
     print()
+
+    if args.values:
+        # Static enum VALUE inventory: members registered per enum in the pybind sources, with
+        # the #if guard of the enum_<> site. Runtime truth is tests/te_rocm/test_seam_values.py;
+        # this is the build-free view for pin-bump triage.
+        ENUM_BLOCK = re.compile(r'(?:py|pybind11)::enum_<[^;]*?>\s*\(\s*\w+\s*,\s*"(\w+)"(.*?);', re.S)
+        VALUE_RE = re.compile(r'\.value\(\s*"(\w+)"')
+        print("--- enum VALUES registered (static, per #if branch) ---")
+        for d in csrc_dirs:
+            for path in sorted(list(d.rglob("*.cpp")) + list(d.rglob("*.h"))):
+                text = path.read_text(errors="replace").replace("\\\n", "\n")
+                for mm in ENUM_BLOCK.finditer(text):
+                    guard = _guard_at(text, mm.start())
+                    members = VALUE_RE.findall(mm.group(2))
+                    tag = "  [CUDA-only]" if rocm_excluded(guard) else ""
+                    print(f"  {mm.group(1)}{tag}  guard='{guard or '-'}'  {len(members)} members: {', '.join(members)}")
+        print()
 
     ctypes_demand = collect_ctypes_demand(root)
     print(f"--- ctypes demand on the CORE .so from the fork's Python (ABI-001; not pybind, not in any header): {len(ctypes_demand)} ---")
