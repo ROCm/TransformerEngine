@@ -10,6 +10,7 @@ import argparse
 import importlib.util
 import itertools
 import math
+from types import SimpleNamespace
 import torch
 import torch.utils.benchmark as benchmark
 
@@ -389,6 +390,35 @@ def make_forward_backward_metric_records(label_prefix, unit,
     return records
 
 
+def direction_records(direction, label, unit, throughput,
+                      fwd_func, fwd_bwd_func, fwd_work, bwd_work):
+    """Metric records for a forward-only or a derived-backward timing.
+
+    *direction* is ``"fwd"`` or ``"bwd"``. *throughput* is ``compute_tflops`` or
+    ``compute_gbps`` and *fwd_work* / *bwd_work* the matching flops / bytes.
+    Backward is ``(fwd+bwd) - fwd``; its per-sample distribution is each fwd+bwd
+    sample shifted by the fwd mean (fwd and fwd+bwd are timed separately, so the
+    spread is inherited from fwd+bwd).
+    """
+    if direction == "fwd":
+        fwd_ms, fwd_measurement = time_func(fwd_func)
+        return [make_metric_record(
+            label, fwd_ms, unit, throughput(fwd_work, fwd_ms), measurement=fwd_measurement,
+        )]
+    fwd_bwd_func()  # warm the backward graph
+    fwd_ms, fwd_measurement = time_func(fwd_func)
+    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
+    bwd_ms = fwd_bwd_ms - fwd_ms
+    fwd_mean_s = fwd_measurement.mean
+    bwd_measurement = SimpleNamespace(
+        times=[t - fwd_mean_s for t in fwd_bwd_measurement.times]
+    )
+    return [make_metric_record(
+        label, bwd_ms, unit, throughput(bwd_work, bwd_ms),
+        derived=True, measurement=bwd_measurement,
+    )]
+
+
 def _metric_time_key(metric):
     return f"{metric['label']} Time (ms)"
 
@@ -548,12 +578,7 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     if args is None:
         args = make_parser().parse_args()
 
-    global _ROTATE_BUFFERS, _ROTATE_MB
-    _rotating = getattr(args, "rotating", None)
-    if _rotating is not None and _rotating < 0:
-        raise ValueError("--rotating expects a non-negative size in MB")
-    _ROTATE_BUFFERS = not getattr(args, "no_rotating", False)
-    _ROTATE_MB = _rotating or 0
+    configure_rotating(getattr(args, "rotating", None), getattr(args, "no_rotating", False))
 
     if args.kernel_profile:
         from torch.profiler import profile, ProfilerActivity
@@ -696,3 +721,202 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
             )
             df.to_csv(samples_csv, index=False)
             print(f"Samples saved to {samples_csv}")
+
+
+# ---------------------------------------------------------------------------
+# pytest-based execution support
+# ---------------------------------------------------------------------------
+# The microbenchmarks can also run under pytest; conftest.py is a thin shim over
+# the framework-agnostic helpers below (no pytest import here, so importing
+# utils.py never requires pytest). Results are collected per family (test module)
+# and written with the same CSV / samples / kernel-profile schema run_benchmarks
+# produces, so downstream tooling (e.g. the dashboard ingest) is unaffected.
+
+def configure_rotating(rotating, no_rotating):
+    """Set module-level input-rotation state from parsed options."""
+    global _ROTATE_BUFFERS, _ROTATE_MB
+    if rotating is not None and rotating < 0:
+        raise ValueError("--rotating expects a non-negative size in MB")
+    _ROTATE_BUFFERS = not no_rotating
+    _ROTATE_MB = rotating or 0
+
+
+def apply_backend_env(monkeypatch, env):
+    """Force a kernel backend for one test by setting/unsetting env vars.
+
+    A ``None`` value unsets the var, so forcing one backend cleanly clears the
+    toggles that would select a competing one; pytest restores them afterwards.
+    """
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
+class _FamilyResults:
+    """Accumulated rows / samples / kernel rows for one benchmark family."""
+
+    def __init__(self):
+        self.param_columns = None
+        self.metric_columns = None
+        self.rows = []
+        self.case_metrics = []
+        self.kernel_rows = []
+
+
+def _stringify_params(case_params):
+    return {k: (str(v) if isinstance(v, torch.dtype) else v) for k, v in case_params.items()}
+
+
+def record_bench(store, family, case_params, metric_records, kernel_rows=None, node_name=""):
+    """Record one benchmark case into *store* (a dict keyed by *family*)."""
+    fam = store.setdefault(family, _FamilyResults())
+    metric_row = _metric_row_from_records(metric_records)
+    metric_columns = list(metric_row.keys())
+    if fam.param_columns is None:
+        fam.param_columns = list(case_params.keys())
+        fam.metric_columns = metric_columns
+    elif metric_columns != fam.metric_columns:
+        raise ValueError(
+            f"Inconsistent metric columns for {family}: "
+            f"expected {fam.metric_columns}, got {metric_columns}"
+        )
+    row = _stringify_params(case_params)
+    row.update(metric_row)
+    fam.rows.append(row)
+    fam.case_metrics.append((_stringify_params(case_params), metric_records, node_name))
+    if kernel_rows:
+        fam.kernel_rows.extend(kernel_rows)
+
+
+def print_case(case_params, metric_records):
+    """Print a case header and its metric lines (reused stdout format)."""
+    label = "  ".join(f"{k}={v}" for k, v in case_params.items())
+    print(f"\n{'='*60}\nTesting: {label}\n{'='*60}")
+    _print_metric_records(metric_records)
+
+
+def collect_kernel_rows(bench_callable, case_params):
+    """Re-run *bench_callable* under torch.profiler and return per-kernel rows."""
+    from torch.profiler import profile, ProfilerActivity
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        bench_callable()
+        torch.cuda.synchronize()
+    events = [e for e in prof.key_averages() if e.self_device_time_total > 0]
+    events.sort(key=lambda e: e.self_device_time_total, reverse=True)
+    params = _stringify_params(case_params)
+    rows = []
+    for e in events:
+        kr = dict(params)
+        kr["kernel_name"] = e.key
+        kr["cuda_time_total_us"] = round(e.self_device_time_total, 1)
+        kr["num_calls"] = e.count
+        kr["cuda_time_avg_us"] = round(e.self_device_time_total / e.count, 2) if e.count else 0
+        rows.append(kr)
+    return rows
+
+
+def write_bench_outputs(store, *, csv=None, csv_samples=None, kernel_profile=False):
+    """Write per-family CSV / samples / kernel-profile outputs; return paths written."""
+    import pandas as pd
+    from pathlib import Path
+
+    written = []
+    for family, fam in store.items():
+        if not fam.rows:
+            continue
+        if csv is not None:
+            out = csv if isinstance(csv, str) else f"{family}.csv"
+            pd.DataFrame(fam.rows, columns=fam.param_columns + fam.metric_columns).to_csv(
+                out, index=False
+            )
+            written.append(out)
+            if kernel_profile and fam.kernel_rows:
+                kout = f"{Path(out).stem}_kernel_profile.csv"
+                cols = fam.param_columns + [
+                    "kernel_name", "cuda_time_total_us", "num_calls", "cuda_time_avg_us",
+                ]
+                pd.DataFrame(fam.kernel_rows, columns=cols).to_csv(kout, index=False)
+                written.append(kout)
+        if csv_samples is not None:
+            sout = csv_samples if isinstance(csv_samples, str) else f"{family}_samples.csv"
+            sample_rows = []
+            for case_params, records, _node in fam.case_metrics:
+                for metric in records:
+                    m = metric.get("measurement")
+                    if m is None:
+                        continue
+                    for i, t in enumerate(m.times):
+                        sr = dict(case_params)
+                        sr["label"] = metric["label"]
+                        sr["sample_idx"] = i
+                        sr["time_ms"] = t * 1e3
+                        sample_rows.append(sr)
+            if sample_rows:
+                pd.DataFrame(
+                    sample_rows,
+                    columns=fam.param_columns + ["label", "sample_idx", "time_ms"],
+                ).to_csv(sout, index=False)
+                written.append(sout)
+    return written
+
+
+def _times_ms(measurement):
+    if measurement is None:
+        return []
+    return [float(t) * 1e3 for t in getattr(measurement, "times", [])]
+
+
+def _result_rows(store):
+    """Flatten *store* into (name, stats_ms, throughput, unit) rows for the summary."""
+    import numpy as np
+
+    rows = []
+    for fam in store.values():
+        for _case_params, records, node_name in fam.case_metrics:
+            base = node_name
+            if base.endswith("]") and "[" in base:
+                base = base[base.index("[") + 1 : -1]  # keep the parametrize id
+            visible = [m for m in records if not m.get("samples_only")]
+            for m in visible:
+                name = base if len(visible) == 1 else f"{base} {m['label']}"
+                times = _times_ms(m.get("measurement"))
+                if times:
+                    a = np.asarray(times)
+                    stats = {
+                        "min": float(a.min()), "median": float(np.median(a)),
+                        "mean": float(a.mean()), "max": float(a.max()), "std": float(a.std()),
+                    }
+                else:  # derived metric: only the mean is meaningful
+                    stats = {"min": None, "median": None, "mean": m["ms"], "max": None, "std": None}
+                rows.append((name, stats, m["throughput"], m["unit"]))
+    return rows
+
+
+def format_results_table(store):
+    """Render a pytest-benchmark-style results table from *store* (times in ms)."""
+    rows = _result_rows(store)
+    if not rows:
+        return ""
+
+    def cell(v):
+        return "-" if v is None else f"{v:.4f}"
+
+    headers = ["Name (time in ms)", "Min", "Median", "Mean", "Max", "StdDev", "Throughput"]
+    body = []
+    for name, s, thr, unit in sorted(rows, key=lambda r: r[0]):
+        body.append([
+            name, cell(s["min"]), cell(s["median"]), cell(s["mean"]),
+            cell(s["max"]), cell(s["std"]), f"{thr:.2f} {unit}",
+        ])
+    widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
+
+    def line(cells):
+        return "  ".join(
+            c.ljust(widths[i]) if i == 0 else c.rjust(widths[i]) for i, c in enumerate(cells)
+        )
+
+    sep = "-" * (sum(widths) + 2 * (len(widths) - 1))
+    title = f" benchmark: {len(body)} tests ".center(len(sep), "-")
+    return "\n".join([title, line(headers), sep, *(line(r) for r in body), sep])
