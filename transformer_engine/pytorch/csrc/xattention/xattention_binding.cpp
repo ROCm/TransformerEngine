@@ -16,6 +16,8 @@
 #include <optional>
 #include <vector>
 
+#include "codegen/kernels/mha_bwd.h"
+#include "codegen/kernels/mha_fwd.h"
 #include "interface/attention.h"
 
 namespace xi = xattn::interface;
@@ -138,10 +140,8 @@ std::vector<at::Tensor> xattn_bwd(at::Tensor dout, at::Tensor q, at::Tensor k, a
 }
 
 // ---- forward (per-tensor fp8 quant) ---------------------------------------
-std::vector<at::Tensor> xattn_fwd_quant(at::Tensor q, at::Tensor k, at::Tensor v, double descale_q,
-                                        double descale_k, double descale_v, double scale_s,
-                                        double descale_s, double scale_o,
-                                        std::optional<at::Tensor> out,
+std::vector<at::Tensor> xattn_fwd_quant(at::Tensor q, at::Tensor k, at::Tensor v,
+                                        at::Tensor quant_scales, std::optional<at::Tensor> out,
                                         std::optional<at::Tensor> amax_s,
                                         std::optional<at::Tensor> amax_o, double softmax_scale,
                                         bool is_causal, int64_t window_size_left,
@@ -150,13 +150,13 @@ std::vector<at::Tensor> xattn_fwd_quant(at::Tensor q, at::Tensor k, at::Tensor v
                                         const std::string &output_layout) {
   // {out, lse, amax_s, amax_o}. Supplying amax_s/amax_o lets the caller hand in
   // its quantizers' amax slots so the reduction lands there directly.
+  // quant_scales is an fp32 device array indexed by FWD_SCALE_INDEX; xAttention
+  // validates its device/dtype/contiguity/length itself.
   const auto in_l = layout_from_name(input_layout);
   const auto out_l = layout_from_name(output_layout);
   Workspace ws = fwd_workspace(q, in_l);
   return xi::mha_fwd_quant(
-      q, k, v, static_cast<float>(descale_q), static_cast<float>(descale_k),
-      static_cast<float>(descale_v), static_cast<float>(scale_s), static_cast<float>(descale_s),
-      static_cast<float>(scale_o), std::move(out), /*softmax_lse_=*/std::nullopt,
+      q, k, v, quant_scales, std::move(out), /*softmax_lse_=*/std::nullopt,
       checked_amax(std::move(amax_s), "amax_s"), checked_amax(std::move(amax_o), "amax_o"),
       static_cast<float>(softmax_scale), is_causal,
       /*return_softmax=*/false, in_l, out_l, static_cast<int>(window_size_left),
@@ -184,9 +184,7 @@ std::vector<at::Tensor> xattn_fwd_mx(at::Tensor q, at::Tensor k, at::Tensor v, a
 // ---- backward (per-tensor fp8 quant) --------------------------------------
 std::vector<at::Tensor> xattn_bwd_quant(
     at::Tensor dout, at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor out,
-    at::Tensor softmax_lse, double descale_q, double descale_k, double descale_v, double descale_o,
-    double descale_do, double scale_s, double descale_s, double scale_ds, double descale_ds,
-    double scale_dq, double scale_dk, double scale_dv, std::optional<at::Tensor> dq,
+    at::Tensor softmax_lse, at::Tensor quant_scales, std::optional<at::Tensor> dq,
     std::optional<at::Tensor> dk, std::optional<at::Tensor> dv, std::optional<at::Tensor> amax_dq,
     std::optional<at::Tensor> amax_dk, std::optional<at::Tensor> amax_dv,
     std::optional<at::Tensor> amax_ds, std::optional<at::Tensor> alibi_slopes, double p_dropout,
@@ -196,15 +194,13 @@ std::vector<at::Tensor> xattn_bwd_quant(
   // {dq, dk, dv, amax_dq, amax_dk, amax_dv, amax_ds}. The four amax reductions
   // write to distinct addresses, so a caller folding them together must still
   // pass four separate slots (they are plain stores, not atomic maxima).
+  // quant_scales is an fp32 device array indexed by BWD_SCALE_INDEX; xAttention
+  // validates its device/dtype/contiguity/length itself.
   const auto in_l = layout_from_name(input_layout);
   const auto out_l = layout_from_name(output_layout);
   Workspace ws = bwd_workspace(q, k, in_l);
   return xi::mha_bwd_quant(
-      dout, q, k, v, out, softmax_lse, static_cast<float>(descale_q), static_cast<float>(descale_k),
-      static_cast<float>(descale_v), static_cast<float>(descale_o), static_cast<float>(descale_do),
-      static_cast<float>(scale_s), static_cast<float>(descale_s), static_cast<float>(scale_ds),
-      static_cast<float>(descale_ds), static_cast<float>(scale_dq), static_cast<float>(scale_dk),
-      static_cast<float>(scale_dv), std::move(dq), std::move(dk), std::move(dv),
+      dout, q, k, v, out, softmax_lse, quant_scales, std::move(dq), std::move(dk), std::move(dv),
       checked_amax(std::move(amax_dq), "amax_dq"), checked_amax(std::move(amax_dk), "amax_dk"),
       checked_amax(std::move(amax_dv), "amax_dv"), checked_amax(std::move(amax_ds), "amax_ds"),
       std::move(alibi_slopes), static_cast<float>(p_dropout), static_cast<float>(softmax_scale),
@@ -232,9 +228,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input_layout"), py::arg("output_layout"));
 
   m.def("fwd_quant", &xattn_fwd_quant, "xAttention forward (per-tensor fp8)", py::arg("q"),
-        py::arg("k"), py::arg("v"), py::arg("descale_q"), py::arg("descale_k"), py::arg("descale_v"),
-        py::arg("scale_s"), py::arg("descale_s"), py::arg("scale_o"), py::arg("out"),
-        py::arg("amax_s"), py::arg("amax_o"), py::arg("softmax_scale"), py::arg("is_causal"),
+        py::arg("k"), py::arg("v"), py::arg("quant_scales"), py::arg("out"), py::arg("amax_s"),
+        py::arg("amax_o"), py::arg("softmax_scale"), py::arg("is_causal"),
         py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_layout"),
         py::arg("output_layout"));
 
@@ -245,12 +240,38 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("bwd_quant", &xattn_bwd_quant, "xAttention backward (per-tensor fp8)", py::arg("dout"),
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("out"), py::arg("softmax_lse"),
-        py::arg("descale_q"), py::arg("descale_k"), py::arg("descale_v"), py::arg("descale_o"),
-        py::arg("descale_do"), py::arg("scale_s"), py::arg("descale_s"), py::arg("scale_ds"),
-        py::arg("descale_ds"), py::arg("scale_dq"), py::arg("scale_dk"), py::arg("scale_dv"),
-        py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("amax_dq"), py::arg("amax_dk"),
-        py::arg("amax_dv"), py::arg("amax_ds"), py::arg("alibi_slopes"), py::arg("p_dropout"),
-        py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
-        py::arg("window_size_right"), py::arg("softcap"), py::arg("deterministic"),
-        py::arg("input_layout"), py::arg("output_layout"));
+        py::arg("quant_scales"), py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("amax_dq"),
+        py::arg("amax_dk"), py::arg("amax_dv"), py::arg("amax_ds"), py::arg("alibi_slopes"),
+        py::arg("p_dropout"), py::arg("softmax_scale"), py::arg("is_causal"),
+        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("softcap"),
+        py::arg("deterministic"), py::arg("input_layout"), py::arg("output_layout"));
+
+  // Slot layout of the `quant_scales` arrays, re-exported from xAttention's own
+  // enums so the Python side packs by name rather than by a copied ordering: a
+  // reordered or extended enum then shows up as a build-time-sourced mismatch
+  // instead of silently feeding the kernels the wrong scale.
+  namespace xc = xattn::codegen;
+  const auto slot = [](int index) { return index; };  // enum -> int for pybind
+
+  m.attr("FWD_SCALE_INDEX") = py::dict(py::arg("descale_q") = slot(xc::MHA_FWD_DESCALE_Q),
+                                       py::arg("descale_k") = slot(xc::MHA_FWD_DESCALE_K),
+                                       py::arg("descale_v") = slot(xc::MHA_FWD_DESCALE_V),
+                                       py::arg("scale_s") = slot(xc::MHA_FWD_SCALE_S),
+                                       py::arg("descale_s") = slot(xc::MHA_FWD_DESCALE_S),
+                                       py::arg("scale_o") = slot(xc::MHA_FWD_SCALE_O));
+  m.attr("FWD_SCALE_COUNT") = slot(xc::MHA_FWD_QUANT_SCALE_COUNT);
+
+  m.attr("BWD_SCALE_INDEX") = py::dict(py::arg("descale_q") = slot(xc::MHA_BWD_DESCALE_Q),
+                                       py::arg("descale_k") = slot(xc::MHA_BWD_DESCALE_K),
+                                       py::arg("descale_v") = slot(xc::MHA_BWD_DESCALE_V),
+                                       py::arg("descale_o") = slot(xc::MHA_BWD_DESCALE_O),
+                                       py::arg("descale_do") = slot(xc::MHA_BWD_DESCALE_DO),
+                                       py::arg("scale_s") = slot(xc::MHA_BWD_SCALE_S),
+                                       py::arg("descale_s") = slot(xc::MHA_BWD_DESCALE_S),
+                                       py::arg("scale_ds") = slot(xc::MHA_BWD_SCALE_DS),
+                                       py::arg("descale_ds") = slot(xc::MHA_BWD_DESCALE_DS),
+                                       py::arg("scale_dq") = slot(xc::MHA_BWD_SCALE_DQ),
+                                       py::arg("scale_dk") = slot(xc::MHA_BWD_SCALE_DK),
+                                       py::arg("scale_dv") = slot(xc::MHA_BWD_SCALE_DV));
+  m.attr("BWD_SCALE_COUNT") = slot(xc::MHA_BWD_QUANT_SCALE_COUNT);
 }

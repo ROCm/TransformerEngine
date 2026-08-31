@@ -205,15 +205,71 @@ def _fp8_data(t) -> torch.Tensor:
     return t._data.view(_torch_fp8_dtype(t._fp8_dtype))
 
 
-def _host_scalars(tensors: List[torch.Tensor]) -> List[float]:
-    """Read several device scalars to the host in a single synchronization.
+def _scale_order(index_map, count: int, names: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Check ``names`` is exactly xAttention's scale-array layout, and return it.
 
-    xAttention takes its scales as host floats, and the per-tensor fp8 path needs
-    five to seven of them per call. Read one at a time, each is its own
-    device-to-host copy that drains the stream; packing them first costs one small
-    kernel and leaves a single sync.
+    The kernels index the scale array by an enum owned by xAttention, so the
+    order below is a copy of theirs. Comparing the two at import turns a
+    reordered or extended enum into an error naming the mismatch, rather than
+    every fp8 attention call quietly reading the wrong slot.
     """
-    return torch.cat([t.detach().reshape(1) for t in tensors]).tolist()
+    expected = tuple(sorted(index_map, key=index_map.__getitem__))
+    if len(index_map) != count or names != expected:
+        raise RuntimeError(
+            "xAttention per-tensor scale layout changed: this build expects "
+            f"{names}, the extension reports {expected} ({count} slots). "
+            "Update the packing order in xattention.py."
+        )
+    return names
+
+
+if _xattn is not None:
+    try:
+        _FWD_SCALES = _scale_order(
+            _xattn.FWD_SCALE_INDEX,
+            _xattn.FWD_SCALE_COUNT,
+            ("descale_q", "descale_k", "descale_v", "scale_s", "descale_s", "scale_o"),
+        )
+        _BWD_SCALES = _scale_order(
+            _xattn.BWD_SCALE_INDEX,
+            _xattn.BWD_SCALE_COUNT,
+            (
+                "descale_q",
+                "descale_k",
+                "descale_v",
+                "descale_o",
+                "descale_do",
+                "scale_s",
+                "descale_s",
+                "scale_ds",
+                "descale_ds",
+                "scale_dq",
+                "scale_dk",
+                "scale_dv",
+            ),
+        )
+    except (AttributeError, RuntimeError) as e:
+        # An extension built against a different scale layout -- most often a
+        # stale .so left over from an earlier build. Report the backend as
+        # unavailable, the same as a failed import, rather than letting a
+        # mismatched build break ``import transformer_engine`` outright.
+        _xattn, _IMPORT_ERROR = None, e
+
+
+def _pack_scales(parts: List[torch.Tensor], trailing_ones: int = 0) -> torch.Tensor:
+    """Pack per-tensor scales into the fp32 device array xAttention reads.
+
+    Every scale here is produced by a quantizer on device and consumed by the
+    kernel on device, so packing them keeps the fp8 path off the host entirely --
+    a host round trip would drain the stream once per attention call. Values are
+    laid out in ``_FWD_SCALES``/``_BWD_SCALES`` order; ``trailing_ones`` fills the
+    tail slots for scales we are not asking the kernel to apply.
+    """
+    packed = torch.empty(len(parts) + trailing_ones, dtype=torch.float32, device=parts[0].device)
+    torch.cat([p.detach().reshape(1) for p in parts], out=packed[: len(parts)])
+    if trailing_ones:
+        packed[len(parts) :].fill_(1.0)
+    return packed
 
 
 def _has_static_scale(quantizer) -> bool:
@@ -314,12 +370,19 @@ def fp8_forward(
     # on, so it may only be non-unit when we are actually asking for fp8 out.
     quantize_out = fp8_output and _has_static_scale(o_quantizer)
 
-    scales = [q_fp8._scale_inv, k_fp8._scale_inv, v_fp8._scale_inv, s_quantizer.scale]
+    # _FWD_SCALES order, minus the trailing scale_o when we want high-precision out.
+    scale_s = s_quantizer.scale
+    scales = [
+        q_fp8._scale_inv,
+        k_fp8._scale_inv,
+        v_fp8._scale_inv,
+        scale_s,
+        scale_s.reciprocal(),
+    ]
     if quantize_out:
-        scales.append(o_quantizer.scale)
-    descale_q, descale_k, descale_v, scale_s, *rest = _host_scalars(scales)
-    descale_s = 1.0 / scale_s
-    scale_o = rest[0] if quantize_out else 1.0
+        quant_scales = _pack_scales(scales + [o_quantizer.scale])
+    else:
+        quant_scales = _pack_scales(scales, trailing_ones=1)
 
     if quantize_out:
         # TE keeps fp8 payloads as uint8; the kernel wants the fp8 view of them.
@@ -337,7 +400,7 @@ def fp8_forward(
     # it as history; a current-scaling one is about to scan for that same value
     # when it casts, and ``quantize_output`` lets it reuse this instead.
     res = _xattn.fwd_quant(
-        qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
+        qd, kd, vd, quant_scales,
         out, s_quantizer.amax, o_quantizer.amax,
         float(softmax_scale), causal, wl, wr, fmt, fmt,
     )
@@ -394,24 +457,26 @@ def fp8_backward(
     # be non-unit when we are actually asking for fp8 dq/dk/dv.
     quantize_dqkv = fp8_output and _has_static_scale(dqkv_quantizer)
 
+    # _BWD_SCALES order, minus the trailing scale_dq/dk/dv when we want
+    # high-precision gradients.
+    scale_s = s_quantizer.scale
+    scale_ds = dp_quantizer.scale
     scales = [
         q_fp8._scale_inv,
         k_fp8._scale_inv,
         v_fp8._scale_inv,
         out_fp8._scale_inv,
         d_out_fp8._scale_inv,
-        s_quantizer.scale,
-        dp_quantizer.scale,
+        scale_s,
+        scale_s.reciprocal(),
+        scale_ds,
+        scale_ds.reciprocal(),
     ]
     if quantize_dqkv:
-        scales.append(dqkv_quantizer.scale)
-    descale_q, descale_k, descale_v, descale_o, descale_do, scale_s, scale_ds, *rest = (
-        _host_scalars(scales)
-    )
-    descale_s = 1.0 / scale_s
-    descale_ds = 1.0 / scale_ds
-    # One quantizer covers all three gradients, so they share a single scale.
-    scale_dqkv = rest[0] if quantize_dqkv else 1.0
+        # One quantizer covers all three gradients, so they share a single scale.
+        quant_scales = _pack_scales(scales + [dqkv_quantizer.scale] * 3)
+    else:
+        quant_scales = _pack_scales(scales, trailing_ones=3)
 
     if quantize_dqkv:
         # TE keeps fp8 payloads as uint8; the kernel wants the fp8 view of them.
@@ -445,10 +510,7 @@ def fp8_backward(
     )
 
     res = _xattn.bwd_quant(
-        dod, qd, kd, vd, od, softmax_lse,
-        descale_q, descale_k, descale_v, descale_o, descale_do,
-        scale_s, descale_s, scale_ds, descale_ds,
-        scale_dqkv, scale_dqkv, scale_dqkv,
+        dod, qd, kd, vd, od, softmax_lse, quant_scales,
         dq, dk, dv,
         amax_dq, amax_dk, amax_dv, dp_quantizer.amax,
         None,

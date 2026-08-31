@@ -2728,6 +2728,20 @@ def _assert_xattn_ran(tensor, what):
     )
 
 
+def _xattn_scales(index_map, count, **values):
+    """Build xAttention's fp32 device scale array from named slots.
+
+    The kernels read the scales from device memory, indexed by the enum the
+    extension re-exports as ``FWD_SCALE_INDEX``/``BWD_SCALE_INDEX``. Filling by
+    name keeps these tests readable and independent of the slot ordering; any
+    slot left unnamed defaults to 1.0.
+    """
+    scales = torch.ones(count, device="cuda", dtype=torch.float32)
+    for name, value in values.items():
+        scales[index_map[name]] = value
+    return scales
+
+
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 @pytest.mark.skipif(not xattention_available, reason="xAttention extension is not installed.")
 @pytest.mark.parametrize("direction", ["backward", "forward"])
@@ -2759,12 +2773,13 @@ def test_xattn_fp8_cast_saturates(direction):
             q=q,
             k=k,
             v=v,
-            descale_q=1.0,
-            descale_k=1.0,
-            descale_v=1.0,
-            scale_s=scale_s,
-            descale_s=1.0 / scale_s,
-            scale_o=scale_o,
+            quant_scales=_xattn_scales(
+                xattn.FWD_SCALE_INDEX,
+                xattn.FWD_SCALE_COUNT,
+                scale_s=scale_s,
+                descale_s=1.0 / scale_s,
+                scale_o=scale_o,
+            ),
             out=out,
             amax_s=None,
             amax_o=None,
@@ -2806,12 +2821,7 @@ def test_xattn_fp8_cast_saturates(direction):
         q=q,
         k=k,
         v=v,
-        descale_q=1.0,
-        descale_k=1.0,
-        descale_v=1.0,
-        scale_s=1.0,
-        descale_s=1.0,
-        scale_o=1.0,
+        quant_scales=_xattn_scales(xattn.FWD_SCALE_INDEX, xattn.FWD_SCALE_COUNT),
         out=out_fp8,
         amax_s=None,
         amax_o=None,
@@ -2838,18 +2848,12 @@ def test_xattn_fp8_cast_saturates(direction):
             v=v,
             out=out_fp8,
             softmax_lse=softmax_lse,
-            descale_q=1.0,
-            descale_k=1.0,
-            descale_v=1.0,
-            descale_o=1.0,
-            descale_do=1.0,
-            scale_s=1.0,
-            descale_s=1.0,
-            scale_ds=scale_ds,
-            descale_ds=1.0 / scale_ds,
-            scale_dq=1.0,
-            scale_dk=1.0,
-            scale_dv=1.0,
+            quant_scales=_xattn_scales(
+                xattn.BWD_SCALE_INDEX,
+                xattn.BWD_SCALE_COUNT,
+                scale_ds=scale_ds,
+                descale_ds=1.0 / scale_ds,
+            ),
             dq=dq,
             dk=dk,
             dv=dv,
