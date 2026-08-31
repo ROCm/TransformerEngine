@@ -251,8 +251,8 @@ entries:
         description: "MXFP4 GEMM wiring -> adapter quantizer + plugin tex.generic_gemm"
         mechanism: custom-recipe+plugin
         patch_timing: build
-        runtime_eligible: candidate
-        runtime_evidence: null
+        runtime_eligible: never
+        runtime_evidence: "S3.2 census FAILED (early-bound): transformer_engine/pytorch/triton/mhc.py:27 from-import general_gemm"
         m1_added_lines: PENDING_RECLASSIFICATION
         m1_removed_lines: 0
         m2_lines: 0
@@ -798,8 +798,8 @@ entries:
         description: backend selection functions (plausible leaf-function override)
         mechanism: capability
         patch_timing: build
-        runtime_eligible: candidate
-        runtime_evidence: null
+        runtime_eligible: never
+        runtime_evidence: "S3.2 census FAILED (early-bound): transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py:56 from-import UnfusedDotProductAttention; transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py:56 from-import FusedAttention"
         m1_added_lines: 71
         m1_removed_lines: 0
         m2_lines: 0
@@ -848,8 +848,8 @@ entries:
         description: selection/support helpers (plausible leaf-function override)
         mechanism: capability
         patch_timing: build
-        runtime_eligible: candidate
-        runtime_evidence: null
+        runtime_eligible: never
+        runtime_evidence: "S3.2 census FAILED (early-bound): transformer_engine/pytorch/attention/dot_product_attention/backends.py:74 from-import FlashAttentionUtils; transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py:46 from-import FlashAttentionUtils"
         m1_added_lines: 66
         m1_removed_lines: 0
         m2_lines: 0
@@ -898,8 +898,8 @@ entries:
         description: fused-attn dispatch helpers (plausible leaf-function override)
         mechanism: capability
         patch_timing: build
-        runtime_eligible: candidate
-        runtime_evidence: null
+        runtime_eligible: never
+        runtime_evidence: "S3.2 census FAILED (early-bound): transformer_engine/pytorch/attention/dot_product_attention/backends.py:46 from-import fused_attn_fwd; transformer_engine/pytorch/attention/dot_product_attention/backends.py:46 from-import fused_attn_bwd"
         m1_added_lines: 60
         m1_removed_lines: 0
         m2_lines: 0
@@ -1569,7 +1569,7 @@ entries:
     added_class_line: {header: 2, sidecar: 0, guard: 2, unmarked: 2}   # line-granular (strict); guard incl. 0 else-branch lines
     disposition: capability
     patch_timing: build
-    runtime_eligible: candidate
+    runtime_eligible: never
     fallback_mechanism: build-time source patch
     m1_added_lines: 6
     m1_removed_lines: 0

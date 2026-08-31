@@ -1,0 +1,60 @@
+{
+ "PT-001": {
+  "verdict": "build-tier",
+  "symbols": [
+   "_is_nvfp4_row_scaled_tensor",
+   "general_gemm",
+   "get_cublas_workspace_size_bytes",
+   "validate_gemm_scale"
+  ],
+  "disqualifiers": [
+   "transformer_engine/pytorch/triton/mhc.py:27 from-import general_gemm"
+  ]
+ },
+ "PT-010": {
+  "verdict": "build-tier",
+  "symbols": [
+   "FusedAttention",
+   "FusedAttnFunc",
+   "UnfusedDotProductAttention"
+  ],
+  "disqualifiers": [
+   "transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py:56 from-import UnfusedDotProductAttention",
+   "transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py:56 from-import FusedAttention"
+  ]
+ },
+ "PT-011": {
+  "verdict": "build-tier",
+  "symbols": [
+   "FlashAttentionUtils",
+   "get_attention_backend"
+  ],
+  "disqualifiers": [
+   "transformer_engine/pytorch/attention/dot_product_attention/backends.py:74 from-import FlashAttentionUtils",
+   "transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py:46 from-import FlashAttentionUtils",
+   "transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py:51 from-import FlashAttentionUtils"
+  ]
+ },
+ "PT-012": {
+  "verdict": "build-tier",
+  "symbols": [
+   "fused_attn_bwd",
+   "fused_attn_fwd"
+  ],
+  "disqualifiers": [
+   "transformer_engine/pytorch/attention/dot_product_attention/backends.py:46 from-import fused_attn_fwd",
+   "transformer_engine/pytorch/attention/dot_product_attention/backends.py:46 from-import fused_attn_bwd",
+   "transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py:20 from-import fused_attn_fwd",
+   "transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py:20 from-import fused_attn_bwd"
+  ]
+ },
+ "PT-026": {
+  "verdict": "census-passed",
+  "symbols": [
+   "AttnFuncWithCPAndKVAllGather",
+   "AttnFuncWithCPAndKVP2P",
+   "AttnFuncWithCPAndQKVOA2A"
+  ],
+  "disqualifiers": []
+ }
+}
