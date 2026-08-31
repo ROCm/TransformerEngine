@@ -77,8 +77,9 @@ SUPPLY   185 distinct names registered by the fork's pybind
 --- early-bound names (from-import; copied at import time): 24 ---
   CommOverlapType, FP8TensorMeta, NVTE_Bias_Type, NVTE_Fused_Attn_Backend, NVTE_Mask_Type, NVTE_QKV_Format, NVTE_QKV_Layout, NVTE_Softmax_Type, bulk_overlap_ag_with_external_gemm, layernorm_bwd, layernorm_fwd, multi_tensor_adam, multi_tensor_adam_capturable, multi_tensor_adam_capturable_master, multi_tensor_adam_fp8, multi_tensor_compute_scale_and_scale_inv, multi_tensor_compute_scale_inv_e8m0, multi_tensor_l2norm, multi_tensor_scale, multi_tensor_scale_tensor, multi_tensor_sgd, multi_tensor_unscale_l2norm, rmsnorm_bwd, rmsnorm_fwd
 
---- ctypes demand on the CORE .so from the fork's Python (ABI-001; not pybind, not in any header): 2 ---
+--- ctypes demand on the CORE .so from the fork's Python (ABI-001; not pybind, not in any header): 3 ---
   nvte_is_rocm_build    transformer_engine/common/__init__.py
+  nvte_rocm_core_abi_version    transformer_engine/common/__init__.py, transformer_engine/te_rocm_diagnostics.py
   nvte_uses_fp8_fnuz    transformer_engine/common/__init__.py
   supply check needs a built core lib: nm -D libtransformer_engine*.so | grep ' T nvte_'
 

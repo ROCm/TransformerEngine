@@ -5,6 +5,13 @@
  ************************************************************************/
 #include "hip_float8.h"
 
+#include <transformer_engine/nvte_rocm.h>
+
+// TE_ROCM_CORE_ABI (plugin plan S3.3): the load-time contract check. Nothing links against this
+// library by SONAME - Python and the framework extension bind symbols after an RTLD_GLOBAL
+// preload - so this version, compared at load, is the only enforcement of core-ABI identity.
+extern "C" int64_t nvte_rocm_core_abi_version() { return NVTE_ROCM_CORE_ABI_VERSION; }
+
 extern "C" bool nvte_is_rocm_build() {
 #ifdef USE_ROCM
   return true;

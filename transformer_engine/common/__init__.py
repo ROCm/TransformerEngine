@@ -462,6 +462,26 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         )
     te_rocm_build = _te_rocm_build
 
+    # TE_ROCM_CORE_ABI check (plugin plan S3.3 / nvte_rocm.h). Nothing links against the core
+    # library by SONAME; this comparison at load is the only enforcement of core-ABI identity.
+    # Keep in sync with NVTE_ROCM_CORE_ABI_VERSION in include/transformer_engine/nvte_rocm.h.
+    _EXPECTED_CORE_ABI_VERSION = 1
+    if te_rocm_build:
+        try:
+            _TE_LIB_CTYPES.nvte_rocm_core_abi_version.restype = ctypes.c_int64
+            _core_abi = int(_TE_LIB_CTYPES.nvte_rocm_core_abi_version())
+        except AttributeError as exc:
+            raise RuntimeError(
+                "This libtransformer_engine does not export nvte_rocm_core_abi_version(); it "
+                "predates the TE_ROCM_CORE_ABI contract. Rebuild the core library."
+            ) from exc
+        if _core_abi != _EXPECTED_CORE_ABI_VERSION:
+            raise RuntimeError(
+                f"TE_ROCM_CORE_ABI mismatch: core library reports {_core_abi}, this Python "
+                f"expects {_EXPECTED_CORE_ABI_VERSION}. Reinstall matching transformer-engine "
+                f"packages."
+            )
+
     if te_rocm_build:
         try:
             # Get installed ROCm version

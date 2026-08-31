@@ -203,7 +203,13 @@ def gen_patch(eid: str, entries, base_sha: str) -> Path | None:
         print(f"  {eid}: {rel} identical to upstream - no patch (retire as unchanged)")
         return None
     feats = e.get("features") or []
-    tests = sorted({t for f in feats for t in (f.get("test_ids") or [])} | set(e.get("test_ids") or [])) or ["TBD"]
+    tests = sorted({t for f in feats for t in (f.get("test_ids") or [])} | set(e.get("test_ids") or []))
+    prior = PATCHES / f"{eid}.patch"          # regenerating: keep the curated '# tests:' header
+    if not tests and prior.exists():
+        m = re.search(r"^# tests: (.+)$", prior.read_text(), re.M)
+        if m and m.group(1).strip() != "TBD":
+            tests = [t.strip() for t in m.group(1).split(",")]
+    tests = tests or ["TBD"]
     expiry = e.get("expiry_condition") or ("see features" if feats else "TBD")
     hdr = (f"# manifest: {eid}\n# base: {base_sha}\n# mechanism: {e.get('disposition')}\n"
            f"# expiry: {expiry}\n# tests: {', '.join(tests)}\n# owner: {e.get('owner', 'none')}\n"
