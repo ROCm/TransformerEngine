@@ -1,0 +1,31 @@
+{
+ "date": "2026-09-01",
+ "stage": "4 (S4.7 pre-run; pin-bump arm outstanding)",
+ "import": {
+  "fork_us": 2608403,
+  "overlay_us": 2637004,
+  "rel": 0.010965,
+  "pass": true
+ },
+ "graph_breaks": {
+  "fork": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  },
+  "overlay": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  }
+ },
+ "ckpt": {
+  "max_rel_loss_diff": 0.0,
+  "pass": true
+ },
+ "e2e": {
+  "fork_tps": 1472646,
+  "overlay_tps": 1468440,
+  "rel_loss": 0.002856,
+  "single_run_note": "graded per the S3.7 methodology note: single run informational, aggregate governs",
+  "pass_single": true
+ }
+}

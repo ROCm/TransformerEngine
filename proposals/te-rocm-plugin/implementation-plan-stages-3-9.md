@@ -225,7 +225,7 @@ keeps both member sets until HDR-B2 lands upstream.
 set) from the certified matrix (§3.2); sdist fallback. `rocm-wheels-build.yml` matrix expansion.
 Each wheel embeds its build-compat tuple; the loader compares it at import.
 
-### S4.7 · Stage-4 exit
+### S4.7 · Stage-4 exit — **PRE-RUN PASS 2026-09-01** (baselines/2026-09-01-s47-prerun.json: import +1.10%, graph breaks 0/0, ckpt continuation bit-identical, e2e +0.29% single run - all inside the signed budget; ROCm-only trees byte-identical to stage3-cert-20260831). **OPEN, gates Stage-4 exit**: the C++ queue must reapply on ONE LIVE PIN BUMP with trip rate reported - that is the next IFU, not a lab replay
 
 Same behaviour and performance as Stage 3 (re-run the S3.7 checklist unchanged) **plus**: the C++
 patch queue reapplies on one live pin bump with the trip rate reported, and the ROCm-only trees are
