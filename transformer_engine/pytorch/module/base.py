@@ -1333,6 +1333,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         kernel (including GroupedLinear's cached weights), so NVFP4 RHT
         eligibility uses that kernel's 64-row alignment.
         """
+        if IS_HIP_EXTENSION:
+            # ROCm sets scale-swizzling per weight-quantizer in _get_weight_quantizers
+            # (via set_usage/keep_fp8_weight_transpose_cache), not through the upstream
+            # forward-path preswizzle fusion. Keep weight optimize_for_gemm False here so
+            # ROCm quantizers don't request with_gemm_swizzled_scales on paths that reject it.
+            return False
         if self.primary_weights_in_fp8:
             return False
         if isinstance(quantizer, MXFP8Quantizer):
