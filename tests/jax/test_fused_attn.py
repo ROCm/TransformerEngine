@@ -1897,11 +1897,6 @@ class TestFusedAttnWithDeterminism:
         swa,
         seq_desc_format,
     ):
-        if (is_hip_extension() and qkv_layout == QKVLayout.THD_THD_THD and
-            attn_mask_type == AttnMaskType.PADDING_MASK and
-            attn_bias_type == AttnBiasType.NO_BIAS):
-            # Issue #350
-            pytest.skip("This confis is skipped due to known numerical failure.")
         """
         Test backward with parameterized configs
         """
