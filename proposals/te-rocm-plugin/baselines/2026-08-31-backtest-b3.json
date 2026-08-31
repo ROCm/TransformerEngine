@@ -1,0 +1,58 @@
+{
+ "inputs": {
+  "pre_sync_fork": "bc3766e6da7f6a478c817e0c9934405b9fdbe039",
+  "merged_base": "42b840051647eef89761a16dfdff87e82bb253ab (release_v2.15 tip, as recorded history)",
+  "target": "2e559f062497bef768dfbe9d7e45548fadeca80a"
+ },
+ "case_rule": {
+  "requirement": "every selected case either reapplies cleanly or trips loudly BY ID",
+  "silent": [],
+  "satisfied": true
+ },
+ "python_cases": {
+  "total": 12,
+  "reapplied": 3,
+  "tripped": 9,
+  "tripped_ids": [
+   "ABI-002-FAENUM",
+   "BOOT-001+CM-001",
+   "HDR-A",
+   "PT-002-CAP",
+   "PT-004-MXFP4",
+   "PT-006-UB",
+   "PT-008-NVFP4FIX",
+   "PT-010-SEL",
+   "PT-032"
+  ]
+ },
+ "cxx_arm": {
+  "total": 8,
+  "tripped": 4,
+  "trip_rate": 0.5,
+  "band": "discuss",
+  "bands": {
+   "mechanized": {
+    "trip_rate_below": 0.3,
+    "reading": "strategy B is a genuine mechanization of the IFU"
+   },
+   "discuss": {
+    "trip_rate_between": [
+     0.3,
+     0.6
+    ],
+    "reading": "mixed; decide per file, expect more C"
+   },
+   "relabelled_ifu": {
+    "trip_rate_above": 0.6,
+    "reading": "B is the old IFU with new labels; weight C heavily"
+   }
+  },
+  "informational_at_gate_a": true
+ },
+ "three_way_repair": {
+  "clean_merges_among_tripped": 1,
+  "note": "a clean 3-way means the trip is mechanically repairable; conflict hunks are the repair-size proxy"
+ },
+ "historical_effort_reference": "release-sync-v2.15-260630 branch activity, mid-July -> Aug 22 2026",
+ "limitations": "silently-wrong behavior not fully testable without a 2.15-era build; repair effort proxied by conflict hunks"
+}

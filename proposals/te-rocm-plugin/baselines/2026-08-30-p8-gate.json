@@ -1,0 +1,34 @@
+{
+ "import_time": {
+  "fork_us": 2641652,
+  "overlay_us": 2637932,
+  "rel": -0.001408209711195873,
+  "max_rel": 0.1
+ },
+ "graph_breaks": {
+  "fork": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  },
+  "overlay": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  }
+ },
+ "checkpoint_continuation": {
+  "steps": 50,
+  "max_rel_loss_diff": 0.0,
+  "band": 0.001
+ },
+ "e2e_proxy": {
+  "fork_tps": 1466217.6286743411,
+  "overlay_tps": 1469625.4633686447,
+  "rel_loss": -0.002324235248340804,
+  "max_rel_loss": 0.01,
+  "note": "DDP TransformerLayer proxy; Megatron-LM(ROCm) row pending"
+ },
+ "seam_call_overhead": {
+  "asserted_by_identity": true
+ },
+ "verdict": "PASS"
+}

@@ -4,139 +4,224 @@
   "rel": "transformer_engine/__init__.py",
   "status": "generated",
   "added": 27,
-  "removed": 3
+  "removed": 3,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "CM-002+ABI-001": {
   "kind": "case",
   "rel": "transformer_engine/common/__init__.py",
   "status": "generated",
   "added": 120,
-  "removed": 32
+  "removed": 32,
+  "outcome": "reapplied"
  },
  "CM-003": {
   "kind": "case",
   "rel": "transformer_engine/common/recipe/__init__.py",
   "status": "generated",
   "added": 86,
-  "removed": 5
+  "removed": 5,
+  "outcome": "reapplied"
  },
  "PT-002-CAP": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/module/base.py",
   "status": "generated",
   "added": 223,
-  "removed": 22
+  "removed": 22,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 3,
+   "secs": 0.0
+  }
  },
  "PT-010-SEL": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/attention/dot_product_attention/backends.py",
   "status": "generated",
   "added": 199,
-  "removed": 259
+  "removed": 259,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 4,
+   "secs": 0.0
+  }
  },
  "PT-006-UB": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/module/layernorm_mlp.py",
   "status": "generated",
   "added": 85,
-  "removed": 9
+  "removed": 9,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 6,
+   "secs": 0.0
+  }
  },
  "PT-028": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/graph.py",
   "status": "generated",
   "added": 13,
-  "removed": 7
+  "removed": 7,
+  "outcome": "reapplied"
  },
  "HDR-A": {
   "kind": "case",
   "rel": "transformer_engine/common/include/transformer_engine/transformer_engine.h",
   "status": "generated",
   "added": 93,
-  "removed": 1
+  "removed": 1,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 5,
+   "secs": 0.0
+  }
  },
  "ABI-002-FAENUM": {
   "kind": "case",
   "rel": "transformer_engine/common/util/pybind_helper.h",
   "status": "generated",
   "added": 27,
-  "removed": 17
+  "removed": 17,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 2,
+   "secs": 0.0
+  }
  },
  "PT-004-MXFP4": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/quantization.py",
   "status": "generated",
   "added": 172,
-  "removed": 3
+  "removed": 3,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "PT-008-NVFP4FIX": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/module/linear.py",
   "status": "generated",
   "added": 76,
-  "removed": 2
+  "removed": 2,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 9,
+   "secs": 0.0
+  }
  },
  "PT-032": {
   "kind": "case",
   "rel": "transformer_engine/pytorch/__init__.py",
   "status": "generated",
   "added": 9,
-  "removed": 4
+  "removed": 4,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": true,
+   "conflict_hunks": 0,
+   "secs": 0.0
+  }
  },
  "CXX-hadamard_transform": {
   "kind": "cxx",
   "rel": "transformer_engine/common/hadamard_transform/hadamard_transform.cu",
   "status": "generated",
   "added": 297,
-  "removed": 2
+  "removed": 2,
+  "outcome": "reapplied"
  },
  "CXX-quantize_transpose_vector_blockwise_fp4": {
   "kind": "cxx",
   "rel": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu",
   "status": "generated",
   "added": 145,
-  "removed": 2
+  "removed": 2,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "CXX-cublaslt_gemm": {
   "kind": "cxx",
   "rel": "transformer_engine/common/gemm/cublaslt_gemm.cu",
   "status": "generated",
   "added": 98,
-  "removed": 1
+  "removed": 1,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "CXX-cublaslt_grouped_gemm": {
   "kind": "cxx",
   "rel": "transformer_engine/common/gemm/cublaslt_grouped_gemm.cu",
   "status": "generated",
   "added": 44,
-  "removed": 0
+  "removed": 0,
+  "outcome": "reapplied"
  },
  "CXX-fused_topk_with_score_function": {
   "kind": "cxx",
   "rel": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
   "status": "generated",
   "added": 11,
-  "removed": 0
+  "removed": 0,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "CXX-fused_score_for_moe_aux_loss": {
   "kind": "cxx",
   "rel": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
   "status": "generated",
   "added": 6,
-  "removed": 0
+  "removed": 0,
+  "outcome": "TRIPPED",
+  "merge3": {
+   "clean": false,
+   "conflict_hunks": 1,
+   "secs": 0.0
+  }
  },
  "CXX-userbuffers-host": {
   "kind": "cxx",
   "rel": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp",
   "status": "generated",
   "added": 10,
-  "removed": 6
+  "removed": 6,
+  "outcome": "reapplied"
  },
  "CXX-dropout": {
   "kind": "cxx",
   "rel": "transformer_engine/common/dropout/dropout.cu",
   "status": "generated",
   "added": 8,
-  "removed": 0
+  "removed": 0,
+  "outcome": "reapplied"
  }
 }

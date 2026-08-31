@@ -227,7 +227,7 @@ Loop: run representative suite on the overlay → triage failures by manifest ID
 | Pass | Same pass/fail set as P0 baseline, **or** every delta explained by a manifest ID with a written reason. Zero in-place edits to files under `build/overlay/` that are not produced by a patch (assembler verifies by hash). P6 green. |
 | Deliverable | `baselines/<date>-overlay.json` alongside the P0 baseline; the diff between them is the Stage-1 report. |
 
-### P8 · Stage-1 performance and checkpoint gate — 2 days · **container**, one needs **8 GPUs**
+### P8 · Stage-1 performance and checkpoint gate — **PASS 2026-08-31** (`baselines/2026-08-30-p8-gate.json`): import parity (2.64 s both), 0 graph breaks both trees, checkpoint continuation 50 steps max rel diff **0.0**, 8-GPU DDP proxy 1.4696 vs 1.4662 M tokens/s (+0.2 %); Megatron-LM(ROCm) e2e row pending external setup
 
 Against the budget approved in G6 — the budget must exist *before* this runs.
 
@@ -311,7 +311,7 @@ sponsor or workstream owners at this stage; `owner: TBD` fields are inert.
 
 ## 5. Track B — the historical backtest (Stage 2)
 
-### B1 · Reconstruct the inputs — 2 days
+### B1 · Reconstruct the inputs — **DONE 2026-08-31**: PRE `bc3766e6d`, BASE `42b84005` (= release_v2.15 tip, what history merged), TGT `2e559f06`; all 12 case files exist at their current paths in the 2.15 era
 
 | Input | Derivation |
 |---|---|
@@ -321,7 +321,7 @@ sponsor or workstream owners at this stage; `owner: TBD` fields are inert.
 | Historical effort | the branch's commit dates + PR review timeline: mid-July → Aug 22 |
 | **C++ arm inputs** | the guard edits in the pre-sync fork's `common/` C++ vs the 2.15 base, expressed as one patch per file by the P4 assembler (same format as the Python queue, `cxx_strategy: patch-queue`). Sample = the manifest's `backtest_plan.cxx_arm` selection rule; confirm the candidate files against actual 2.15→2.17 upstream churn in `common/` |
 
-### B2 · Replay — 5-7 days
+### B2 · Replay — **DONE 2026-08-31** (`tools/backtest.py`): 12 Python cases + 8 C++-arm files as whole-file patches at BASE, applied against TGT. Python: 3 reapplied, 9 TRIPPED loudly by ID (3-way repair proxy: 1 clean, rest 1–9 conflict hunks). C++: 4/8 tripped, every trip 1 hunk. Zero silent outcomes. Caveat: whole-file patches are an upper bound on trips
 
 1. From the pre-sync fork, extract the risk-weighted case set (12 cases in the manifest's
    `backtest_plan`) as patches against the 2.15 base, using the P4 assembler.
@@ -337,7 +337,7 @@ sponsor or workstream owners at this stage; `owner: TBD` fields are inert.
    The arm is **informational at Gate A**, not pass/fail — the C++ strategy is not a Stage 0-2
    deliverable.
 
-### B3 · Report against G6 thresholds — 1 day
+### B3 · Report — **DONE 2026-08-31** (`baselines/2026-08-31-backtest-b3.json`): case rule satisfied (100 % reapply-or-trip-by-ID, 0 silent); cxx_arm trip rate 0.50 → band **discuss**; limitations stated (no 2.15-era build; conflict-hunk proxy for repair effort)
 
 Every threshold pass/fail, every case's outcome, the effort fraction vs historical, **the C++ arm's
 trip rate and per-file outcomes (informational)**, and — stated plainly — what the backtest could

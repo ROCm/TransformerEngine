@@ -2692,6 +2692,12 @@ open_decisions:
       maintained? A freeze / B patch-queue over the submodule then hipify / C de-guard to native HIP.
     working_default: "B for all 85, C selectively, A never as blanket policy - PROVISIONAL, open for discussion"
     evidence_required: "backtest_plan.cxx_arm trip rate and repair hours (Stage 2, informational at Gate A)"
+    evidence_received_2026_08_31: >-
+      cxx_arm trip rate 0.50 over 8 files (2.15->2.17 replay, whole-file guard patches) ->
+      band DISCUSS: "mixed; decide per file, expect more C". Every trip is 1 conflict hunk in
+      the 3-way merge - mechanically small. Caveat: whole-file patches are an UPPER bound on
+      trip rate; a feature-split queue trips less. Full packet:
+      baselines/2026-08-31-backtest-b3.json.
     why_it_matters: >-
       B keeps upstream's commodity kernels flowing under the same governance as the Python queue,
       but does not shrink the divergence: the guards ARE the divergence. Whether B is a mechanized
