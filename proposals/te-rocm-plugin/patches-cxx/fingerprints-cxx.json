@@ -1,0 +1,5687 @@
+{
+ "pin": "868d8d9216da361c666519652115e23688db5211",
+ "patches": {
+  "CXX-cast-cast-cu": {
+   "file": "transformer_engine/common/cast/cast.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      11
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "51d4ff6e2ac4fcc5"
+    },
+    {
+     "span": [
+      60,
+      65
+     ],
+     "symbol": "nvte_multi_tensor_quantize",
+     "kind": "function",
+     "sha256_span": "cf79c77c0f86b42b"
+    }
+   ]
+  },
+  "CXX-cast-core-grouped-tma-cuh": {
+   "file": "transformer_engine/common/cast/core/grouped_tma.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      17,
+      22
+     ],
+     "symbol": "TRANSFORMER_ENGINE_QUANTIZE_CORE_GROUPED_TMA_CUH_",
+     "kind": "macro",
+     "sha256_span": "fafe9127aa532add"
+    },
+    {
+     "span": [
+      214,
+      217
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "8583ec545661c3b0"
+    }
+   ]
+  },
+  "CXX-cast-dispatch-dequantize-cuh": {
+   "file": "transformer_engine/common/cast/dispatch/dequantize.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      15,
+      21
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e87e5a9590b23fb2"
+    },
+    {
+     "span": [
+      40,
+      50
+     ],
+     "symbol": "dequantize_helper",
+     "kind": "function",
+     "sha256_span": "1f2f24bf8adda6a4"
+    },
+    {
+     "span": [
+      63,
+      78
+     ],
+     "symbol": "group_dequantize_helper",
+     "kind": "function",
+     "sha256_span": "efae401e3dd31fea"
+    }
+   ]
+  },
+  "CXX-cast-dispatch-gated-cuh": {
+   "file": "transformer_engine/common/cast/dispatch/gated.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      46,
+      51
+     ],
+     "symbol": "quantize_gated_fwd_helper",
+     "kind": "function",
+     "sha256_span": "c819c35b867d7677"
+    },
+    {
+     "span": [
+      54,
+      59
+     ],
+     "symbol": "quantize_gated_fwd_helper",
+     "kind": "function",
+     "sha256_span": "47bd80955898f61a"
+    },
+    {
+     "span": [
+      83,
+      90
+     ],
+     "symbol": "quantize_gated_fwd_helper",
+     "kind": "function",
+     "sha256_span": "cf6148b9c3550d98"
+    },
+    {
+     "span": [
+      137,
+      142
+     ],
+     "symbol": "quantize_gated_bwd_helper",
+     "kind": "function",
+     "sha256_span": "9c6f18ea14d61fae"
+    },
+    {
+     "span": [
+      144,
+      149
+     ],
+     "symbol": "quantize_gated_bwd_helper",
+     "kind": "function",
+     "sha256_span": "f14efd353f73ceaa"
+    },
+    {
+     "span": [
+      173,
+      180
+     ],
+     "symbol": "quantize_gated_bwd_helper",
+     "kind": "function",
+     "sha256_span": "24a0c5e455afe000"
+    }
+   ]
+  },
+  "CXX-cast-dispatch-quantize-cuh": {
+   "file": "transformer_engine/common/cast/dispatch/quantize.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      17,
+      30
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "426750605ec6d2f2"
+    },
+    {
+     "span": [
+      76,
+      84
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "172e7c77152c8bc0"
+    },
+    {
+     "span": [
+      91,
+      96
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "5097292db57747b0"
+    },
+    {
+     "span": [
+      108,
+      113
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "b6441d8ab1b3cbab"
+    },
+    {
+     "span": [
+      123,
+      129
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "e4fa3defed4691d5"
+    },
+    {
+     "span": [
+      141,
+      146
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "2ac6f5121c8ac06c"
+    },
+    {
+     "span": [
+      156,
+      163
+     ],
+     "symbol": "quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "1986c3467aaa8d28"
+    },
+    {
+     "span": [
+      256,
+      261
+     ],
+     "symbol": "quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "f2b0772790de9962"
+    },
+    {
+     "span": [
+      273,
+      278
+     ],
+     "symbol": "quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "74afc1433189621b"
+    },
+    {
+     "span": [
+      283,
+      289
+     ],
+     "symbol": "quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "e4fa3defed4691d5"
+    },
+    {
+     "span": [
+      301,
+      306
+     ],
+     "symbol": "quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "6c7a7f2f32ee26ef"
+    },
+    {
+     "span": [
+      316,
+      323
+     ],
+     "symbol": "quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "8b0d8dcb2fabe26e"
+    },
+    {
+     "span": [
+      396,
+      401
+     ],
+     "symbol": "group_quantize_fwd_host_aware_helper",
+     "kind": "function",
+     "sha256_span": "83649032f96af157"
+    },
+    {
+     "span": [
+      425,
+      430
+     ],
+     "symbol": "group_quantize_fwd_host_aware_helper",
+     "kind": "function",
+     "sha256_span": "c9fa4792442bf699"
+    },
+    {
+     "span": [
+      463,
+      470
+     ],
+     "symbol": "group_quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "0c2a35cd9c3ca894"
+    },
+    {
+     "span": [
+      479,
+      486
+     ],
+     "symbol": "group_quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "bd3d85204c42c2dd"
+    },
+    {
+     "span": [
+      489,
+      496
+     ],
+     "symbol": "group_quantize_fwd_helper",
+     "kind": "function",
+     "sha256_span": "2c8dbafa75fa3cfd"
+    },
+    {
+     "span": [
+      541,
+      546
+     ],
+     "symbol": "group_quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "957d889ecdf21cb6"
+    },
+    {
+     "span": [
+      554,
+      559
+     ],
+     "symbol": "group_quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "a993ae1ae5bfe401"
+    },
+    {
+     "span": [
+      561,
+      566
+     ],
+     "symbol": "group_quantize_bwd_helper",
+     "kind": "function",
+     "sha256_span": "aae35610021a6ca8"
+    }
+   ]
+  },
+  "CXX-cast-fp8-dequantize-fp8-cuh": {
+   "file": "transformer_engine/common/cast/fp8/dequantize_fp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_DEQUANTIZE_FP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "bcb1d38d86f091a1"
+    }
+   ]
+  },
+  "CXX-cast-fp8-gated-fp8-cuh": {
+   "file": "transformer_engine/common/cast/fp8/gated_fp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_GATED_FP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "01ce3fbb4c170fb3"
+    },
+    {
+     "span": [
+      25,
+      30
+     ],
+     "symbol": "CHUNK_DIM_Y",
+     "kind": "variable",
+     "sha256_span": "6fa3e2de65678a1c"
+    },
+    {
+     "span": [
+      347,
+      352
+     ],
+     "symbol": "cast_gated_fwd",
+     "kind": "function",
+     "sha256_span": "abbb8146ceb4366b"
+    }
+   ]
+  },
+  "CXX-cast-fp8-group-amax-fp8-cuh": {
+   "file": "transformer_engine/common/cast/fp8/group_amax_fp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      131,
+      144
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "0b5893386f2a12c0"
+    }
+   ]
+  },
+  "CXX-cast-fp8-quantize-fp8-cuh": {
+   "file": "transformer_engine/common/cast/fp8/quantize_fp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_QUANTIZE_FP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "cb0d68b770709d15"
+    },
+    {
+     "span": [
+      35,
+      40
+     ],
+     "symbol": "FP8_CHUNK_DIM_Y",
+     "kind": "variable",
+     "sha256_span": "bf78f11dd145b5ea"
+    },
+    {
+     "span": [
+      453,
+      468
+     ],
+     "symbol": "Empty",
+     "kind": "variable",
+     "sha256_span": "06d4a79b0cd9685c"
+    },
+    {
+     "span": [
+      486,
+      492
+     ],
+     "symbol": "CastVectorizedUnaryGradKernelLauncher",
+     "kind": "function",
+     "sha256_span": "ff9309b3b34c0551"
+    },
+    {
+     "span": [
+      511,
+      517
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "c1512dd6b08f4a24"
+    },
+    {
+     "span": [
+      530,
+      535
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "2372b7b5e088c0fb"
+    },
+    {
+     "span": [
+      570,
+      575
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "16488e942fbe9070"
+    }
+   ]
+  },
+  "CXX-cast-mxfp8-dequantize-mxfp8-cuh": {
+   "file": "transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "08c8c21eb64144f8"
+    },
+    {
+     "span": [
+      22,
+      32
+     ],
+     "symbol": "CHUNK_DIM_X",
+     "kind": "variable",
+     "sha256_span": "74c82925bd051bd6"
+    },
+    {
+     "span": [
+      232,
+      244
+     ],
+     "symbol": "dequantize",
+     "kind": "function",
+     "sha256_span": "9c2d5b50f2e7ffe6"
+    },
+    {
+     "span": [
+      305,
+      310
+     ],
+     "symbol": "dequantize",
+     "kind": "function",
+     "sha256_span": "92498b76af24be9e"
+    },
+    {
+     "span": [
+      321,
+      332
+     ],
+     "symbol": "dequantize",
+     "kind": "function",
+     "sha256_span": "42007457e0ab4694"
+    }
+   ]
+  },
+  "CXX-cast-mxfp8-gated-mxfp8-cuh": {
+   "file": "transformer_engine/common/cast/mxfp8/gated_mxfp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_GATED_MXFP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "5749bacf70720aac"
+    },
+    {
+     "span": [
+      22,
+      32
+     ],
+     "symbol": "CHUNK_DIM_X",
+     "kind": "variable",
+     "sha256_span": "01cb310a19eb2a86"
+    },
+    {
+     "span": [
+      695,
+      700
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "2ae95b758bc29e39"
+    },
+    {
+     "span": [
+      708,
+      713
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "665aa6eefa0d41dc"
+    },
+    {
+     "span": [
+      716,
+      721
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "6ba76054541df672"
+    },
+    {
+     "span": [
+      724,
+      740
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "f263e04cc2b91ddf"
+    },
+    {
+     "span": [
+      753,
+      759
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "5fdbe6399bcb5328"
+    },
+    {
+     "span": [
+      784,
+      790
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "cf1922cbd1b0d7ae"
+    },
+    {
+     "span": [
+      794,
+      799
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "db7c014a031dd693"
+    },
+    {
+     "span": [
+      802,
+      807
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "ba04f7cc14cab553"
+    },
+    {
+     "span": [
+      812,
+      820
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "2cd0fb07e1eb29ad"
+    },
+    {
+     "span": [
+      882,
+      888
+     ],
+     "symbol": "quantize_gated",
+     "kind": "function",
+     "sha256_span": "479d9c48eee05ba6"
+    }
+   ]
+  },
+  "CXX-cast-mxfp8-group-dequantize-mxfp8-cuh": {
+   "file": "transformer_engine/common/cast/mxfp8/group_dequantize_mxfp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      11,
+      16
+     ],
+     "symbol": "TRANSFORMER_ENGINE_GROUP_DEQUANTIZE_MXFP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "26ffbc16463e99bf"
+    },
+    {
+     "span": [
+      22,
+      31
+     ],
+     "symbol": "MAX_SUPPORTED_TENSOR_DESCRIPTORS",
+     "kind": "variable",
+     "sha256_span": "485fe8d8572f4934"
+    },
+    {
+     "span": [
+      369,
+      381
+     ],
+     "symbol": "group_dequantize",
+     "kind": "function",
+     "sha256_span": "95ffe61fc033c8d1"
+    },
+    {
+     "span": [
+      412,
+      417
+     ],
+     "symbol": "group_dequantize",
+     "kind": "function",
+     "sha256_span": "3b08a4575038225e"
+    },
+    {
+     "span": [
+      439,
+      454
+     ],
+     "symbol": "group_dequantize",
+     "kind": "function",
+     "sha256_span": "5c7620dec5c222d6"
+    },
+    {
+     "span": [
+      486,
+      491
+     ],
+     "symbol": "group_dequantize",
+     "kind": "function",
+     "sha256_span": "959457762e9dafcf"
+    }
+   ]
+  },
+  "CXX-cast-mxfp8-group-quantize-mxfp8-cuh": {
+   "file": "transformer_engine/common/cast/mxfp8/group_quantize_mxfp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      24,
+      32
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "0c1542226986f62b"
+    },
+    {
+     "span": [
+      757,
+      762
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "90726be109c9d79e"
+    },
+    {
+     "span": [
+      764,
+      769
+     ],
+     "symbol": "group_quantize",
+     "kind": "function",
+     "sha256_span": "fe0f6e2ac7369bac"
+    },
+    {
+     "span": [
+      994,
+      1005
+     ],
+     "symbol": "group_quantize",
+     "kind": "function",
+     "sha256_span": "6815e9029dedd070"
+    }
+   ]
+  },
+  "CXX-cast-mxfp8-quantize-mxfp8-cuh": {
+   "file": "transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_QUANTIZE_MXFP8_CUH_",
+     "kind": "macro",
+     "sha256_span": "2898246058652a9d"
+    },
+    {
+     "span": [
+      21,
+      34
+     ],
+     "symbol": "SCALE_DIM_X",
+     "kind": "variable",
+     "sha256_span": "ec929764dc31b602"
+    },
+    {
+     "span": [
+      566,
+      571
+     ],
+     "symbol": "zero_scales_kernel",
+     "kind": "function",
+     "sha256_span": "8f1cdf6d6c66a648"
+    },
+    {
+     "span": [
+      573,
+      579
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "6545665e37d79cef"
+    },
+    {
+     "span": [
+      593,
+      598
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "19122bd269c146de"
+    },
+    {
+     "span": [
+      869,
+      874
+     ],
+     "symbol": "quantize",
+     "kind": "function",
+     "sha256_span": "528eadd4e3791ac2"
+    }
+   ]
+  },
+  "CXX-cast-nvfp4-dequantize-nvfp4-cuh": {
+   "file": "transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      63,
+      69
+     ],
+     "symbol": "dequantize_fp4_kernel",
+     "kind": "function",
+     "sha256_span": "0964f0cb3848b7a7"
+    }
+   ]
+  },
+  "CXX-comm-gemm-overlap-comm-gemm-overlap-cpp": {
+   "file": "transformer_engine/common/comm_gemm_overlap/comm_gemm_overlap.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      127,
+      133
+     ],
+     "symbol": "initialize",
+     "kind": "function",
+     "sha256_span": "58b36ca317ffd3a9"
+    },
+    {
+     "span": [
+      165,
+      170
+     ],
+     "symbol": "initialize",
+     "kind": "function",
+     "sha256_span": "c9e78bba2eb49fc1"
+    },
+    {
+     "span": [
+      175,
+      180
+     ],
+     "symbol": "~CommOverlapCore",
+     "kind": "function",
+     "sha256_span": "abe418577ed8f173"
+    },
+    {
+     "span": [
+      256,
+      261
+     ],
+     "symbol": "get_tensor_chunk",
+     "kind": "function",
+     "sha256_span": "05218fcb95b66585"
+    },
+    {
+     "span": [
+      264,
+      269
+     ],
+     "symbol": "get_tensor_chunk",
+     "kind": "function",
+     "sha256_span": "abdea86bba0d6410"
+    },
+    {
+     "span": [
+      603,
+      609
+     ],
+     "symbol": "atomic_gemm_overlap_rs",
+     "kind": "function",
+     "sha256_span": "a93a28450544d0b1"
+    },
+    {
+     "span": [
+      761,
+      766
+     ],
+     "symbol": "bulk_overlap_external_ag",
+     "kind": "function",
+     "sha256_span": "34b8a5063412f2e5"
+    },
+    {
+     "span": [
+      794,
+      804
+     ],
+     "symbol": "CommOverlapP2PBase",
+     "kind": "function",
+     "sha256_span": "fdd9127cda2efd10"
+    },
+    {
+     "span": [
+      860,
+      865
+     ],
+     "symbol": "initialize",
+     "kind": "function",
+     "sha256_span": "cb37baf8628918e8"
+    },
+    {
+     "span": [
+      875,
+      880
+     ],
+     "symbol": "~CommOverlapP2PBase",
+     "kind": "function",
+     "sha256_span": "fc924945e14ef0eb"
+    }
+   ]
+  },
+  "CXX-comm-gemm-overlap-userbuffers-userbuffers-cu": {
+   "file": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      18
+     ],
+     "symbol": "half_dtype",
+     "kind": "macro",
+     "sha256_span": "2b841dc27c08c91e"
+    },
+    {
+     "span": [
+      24,
+      29
+     ],
+     "symbol": "MAX_THREADS",
+     "kind": "macro",
+     "sha256_span": "c173bca2b589b2cb"
+    },
+    {
+     "span": [
+      34,
+      39
+     ],
+     "symbol": "ATOMIC_PRODUCER",
+     "kind": "macro",
+     "sha256_span": "68a3caef9b48b2b6"
+    },
+    {
+     "span": [
+      212,
+      218
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "6e3dcc52f8e30fd0"
+    },
+    {
+     "span": [
+      1025,
+      1031
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "360a38e860f4c85c"
+    },
+    {
+     "span": [
+      1116,
+      1122
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "2399cfadf4191ab2"
+    },
+    {
+     "span": [
+      1357,
+      1362
+     ],
+     "symbol": "SETUP_LAUNCH_CONFIG",
+     "kind": "macro",
+     "sha256_span": "8e8de65952a78c31"
+    },
+    {
+     "span": [
+      1367,
+      1372
+     ],
+     "symbol": "ADD_LAUNCH_COMPLETION_EVENT",
+     "kind": "macro",
+     "sha256_span": "73181381c723ea7f"
+    },
+    {
+     "span": [
+      1378,
+      1383
+     ],
+     "symbol": "NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH",
+     "kind": "macro",
+     "sha256_span": "a63133f2f34cbd9f"
+    },
+    {
+     "span": [
+      1389,
+      1394
+     ],
+     "symbol": "SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT",
+     "kind": "macro",
+     "sha256_span": "b3681473f22bec39"
+    },
+    {
+     "span": [
+      2196,
+      2202
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "96a7ea794d44f5d6"
+    },
+    {
+     "span": [
+      2267,
+      2273
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "6dbd3ee8e4d576f8"
+    },
+    {
+     "span": [
+      2284,
+      2289
+     ],
+     "symbol": "INTRANODE",
+     "kind": "macro",
+     "sha256_span": "1bacfc2ca61eaec6"
+    },
+    {
+     "span": [
+      2303,
+      2308
+     ],
+     "symbol": "GET_RECV_PTR_BY_INDEX",
+     "kind": "macro",
+     "sha256_span": "888e6259ac47d8a1"
+    },
+    {
+     "span": [
+      2314,
+      2322
+     ],
+     "symbol": "userbuffers_send",
+     "kind": "function",
+     "sha256_span": "165d932759b76277"
+    },
+    {
+     "span": [
+      2325,
+      2331
+     ],
+     "symbol": "userbuffers_send",
+     "kind": "function",
+     "sha256_span": "82152bec273919f4"
+    },
+    {
+     "span": [
+      2338,
+      2344
+     ],
+     "symbol": "userbuffers_send",
+     "kind": "function",
+     "sha256_span": "062231e93dd50cac"
+    },
+    {
+     "span": [
+      2508,
+      2516
+     ],
+     "symbol": "userbuffers_recv",
+     "kind": "function",
+     "sha256_span": "b6404c127840115a"
+    },
+    {
+     "span": [
+      2522,
+      2533
+     ],
+     "symbol": "userbuffers_recv",
+     "kind": "function",
+     "sha256_span": "318cd3bc87c47d57"
+    },
+    {
+     "span": [
+      2536,
+      2542
+     ],
+     "symbol": "userbuffers_recv",
+     "kind": "function",
+     "sha256_span": "bb61c3a89769532d"
+    },
+    {
+     "span": [
+      2584,
+      2590
+     ],
+     "symbol": "producer_kernel",
+     "kind": "function",
+     "sha256_span": "50616e0b74cd5350"
+    },
+    {
+     "span": [
+      2594,
+      2600
+     ],
+     "symbol": "consumer_kernel",
+     "kind": "function",
+     "sha256_span": "480ba20fe9fe51b2"
+    },
+    {
+     "span": [
+      2606,
+      2612
+     ],
+     "symbol": "consumer_batch_kernel",
+     "kind": "function",
+     "sha256_span": "04e976de7b22fb6a"
+    }
+   ]
+  },
+  "CXX-comm-gemm-overlap-userbuffers-userbuffers-h": {
+   "file": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      36,
+      41
+     ],
+     "symbol": "NVTE_LAUNCH_CPU",
+     "kind": "macro",
+     "sha256_span": "1cfa43d958d7fe03"
+    },
+    {
+     "span": [
+      63,
+      68
+     ],
+     "symbol": "NVTE_HF_NVREDUCEDONE",
+     "kind": "macro",
+     "sha256_span": "e58a05cc76e46f14"
+    },
+    {
+     "span": [
+      269,
+      278
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e2ea300aeb919cfa"
+    }
+   ]
+  },
+  "CXX-comm-gemm-overlap-userbuffers-userbuffers-host-cpp": {
+   "file": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      358,
+      369
+     ],
+     "symbol": "create_communicator_grouped2",
+     "kind": "function",
+     "sha256_span": "9e4f6ed001c08774"
+    },
+    {
+     "span": [
+      376,
+      383
+     ],
+     "symbol": "create_communicator_grouped2",
+     "kind": "function",
+     "sha256_span": "f7553f0aa80fba5f"
+    },
+    {
+     "span": [
+      734,
+      738
+     ],
+     "symbol": "register_user_buffer_collective",
+     "kind": "function",
+     "sha256_span": "148afa238a80b2f5"
+    }
+   ]
+  },
+  "CXX-common-cu": {
+   "file": "transformer_engine/common/common.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      26,
+      31
+     ],
+     "symbol": "get_cuda_dtype",
+     "kind": "function",
+     "sha256_span": "f8e406326645c668"
+    },
+    {
+     "span": [
+      47,
+      52
+     ],
+     "symbol": "update_tensor_scale_inv",
+     "kind": "function",
+     "sha256_span": "3f30f043e6db0582"
+    },
+    {
+     "span": [
+      120,
+      125
+     ],
+     "symbol": "checkCuDriverContext",
+     "kind": "function",
+     "sha256_span": "011704b13be763df"
+    },
+    {
+     "span": [
+      139,
+      145
+     ],
+     "symbol": "checkCuDriverContext",
+     "kind": "function",
+     "sha256_span": "537f12c6327d6d0e"
+    },
+    {
+     "span": [
+      233,
+      238
+     ],
+     "symbol": "is_supported_by_CC_100",
+     "kind": "function",
+     "sha256_span": "cd541e8d21390c49"
+    }
+   ]
+  },
+  "CXX-common-h": {
+   "file": "transformer_engine/common/common.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      14
+     ],
+     "symbol": "FP4_TYPE_SUPPORTED",
+     "kind": "macro",
+     "sha256_span": "98602504731f2d10"
+    },
+    {
+     "span": [
+      91,
+      98
+     ],
+     "symbol": "is_mxfp8_scaling",
+     "kind": "function",
+     "sha256_span": "21c513dd52b5bcb4"
+    },
+    {
+     "span": [
+      309,
+      314
+     ],
+     "symbol": "nvfp4_e4m3_max",
+     "kind": "member",
+     "sha256_span": "f78d54b020c6c822"
+    },
+    {
+     "span": [
+      321,
+      326
+     ],
+     "symbol": "Tensor",
+     "kind": "function",
+     "sha256_span": "c9cb0b03dd7be52c"
+    },
+    {
+     "span": [
+      338,
+      343
+     ],
+     "symbol": "operator NVTETensor",
+     "kind": "function",
+     "sha256_span": "dd266c8be449d620"
+    },
+    {
+     "span": [
+      389,
+      395
+     ],
+     "symbol": "shape",
+     "kind": "function",
+     "sha256_span": "1cca544bcbb68ebe"
+    },
+    {
+     "span": [
+      510,
+      515
+     ],
+     "symbol": "with_gemm_swizzled_scales",
+     "kind": "member",
+     "sha256_span": "5357bd076285ac82"
+    },
+    {
+     "span": [
+      523,
+      528
+     ],
+     "symbol": "attr_sizes",
+     "kind": "member",
+     "sha256_span": "44246836abac8bb4"
+    },
+    {
+     "span": [
+      540,
+      545
+     ],
+     "symbol": "operator NVTEGroupedTensor",
+     "kind": "function",
+     "sha256_span": "4d633449a23d5aad"
+    },
+    {
+     "span": [
+      593,
+      598
+     ],
+     "symbol": "clear",
+     "kind": "function",
+     "sha256_span": "dcf884bbc2dba2f6"
+    },
+    {
+     "span": [
+      606,
+      611
+     ],
+     "symbol": "nvfp4_4over6_err_use_fast_math",
+     "kind": "member",
+     "sha256_span": "f0522697ce1c3d47"
+    },
+    {
+     "span": [
+      618,
+      628
+     ],
+     "symbol": "DIVUP",
+     "kind": "function",
+     "sha256_span": "93cd323941b9ef5c"
+    },
+    {
+     "span": [
+      634,
+      639
+     ],
+     "symbol": "byte",
+     "kind": "typedef",
+     "sha256_span": "e9c244027cbf96af"
+    },
+    {
+     "span": [
+      641,
+      657
+     ],
+     "symbol": "bf16",
+     "kind": "typedef",
+     "sha256_span": "de713b30249c1102"
+    },
+    {
+     "span": [
+      669,
+      683
+     ],
+     "symbol": "detail",
+     "kind": "namespace",
+     "sha256_span": "503cc280c6d4fb2e"
+    },
+    {
+     "span": [
+      693,
+      700
+     ],
+     "symbol": "max",
+     "kind": "member",
+     "sha256_span": "d8a6cef9d9e2ce8e"
+    },
+    {
+     "span": [
+      1137,
+      1142
+     ],
+     "symbol": "is_fp4",
+     "kind": "struct",
+     "sha256_span": "c18e906843b37f0d"
+    },
+    {
+     "span": [
+      1148,
+      1153
+     ],
+     "symbol": "TMA_GMEM_ALIGNMENT",
+     "kind": "variable",
+     "sha256_span": "801fa404c6a1c7ff"
+    },
+    {
+     "span": [
+      1174,
+      1179
+     ],
+     "symbol": "NVTE_API_CALL",
+     "kind": "macro",
+     "sha256_span": "344231ea3df1b68f"
+    },
+    {
+     "span": [
+      1186,
+      1191
+     ],
+     "symbol": "transformer_engine",
+     "kind": "namespace",
+     "sha256_span": "ff8c2109abab690b"
+    }
+   ]
+  },
+  "CXX-dropout-dropout-cu": {
+   "file": "transformer_engine/common/dropout/dropout.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      41,
+      49
+     ],
+     "symbol": "bytewise_less_than",
+     "kind": "function",
+     "sha256_span": "cdc0a530a55d460e"
+    }
+   ]
+  },
+  "CXX-fused-attn-flash-attn-cu": {
+   "file": "transformer_engine/common/fused_attn/flash_attn.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      11
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d440d75408e6b8d9"
+    },
+    {
+     "span": [
+      173,
+      181
+     ],
+     "symbol": "maps",
+     "kind": "member",
+     "sha256_span": "f6cba9ceaf253d25"
+    },
+    {
+     "span": [
+      364,
+      369
+     ],
+     "symbol": "tma_permute_s_tile_default",
+     "kind": "variable",
+     "sha256_span": "bd3e043251e26f2f"
+    },
+    {
+     "span": [
+      584,
+      589
+     ],
+     "symbol": "create_strided_tensor_map",
+     "kind": "function",
+     "sha256_span": "2ee5bb91afc4b93f"
+    },
+    {
+     "span": [
+      600,
+      606
+     ],
+     "symbol": "multi_tensor_transpose_to_bhsd",
+     "kind": "function",
+     "sha256_span": "0eedd540ffc93bcf"
+    },
+    {
+     "span": [
+      618,
+      623
+     ],
+     "symbol": "multi_tensor_transpose_to_bhsd",
+     "kind": "function",
+     "sha256_span": "2e7fe21f02df7fae"
+    },
+    {
+     "span": [
+      636,
+      647
+     ],
+     "symbol": "multi_tensor_transpose_to_bhsd",
+     "kind": "function",
+     "sha256_span": "4623171a92f0145f"
+    },
+    {
+     "span": [
+      681,
+      686
+     ],
+     "symbol": "multi_tensor_transpose_to_bhsd",
+     "kind": "function",
+     "sha256_span": "f248759d5bbd3901"
+    }
+   ]
+  },
+  "CXX-fused-attn-utils-cu": {
+   "file": "transformer_engine/common/fused_attn/utils.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      8,
+      14
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "df91ae2b1b2b7d98"
+    }
+   ]
+  },
+  "CXX-fused-router-async-loader-h": {
+   "file": "transformer_engine/common/fused_router/async_loader.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      13
+     ],
+     "symbol": "TRANSFORMER_ENGINE_FUSED_ROUTER_ASYNC_LOADER_H_",
+     "kind": "macro",
+     "sha256_span": "78f21a45464ac1f9"
+    }
+   ]
+  },
+  "CXX-fused-router-fused-moe-aux-loss-cu": {
+   "file": "transformer_engine/common/fused_router/fused_moe_aux_loss.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    }
+   ]
+  },
+  "CXX-fused-router-utils-h": {
+   "file": "transformer_engine/common/fused_router/utils.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      58,
+      63
+     ],
+     "symbol": "CompType",
+     "kind": "typedef",
+     "sha256_span": "cd48992f0f1f60fa"
+    },
+    {
+     "span": [
+      68,
+      73
+     ],
+     "symbol": "MAX",
+     "kind": "enumerator",
+     "sha256_span": "7b7bd63f340d0742"
+    },
+    {
+     "span": [
+      86,
+      91
+     ],
+     "symbol": "warp_reduce_on_shmem",
+     "kind": "function",
+     "sha256_span": "798172437d692a00"
+    },
+    {
+     "span": [
+      100,
+      105
+     ],
+     "symbol": "warp_reduce_on_shmem",
+     "kind": "function",
+     "sha256_span": "e21a8d4e1d846b87"
+    },
+    {
+     "span": [
+      228,
+      233
+     ],
+     "symbol": "Radix",
+     "kind": "enumerator",
+     "sha256_span": "284468fb2ac692e7"
+    },
+    {
+     "span": [
+      370,
+      379
+     ],
+     "symbol": "radix_topk_and_mask",
+     "kind": "function",
+     "sha256_span": "44bb4fd665627651"
+    },
+    {
+     "span": [
+      395,
+      403
+     ],
+     "symbol": "radix_topk_and_mask",
+     "kind": "function",
+     "sha256_span": "2177b521afd57fed"
+    },
+    {
+     "span": [
+      444,
+      459
+     ],
+     "symbol": "naive_topk_and_mask_smallk",
+     "kind": "function",
+     "sha256_span": "48d1e4265d5a5177"
+    },
+    {
+     "span": [
+      495,
+      502
+     ],
+     "symbol": "naive_topk_and_mask_generic",
+     "kind": "function",
+     "sha256_span": "01f5d81b617f6f43"
+    }
+   ]
+  },
+  "CXX-fused-softmax-scaled-aligned-causal-masked-softmax-cu": {
+   "file": "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      31,
+      38
+     ],
+     "symbol": "NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX",
+     "kind": "macro",
+     "sha256_span": "326ff37dfc372dd3"
+    },
+    {
+     "span": [
+      107,
+      117
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "f70d3e8ba9f67f65"
+    },
+    {
+     "span": [
+      226,
+      232
+     ],
+     "symbol": "scaled_aligned_causal_masked_softmax_warp_forward",
+     "kind": "function",
+     "sha256_span": "8cc755d796553f59"
+    },
+    {
+     "span": [
+      379,
+      385
+     ],
+     "symbol": "make_softmax_rtc_label",
+     "kind": "function",
+     "sha256_span": "3c622e83bb7fab44"
+    },
+    {
+     "span": [
+      475,
+      481
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "04a962b660adddb0"
+    },
+    {
+     "span": [
+      513,
+      519
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "00d9a6a5e9f3a96a"
+    },
+    {
+     "span": [
+      579,
+      585
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3b861984099567b3"
+    }
+   ]
+  },
+  "CXX-fused-softmax-scaled-masked-softmax-cu": {
+   "file": "transformer_engine/common/fused_softmax/scaled_masked_softmax.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      28,
+      35
+     ],
+     "symbol": "NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX",
+     "kind": "macro",
+     "sha256_span": "57f63b68c29b1a0e"
+    },
+    {
+     "span": [
+      86,
+      96
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "7d52af99d12e04be"
+    },
+    {
+     "span": [
+      458,
+      464
+     ],
+     "symbol": "make_softmax_rtc_label",
+     "kind": "function",
+     "sha256_span": "22fa6e2c8d34547c"
+    },
+    {
+     "span": [
+      476,
+      482
+     ],
+     "symbol": "dispatch_scaled_softmax_forward",
+     "kind": "function",
+     "sha256_span": "0ddf7b9e08bd8311"
+    },
+    {
+     "span": [
+      511,
+      517
+     ],
+     "symbol": "dispatch_scaled_softmax_forward",
+     "kind": "function",
+     "sha256_span": "03ea818fdd309eb9"
+    },
+    {
+     "span": [
+      593,
+      599
+     ],
+     "symbol": "dispatch_scaled_masked_softmax_forward",
+     "kind": "function",
+     "sha256_span": "441ab249ca85aaf3"
+    },
+    {
+     "span": [
+      629,
+      635
+     ],
+     "symbol": "dispatch_scaled_masked_softmax_forward",
+     "kind": "function",
+     "sha256_span": "54047018757513db"
+    },
+    {
+     "span": [
+      761,
+      767
+     ],
+     "symbol": "dispatch_scaled_masked_softmax_backward",
+     "kind": "function",
+     "sha256_span": "82196bf0cd93a72b"
+    }
+   ]
+  },
+  "CXX-fused-softmax-scaled-upper-triang-masked-softmax-cu": {
+   "file": "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      29,
+      36
+     ],
+     "symbol": "NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX",
+     "kind": "macro",
+     "sha256_span": "326ff37dfc372dd3"
+    },
+    {
+     "span": [
+      110,
+      120
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "7d52af99d12e04be"
+    },
+    {
+     "span": [
+      372,
+      378
+     ],
+     "symbol": "make_softmax_rtc_label",
+     "kind": "function",
+     "sha256_span": "c0914b3bedb47160"
+    },
+    {
+     "span": [
+      391,
+      397
+     ],
+     "symbol": "dispatch_scaled_upper_triang_masked_softmax_forward",
+     "kind": "function",
+     "sha256_span": "18c2b90b862a3a32"
+    },
+    {
+     "span": [
+      429,
+      435
+     ],
+     "symbol": "dispatch_scaled_upper_triang_masked_softmax_forward",
+     "kind": "function",
+     "sha256_span": "527ab8c569d26efd"
+    },
+    {
+     "span": [
+      565,
+      571
+     ],
+     "symbol": "dispatch_scaled_upper_triang_masked_softmax_backward",
+     "kind": "function",
+     "sha256_span": "dc24eea98d4c2122"
+    }
+   ]
+  },
+  "CXX-gemm-cublaslt-grouped-gemm-cu": {
+   "file": "transformer_engine/common/gemm/cublaslt_grouped_gemm.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e9b695b15477c618"
+    },
+    {
+     "span": [
+      23,
+      28
+     ],
+     "symbol": "CreateCublasHandle",
+     "kind": "function",
+     "sha256_span": "5d9afbbf7de561df"
+    },
+    {
+     "span": [
+      2072,
+      2077
+     ],
+     "symbol": "convert_int32_to_int64_kernel",
+     "kind": "function",
+     "sha256_span": "56c94d11768138a6"
+    }
+   ]
+  },
+  "CXX-hadamard-transform-hadamard-transform-cu": {
+   "file": "transformer_engine/common/hadamard_transform/hadamard_transform.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      16,
+      26
+     ],
+     "symbol": "kThreadsPerWarp",
+     "kind": "variable",
+     "sha256_span": "58655b0f43cd1f16"
+    },
+    {
+     "span": [
+      153,
+      158
+     ],
+     "symbol": "ZeroAmaxKernel",
+     "kind": "function",
+     "sha256_span": "bf45ba5ecc8e8435"
+    },
+    {
+     "span": [
+      168,
+      173
+     ],
+     "symbol": "ZeroAmaxKernel",
+     "kind": "function",
+     "sha256_span": "1c34e968ef206614"
+    },
+    {
+     "span": [
+      482,
+      487
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "c300954f9b46985d"
+    },
+    {
+     "span": [
+      511,
+      517
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "1daa92a1f6902298"
+    },
+    {
+     "span": [
+      520,
+      533
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "d1546c8e6be287a9"
+    },
+    {
+     "span": [
+      541,
+      546
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "dfd643e9e72520fa"
+    },
+    {
+     "span": [
+      548,
+      553
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "d608c54025232056"
+    },
+    {
+     "span": [
+      558,
+      563
+     ],
+     "symbol": "hadamard_transform",
+     "kind": "function",
+     "sha256_span": "0bf18d1f300923a8"
+    },
+    {
+     "span": [
+      567,
+      573
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "686083fcd0b754ca"
+    },
+    {
+     "span": [
+      583,
+      588
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "8a24915ca820d29f"
+    },
+    {
+     "span": [
+      592,
+      597
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "1a451f79b0909579"
+    },
+    {
+     "span": [
+      601,
+      606
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "cec31da50eefdc94"
+    },
+    {
+     "span": [
+      609,
+      614
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "5d2a33aee3746c18"
+    },
+    {
+     "span": [
+      641,
+      646
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "0f85e4419e48df88"
+    },
+    {
+     "span": [
+      648,
+      653
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "3dd76ac64212bfc0"
+    },
+    {
+     "span": [
+      671,
+      682
+     ],
+     "symbol": "hadamard_transform_amax",
+     "kind": "function",
+     "sha256_span": "c83ba8ee744678ef"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-comm-gemm-overlap-h": {
+   "file": "transformer_engine/common/include/transformer_engine/comm_gemm_overlap.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      17,
+      23
+     ],
+     "symbol": "NVTE_COMM_OVERLAP_MAX_STREAMS",
+     "kind": "macro",
+     "sha256_span": "04e0756735ed673f"
+    },
+    {
+     "span": [
+      124,
+      131
+     ],
+     "symbol": "is_fp8_ubuf",
+     "kind": "function",
+     "sha256_span": "4952408fc5e7c6a8"
+    },
+    {
+     "span": [
+      152,
+      157
+     ],
+     "symbol": "atomic_gemm_overlap_ag",
+     "kind": "function",
+     "sha256_span": "6804f8067d8f8e21"
+    },
+    {
+     "span": [
+      172,
+      177
+     ],
+     "symbol": "bulk_overlap_external_ag",
+     "kind": "function",
+     "sha256_span": "6654a4d2e50f518b"
+    },
+    {
+     "span": [
+      250,
+      255
+     ],
+     "symbol": "CommOverlapBase",
+     "kind": "class",
+     "sha256_span": "bdf5c3efea4be1a5"
+    },
+    {
+     "span": [
+      264,
+      272
+     ],
+     "symbol": "_self_chunk_id",
+     "kind": "member",
+     "sha256_span": "0e9c7710aff8a4d6"
+    },
+    {
+     "span": [
+      281,
+      287
+     ],
+     "symbol": "CommOverlapP2PBase",
+     "kind": "function",
+     "sha256_span": "51bf1f5a00ae06bd"
+    },
+    {
+     "span": [
+      342,
+      347
+     ],
+     "symbol": "CommOverlapP2PBase",
+     "kind": "class",
+     "sha256_span": "6f11baf3b63b98b5"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-fused-attn-h": {
+   "file": "transformer_engine/common/include/transformer_engine/fused_attn.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      153,
+      166
+     ],
+     "symbol": "NVTE_F16_arbitrary_seqlen",
+     "kind": "enumerator",
+     "sha256_span": "90c5e2b31bf07bdb"
+    },
+    {
+     "span": [
+      231,
+      236
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "7ff7e5e91d3fb05c"
+    },
+    {
+     "span": [
+      299,
+      304
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "164297500e3848c6"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-gemm-h": {
+   "file": "transformer_engine/common/include/transformer_engine/gemm.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      482,
+      488
+     ],
+     "symbol": "transformer_engine",
+     "kind": "namespace",
+     "sha256_span": "1697f2781fb34025"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-multi-stream-h": {
+   "file": "transformer_engine/common/include/transformer_engine/multi_stream.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      11,
+      17
+     ],
+     "symbol": "TRANSFORMER_ENGINE_MULTI_STREAM_H",
+     "kind": "macro",
+     "sha256_span": "77549a0cd3c3ac9c"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-multi-tensor-h": {
+   "file": "transformer_engine/common/include/transformer_engine/multi_tensor.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      68,
+      73
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "f61c78d37699390c"
+    },
+    {
+     "span": [
+      120,
+      125
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "00c6bc489ecd9e98"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-normalization-h": {
+   "file": "transformer_engine/common/include/transformer_engine/normalization.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      163,
+      168
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "fd0ccda7964f8d46"
+    },
+    {
+     "span": [
+      184,
+      189
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "2c13e2742bf4940c"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-recipe-h": {
+   "file": "transformer_engine/common/include/transformer_engine/recipe.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      73,
+      78
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "fad5d5186de2b833"
+    },
+    {
+     "span": [
+      99,
+      104
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "a86648ccb0933f25"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-transformer-engine-h": {
+   "file": "transformer_engine/common/include/transformer_engine/transformer_engine.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      90,
+      95
+     ],
+     "symbol": "kNVTENVFP4E4M3Max",
+     "kind": "enumerator",
+     "sha256_span": "612281eaf508b517"
+    },
+    {
+     "span": [
+      115,
+      120
+     ],
+     "symbol": "NVTE_INVALID_SCALING",
+     "kind": "enumerator",
+     "sha256_span": "42751b30d6262a81"
+    },
+    {
+     "span": [
+      436,
+      441
+     ],
+     "symbol": "kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath",
+     "kind": "enumerator",
+     "sha256_span": "6d162df774b5da71"
+    },
+    {
+     "span": [
+      570,
+      575
+     ],
+     "symbol": "kNVTEGroupedWithGEMMSwizzledScales",
+     "kind": "enumerator",
+     "sha256_span": "af5e7cf45aea37d4"
+    },
+    {
+     "span": [
+      690,
+      695
+     ],
+     "symbol": "kNumTypes",
+     "kind": "enumerator",
+     "sha256_span": "21a8031f78220bd0"
+    },
+    {
+     "span": [
+      879,
+      884
+     ],
+     "symbol": "set_nvfp4_e4m3_max",
+     "kind": "function",
+     "sha256_span": "5157aa60b8b6d4af"
+    },
+    {
+     "span": [
+      927,
+      932
+     ],
+     "symbol": "get_nvfp4_e4m3_max",
+     "kind": "function",
+     "sha256_span": "866d37550dabfee9"
+    },
+    {
+     "span": [
+      1298,
+      1304
+     ],
+     "symbol": "set_with_gemm_swizzled_scales",
+     "kind": "function",
+     "sha256_span": "db4b457c6f490a2d"
+    },
+    {
+     "span": [
+      1344,
+      1349
+     ],
+     "symbol": "get_with_gemm_swizzled_scales",
+     "kind": "function",
+     "sha256_span": "ba62ef5bbaef4b3e"
+    },
+    {
+     "span": [
+      1503,
+      1508
+     ],
+     "symbol": "config_",
+     "kind": "member",
+     "sha256_span": "fd24a27d52b3b1f2"
+    }
+   ]
+  },
+  "CXX-include-transformer-engine-transpose-h": {
+   "file": "transformer_engine/common/include/transformer_engine/transpose.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      93,
+      98
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "dccca6e52733c1dc"
+    }
+   ]
+  },
+  "CXX-multi-tensor-adam-cu": {
+   "file": "transformer_engine/common/multi_tensor/adam.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      11,
+      16
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "207ef327e7bc32b1"
+    },
+    {
+     "span": [
+      25,
+      32
+     ],
+     "symbol": "MATH_T",
+     "kind": "variable",
+     "sha256_span": "78c7afb919ef35cc"
+    },
+    {
+     "span": [
+      970,
+      975
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "bdc1bb159a70f7eb"
+    },
+    {
+     "span": [
+      1047,
+      1049
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e9c62c217d430043"
+    }
+   ]
+  },
+  "CXX-multi-tensor-l2norm-cu": {
+   "file": "transformer_engine/common/multi_tensor/l2norm.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      11,
+      16
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3262406ef4f20b30"
+    },
+    {
+     "span": [
+      57,
+      63
+     ],
+     "symbol": "i",
+     "kind": "variable",
+     "sha256_span": "9b84ad0e55012cc3"
+    },
+    {
+     "span": [
+      99,
+      105
+     ],
+     "symbol": "i",
+     "kind": "variable",
+     "sha256_span": "949729f8e48beefe"
+    },
+    {
+     "span": [
+      250,
+      255
+     ],
+     "symbol": "operator",
+     "kind": "function",
+     "sha256_span": "82fc2bcd663d90d0"
+    },
+    {
+     "span": [
+      447,
+      452
+     ],
+     "symbol": "nvte_multi_tensor_l2norm_cuda",
+     "kind": "function",
+     "sha256_span": "43f7d30f5d5c3464"
+    }
+   ]
+  },
+  "CXX-normalization-common-cpp": {
+   "file": "transformer_engine/common/normalization/common.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      39,
+      49
+     ],
+     "symbol": "get_cudnn_forward_phase",
+     "kind": "function",
+     "sha256_span": "cd0217960be5069f"
+    },
+    {
+     "span": [
+      61,
+      72
+     ],
+     "symbol": "get_key",
+     "kind": "function",
+     "sha256_span": "536204bbd0878855"
+    },
+    {
+     "span": [
+      74,
+      80
+     ],
+     "symbol": "TeNormalizationPlan",
+     "kind": "function",
+     "sha256_span": "d16615db2708ce1b"
+    },
+    {
+     "span": [
+      102,
+      107
+     ],
+     "symbol": "execute",
+     "kind": "function",
+     "sha256_span": "37fc749746a1d516"
+    },
+    {
+     "span": [
+      149,
+      154
+     ],
+     "symbol": "_set_workspace",
+     "kind": "function",
+     "sha256_span": "3e85b854be6d25ca"
+    },
+    {
+     "span": [
+      200,
+      205
+     ],
+     "symbol": "execute",
+     "kind": "function",
+     "sha256_span": "f2e86e28037172cb"
+    },
+    {
+     "span": [
+      507,
+      512
+     ],
+     "symbol": "execute",
+     "kind": "function",
+     "sha256_span": "5f1feca85c10f41b"
+    },
+    {
+     "span": [
+      525,
+      547
+     ],
+     "symbol": "_cudnn_norm_fwd_flag",
+     "kind": "function",
+     "sha256_span": "78c0d25ed3f0e992"
+    },
+    {
+     "span": [
+      561,
+      570
+     ],
+     "symbol": "use_zero_centered_gamma_in_weight_dtype",
+     "kind": "function",
+     "sha256_span": "f7fec93cdac482a3"
+    },
+    {
+     "span": [
+      580,
+      582
+     ],
+     "symbol": "nvte_enable_zero_centered_gamma_in_weight_dtype",
+     "kind": "function",
+     "sha256_span": "b7fa4809ff31ed4b"
+    }
+   ]
+  },
+  "CXX-normalization-common-h": {
+   "file": "transformer_engine/common/normalization/common.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      15
+     ],
+     "symbol": "TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_",
+     "kind": "macro",
+     "sha256_span": "78b9e61a70ab66b3"
+    },
+    {
+     "span": [
+      19,
+      28
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "82ce310315f555e2"
+    },
+    {
+     "span": [
+      30,
+      36
+     ],
+     "symbol": "LaunchParams",
+     "kind": "struct",
+     "sha256_span": "d2cb1d39e50c4e56"
+    },
+    {
+     "span": [
+      40,
+      58
+     ],
+     "symbol": "Backward",
+     "kind": "enumerator",
+     "sha256_span": "66b5f7471762190b"
+    },
+    {
+     "span": [
+      76,
+      81
+     ],
+     "symbol": "TeNormalizationRegistry",
+     "kind": "class",
+     "sha256_span": "de7df2fc102123fa"
+    },
+    {
+     "span": [
+      117,
+      123
+     ],
+     "symbol": "getKernel",
+     "kind": "function",
+     "sha256_span": "4f130fccc4c0f8dc"
+    },
+    {
+     "span": [
+      158,
+      164
+     ],
+     "symbol": "TeNormalizationPlan",
+     "kind": "class",
+     "sha256_span": "1f07cb43324e1515"
+    },
+    {
+     "span": [
+      180,
+      185
+     ],
+     "symbol": "_is_layernorm",
+     "kind": "member",
+     "sha256_span": "cb876b2702d18042"
+    },
+    {
+     "span": [
+      220,
+      225
+     ],
+     "symbol": "_handle",
+     "kind": "member",
+     "sha256_span": "1943c653ca198c65"
+    },
+    {
+     "span": [
+      248,
+      256
+     ],
+     "symbol": "bf16",
+     "kind": "typedef",
+     "sha256_span": "75489d66522c5ee5"
+    },
+    {
+     "span": [
+      304,
+      313
+     ],
+     "symbol": "is_ptr_aligned",
+     "kind": "function",
+     "sha256_span": "65b91060c806a8e1"
+    }
+   ]
+  },
+  "CXX-normalization-kernel-params-h": {
+   "file": "transformer_engine/common/normalization/kernel_params.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      60,
+      65
+     ],
+     "symbol": "fp8_out",
+     "kind": "member",
+     "sha256_span": "c84092b335e03814"
+    }
+   ]
+  },
+  "CXX-normalization-kernel-traits-h": {
+   "file": "transformer_engine/common/normalization/kernel_traits.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      25,
+      31
+     ],
+     "symbol": "bf16",
+     "kind": "typedef",
+     "sha256_span": "013106b000717b80"
+    }
+   ]
+  },
+  "CXX-normalization-layernorm-ln-api-cpp": {
+   "file": "transformer_engine/common/normalization/layernorm/ln_api.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      67,
+      85
+     ],
+     "symbol": "layernorm_fwd",
+     "kind": "function",
+     "sha256_span": "a800c63fd66a9d54"
+    },
+    {
+     "span": [
+      164,
+      174
+     ],
+     "symbol": "layernorm_bwd",
+     "kind": "function",
+     "sha256_span": "6c7c21e6e8a3c9c2"
+    }
+   ]
+  },
+  "CXX-normalization-layernorm-ln-bwd-semi-cuda-kernel-cu": {
+   "file": "transformer_engine/common/normalization/layernorm/ln_bwd_semi_cuda_kernel.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      39,
+      48
+     ],
+     "symbol": "launch_ln_bwd_tuned_",
+     "kind": "function",
+     "sha256_span": "91e8cf19d68a30ed"
+    },
+    {
+     "span": [
+      133,
+      160
+     ],
+     "symbol": "REGISTER_NORM_LAUNCHER_LN_BWD_general",
+     "kind": "macro",
+     "sha256_span": "c064b403cdf70246"
+    },
+    {
+     "span": [
+      181,
+      186
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "c24891229260cf3e"
+    },
+    {
+     "span": [
+      241,
+      246
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "33af32e1de689dea"
+    }
+   ]
+  },
+  "CXX-normalization-layernorm-ln-fwd-cuda-kernel-cu": {
+   "file": "transformer_engine/common/normalization/layernorm/ln_fwd_cuda_kernel.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      32,
+      44
+     ],
+     "symbol": "launch_ln_fwd_tuned_",
+     "kind": "function",
+     "sha256_span": "1b9cff4c8b12c99e"
+    },
+    {
+     "span": [
+      55,
+      60
+     ],
+     "symbol": "launch_ln_fwd_tuned_",
+     "kind": "function",
+     "sha256_span": "a87628ef29ef05a9"
+    },
+    {
+     "span": [
+      85,
+      90
+     ],
+     "symbol": "launch_ln_fwd_general_",
+     "kind": "function",
+     "sha256_span": "86ba4b2b98b82dab"
+    },
+    {
+     "span": [
+      100,
+      107
+     ],
+     "symbol": "launch_ln_fwd_general_",
+     "kind": "function",
+     "sha256_span": "d21d727550cca2fc"
+    },
+    {
+     "span": [
+      109,
+      132
+     ],
+     "symbol": "REGISTER_NORM_LAUNCHER_LN_FWD_general",
+     "kind": "macro",
+     "sha256_span": "ada1f115c1657f95"
+    },
+    {
+     "span": [
+      152,
+      157
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "a29ceb7ae33b0f8a"
+    },
+    {
+     "span": [
+      162,
+      167
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "60c7204f47dce96e"
+    },
+    {
+     "span": [
+      178,
+      183
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "21ca432bfcd81e10"
+    },
+    {
+     "span": [
+      188,
+      193
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "f3cfc5e7f6254909"
+    },
+    {
+     "span": [
+      204,
+      209
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "22c07064974d2023"
+    },
+    {
+     "span": [
+      214,
+      219
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "692761cf25c8507e"
+    },
+    {
+     "span": [
+      230,
+      235
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e6e9823327821ecd"
+    },
+    {
+     "span": [
+      290,
+      295
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "020b9f461d007e56"
+    },
+    {
+     "span": [
+      430,
+      432
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "8d504eeda94c7161"
+    }
+   ]
+  },
+  "CXX-normalization-layernorm-ln-fwd-kernels-cuh": {
+   "file": "transformer_engine/common/normalization/layernorm/ln_fwd_kernels.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      41,
+      46
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "3450e086fc530fc0"
+    },
+    {
+     "span": [
+      112,
+      117
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "e4399f7a5f76d775"
+    },
+    {
+     "span": [
+      146,
+      151
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "0364a5b171f4337a"
+    },
+    {
+     "span": [
+      318,
+      326
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "435a1c0b58e82185"
+    }
+   ]
+  },
+  "CXX-normalization-rmsnorm-rmsnorm-api-cpp": {
+   "file": "transformer_engine/common/normalization/rmsnorm/rmsnorm_api.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      53,
+      74
+     ],
+     "symbol": "rmsnorm_fwd",
+     "kind": "function",
+     "sha256_span": "f46438768ab3e363"
+    },
+    {
+     "span": [
+      141,
+      151
+     ],
+     "symbol": "rmsnorm_bwd",
+     "kind": "function",
+     "sha256_span": "08983a87f82bea27"
+    },
+    {
+     "span": [
+      205,
+      213
+     ],
+     "symbol": "rmsnorm_bwd_add",
+     "kind": "function",
+     "sha256_span": "02eee107547f0e02"
+    },
+    {
+     "span": [
+      220,
+      225
+     ],
+     "symbol": "rmsnorm_bwd_add",
+     "kind": "function",
+     "sha256_span": "ba39f6bfed8e1655"
+    }
+   ]
+  },
+  "CXX-normalization-rmsnorm-rmsnorm-bwd-semi-cuda-kernel-cu": {
+   "file": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      38,
+      47
+     ],
+     "symbol": "launch_rmsnorm_bwd_tuned_",
+     "kind": "function",
+     "sha256_span": "91e8cf19d68a30ed"
+    },
+    {
+     "span": [
+      137,
+      191
+     ],
+     "symbol": "REGISTER_NORM_LAUNCHER_RMSN_BWD_general_Backward",
+     "kind": "macro",
+     "sha256_span": "60994411f7406d68"
+    },
+    {
+     "span": [
+      212,
+      217
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3436109ccab5c841"
+    },
+    {
+     "span": [
+      224,
+      229
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "2881c3e526ba8d1c"
+    },
+    {
+     "span": [
+      232,
+      237
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3224b3b008780b9a"
+    },
+    {
+     "span": [
+      274,
+      279
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "ba2544b2b07e74e2"
+    },
+    {
+     "span": [
+      295,
+      300
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "33a5a16092a5e1fb"
+    },
+    {
+     "span": [
+      309,
+      314
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "25e8b6c7f5207e33"
+    }
+   ]
+  },
+  "CXX-normalization-rmsnorm-rmsnorm-fwd-cuda-kernel-cu": {
+   "file": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      33,
+      45
+     ],
+     "symbol": "launch_rmsnorm_fwd_tuned_",
+     "kind": "function",
+     "sha256_span": "1b9cff4c8b12c99e"
+    },
+    {
+     "span": [
+      56,
+      61
+     ],
+     "symbol": "launch_rmsnorm_fwd_tuned_",
+     "kind": "function",
+     "sha256_span": "a87628ef29ef05a9"
+    },
+    {
+     "span": [
+      86,
+      91
+     ],
+     "symbol": "launch_rmsnorm_fwd_general_",
+     "kind": "function",
+     "sha256_span": "86ba4b2b98b82dab"
+    },
+    {
+     "span": [
+      101,
+      131
+     ],
+     "symbol": "REGISTER_NORM_LAUNCHER_RMSN_FWD_general",
+     "kind": "macro",
+     "sha256_span": "f4fe4e890ae6aeac"
+    },
+    {
+     "span": [
+      151,
+      156
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d6c42e761b1f0aee"
+    },
+    {
+     "span": [
+      172,
+      177
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d55aedf3b706fa24"
+    },
+    {
+     "span": [
+      186,
+      191
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "c073388fc7f46e90"
+    },
+    {
+     "span": [
+      243,
+      245
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "2012bbc39e88f6bf"
+    }
+   ]
+  },
+  "CXX-normalization-rmsnorm-rmsnorm-fwd-kernels-cuh": {
+   "file": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_kernels.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      20,
+      25
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "6e121f898fa62995"
+    },
+    {
+     "span": [
+      40,
+      45
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "3450e086fc530fc0"
+    },
+    {
+     "span": [
+      105,
+      110
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "e4399f7a5f76d775"
+    },
+    {
+     "span": [
+      139,
+      144
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "c744aa88f7eef17c"
+    },
+    {
+     "span": [
+      293,
+      302
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "3156b4ab7ac292e6"
+    }
+   ]
+  },
+  "CXX-normalization-rtc-dispatch-cpp": {
+   "file": "transformer_engine/common/normalization/rtc_dispatch.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      15,
+      20
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "0550b5a697a917ea"
+    },
+    {
+     "span": [
+      159,
+      164
+     ],
+     "symbol": "try_static_fallback",
+     "kind": "function",
+     "sha256_span": "e1b86914e77b5e2b"
+    },
+    {
+     "span": [
+      168,
+      178
+     ],
+     "symbol": "__anon81f3a6570202",
+     "kind": "function",
+     "sha256_span": "97825675245fe3c7"
+    },
+    {
+     "span": [
+      195,
+      200
+     ],
+     "symbol": "__anon81f3a6570202",
+     "kind": "function",
+     "sha256_span": "0d6d22e4c662003d"
+    },
+    {
+     "span": [
+      212,
+      218
+     ],
+     "symbol": "__anon81f3a6570202",
+     "kind": "function",
+     "sha256_span": "9db2a15cdc7c819a"
+    },
+    {
+     "span": [
+      245,
+      251
+     ],
+     "symbol": "register_ln_fwd_tuned",
+     "kind": "function",
+     "sha256_span": "e04ead83e8debe28"
+    },
+    {
+     "span": [
+      292,
+      297
+     ],
+     "symbol": "__anon81f3a6570302",
+     "kind": "function",
+     "sha256_span": "ac836d5087d48478"
+    },
+    {
+     "span": [
+      302,
+      307
+     ],
+     "symbol": "__anon81f3a6570302",
+     "kind": "function",
+     "sha256_span": "99b5d04c91d641d7"
+    },
+    {
+     "span": [
+      330,
+      336
+     ],
+     "symbol": "register_rmsnorm_fwd_tuned",
+     "kind": "function",
+     "sha256_span": "3c7f87c1254e34d0"
+    },
+    {
+     "span": [
+      375,
+      380
+     ],
+     "symbol": "__anon81f3a6570502",
+     "kind": "function",
+     "sha256_span": "ac836d5087d48478"
+    },
+    {
+     "span": [
+      385,
+      390
+     ],
+     "symbol": "__anon81f3a6570502",
+     "kind": "function",
+     "sha256_span": "99b5d04c91d641d7"
+    }
+   ]
+  },
+  "CXX-permutation-permutation-cu": {
+   "file": "transformer_engine/common/permutation/permutation.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      63,
+      69
+     ],
+     "symbol": "moe_unpermute_kernel",
+     "kind": "function",
+     "sha256_span": "8fb6c5ba0846f263"
+    },
+    {
+     "span": [
+      71,
+      90
+     ],
+     "symbol": "moe_unpermute_kernel",
+     "kind": "function",
+     "sha256_span": "dcc70521dc9e8b7c"
+    },
+    {
+     "span": [
+      95,
+      101
+     ],
+     "symbol": "moe_unpermute_kernel",
+     "kind": "function",
+     "sha256_span": "23e2754ff0f202c8"
+    },
+    {
+     "span": [
+      108,
+      125
+     ],
+     "symbol": "moe_unpermute_kernel",
+     "kind": "function",
+     "sha256_span": "18e767116313fb4d"
+    },
+    {
+     "span": [
+      162,
+      168
+     ],
+     "symbol": "moe_permute_kernel",
+     "kind": "function",
+     "sha256_span": "1f7cac0f98972740"
+    },
+    {
+     "span": [
+      192,
+      198
+     ],
+     "symbol": "moe_permute_kernel",
+     "kind": "function",
+     "sha256_span": "7fe4b07947e96c82"
+    },
+    {
+     "span": [
+      211,
+      217
+     ],
+     "symbol": "moe_permute_kernel",
+     "kind": "function",
+     "sha256_span": "566fa201b39cb616"
+    },
+    {
+     "span": [
+      229,
+      236
+     ],
+     "symbol": "nvte_permute_launcher",
+     "kind": "function",
+     "sha256_span": "a4dd14318bbaced2"
+    },
+    {
+     "span": [
+      294,
+      301
+     ],
+     "symbol": "nvte_unpermute_launcher",
+     "kind": "function",
+     "sha256_span": "c315e3250330c230"
+    }
+   ]
+  },
+  "CXX-recipe-current-scaling-cu": {
+   "file": "transformer_engine/common/recipe/current_scaling.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      19,
+      26
+     ],
+     "symbol": "amax_kernel_threads",
+     "kind": "variable",
+     "sha256_span": "9d40e1f2301f1a4e"
+    },
+    {
+     "span": [
+      30,
+      43
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "bd34f6a1e460ace6"
+    },
+    {
+     "span": [
+      47,
+      59
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "bb1bcccec90075c7"
+    },
+    {
+     "span": [
+      65,
+      77
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "643fb8e988f59d93"
+    },
+    {
+     "span": [
+      85,
+      115
+     ],
+     "symbol": "launch_amax_kernel",
+     "kind": "function",
+     "sha256_span": "518ea05d57435e88"
+    },
+    {
+     "span": [
+      117,
+      125
+     ],
+     "symbol": "compute_amax_impl",
+     "kind": "function",
+     "sha256_span": "a4632e6160da6474"
+    },
+    {
+     "span": [
+      157,
+      162
+     ],
+     "symbol": "compute_amax_impl",
+     "kind": "function",
+     "sha256_span": "839b315837eb6496"
+    },
+    {
+     "span": [
+      171,
+      179
+     ],
+     "symbol": "compute_amax_impl",
+     "kind": "function",
+     "sha256_span": "4aebc094dd8abf3a"
+    },
+    {
+     "span": [
+      246,
+      260
+     ],
+     "symbol": "nvte_compute_amax",
+     "kind": "function",
+     "sha256_span": "c6509abcf53ddd83"
+    }
+   ]
+  },
+  "CXX-recipe-delayed-scaling-cu": {
+   "file": "transformer_engine/common/recipe/delayed_scaling.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      32,
+      38
+     ],
+     "symbol": "fp8_dtype_max",
+     "kind": "function",
+     "sha256_span": "69d72b77c9afa357"
+    }
+   ]
+  },
+  "CXX-recipe-fp8-block-scaling-cu": {
+   "file": "transformer_engine/common/recipe/fp8_block_scaling.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      52,
+      58
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "91d67f73ad0d8dcc"
+    },
+    {
+     "span": [
+      119,
+      128
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "a12b54c6fe9c7932"
+    }
+   ]
+  },
+  "CXX-recipe-mxfp8-scaling-cu": {
+   "file": "transformer_engine/common/recipe/mxfp8_scaling.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      52,
+      58
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "11ef4cd3cb96458a"
+    }
+   ]
+  },
+  "CXX-recipe-nvfp4-cu": {
+   "file": "transformer_engine/common/recipe/nvfp4.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      103,
+      109
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "91d67f73ad0d8dcc"
+    },
+    {
+     "span": [
+      179,
+      188
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "0e3e2ec90146e89d"
+    },
+    {
+     "span": [
+      637,
+      643
+     ],
+     "symbol": "nvfp4_compute_per_block_scale_kernel",
+     "kind": "function",
+     "sha256_span": "48bde613828c02f5"
+    },
+    {
+     "span": [
+      666,
+      672
+     ],
+     "symbol": "nvfp4_compute_global_scale_kernel",
+     "kind": "function",
+     "sha256_span": "29beb51f84c460f2"
+    },
+    {
+     "span": [
+      758,
+      764
+     ],
+     "symbol": "nvfp4_fused_scale_kernel",
+     "kind": "function",
+     "sha256_span": "3a23aa5c52c12f84"
+    }
+   ]
+  },
+  "CXX-recipe-recipe-common-cuh": {
+   "file": "transformer_engine/common/recipe/recipe_common.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      61,
+      70
+     ],
+     "symbol": "compute_scale_from_types",
+     "kind": "function",
+     "sha256_span": "e91c746aa2fc8dbe"
+    }
+   ]
+  },
+  "CXX-swizzle-swizzle-cu": {
+   "file": "transformer_engine/common/swizzle/swizzle.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      21,
+      26
+     ],
+     "symbol": "MXFP8_BLOCK_SIZE",
+     "kind": "variable",
+     "sha256_span": "71bb1d79df0b41f8"
+    },
+    {
+     "span": [
+      38,
+      43
+     ],
+     "symbol": "NEW_SF_TILE_DIM_K",
+     "kind": "variable",
+     "sha256_span": "2fcd9290a622913d"
+    },
+    {
+     "span": [
+      45,
+      50
+     ],
+     "symbol": "NEW_SF_TILE_DIM_K_I32",
+     "kind": "variable",
+     "sha256_span": "8339d3155185afaf"
+    },
+    {
+     "span": [
+      954,
+      962
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "e8e7aa620c060b41"
+    },
+    {
+     "span": [
+      1446,
+      1451
+     ],
+     "symbol": "multi_tensor_swizzle_scaling_factors",
+     "kind": "function",
+     "sha256_span": "72ae399c23d55d59"
+    },
+    {
+     "span": [
+      2014,
+      2019
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "7479b7b5aedea4b6"
+    },
+    {
+     "span": [
+      2161,
+      2166
+     ],
+     "symbol": "grouped_swizzle_variable_max_active_blocks_per_sm",
+     "kind": "function",
+     "sha256_span": "71c83a8fd1bfb42e"
+    },
+    {
+     "span": [
+      2189,
+      2196
+     ],
+     "symbol": "swizzle_grouped_scaling_factors",
+     "kind": "function",
+     "sha256_span": "46617d58d3aecc3c"
+    },
+    {
+     "span": [
+      2307,
+      2312
+     ],
+     "symbol": "swizzle_grouped_scaling_factors",
+     "kind": "function",
+     "sha256_span": "85caba8d746abf16"
+    },
+    {
+     "span": [
+      2352,
+      2357
+     ],
+     "symbol": "swizzle_grouped_scaling_factors",
+     "kind": "function",
+     "sha256_span": "77ed3514a568c8cf"
+    }
+   ]
+  },
+  "CXX-transformer-engine-cpp": {
+   "file": "transformer_engine/common/transformer_engine.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      46,
+      51
+     ],
+     "symbol": "to_string",
+     "kind": "function",
+     "sha256_span": "ec30f42141add140"
+    },
+    {
+     "span": [
+      91,
+      98
+     ],
+     "symbol": "CheckScaleTensorShape",
+     "kind": "function",
+     "sha256_span": "dff5aa87de725fff"
+    },
+    {
+     "span": [
+      137,
+      142
+     ],
+     "symbol": "CheckScaleTensorShape",
+     "kind": "function",
+     "sha256_span": "64d1c7ef7e7fe4c4"
+    },
+    {
+     "span": [
+      166,
+      186
+     ],
+     "symbol": "CheckInputTensor",
+     "kind": "function",
+     "sha256_span": "8125eda171d45ec2"
+    },
+    {
+     "span": [
+      227,
+      247
+     ],
+     "symbol": "CheckOutputTensor",
+     "kind": "function",
+     "sha256_span": "857181c473e5ccc4"
+    },
+    {
+     "span": [
+      354,
+      360
+     ],
+     "symbol": "CheckGroupedScaleInv",
+     "kind": "function",
+     "sha256_span": "f782a6777ef8a541"
+    },
+    {
+     "span": [
+      847,
+      852
+     ],
+     "symbol": "nvte_set_tensor_param_v2",
+     "kind": "function",
+     "sha256_span": "93b60ad8d08cf4f9"
+    },
+    {
+     "span": [
+      933,
+      938
+     ],
+     "symbol": "nvte_get_tensor_param_v2",
+     "kind": "function",
+     "sha256_span": "bda11a7e4f2f7eaa"
+    },
+    {
+     "span": [
+      1050,
+      1055
+     ],
+     "symbol": "nvte_get_quantization_config_attribute",
+     "kind": "function",
+     "sha256_span": "24a8f33f1e528fa3"
+    },
+    {
+     "span": [
+      1117,
+      1122
+     ],
+     "symbol": "nvte_set_quantization_config_attribute",
+     "kind": "function",
+     "sha256_span": "8f3839d087b96c27"
+    },
+    {
+     "span": [
+      1129,
+      1134
+     ],
+     "symbol": "nvte_destroy_quantization_config",
+     "kind": "function",
+     "sha256_span": "63a5605861a88b7f"
+    },
+    {
+     "span": [
+      1141,
+      1146
+     ],
+     "symbol": "__anonef41891e0502",
+     "kind": "function",
+     "sha256_span": "b81163b89f7c59b0"
+    },
+    {
+     "span": [
+      1234,
+      1239
+     ],
+     "symbol": "nvte_set_grouped_tensor_param",
+     "kind": "function",
+     "sha256_span": "3cbfe516e64cb868"
+    },
+    {
+     "span": [
+      1329,
+      1334
+     ],
+     "symbol": "nvte_get_grouped_tensor_param",
+     "kind": "function",
+     "sha256_span": "95d90da94c721c0e"
+    }
+   ]
+  },
+  "CXX-transpose-cast-transpose-cu": {
+   "file": "transformer_engine/common/transpose/cast_transpose.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      17,
+      22
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "4938bfa001dd5102"
+    },
+    {
+     "span": [
+      257,
+      266
+     ],
+     "symbol": "cast_transpose",
+     "kind": "function",
+     "sha256_span": "174e2c4590e05235"
+    },
+    {
+     "span": [
+      318,
+      323
+     ],
+     "symbol": "cast_transpose",
+     "kind": "function",
+     "sha256_span": "c0ad531b8be56f28"
+    },
+    {
+     "span": [
+      337,
+      342
+     ],
+     "symbol": "cast_transpose",
+     "kind": "function",
+     "sha256_span": "b748a118e1fa9386"
+    }
+   ]
+  },
+  "CXX-transpose-cast-transpose-fusion-cu": {
+   "file": "transformer_engine/common/transpose/cast_transpose_fusion.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      171,
+      177
+     ],
+     "symbol": "cast_and_transpose_regs",
+     "kind": "function",
+     "sha256_span": "0a378da9a5aa0caf"
+    },
+    {
+     "span": [
+      252,
+      260
+     ],
+     "symbol": "reduce_dbias",
+     "kind": "function",
+     "sha256_span": "3c5e3a177a91d5fb"
+    },
+    {
+     "span": [
+      484,
+      491
+     ],
+     "symbol": "ActTypeToString",
+     "kind": "variable",
+     "sha256_span": "d4dc94c4ed358afc"
+    },
+    {
+     "span": [
+      507,
+      512
+     ],
+     "symbol": "get_activation_type",
+     "kind": "function",
+     "sha256_span": "86e7e299a1fbc77a"
+    },
+    {
+     "span": [
+      735,
+      744
+     ],
+     "symbol": "cast_transpose_fused",
+     "kind": "function",
+     "sha256_span": "f22cd985106b07a3"
+    },
+    {
+     "span": [
+      1196,
+      1205
+     ],
+     "symbol": "dgated_act_cast_transpose",
+     "kind": "function",
+     "sha256_span": "801cb42178b2c843"
+    },
+    {
+     "span": [
+      1214,
+      1223
+     ],
+     "symbol": "dgated_act_cast_transpose",
+     "kind": "function",
+     "sha256_span": "f1b1105d3ac1e916"
+    }
+   ]
+  },
+  "CXX-transpose-cast-transpose-h": {
+   "file": "transformer_engine/common/transpose/cast_transpose.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      68,
+      74
+     ],
+     "symbol": "detail",
+     "kind": "namespace",
+     "sha256_span": "29bf5c59bd560611"
+    }
+   ]
+  },
+  "CXX-transpose-multi-cast-transpose-cu": {
+   "file": "transformer_engine/common/transpose/multi_cast_transpose.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      16,
+      21
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "ca4b40a2efb8c640"
+    },
+    {
+     "span": [
+      196,
+      202
+     ],
+     "symbol": "multi_cast_transpose",
+     "kind": "function",
+     "sha256_span": "4db1ed3031db895c"
+    },
+    {
+     "span": [
+      222,
+      240
+     ],
+     "symbol": "multi_cast_transpose",
+     "kind": "function",
+     "sha256_span": "a488b1fb7e8dfc6e"
+    },
+    {
+     "span": [
+      290,
+      296
+     ],
+     "symbol": "multi_cast_transpose",
+     "kind": "function",
+     "sha256_span": "d8d8e07c45a5a707"
+    },
+    {
+     "span": [
+      328,
+      333
+     ],
+     "symbol": "multi_cast_transpose",
+     "kind": "function",
+     "sha256_span": "dad326c70173f570"
+    },
+    {
+     "span": [
+      343,
+      345
+     ],
+     "symbol": "nvte_multi_cast_transpose",
+     "kind": "function",
+     "sha256_span": "f147e4f5bc9934f0"
+    }
+   ]
+  },
+  "CXX-transpose-quantize-transpose-square-blockwise-cu": {
+   "file": "transformer_engine/common/transpose/quantize_transpose_square_blockwise.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      17,
+      22
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "bca61951f27c2789"
+    },
+    {
+     "span": [
+      28,
+      34
+     ],
+     "symbol": "BLOCK_TILE_DIM",
+     "kind": "variable",
+     "sha256_span": "ade265bba632d615"
+    },
+    {
+     "span": [
+      40,
+      47
+     ],
+     "symbol": "NUM_BYTES_PER_BANK",
+     "kind": "variable",
+     "sha256_span": "2eb953f767bd0c4e"
+    },
+    {
+     "span": [
+      62,
+      67
+     ],
+     "symbol": "MIN",
+     "kind": "macro",
+     "sha256_span": "c8c350c61a64d3a7"
+    },
+    {
+     "span": [
+      247,
+      252
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "615c92fc70c503fb"
+    },
+    {
+     "span": [
+      357,
+      366
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "e625be1cdf2832e6"
+    },
+    {
+     "span": [
+      456,
+      461
+     ],
+     "symbol": "get_tensor_map",
+     "kind": "function",
+     "sha256_span": "86eec0feb7e8739b"
+    },
+    {
+     "span": [
+      473,
+      478
+     ],
+     "symbol": "get_tensor_map",
+     "kind": "function",
+     "sha256_span": "fe308ddf56a4d3c8"
+    },
+    {
+     "span": [
+      543,
+      548
+     ],
+     "symbol": "quantize_transpose_square_blockwise",
+     "kind": "function",
+     "sha256_span": "e6ec4eba488b5ae4"
+    },
+    {
+     "span": [
+      573,
+      578
+     ],
+     "symbol": "quantize_transpose_square_blockwise",
+     "kind": "function",
+     "sha256_span": "0f7e48bd6ee9220e"
+    }
+   ]
+  },
+  "CXX-transpose-rtc-cast-transpose-fusion-cu": {
+   "file": "transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      90,
+      96
+     ],
+     "symbol": "cast_and_transpose_regs_optimized",
+     "kind": "function",
+     "sha256_span": "a36ec86f6f30da56"
+    }
+   ]
+  },
+  "CXX-transpose-transpose-fusion-cu": {
+   "file": "transformer_engine/common/transpose/transpose_fusion.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      45,
+      51
+     ],
+     "symbol": "transpose_regs_partial_dbias",
+     "kind": "function",
+     "sha256_span": "8fa55eaad5e057b6"
+    },
+    {
+     "span": [
+      471,
+      487
+     ],
+     "symbol": "fp8_transpose_dbias",
+     "kind": "function",
+     "sha256_span": "06e36bfcaa01826a"
+    }
+   ]
+  },
+  "CXX-util-cuda-driver-cpp": {
+   "file": "transformer_engine/common/util/cuda_driver.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      12,
+      18
+     ],
+     "symbol": "VersionedGetEntryPoint",
+     "kind": "typedef",
+     "sha256_span": "ddc3c9b343fcf6fd"
+    },
+    {
+     "span": [
+      43,
+      48
+     ],
+     "symbol": "__anonb4a8a88b0102",
+     "kind": "function",
+     "sha256_span": "d532b9916b6da316"
+    }
+   ]
+  },
+  "CXX-util-cuda-driver-h": {
+   "file": "transformer_engine/common/util/cuda_driver.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      75,
+      81
+     ],
+     "symbol": "NVTE_CHECK_CUDA_DRIVER",
+     "kind": "macro",
+     "sha256_span": "2e2d43bef0c63fca"
+    }
+   ]
+  },
+  "CXX-util-cuda-runtime-cpp": {
+   "file": "transformer_engine/common/util/cuda_runtime.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      21,
+      32
+     ],
+     "symbol": "__anon2f5aeb7f0202",
+     "kind": "function",
+     "sha256_span": "668c3bc08b04540b"
+    },
+    {
+     "span": [
+      68,
+      73
+     ],
+     "symbol": "sm_arch",
+     "kind": "function",
+     "sha256_span": "f990b274ff678655"
+    },
+    {
+     "span": [
+      104,
+      109
+     ],
+     "symbol": "stream_priority_range",
+     "kind": "function",
+     "sha256_span": "b5874e3cf3240d76"
+    },
+    {
+     "span": [
+      137,
+      142
+     ],
+     "symbol": "supports_multicast",
+     "kind": "function",
+     "sha256_span": "68d8ea86f14c6fe9"
+    },
+    {
+     "span": [
+      149,
+      164
+     ],
+     "symbol": "Path",
+     "kind": "typedef",
+     "sha256_span": "998c3177bb82aa7a"
+    },
+    {
+     "span": [
+      167,
+      172
+     ],
+     "symbol": "include_directory",
+     "kind": "function",
+     "sha256_span": "90813d32406e5c07"
+    },
+    {
+     "span": [
+      174,
+      180
+     ],
+     "symbol": "include_directory",
+     "kind": "function",
+     "sha256_span": "ece7dab798a1d140"
+    },
+    {
+     "span": [
+      189,
+      199
+     ],
+     "symbol": "include_directory",
+     "kind": "function",
+     "sha256_span": "01322d4da2a00325"
+    },
+    {
+     "span": [
+      246,
+      251
+     ],
+     "symbol": "__anon2f5aeb7f0702",
+     "kind": "function",
+     "sha256_span": "801d539f42a15585"
+    },
+    {
+     "span": [
+      261,
+      266
+     ],
+     "symbol": "cublas_version",
+     "kind": "function",
+     "sha256_span": "34a59ca6405be492"
+    }
+   ]
+  },
+  "CXX-util-cuda-runtime-h": {
+   "file": "transformer_engine/common/util/cuda_runtime.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      10,
+      16
+     ],
+     "symbol": "cuda",
+     "kind": "namespace",
+     "sha256_span": "d24a490f6962a187"
+    },
+    {
+     "span": [
+      30,
+      35
+     ],
+     "symbol": "cuda",
+     "kind": "namespace",
+     "sha256_span": "9827ad35fb3abdd6"
+    },
+    {
+     "span": [
+      56,
+      64
+     ],
+     "symbol": "cuda",
+     "kind": "namespace",
+     "sha256_span": "19b645f6cb9da8b8"
+    },
+    {
+     "span": [
+      67,
+      72
+     ],
+     "symbol": "cuda",
+     "kind": "namespace",
+     "sha256_span": "05c2f822310f6caf"
+    },
+    {
+     "span": [
+      93,
+      98
+     ],
+     "symbol": "cuda",
+     "kind": "namespace",
+     "sha256_span": "df56e53a8059ae05"
+    }
+   ]
+  },
+  "CXX-util-logging-h": {
+   "file": "transformer_engine/common/util/logging.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      18
+     ],
+     "symbol": "TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_",
+     "kind": "macro",
+     "sha256_span": "a40fd2ed77cb6de1"
+    },
+    {
+     "span": [
+      58,
+      63
+     ],
+     "symbol": "NVTE_CHECK_CUBLAS",
+     "kind": "macro",
+     "sha256_span": "1ddc901f071dd4e8"
+    },
+    {
+     "span": [
+      65,
+      70
+     ],
+     "symbol": "NVTE_CHECK_CUBLAS",
+     "kind": "macro",
+     "sha256_span": "7946bd7c14bfaea1"
+    },
+    {
+     "span": [
+      110,
+      115
+     ],
+     "symbol": "NVTE_CHECK_CUSOLVERMP",
+     "kind": "macro",
+     "sha256_span": "2d6bb70f1bfd22f5"
+    },
+    {
+     "span": [
+      129,
+      133
+     ],
+     "symbol": "NVTE_CHECK_NCCL",
+     "kind": "macro",
+     "sha256_span": "b703fbefcca3e746"
+    }
+   ]
+  },
+  "CXX-util-math-h": {
+   "file": "transformer_engine/common/util/math.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      9,
+      14
+     ],
+     "symbol": "Empty",
+     "kind": "struct",
+     "sha256_span": "d01c57607b95e752"
+    },
+    {
+     "span": [
+      20,
+      32
+     ],
+     "symbol": "gelu",
+     "kind": "function",
+     "sha256_span": "91e8009fddc4dd3b"
+    },
+    {
+     "span": [
+      34,
+      40
+     ],
+     "symbol": "sigmoidf",
+     "kind": "function",
+     "sha256_span": "8d571452c1638b16"
+    },
+    {
+     "span": [
+      62,
+      69
+     ],
+     "symbol": "dqgelu_with_alpha",
+     "kind": "function",
+     "sha256_span": "5c5fe5e59e7ac468"
+    },
+    {
+     "span": [
+      86,
+      92
+     ],
+     "symbol": "dsilu",
+     "kind": "function",
+     "sha256_span": "011638bd6bf33b4b"
+    }
+   ]
+  },
+  "CXX-util-padding-cu": {
+   "file": "transformer_engine/common/util/padding.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      13,
+      25
+     ],
+     "symbol": "desired_load_store_size",
+     "kind": "variable",
+     "sha256_span": "5dfd410ab27d7bc0"
+    },
+    {
+     "span": [
+      65,
+      79
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "a46f91cf67efaa8a"
+    },
+    {
+     "span": [
+      83,
+      88
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "09374faeace0e691"
+    },
+    {
+     "span": [
+      124,
+      129
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "6ad87f25388a0d44"
+    },
+    {
+     "span": [
+      149,
+      162
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "d7c5948b7a7786d6"
+    },
+    {
+     "span": [
+      166,
+      171
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "09374faeace0e691"
+    },
+    {
+     "span": [
+      200,
+      205
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "7a96431bc5abf10a"
+    }
+   ]
+  },
+  "CXX-util-ptx-cuh": {
+   "file": "transformer_engine/common/util/ptx.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      27,
+      32
+     ],
+     "symbol": "id",
+     "kind": "member",
+     "sha256_span": "086298ddb7709d38"
+    },
+    {
+     "span": [
+      345,
+      350
+     ],
+     "symbol": "BF16_MANTISSA_BITS",
+     "kind": "variable",
+     "sha256_span": "ebb91e44ff597b79"
+    },
+    {
+     "span": [
+      384,
+      389
+     ],
+     "symbol": "exp2f",
+     "kind": "function",
+     "sha256_span": "0dbfc1747ea313da"
+    },
+    {
+     "span": [
+      395,
+      400
+     ],
+     "symbol": "float_to_e8m0",
+     "kind": "function",
+     "sha256_span": "afa111fdafaa31c4"
+    },
+    {
+     "span": [
+      414,
+      422
+     ],
+     "symbol": "cp_async_bulk_tensor_1d_shared_to_global",
+     "kind": "function",
+     "sha256_span": "c458c537d6dda2aa"
+    },
+    {
+     "span": [
+      526,
+      531
+     ],
+     "symbol": "x",
+     "kind": "member",
+     "sha256_span": "68374db4c3696d7c"
+    },
+    {
+     "span": [
+      603,
+      608
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "f56196637acd9f04"
+    },
+    {
+     "span": [
+      637,
+      650
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "76a2bbdb1c45f4a7"
+    },
+    {
+     "span": [
+      683,
+      688
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e03d9e516aca1a01"
+    },
+    {
+     "span": [
+      700,
+      705
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d13268c59abc7e0c"
+    },
+    {
+     "span": [
+      730,
+      741
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "de540e34e9cd0137"
+    },
+    {
+     "span": [
+      772,
+      777
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "70fae33ba3f96d6d"
+    },
+    {
+     "span": [
+      785,
+      790
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "fe558425ef513c78"
+    },
+    {
+     "span": [
+      957,
+      964
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "0e5e14068a44215c"
+    },
+    {
+     "span": [
+      1996,
+      2001
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "2be6126d5658a64a"
+    },
+    {
+     "span": [
+      2056,
+      2061
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "7f1c843c67ce93a1"
+    }
+   ]
+  },
+  "CXX-util-pybind-helper-h": {
+   "file": "transformer_engine/common/util/pybind_helper.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      14,
+      19
+     ],
+     "symbol": "NVTE_DECLARE_COMMON_PYBIND11_HANDLES",
+     "kind": "macro",
+     "sha256_span": "660aa017241445dc"
+    },
+    {
+     "span": [
+      87,
+      101
+     ],
+     "symbol": "NVTE_DECLARE_COMMON_PYBIND11_HANDLES",
+     "kind": "macro",
+     "sha256_span": "5724bc9296d9c5fb"
+    },
+    {
+     "span": [
+      153,
+      158
+     ],
+     "symbol": "NVTE_DECLARE_COMMON_PYBIND11_HANDLES",
+     "kind": "macro",
+     "sha256_span": "fd405005040e1005"
+    }
+   ]
+  },
+  "CXX-util-rtc-cpp": {
+   "file": "transformer_engine/common/util/rtc.cpp",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      26,
+      31
+     ],
+     "symbol": "__anon0397f5950111",
+     "kind": "namespace",
+     "sha256_span": "0f3b0a120333080b"
+    },
+    {
+     "span": [
+      43,
+      56
+     ],
+     "symbol": "is_enabled",
+     "kind": "function",
+     "sha256_span": "f985e25086014519"
+    },
+    {
+     "span": [
+      62,
+      67
+     ],
+     "symbol": "~Kernel",
+     "kind": "function",
+     "sha256_span": "2b3c40be82ca4bca"
+    },
+    {
+     "span": [
+      75,
+      80
+     ],
+     "symbol": "~Kernel",
+     "kind": "function",
+     "sha256_span": "b2bf578bd5dbb94f"
+    },
+    {
+     "span": [
+      156,
+      177
+     ],
+     "symbol": "compile",
+     "kind": "function",
+     "sha256_span": "795a487618dd1a76"
+    },
+    {
+     "span": [
+      181,
+      188
+     ],
+     "symbol": "compile",
+     "kind": "function",
+     "sha256_span": "7b5b242d2a9621de"
+    },
+    {
+     "span": [
+      200,
+      205
+     ],
+     "symbol": "__anon0397f5950302",
+     "kind": "function",
+     "sha256_span": "dcebcc7ca99a2e82"
+    },
+    {
+     "span": [
+      227,
+      232
+     ],
+     "symbol": "compile",
+     "kind": "function",
+     "sha256_span": "47c4bacb35f6ab97"
+    },
+    {
+     "span": [
+      248,
+      253
+     ],
+     "symbol": "compile",
+     "kind": "function",
+     "sha256_span": "5b73a780bb335c07"
+    },
+    {
+     "span": [
+      259,
+      264
+     ],
+     "symbol": "compile",
+     "kind": "function",
+     "sha256_span": "20d6361d64222fa7"
+    },
+    {
+     "span": [
+      304,
+      310
+     ],
+     "symbol": "get_kernel_cache_key",
+     "kind": "function",
+     "sha256_span": "a6402a4368ebf1fd"
+    }
+   ]
+  },
+  "CXX-util-rtc-h": {
+   "file": "transformer_engine/common/util/rtc.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      34,
+      39
+     ],
+     "symbol": "content",
+     "kind": "member",
+     "sha256_span": "f959b508e352ae39"
+    }
+   ]
+  },
+  "CXX-util-standalone-topk-cuh": {
+   "file": "transformer_engine/common/util/standalone_topk.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      13
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3551b8d9390a6392"
+    },
+    {
+     "span": [
+      15,
+      20
+     ],
+     "symbol": "cg",
+     "kind": "variable",
+     "sha256_span": "7b35bf079dbf6c49"
+    },
+    {
+     "span": [
+      485,
+      490
+     ],
+     "symbol": "choose_bucket",
+     "kind": "function",
+     "sha256_span": "252c5c0d580b2384"
+    },
+    {
+     "span": [
+      569,
+      574
+     ],
+     "symbol": "scan_warp_version",
+     "kind": "function",
+     "sha256_span": "150a0fcefad9582e"
+    }
+   ]
+  },
+  "CXX-util-system-h": {
+   "file": "transformer_engine/common/util/system.h",
+   "hunks": [
+    {
+     "span": [
+      1,
+      6
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "00689aa6d3ffd8f0"
+    },
+    {
+     "span": [
+      16,
+      21
+     ],
+     "symbol": "detail",
+     "kind": "namespace",
+     "sha256_span": "74c35eae79279db4"
+    }
+   ]
+  },
+  "CXX-util-topk-cu": {
+   "file": "transformer_engine/common/util/topk.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      49,
+      55
+     ],
+     "symbol": "DISPATCH_TOPK",
+     "kind": "macro",
+     "sha256_span": "746f2c42b52c2b71"
+    }
+   ]
+  },
+  "CXX-utils-cuh": {
+   "file": "transformer_engine/common/utils.cuh",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      7,
+      16
+     ],
+     "symbol": "TRANSFORMER_ENGINE_COMMON_UTILS_CUH_",
+     "kind": "macro",
+     "sha256_span": "abf0a0db49b01464"
+    },
+    {
+     "span": [
+      30,
+      35
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "7deb10e4f4bf2dee"
+    },
+    {
+     "span": [
+      110,
+      116
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "ad6dda82b925bd50"
+    },
+    {
+     "span": [
+      120,
+      126
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "89af5d29143db76f"
+    },
+    {
+     "span": [
+      210,
+      219
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "05d8302aa48b81df"
+    },
+    {
+     "span": [
+      278,
+      283
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "e3e106563f73f08b"
+    },
+    {
+     "span": [
+      294,
+      299
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "8c76820e9c8ed7c9"
+    },
+    {
+     "span": [
+      322,
+      327
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "3ea86eb8104bf4a9"
+    },
+    {
+     "span": [
+      402,
+      413
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "372a623f4b9beb44"
+    },
+    {
+     "span": [
+      690,
+      697
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "79d7705c06daa877"
+    },
+    {
+     "span": [
+      867,
+      873
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "01b6d63069184ebb"
+    },
+    {
+     "span": [
+      879,
+      892
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "be9627a239e1ebe4"
+    },
+    {
+     "span": [
+      900,
+      906
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "fe645cd4b8a82bc1"
+    },
+    {
+     "span": [
+      920,
+      933
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "5e074c4ef1899804"
+    },
+    {
+     "span": [
+      980,
+      986
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "4c9cd682a956386d"
+    },
+    {
+     "span": [
+      995,
+      1001
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "c71392c80367a8a7"
+    },
+    {
+     "span": [
+      1009,
+      1016
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "abb8994a8394f226"
+    },
+    {
+     "span": [
+      1028,
+      1035
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "de3304a44aaa9bc8"
+    },
+    {
+     "span": [
+      1040,
+      1049
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "0520b7b3a8fd22c1"
+    }
+   ]
+  }
+ }
+}

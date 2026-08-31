@@ -1,0 +1,22 @@
+# First C++ intake preview (S4.2): CXX queue fingerprints vs upstream main HEAD ace1873f0bca
+# (nightly Job B reproduces this; repairs land at the next pin bump, not before)
+queue fingerprinted @ 868d8d9216da; candidate = ace1873f0bca
+{"target-unchanged": 69, "target-changed": 18}
+  REPAIR CXX-cast-core-grouped-tma-cuh: changed: unattributed span
+  REPAIR CXX-cast-dispatch-quantize-cuh: changed: ['group_quantize_bwd_helper', 'group_quantize_fwd_helper', 'group_quantize_fwd_host_aware_helper', 'quantize_bwd_helper', 'quantize_fwd_helper']
+  REPAIR CXX-cast-fp8-gated-fp8-cuh: changed: ['cast_gated_fwd']
+  REPAIR CXX-cast-fp8-quantize-fp8-cuh: changed: ['CastVectorizedUnaryGradKernelLauncher', 'Empty', 'quantize']
+  REPAIR CXX-cast-mxfp8-gated-mxfp8-cuh: changed: ['__launch_bounds__', 'quantize_gated']
+  REPAIR CXX-cast-mxfp8-group-quantize-mxfp8-cuh: changed: ['__launch_bounds__', 'group_quantize']
+  REPAIR CXX-cast-mxfp8-quantize-mxfp8-cuh: changed: ['SCALE_DIM_X', 'quantize', 'zero_scales_kernel']
+  REPAIR CXX-common-h: changed: ['DIVUP', 'NVTE_API_CALL', 'TMA_GMEM_ALIGNMENT', 'bf16', 'byte', 'detail', 'is_fp4', 'max', 'nvfp4_4over6_err_use_fast_math', 'transformer_engine']
+  REPAIR CXX-gemm-cublaslt-grouped-gemm-cu: changed: ['convert_int32_to_int64_kernel']
+  REPAIR CXX-include-transformer-engine-transformer-engine-h: changed: ['config_', 'get_nvfp4_e4m3_max', 'get_with_gemm_swizzled_scales', 'kNVTEGroupedWithGEMMSwizzledScales', 'kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath', 'kNumTypes', 'set_nvfp4_e4m3_max', 'set_with_gemm_swizzled_scales']
+  REPAIR CXX-multi-tensor-adam-cu: changed: unattributed span
+  REPAIR CXX-normalization-common-cpp: changed: ['_cudnn_norm_fwd_flag', 'execute', 'nvte_enable_zero_centered_gamma_in_weight_dtype', 'use_zero_centered_gamma_in_weight_dtype']
+  REPAIR CXX-normalization-common-h: changed: ['is_ptr_aligned']
+  REPAIR CXX-transformer-engine-cpp: changed: ['CheckGroupedScaleInv', 'CheckInputTensor', 'CheckOutputTensor', 'CheckScaleTensorShape', '__anonef41891e0502', 'nvte_destroy_quantization_config', 'nvte_get_grouped_tensor_param', 'nvte_get_quantization_config_attribute', 'nvte_get_tensor_param_v2', 'nvte_set_grouped_tensor_param', 'nvte_set_quantization_config_attribute', 'nvte_set_tensor_param_v2', 'to_string']
+  REPAIR CXX-transpose-quantize-transpose-square-blockwise-cu: changed: ['__launch_bounds__', 'get_tensor_map', 'quantize_transpose_square_blockwise']
+  REPAIR CXX-util-cuda-runtime-cpp: changed: ['Path', '__anon2f5aeb7f0202', '__anon2f5aeb7f0702', 'cublas_version', 'include_directory', 'sm_arch', 'stream_priority_range', 'supports_multicast']
+  REPAIR CXX-util-math-h: changed: ['dqgelu_with_alpha', 'dsilu', 'gelu', 'sigmoidf']
+  REPAIR CXX-util-ptx-cuh: changed: ['BF16_MANTISSA_BITS', 'cp_async_bulk_tensor_1d_shared_to_global', 'exp2f', 'float_to_e8m0', 'x']

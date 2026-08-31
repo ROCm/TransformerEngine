@@ -62,6 +62,12 @@ jobs:
         run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py gen --verify
       - name: Overlay assembles and compiles (no binaries needed for check/py_compile of the tree)
         run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py check
+      - name: C++ fingerprints self-check (all target-unchanged at the pin)
+        run: |
+          sudo apt-get install -y universal-ctags >/dev/null
+          python3 proposals/te-rocm-plugin/tools/cxx_fingerprints.py verify \
+            --upstream $(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD) | tee /tmp/cfp.txt
+          grep -q '{"target-unchanged": 87}' /tmp/cfp.txt || { echo "::error::cxx fingerprints drifted at the pin"; exit 1; }
       - name: C++ patch queue - staleness (apply-at-pin, byte-compare)
         run: python3 proposals/te-rocm-plugin/tools/cxx_queue.py verify
       - name: C++ patch queue - assembled tree identity vs fork common/
@@ -93,3 +99,8 @@ jobs:
           git -C 3rdparty/transformer_engine_nvidia fetch --no-tags origin main
           python3 proposals/te-rocm-plugin/tools/patch_fingerprints.py verify \
             --upstream $(git rev-parse refs/nvidia/main) || echo "::warning::patches would trip on a pin bump to main - see log for the per-ID repair list (category: API drift)"
+      - name: C++ fingerprint drift vs upstream main HEAD (the C++ intake preview)
+        run: |
+          sudo apt-get install -y universal-ctags >/dev/null
+          python3 proposals/te-rocm-plugin/tools/cxx_fingerprints.py verify \
+            --upstream $(git rev-parse refs/nvidia/main) || echo "::warning::C++ queue would need repairs on a pin bump to main"
