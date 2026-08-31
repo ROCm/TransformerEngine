@@ -22,6 +22,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
+    fused_bulk_ag_eligible,
     ub_overlap_disabled,
     get_dummy_wgrad,
     get_ub,
@@ -2093,6 +2094,11 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
             ):
                 ub_overlap_ag_dgrad = False
+            if ub_bulk_dgrad and not fused_bulk_ag_eligible(
+                self.ub_name + "_dgrad", inp, weight_tensor,
+                self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_bulk_dgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             fwd_args = LinearFwdArgs(
                 # tensors

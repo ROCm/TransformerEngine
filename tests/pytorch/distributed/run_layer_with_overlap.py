@@ -481,6 +481,9 @@ def _train(opts):
         with_cublasmp=opts.use_cublasmp,
     )
 
+    dist_print("UB FUSED NAMES: " + " ".join(sorted(te.module.base._ub_fused_names)))
+    dist_print("UB DISABLED NAMES: " + " ".join(sorted(te.module.base._ub_disabled_names)))
+
     with te.quantized_model_init(enabled=opts.fp8_init):
         test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
@@ -563,6 +566,10 @@ def _train(opts):
             del test_graph
     else:
         test_out = run_fwd_bwd(test_model, test_x)
+    dist_print(
+        "UB BULK ELIGIBLE: "
+        + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
+    )
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():

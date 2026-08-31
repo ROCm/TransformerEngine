@@ -26,6 +26,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     fused_ag_gemm_eligible,
+    fused_bulk_ag_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -413,6 +414,10 @@ class _LayerNormMLP(torch.autograd.Function):
             )
         ):
             ub_overlap_ag = False
+        if ub_bulk_dgrad and not fused_bulk_ag_eligible(
+            "fc1_dgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+        ):
+            ub_bulk_dgrad = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP

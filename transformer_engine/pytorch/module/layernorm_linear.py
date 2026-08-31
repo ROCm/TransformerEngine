@@ -25,6 +25,7 @@ from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_c
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
+    fused_bulk_ag_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -233,6 +234,10 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_name + "_dgrad", inp, weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
         ):
             ub_overlap_ag_dgrad = False
+        if ub_bulk_dgrad and not fused_bulk_ag_eligible(
+            ub_name + "_dgrad", inp, weight, activation_dtype, tp_size, fp8,
+        ):
+            ub_bulk_dgrad = False
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.RS
