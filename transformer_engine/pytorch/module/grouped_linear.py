@@ -1691,7 +1691,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             if grouped_weight is not None:
                 set_tensor_model_parallel_attributes(
                     tensor=grouped_weight,
-                    is_parallel=True,
+                    # Replicated when parallel_mode is None; see Linear.reset_parameters.
+                    is_parallel=self.parallel_mode is not None,
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
@@ -1699,7 +1700,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     set_tensor_model_parallel_attributes(
                         tensor=getattr(self, f"weight{i}"),
-                        is_parallel=True,
+                        # Replicated when parallel_mode is None.
+                        is_parallel=self.parallel_mode is not None,
                         dim=1 if self.parallel_mode == "row" else 0,
                         stride=1,
                     )

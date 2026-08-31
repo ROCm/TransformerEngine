@@ -1868,7 +1868,12 @@ class Linear(TransformerEngineBaseModule):
             for weight in self.weight_names:
                 set_tensor_model_parallel_attributes(
                     tensor=getattr(self, weight),
-                    is_parallel=True,
+                    # A weight is only tensor-model-parallel when the layer is. For
+                    # parallel_mode=None the weight is replicated on every TP rank, and
+                    # marking it parallel makes downstream consumers (e.g. Megatron's
+                    # param_is_not_tensor_parallel_duplicate) admit it to the global
+                    # gradient norm once per rank instead of once.
+                    is_parallel=self.parallel_mode is not None,
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
