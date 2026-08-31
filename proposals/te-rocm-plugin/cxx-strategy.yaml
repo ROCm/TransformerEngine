@@ -7,9 +7,17 @@
 # Census at pin 868d8d9216da: 92 modified C++ files, 6329 changed lines, 507 guard sites.
 # (Manifest cxx_facts said 85 files: that count excluded public headers under include/ and
 #  counted at the previous measurement; this file is the per-file authority from S4.1 on.)
-# assignment: 5 native-hip, 87 patch-queue
+# assignment (amended): 3 native-hip, 89 patch-queue
+# AMENDED 2026-09-01 (same day, on per-file divergence measurement): the two fused_router
+# files tripped in B3 on UPSTREAM CHURN in the whole-file replay, while their fork-side
+# divergence is 2 and 7 added lines with 0-1 guards. Converting ~700-1500 lines to native-hip
+# to escape a <=7-line patch inverts the program's goal - a churn-tripped tiny patch is a
+# minutes-scale repair; a native fork is a permanent full-file divergence. They return to
+# patch-queue. The amended rule: native-hip requires trip evidence AND substantial fork-side
+# divergence (guards or changed-share), not churn-trips alone.
 decided: '2026-09-01'
 decider: 'Wen Chen (Gate B: ''Start stage 4'')'
+amended: '2026-09-01: fused_router pair -> patch-queue (churn-trip, minimal fork divergence)'
 default: patch-queue
 files:
 - file: transformer_engine/common/cast/cast.cu
@@ -169,17 +177,17 @@ files:
   changed_share: 0.006
   evidence: no trip evidence; default B
 - file: transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu
-  cxx_strategy: native-hip
+  cxx_strategy: patch-queue
   guards: 0
   changed_lines: 2
   changed_share: 0.003
-  evidence: TRIPPED in B3 replay
+  evidence: B3-tripped by upstream churn; fork divergence 2 added lines / 0 guards -> patch-queue (amended 2026-09-01)
 - file: transformer_engine/common/fused_router/fused_topk_with_score_function.cu
-  cxx_strategy: native-hip
+  cxx_strategy: patch-queue
   guards: 1
   changed_lines: 7
   changed_share: 0.005
-  evidence: TRIPPED in B3 replay
+  evidence: B3-tripped by upstream churn; fork divergence 7 added lines / 1 guard -> patch-queue (amended 2026-09-01)
 - file: transformer_engine/common/fused_router/utils.h
   cxx_strategy: patch-queue
   guards: 9

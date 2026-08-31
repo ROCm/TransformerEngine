@@ -899,16 +899,20 @@
    "upstream_path": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
    "upstream_blob_at_pin": "4156a5dfc96ef4cea6149dfdf5cee930791a0794",
    "state": "diverged",
-   "cxx_strategy": "native-hip",
-   "patch_ids": []
+   "cxx_strategy": "patch-queue",
+   "patch_ids": [
+    "CXX-fused-router-fused-score-for-moe-aux-loss-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
    "upstream_path": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
    "upstream_blob_at_pin": "cd8eca05e07b83c94fd47d1d1c6225389bae6ffb",
    "state": "diverged",
-   "cxx_strategy": "native-hip",
-   "patch_ids": []
+   "cxx_strategy": "patch-queue",
+   "patch_ids": [
+    "CXX-fused-router-fused-topk-with-score-function-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_router/utils.h",
@@ -2390,8 +2394,8 @@
  "counts_strategy": {
   "vendored-python": 9,
   "identical-at-pin": 116,
-  "native-hip": 62,
-  "patch-queue": 87,
+  "native-hip": 60,
+  "patch-queue": 89,
   "fork-only-python": 1
  }
 }

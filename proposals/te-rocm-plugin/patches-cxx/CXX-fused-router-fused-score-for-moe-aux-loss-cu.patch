@@ -1,0 +1,16 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: B3-tripped by upstream churn; fork divergence 2 added lines / 0 guards -> patch-queue (amended 2026-09-01)
+--- a/transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu
++++ b/transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.

@@ -1,0 +1,29 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: B3-tripped by upstream churn; fork divergence 7 added lines / 1 guard -> patch-queue (amended 2026-09-01)
+--- a/transformer_engine/common/fused_router/fused_topk_with_score_function.cu
++++ b/transformer_engine/common/fused_router/fused_topk_with_score_function.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -427,7 +429,12 @@
+         __syncwarp();
+         // Compute the group score
+         if (lane_id == 0) {
++// TODO: release after /opt/rocm/include/hip/amd_detail/amd_hip_bfloat16.h removes explicit constructor restriction
++#ifdef __HIP_PLATFORM_AMD__
++          CompType tmp(0.0f);
++#else
+           CompType tmp = 0.0;
++#endif
+           for (int j = 0; j < topk / group_topk; j++) {
+             tmp = tmp + topk_scores[j];
+           }

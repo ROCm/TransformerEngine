@@ -1724,6 +1724,43 @@
     }
    ]
   },
+  "CXX-fused-router-fused-score-for-moe-aux-loss-cu": {
+   "file": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    }
+   ]
+  },
+  "CXX-fused-router-fused-topk-with-score-function-cu": {
+   "file": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      427,
+      433
+     ],
+     "symbol": "fused_topk_with_score_function_forward_kernel",
+     "kind": "function",
+     "sha256_span": "5efc81f7f08f1021"
+    }
+   ]
+  },
   "CXX-fused-router-utils-h": {
    "file": "transformer_engine/common/fused_router/utils.h",
    "hunks": [
@@ -3605,7 +3642,7 @@
       168,
       178
      ],
-     "symbol": "__anon81f3a6570202",
+     "symbol": "__anona0f3a1c10202",
      "kind": "function",
      "sha256_span": "97825675245fe3c7"
     },
@@ -3614,7 +3651,7 @@
       195,
       200
      ],
-     "symbol": "__anon81f3a6570202",
+     "symbol": "__anona0f3a1c10202",
      "kind": "function",
      "sha256_span": "0d6d22e4c662003d"
     },
@@ -3623,7 +3660,7 @@
       212,
       218
      ],
-     "symbol": "__anon81f3a6570202",
+     "symbol": "__anona0f3a1c10202",
      "kind": "function",
      "sha256_span": "9db2a15cdc7c819a"
     },
@@ -3641,7 +3678,7 @@
       292,
       297
      ],
-     "symbol": "__anon81f3a6570302",
+     "symbol": "__anona0f3a1c10302",
      "kind": "function",
      "sha256_span": "ac836d5087d48478"
     },
@@ -3650,7 +3687,7 @@
       302,
       307
      ],
-     "symbol": "__anon81f3a6570302",
+     "symbol": "__anona0f3a1c10302",
      "kind": "function",
      "sha256_span": "99b5d04c91d641d7"
     },
@@ -3668,7 +3705,7 @@
       375,
       380
      ],
-     "symbol": "__anon81f3a6570502",
+     "symbol": "__anona0f3a1c10502",
      "kind": "function",
      "sha256_span": "ac836d5087d48478"
     },
@@ -3677,7 +3714,7 @@
       385,
       390
      ],
-     "symbol": "__anon81f3a6570502",
+     "symbol": "__anona0f3a1c10502",
      "kind": "function",
      "sha256_span": "99b5d04c91d641d7"
     }
@@ -4253,7 +4290,7 @@
       1141,
       1146
      ],
-     "symbol": "__anonef41891e0502",
+     "symbol": "__anon52c94e470502",
      "kind": "function",
      "sha256_span": "b81163b89f7c59b0"
     },
@@ -4680,7 +4717,7 @@
       43,
       48
      ],
-     "symbol": "__anonb4a8a88b0102",
+     "symbol": "__anon69ccb4bd0102",
      "kind": "function",
      "sha256_span": "d532b9916b6da316"
     }
@@ -4726,7 +4763,7 @@
       21,
       32
      ],
-     "symbol": "__anon2f5aeb7f0202",
+     "symbol": "__anonaf6de3320202",
      "kind": "function",
      "sha256_span": "668c3bc08b04540b"
     },
@@ -4798,7 +4835,7 @@
       246,
       251
      ],
-     "symbol": "__anon2f5aeb7f0702",
+     "symbol": "__anonaf6de3320702",
      "kind": "function",
      "sha256_span": "801d539f42a15585"
     },
@@ -5283,7 +5320,7 @@
       26,
       31
      ],
-     "symbol": "__anon0397f5950111",
+     "symbol": "__anon4e460a3c0111",
      "kind": "namespace",
      "sha256_span": "0f3b0a120333080b"
     },
@@ -5337,7 +5374,7 @@
       200,
       205
      ],
-     "symbol": "__anon0397f5950302",
+     "symbol": "__anon4e460a3c0302",
      "kind": "function",
      "sha256_span": "dcebcc7ca99a2e82"
     },
