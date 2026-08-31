@@ -157,6 +157,7 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+if(USE_CUDA)
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -164,6 +165,7 @@ find_path(NCCL_INCLUDE_DIR
                 "/usr/local/nccl"
             PATH_SUFFIXES include
             REQUIRED)
+endif()
 
 function(get_nccl_version OUT_VERSION INCLUDE_DIR)
   file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_major_line
@@ -192,7 +194,9 @@ function(get_nccl_version OUT_VERSION INCLUDE_DIR)
       PARENT_SCOPE)
 endfunction()
 
-get_nccl_version(NCCL_VERSION "${NCCL_INCLUDE_DIR}")
+if(USE_CUDA)
+  get_nccl_version(NCCL_VERSION "${NCCL_INCLUDE_DIR}")
+endif()
 
 function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
   find_path(_nvte_cublasmp_include_dir
