@@ -1,0 +1,81 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+# Plugin-refactor governance checks (plugin plan S3.6 / G2 / G3). Pure-Python, no GPU, no TE
+# build. Blocking job on pushes to the plugin branch; nightly Job B is NON-GATING early warning
+# against upstream main (proposal sec 5), with categorized outcomes in the log.
+
+name: TE Plugin Governance
+
+on:
+  push:
+    branches:
+      - 'wen/dev-plugin'
+    paths:
+      - 'proposals/te-rocm-plugin/**'
+      - 'transformer_engine/**/*.py'
+      - '3rdparty/transformer_engine_nvidia'
+      - '.github/workflows/te-plugin-governance.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'   # nightly Job B
+
+jobs:
+  governance:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # merge-base needs history
+      - name: Init the upstream pin (explicitly, non-recursively - update=none skips it otherwise)
+        run: git submodule update --init --checkout 3rdparty/transformer_engine_nvidia
+      - name: Deps
+        run: pip install pyyaml
+      - name: Three-way pin identity (branch-aware; the check that would have caught the v2.3 base error)
+        run: |
+          set -e
+          SUB=$(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD)
+          MAN=$(python3 -c "import yaml; print(yaml.safe_load(open('proposals/te-rocm-plugin/divergence-manifest.yaml'))['metadata']['upstream_sha'])")
+          case "${GITHUB_REF_NAME}" in
+            release_v*_rocm) UPREF="release_${GITHUB_REF_NAME%_rocm}" ;;   # release branch tracks upstream release
+            *)               UPREF="main" ;;                                # dev-lineage tracks upstream main
+          esac
+          git fetch --no-tags https://github.com/NVIDIA/TransformerEngine.git "$UPREF:refs/nvidia/$UPREF"
+          MB=$(git merge-base "refs/nvidia/$UPREF" HEAD)
+          echo "submodule=$SUB manifest=$MAN merge-base($UPREF)=$MB"
+          [ "$SUB" = "$MAN" ] && [ "$SUB" = "$MB" ] || { echo "::error::pin identity broken"; exit 1; }
+      - name: Divergence measurement reproduces (GNU diff, derived base)
+        run: proposals/te-rocm-plugin/tools/measure_divergence.sh --base $(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD) --no-verify > /tmp/md.txt && tail -4 /tmp/md.txt
+      - name: Seam inventory (names; LayerNorm is the allowlisted upstream dead-code bug)
+        run: |
+          python3 proposals/te-rocm-plugin/tools/seam_inventory.py --base $(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD) > /tmp/si.txt || true
+          grep -q "MISSING (demanded, never registered) -> facade CANNOT close: 1 ---" /tmp/si.txt \
+            && grep -A1 "MISSING" /tmp/si.txt | grep -q LayerNorm \
+            || { echo "::error::seam name inventory changed - inspect /tmp/si.txt"; sed -n '1,40p' /tmp/si.txt; exit 1; }
+      - name: Manifest governance + M1/M2
+        run: python3 proposals/te-rocm-plugin/tools/check_manifest.py
+      - name: Patch fingerprints self-check (all target-unchanged at the pin)
+        run: python3 proposals/te-rocm-plugin/tools/patch_fingerprints.py verify --upstream $(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD)
+      - name: Patch staleness (freeze invariant - fork tree edits must regenerate their patch)
+        run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py gen --verify
+      - name: Overlay assembles and compiles (no binaries needed for check/py_compile of the tree)
+        run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py check
+
+  job-b-upstream-main:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true        # NON-GATING early warning (proposal sec 5)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git submodule update --init --checkout 3rdparty/transformer_engine_nvidia
+      - run: pip install pyyaml
+      - name: Fingerprint drift vs upstream main HEAD (categorized; informs the next pin bump)
+        run: |
+          git fetch --no-tags https://github.com/NVIDIA/TransformerEngine.git main:refs/nvidia/main
+          git -C 3rdparty/transformer_engine_nvidia fetch --no-tags origin main
+          python3 proposals/te-rocm-plugin/tools/patch_fingerprints.py verify \
+            --upstream $(git rev-parse refs/nvidia/main) || echo "::warning::patches would trip on a pin bump to main - see log for the per-ID repair list (category: API drift)"

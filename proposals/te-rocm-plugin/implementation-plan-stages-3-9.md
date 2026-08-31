@@ -73,7 +73,7 @@ Two facts about this path that the proposal's table does not make obvious:
 Goal: the prototype's overlay becomes a **certified package**, still on the fork's existing
 compiled backend, so that Gate B judges the Python layer in isolation.
 
-### S3.1 · Patch-queue governance — 5 days
+### S3.1 · Patch-queue governance — **DONE 2026-08-31**: `patch_fingerprints.py` (symbol-level AST fingerprints; self-check 45/45; dry run vs upstream main: 17 unchanged / 2 moved / 25 changed by symbol / 1 gone), `check_manifest.py` (M1/M2 + invariants), `# tests:` headers enforced
 
 The P4 assembler used `git apply --check` as its applicability test. Productionize:
 
@@ -91,7 +91,7 @@ The P4 assembler used `git apply --check` as its applicability test. Productioni
 
 | Exit | A pin bump to a *synthetic* target (the base + one hand-made upstream change to a patched function) reports the trip by ID with the AST diff; M2 is computed, not hand-counted. |
 
-### S3.2 · Runtime-override tier — 4 days `[EVIDENCE: F18]`
+### S3.2 · Runtime-override tier — **DONE 2026-08-31**: census (`override_census.py`) disqualified all four needed candidates with file:line evidence; PT-026 census-passed but swap test blocked on CP tests; **runtime tier ships EMPTY, by measurement**
 
 Six candidates. Each must be **proven** late-bound before it may leave the build tier:
 
@@ -109,7 +109,7 @@ star-import) and stays build-tier. **Either result is fine — the point is the 
 registry itself: `te_rocm/overrides.py`, applied at the end of `load_framework_extension`, identity-
 and signature-checked at load.
 
-### S3.3 · The contracts, embedded — 5 days
+### S3.3 · The contracts, embedded — **CORE_ABI DONE 2026-08-31**: `nvte_rocm.h` + `nvte_rocm_core_abi_version()` + load-time refusal (both paths verified); ABI-001 closed. PY_CONTRACT = bundle hash (done); EXTENSION_API inventory = P6 tests (names/values/signatures) — richer signature typing remains open
 
 | Contract | Source of the inventory | Check |
 |---|---|---|
@@ -139,7 +139,7 @@ own `setup()`; `build_wheels.sh` gains the split. **Lifecycle tests** (§4.4): i
 downgrade / uninstall / mixed-index, run in a clean venv in CI; the mixed-index case asserts the
 loud-failure property (P3 test b).
 
-### S3.5 · Diagnostics snapshot — 1 day
+### S3.5 · Diagnostics snapshot — **DONE 2026-08-31**: `python -m transformer_engine.te_rocm_diagnostics` (tree provenance, seam identity, core ABI, bundle hash/patch ids)
 
 `te_rocm.diagnostics.snapshot()` → dict: pin SHA, overlay bundle hash, applied patch IDs, active
 runtime overrides, contract versions (all three), build-compat tuple, `IS_HIP_EXTENSION`, ROCm/HIP

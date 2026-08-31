@@ -344,6 +344,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check"); sub.add_parser("build"); sub.add_parser("diff-fork")
     g = sub.add_parser("gen"); g.add_argument("ids", nargs="*"); g.add_argument("--all", action="store_true")
+    g.add_argument("--verify", action="store_true",
+                   help="stale check (the in-fork-phase freeze invariant, plan G3/S3.6): regenerate "
+                        "each ACTIVE patch to a temp file and compare bodies; a mismatch means the "
+                        "fork tree was edited without regenerating the patch. Exit 1 on staleness.")
     args = ap.parse_args()
 
     d, entries = load_manifest()
@@ -353,6 +357,36 @@ def main():
     head = ensure_submodule(base_sha)
     print(f"pin           : {SUBMODULE}@{head[:12]} == manifest upstream_sha  OK")
     if args.cmd == "gen":
+        if args.verify:
+            # Staleness = the true invariant, tested directly: applying the checked-in patch to
+            # the pinned upstream file must reproduce the fork tree byte-for-byte. (Comparing
+            # diff texts is unsound - Myers and difflib may split hunks differently for the
+            # same edit.) A mismatch means the fork tree was edited without `gen`.
+            stale = []
+            patch_files = sorted(PATCHES.glob("*.patch"))
+            for p in patch_files:
+                if args.ids and p.stem not in args.ids:
+                    continue
+                body = "\n".join(l for l in p.read_text().splitlines() if not l.startswith("#")) + "\n"
+                rel = next((l[6:] for l in body.splitlines() if l.startswith("--- a/")), None)
+                up = subprocess.run(["git", "show", f"{base_sha}:{rel}"], capture_output=True,
+                                    cwd=ROOT / SUBMODULE)
+                if up.returncode or not (ROOT / rel).exists():
+                    stale.append((p.stem, f"{rel}: target missing")); continue
+                with tempfile.TemporaryDirectory() as td:
+                    tgt = Path(td) / rel; tgt.parent.mkdir(parents=True, exist_ok=True)
+                    tgt.write_bytes(up.stdout)
+                    (Path(td) / "p.patch").write_text(body)
+                    ap_ = subprocess.run(["git", "apply", "--whitespace=nowarn", "p.patch"],
+                                         capture_output=True, cwd=td)
+                    if ap_.returncode:
+                        stale.append((p.stem, f"{rel}: does not apply at pin")); continue
+                    if tgt.read_bytes() != (ROOT / rel).read_bytes():
+                        stale.append((p.stem, f"{rel}: patched upstream != fork tree"))
+            for pid, why in stale:
+                print(f"  STALE {pid}: {why} - regenerate with `gen {pid}`")
+            print(f"stale-check: {len(stale)} stale of {len(patch_files)} active")
+            sys.exit(1 if stale else 0)
         ids = list(file_entries(entries)) if args.all else args.ids
         if not ids: die("gen: give manifest ids or --all")
         for eid in ids:
