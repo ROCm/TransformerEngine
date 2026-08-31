@@ -177,6 +177,9 @@ def main():
 
     if a.phase == "record":
         # Fold results into the manifest as p5_* fields, line-based so layout/comments survive.
+        # SHRINK_RESULTS must point at the FINAL verdicts file explicitly: the merged view lets
+        # results.json (smoke statuses) win, which silently recorded smoke-era statuses once.
+        results = json.loads(RESULTS.read_text())
         mf = PROP / "divergence-manifest.yaml"
         lines = mf.read_text().split("\n"); out = []; cur = None; n = 0
         for line in lines:

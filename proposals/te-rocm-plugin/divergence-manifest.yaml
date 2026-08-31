@@ -229,8 +229,8 @@ rocm_only_volume:   # added-only files; migration_volume, NOT overlap debt
 entries:
   # ============================ PyTorch Python ============================
   - id: PT-001
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_numerics.py: 880 passed, 29 skipped, 625 deselected, 18 warnings in 94.33s (0:01:34) | mxfp4: 1 failed, 17 warnings in 5.01s"
     path: transformer_engine/pytorch/cpp_extensions/gemm.py
     added_lines: 302
     removed_lines: 1
@@ -296,7 +296,7 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-002
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "ImportError: cannot import name 'fused_ag_gemm_eligible' from 'transformer_engine.pytorch.module.base' (/workspace/TransformerEngine/build/shrink/overlay-withou"
     path: transformer_engine/pytorch/module/base.py
     added_lines: 289
@@ -363,8 +363,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-003
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 25% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/module/grouped_linear.py
     added_lines: 149
     removed_lines: 36
@@ -442,7 +442,7 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-004
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "ImportError: cannot import name 'MXFP4BlockScalingRecipeState' from 'transformer_engine.pytorch.quantization' (/workspace/TransformerEngine/build/shrink/overlay"
     path: transformer_engine/pytorch/quantization.py
     added_lines: 207
@@ -506,8 +506,8 @@ entries:
         status: proposed
   # PT-005 RETIRED (see retired_entries)
   - id: PT-006
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_numerics.py: 1 failed, 36 passed, 625 deselected, 18 warnings in 13.37s"
     path: transformer_engine/pytorch/module/layernorm_mlp.py
     added_lines: 130
     removed_lines: 20
@@ -585,8 +585,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-007
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 12% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/tensor/mxfp8_tensor.py
     added_lines: 140
     removed_lines: 5
@@ -603,8 +603,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-008
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_numerics.py: 1 failed, 24 passed, 625 deselected, 18 warnings in 10.70s"
     path: transformer_engine/pytorch/module/linear.py
     added_lines: 123
     removed_lines: 10
@@ -697,8 +697,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-009
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_numerics.py: 1 failed, 48 passed, 625 deselected, 18 warnings in 14.53s"
     path: transformer_engine/pytorch/module/layernorm_linear.py
     added_lines: 119
     removed_lines: 12
@@ -776,8 +776,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-010
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_attention.py: 1 failed, 21 warnings in 3.45s"
     path: transformer_engine/pytorch/attention/dot_product_attention/backends.py
     added_lines: 75
     removed_lines: 29
@@ -826,7 +826,7 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-011
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "AttributeError: type object 'FlashAttentionUtils' has no attribute 'use_aiter_triton'"
     path: transformer_engine/pytorch/attention/dot_product_attention/utils.py
     added_lines: 70
@@ -876,7 +876,7 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-012
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "AttributeError: type object 'transformer_engine_rocm_torch.NVTE_Fused_Attn_Backend' has no attribute 'NVTE_F16_arbitrary_seqlen'"
     path: transformer_engine/pytorch/cpp_extensions/fused_attn.py
     added_lines: 62
@@ -926,8 +926,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-013
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 27% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/optimizers/__init__.py
     added_lines: 62
     removed_lines: 0
@@ -975,8 +975,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-014
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 0% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/distributed.py
     added_lines: 4
     removed_lines: 0
@@ -1001,8 +1001,8 @@ entries:
       still exists but belongs to the release_218_gap decision, not to this entry.
   # PT-015, PT-016 RETIRED (see retired_entries)
   - id: PT-017
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired(gfx950-only; FNUZ untested)
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 87% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/tensor/float8_tensor.py
     added_lines: 34
     removed_lines: 4
@@ -1064,8 +1064,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-018
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired(gfx950-only; FNUZ untested)
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 96% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/constants.py
     added_lines: 32
     removed_lines: 3
@@ -1082,8 +1082,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-019
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: not-applicable(build-system)
+    p5_detail: "pytorch/setup.py: no import exercises it; S3.4 packaging"
     path: transformer_engine/pytorch/setup.py
     added_lines: 29
     removed_lines: 6
@@ -1100,8 +1100,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-020
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 95% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/optimizers/fused_adam.py
     added_lines: 26
     removed_lines: 8
@@ -1148,7 +1148,7 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-021
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "ImportError: cannot import name 'is_fp8_fnuz' from 'transformer_engine.pytorch.utils' (/workspace/TransformerEngine/build/shrink/overlay-without-PT-021/transfor"
     path: transformer_engine/pytorch/utils.py
     added_lines: 33
@@ -1170,8 +1170,8 @@ entries:
       two are CM-002 (ctypes) and JX-CAP (subprocess). Canonical first item for the
       capability provider - see ABI-001.
   - id: PT-022
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_fusible_ops.py: 1 failed, 1117 passed, 1705 skipped, 342 warnings in 19.42s"
     path: transformer_engine/pytorch/ops/basic/grouped_linear.py
     added_lines: 6
     removed_lines: 0
@@ -1189,8 +1189,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-023
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/module/_common.py
     added_lines: 27
     removed_lines: 4
@@ -1237,8 +1237,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-024
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_custom_recipe.py: 1 failed, 23 passed, 2 skipped, 18 warnings in 7.86s"
     path: transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py
     added_lines: 25
     removed_lines: 6
@@ -1255,8 +1255,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-025
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 6% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/tensor/float8_blockwise_tensor.py
     added_lines: 20
     removed_lines: 8
@@ -1273,8 +1273,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-026
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 7% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py
     added_lines: 17
     removed_lines: 6
@@ -1292,8 +1292,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     notes: "2.15->2.17 convergence success case: 1,619 diverged lines -> 23. Retain as evidence convergence is achievable."
   - id: PT-027
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 60% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/quantized_tensor.py
     added_lines: 18
     removed_lines: 3
@@ -1310,8 +1310,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-028
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_cuda_graphs.py: ssssssssssss."
     path: transformer_engine/pytorch/graph.py
     added_lines: 13
     removed_lines: 7
@@ -1328,8 +1328,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-029
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_parallel_cross_entropy.py: 1 failed, 17 warnings in 3.37s"
     path: transformer_engine/pytorch/triton/cross_entropy.py
     added_lines: 15
     removed_lines: 5
@@ -1346,8 +1346,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-030
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/ops/basic/rmsnorm.py
     added_lines: 14
     removed_lines: 2
@@ -1365,8 +1365,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     notes: "early-binding site: 'from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd'"
   - id: PT-031
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 0% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/tensor/storage/nvfp4_tensor_storage.py
     added_lines: 12
     removed_lines: 2
@@ -1383,8 +1383,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-032
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "Phase C interaction: pytorch/__init__.py exports is_mxfp4_available, imported at collection by tests/pytorch/mxfp4/*; Phase B's mapping (numerics+recipe) never "
     path: transformer_engine/pytorch/__init__.py
     added_lines: 9
     removed_lines: 4
@@ -1402,8 +1402,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     dependencies: [CM-001]
   - id: PT-033
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 67% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/ops/basic/layer_norm.py
     added_lines: 11
     removed_lines: 2
@@ -1421,8 +1421,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     notes: "early-binding site: 'from transformer_engine_torch import layernorm_bwd, layernorm_fwd'"
   - id: PT-034
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 11% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/module/fp8_padding.py
     added_lines: 13
     removed_lines: 0
@@ -1439,8 +1439,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-035
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 43% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/tensor/storage/mxfp8_tensor_storage.py
     added_lines: 11
     removed_lines: 1
@@ -1502,8 +1502,8 @@ entries:
         expiry_condition: null
         status: proposed
   - id: PT-036
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired(gfx950-only; FNUZ untested)
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 25% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/tensor/utils.py
     added_lines: 7
     removed_lines: 4
@@ -1521,8 +1521,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     notes: "early-binding site: 'from transformer_engine_torch import (...)'"
   - id: PT-037
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fl"
     path: transformer_engine/pytorch/transformer.py
     added_lines: 5
     removed_lines: 2
@@ -1539,8 +1539,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-038
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: untested(kept)
+    p5_detail: "tests pass without it but only 17% of added lines executed - vacuous; kept pending targeted tests"
     path: transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py
     added_lines: 7
     removed_lines: 0
@@ -1559,8 +1559,8 @@ entries:
     notes: "early-binding site importing CommOverlapType + bulk_overlap_ag_with_external_gemm; depends on HDR-B1 outcome"
     dependencies: [HDR-B1]
   - id: PT-039
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fl"
     path: transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py
     added_lines: 6
     removed_lines: 0
@@ -1577,8 +1577,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-040
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 50% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/optimizers/multi_tensor_apply.py
     added_lines: 4
     removed_lines: 2
@@ -1595,8 +1595,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-041
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fl"
     path: transformer_engine/pytorch/tensor/nvfp4_tensor.py
     added_lines: 5
     removed_lines: 1
@@ -1614,8 +1614,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   # PT-042 RETIRED (see retired_entries)
   - id: PT-043
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fl"
     path: transformer_engine/pytorch/jit.py
     added_lines: 4
     removed_lines: 0
@@ -1632,8 +1632,8 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-044
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: retired
+    p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 33% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/ops/fused/userbuffers_forward_linear.py
     added_lines: 4
     removed_lines: 0
@@ -1651,8 +1651,8 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     dependencies: [HDR-B1]
   - id: PT-045
-    p5_status: smoke-ok
-    p5_detail: "<string>:7: DeprecationWarning: fp8_autocast is deprecated and will be removed in a future release. Use autocast(enabled=..., calibrating=..., recipe=..., group"
+    p5_status: needed(tests)
+    p5_detail: "test_checkpoint.py: 9 passed, 2 skipped, 17 warnings in 2.83s | test_recipe.py: 1 failed, 130 passed, 2 skipped, 18 warnings in 7.43s"
     path: transformer_engine/pytorch/_extra_state.py
     added_lines: 3
     removed_lines: 0
@@ -1673,7 +1673,7 @@ entries:
   # NEW IN v2.4. These 281 lines had no entry in v2.3 despite measured_scope claiming
   # "all layers". They are the three files the plugin architecture depends on most.
   - id: CM-001
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "RuntimeError: /workspace/TransformerEngine/transformer_engine/common/util/hip_runtime.cpp:268 in function include_directory: Could not find hip/hip_runtime.h in"
     path: transformer_engine/__init__.py
     added_lines: 36
@@ -1700,7 +1700,7 @@ entries:
       then import the remaining TE Python. Stage 1 must prove production activation in
       this file, not env-var activation.
   - id: CM-002
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "RuntimeError: cudnn shared object not found."
     path: transformer_engine/common/__init__.py
     added_lines: 119
@@ -1795,7 +1795,7 @@ entries:
           One of THREE independent is_fp8_fnuz implementations (see PT-021 and JX-CAP).
           Canonical first item for the Sec 3.6 capability provider.
   - id: CM-003
-    p5_status: NEEDED(smoke)
+    p5_status: needed(import)
     p5_detail: "ImportError: cannot import name 'MXFP4BlockScaling' from 'transformer_engine.common.recipe' (/workspace/TransformerEngine/build/shrink/overlay-without-CM-003/tr"
     path: transformer_engine/common/recipe/__init__.py
     added_lines: 86

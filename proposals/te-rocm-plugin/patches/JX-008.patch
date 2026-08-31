@@ -2,7 +2,7 @@
 # base: 868d8d9216da361c666519652115e23688db5211
 # mechanism: build-system
 # expiry: TBD
-# tests: TBD
+# tests: tests/jax (S7; not runnable in the PyTorch-only prototype)
 # owner: TBD
 # seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
 --- a/transformer_engine/jax/setup.py

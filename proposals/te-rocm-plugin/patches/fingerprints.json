@@ -1,0 +1,1155 @@
+{
+ "base": "868d8d9216da361c666519652115e23688db5211",
+ "patches": {
+  "CM-001": {
+   "spans": {
+    "<module-level>": [
+     1,
+     112
+    ],
+    "require_nccl_ep": [
+     41,
+     54
+    ]
+   },
+   "symbols": {
+    "<module-level>": "7c10dd809d6aa2eb9f87707f4cecb11265d1098dc4fc2601e19bf4d23ae2c19f",
+    "require_nccl_ep": "648c9bb1395e4518e079764979ff64c8f7db5e4738b7fbfeaff64f58891bec36"
+   },
+   "target": "transformer_engine/__init__.py"
+  },
+  "CM-002": {
+   "spans": {
+    "<module-level>": [
+     1,
+     387
+    ],
+    "_get_shared_object_file": [
+     99,
+     130
+    ],
+    "_is_package_installed": [
+     22,
+     33
+    ],
+    "_load_core_library": [
+     358,
+     360
+    ],
+    "_load_cuda_library": [
+     337,
+     354
+    ],
+    "get_te_core_package_info": [
+     133,
+     143
+    ],
+    "load_framework_extension": [
+     147,
+     192
+    ],
+    "sanity_checks_for_pypi_installation": [
+     195,
+     221
+    ]
+   },
+   "symbols": {
+    "<module-level>": "d58f129c783ec6952f3b84b5e352adad585635052407b1f1f276b70bc9537f62",
+    "_get_shared_object_file": "a19120202fe64de2ace580e54424f08f52d3378cb5202936191be0ffce3f1ebd",
+    "_is_package_installed": "1aa44160fc8cf432fd97d0e04e7fdf74e28910c38becf8e78c3d9936b01160d5",
+    "_load_core_library": "1ea15e145bc9826143f31c476ee5ac32377c71361a51a4ed8764d0dbf2006d92",
+    "_load_cuda_library": "c369d3d1d22e76f1e459612362c059019e9249c88394216f43f634eacec1d652",
+    "get_te_core_package_info": "08d61ad94ba259e2eb1cb0c221be474588b365097bdbe4eebc01a41a6631646f",
+    "load_framework_extension": "ff0509d0f1302489e47101805c02e5358d5cf56ff41954a4ed8e55f0ee88ba7e",
+    "sanity_checks_for_pypi_installation": "8244c558dd73c7a8e37b88eab65d9f8c589f1f51fad604a83dbddadc3f6f6d22"
+   },
+   "target": "transformer_engine/common/__init__.py"
+  },
+  "CM-003": {
+   "spans": {
+    "<module-level>": [
+     1,
+     687
+    ],
+    "CustomRecipe": [
+     620,
+     686
+    ],
+    "Format": [
+     29,
+     50
+    ],
+    "Recipe": [
+     107,
+     169
+    ],
+    "_FormatHelper": [
+     20,
+     26
+    ]
+   },
+   "symbols": {
+    "<module-level>": "00964f16083bc036c7c5f01130851785a4253b6270f1a31b77181309df40ee8d",
+    "CustomRecipe": "43628c9235f9f6ff5efdfd38b7417bc10e4e7aea93c3b1844c53f0686fba7a06",
+    "Format": "164115ffebf1f2d41029481fce73d439623e5cf6e84eb38a33f8b741ab0a9cef",
+    "Recipe": "481a4abd288b4102abe2f1b7d5390234cdf3bbe5de7f93b35fd9fa3c58e6d450",
+    "_FormatHelper": "b5a6376492b3ec6fd88f9aa46f42f55049e5775f82e991b6a57344e9d9499260"
+   },
+   "target": "transformer_engine/common/recipe/__init__.py"
+  },
+  "JX-001": {
+   "spans": {
+    "<module-level>": [
+     1,
+     652
+    ],
+    "compile_triton": [
+     274,
+     377
+    ],
+    "get_triton_info": [
+     208,
+     240
+    ],
+    "triton_call_lowering": [
+     380,
+     651
+    ]
+   },
+   "symbols": {
+    "<module-level>": "c00a30e3d2c8d501f30a2de01f49281057764c8a6fa235b8f4157a4f06b5eabc",
+    "compile_triton": "fd9d0745c78bd1fc2f189483d650a6f06f807a246d95be4652e7421104e724a5",
+    "get_triton_info": "6af2a2f7b0f4355b9c57c4950b7c49593fb7800bc84a3692593697cab051bebe",
+    "triton_call_lowering": "cfd98f48c8e0abbd48daeeb3935c7220017fc65566ef26305c721200fb5df336"
+   },
+   "target": "transformer_engine/jax/triton_extensions/utils.py"
+  },
+  "JX-002": {
+   "spans": {
+    "<module-level>": [
+     1,
+     487
+    ],
+    "_get_mesh": [
+     40,
+     46
+    ],
+    "all_reduce_max_along_all_axes_except_PP": [
+     449,
+     463
+    ],
+    "global_mesh_resource": [
+     373,
+     385
+    ],
+    "global_shard_guard": [
+     355,
+     370
+    ],
+    "with_sharding_constraint": [
+     132,
+     167
+    ]
+   },
+   "symbols": {
+    "<module-level>": "ee44c14421ea7184b1c4aa10f538f9a280aa9835af736c51494cf24244272379",
+    "_get_mesh": "316c3a3fe1445e3960f0490e11fac4792d30346de789337ac9323b4770bf5890",
+    "all_reduce_max_along_all_axes_except_PP": "4b5bba72003c83e02322a66e8ec68cfaf6c055ab836bad09f2bcb463ade16305",
+    "global_mesh_resource": "cd7f781be256c47c6ad66accd78b4c6ac4250ea1c1a66582291dabef16951f7b",
+    "global_shard_guard": "0ce8d30ec853b65358cd48832fbb387c921ee7c9713b2d9e156c8d5f6b2712e1",
+    "with_sharding_constraint": "bbdd5f8ddddf73be202bfe5034c9f39b1e6701a88cf84c50236c1e28ac4a2850"
+   },
+   "target": "transformer_engine/jax/sharding.py"
+  },
+  "JX-003": {
+   "spans": {
+    "<module-level>": [
+     1,
+     3695
+    ],
+    "FusedAttnFwdPrimitive": [
+     279,
+     761
+    ],
+    "FusedRingAttnStripedBwdPrimitive": [
+     3205,
+     3343
+    ],
+    "FusedRingAttnStripedFwdPrimitive": [
+     3052,
+     3199
+    ],
+    "_FusedAttnRNGStateChecker": [
+     225,
+     267
+    ],
+    "fused_attn_bwd": [
+     3521,
+     3694
+    ]
+   },
+   "symbols": {
+    "<module-level>": "a3c443cf92f393ed5bf368d5e5b31904efbc383a87263c441308d1558fa01c67",
+    "FusedAttnFwdPrimitive": "1826ba0d48f404575edf2bab5c37bc9dba4752206070943e125b4732644c850d",
+    "FusedRingAttnStripedBwdPrimitive": "c0fa07246c5d939a00ee55fdcbc855e7f9b5c6476c37d9743fbec695b21932f3",
+    "FusedRingAttnStripedFwdPrimitive": "786343495bdda438599467e3a72356ad5519226ab232b874c50e0966e03361c9",
+    "_FusedAttnRNGStateChecker": "9e162b29624f56f9c101df440b47df507ab08bce12cee58a8d65aed94ea01ead",
+    "fused_attn_bwd": "d6113fd9e9713795487490f359781fbe655f7629ea1cdd172d661dbf1a1d73a0"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/attention.py"
+  },
+  "JX-004": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2577
+    ],
+    "GemmPrimitive": [
+     487,
+     1260
+    ],
+    "_compatible_fp8_gemm_dtypes": [
+     122,
+     138
+    ],
+    "collective_gemm_bootstrap": [
+     216,
+     351
+    ],
+    "get_cublas_workspace_size_bytes": [
+     92,
+     96
+    ],
+    "grouped_gemm": [
+     2393,
+     2576
+    ]
+   },
+   "symbols": {
+    "<module-level>": "2b984a996d9e1c4704ac89f29a0c26975d04480a9889a2fc5bbccfa9656c294f",
+    "GemmPrimitive": "1574d3eb03cad5d83a62ee43d2bb4b2ab77f2b98f4b2d1dadc809a28977c203b",
+    "_compatible_fp8_gemm_dtypes": "f347a7ce78f5df988ae4f3554affe98bdb56e053de69d3ca9c091be64efa09e1",
+    "collective_gemm_bootstrap": "2408b6d7d50d47d9d2e453a7fb053d0bb723bdf7d31d29edb617a527279c64b2",
+    "get_cublas_workspace_size_bytes": "b62de7b94136d50c0695182863065b01d5fa3988d47fd2d4d2bdaf5b88cdb98a",
+    "grouped_gemm": "090c25ccc4a75715806aac1db16a5bf0084725fa716df826003d86db6fb100b1"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/gemm.py"
+  },
+  "JX-005": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1273
+    ]
+   },
+   "symbols": {
+    "<module-level>": "0b4114e392ec036e1e18d057d013fc593283051e78fe8c36337173448e31b1f3"
+   },
+   "target": "transformer_engine/jax/moe.py"
+  },
+  "JX-006": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1640
+    ],
+    "NormFwdPrimitive": [
+     91,
+     716
+    ],
+    "layernorm_fwd": [
+     1008,
+     1200
+    ],
+    "rmsnorm_fwd": [
+     1261,
+     1454
+    ]
+   },
+   "symbols": {
+    "<module-level>": "d225774fceb7e2d346222fa65dcba2782d939a57747fe2aa459d1474eb87c19b",
+    "NormFwdPrimitive": "2ac8d174deeb0f68e59052d751b2eab84860428c0f86fb0ddb8caa140bbb7b01",
+    "layernorm_fwd": "b6e31c0b08661e078a49434c1cdeafc8e311f4f6e9966da55e7187cea1f9b27e",
+    "rmsnorm_fwd": "cadab0bc8aa728f859b583e5d353d8e9ccb41dd85ea285f62ce4011a9d779452"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/normalization.py"
+  },
+  "JX-007": {
+   "spans": {
+    "<module-level>": [
+     1,
+     978
+    ],
+    "_check_block_scaling_fp8_support": [
+     90,
+     107
+    ],
+    "_check_delayed_scaling_fp8_support": [
+     72,
+     87
+    ],
+    "_check_fp4_support": [
+     110,
+     120
+    ],
+    "_format2dtypes": [
+     260,
+     277
+    ]
+   },
+   "symbols": {
+    "<module-level>": "a06f61a6c6448225834f241108d7c8faaf36e4ea569a12b39dee636fec550772",
+    "_check_block_scaling_fp8_support": "4136b2f63c27a9490a41442b0a7a89e425e06c93380771ad596ebf42cd2b4cce",
+    "_check_delayed_scaling_fp8_support": "49d05dc1106832ab5e989f172eb62a3f17fbac9641a72cc8736bccf283979aba",
+    "_check_fp4_support": "9af5f12a4dcb0058f6d04995c6a0614f2474db7fe551e115919605d142f150f5",
+    "_format2dtypes": "52a5c4f2154363570ed0687750dc1b9069ee6451647f933fd937d2bc6c8be7bc"
+   },
+   "target": "transformer_engine/jax/quantize/helper.py"
+  },
+  "JX-008": {
+   "spans": {
+    "<module-level>": [
+     1,
+     146
+    ]
+   },
+   "symbols": {
+    "<module-level>": "00a09fc9cd173053b3bf1928788604c1f0ddbed45db02b620a2c4ab6bc16644e"
+   },
+   "target": "transformer_engine/jax/setup.py"
+  },
+  "JX-009": {
+   "spans": {
+    "<module-level>": [
+     1,
+     297
+    ],
+    "get_cudnn_version": [
+     144,
+     150
+    ],
+    "jax_dtype_to_te_dtype": [
+     62,
+     83
+    ],
+    "te_dtype_to_jax_dtype": [
+     25,
+     45
+    ]
+   },
+   "symbols": {
+    "<module-level>": "ea247463c77957be34b5b9a470a5c9f2453994f938ce8c9bd3171609d4abd1f8",
+    "get_cudnn_version": "cd748e1ff17e8fb029773506ed22606def47607a945b5f6ea7091ca708034d57",
+    "jax_dtype_to_te_dtype": "a47f70832e16eea4a90313d012fad8a35cf298c630eeec591c509e70805f96c4",
+    "te_dtype_to_jax_dtype": "f1f538b55a8daadbbf182c6eac31a27b44a8dd50b837f8027d841c4d90cd372a"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/misc.py"
+  },
+  "JX-010": {
+   "spans": {
+    "<module-level>": [
+     1,
+     955
+    ],
+    "_import_cudnn_for_score_mod": [
+     596,
+     604
+    ]
+   },
+   "symbols": {
+    "<module-level>": "86a0bbbec1ad615b516bb62ca27d2df6ce9f07ab8ae79bfe54fd2c693c62b733",
+    "_import_cudnn_for_score_mod": "6f0e7b9ec99d4d24db23ead7b8074e3e20ca2bda283da60b51c878f9d8c262ad"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/flex_attention.py"
+  },
+  "JX-011": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1354
+    ],
+    "_require_triton_permutation": [
+     70,
+     84
+    ],
+    "_sort_chunks_by_index_fwd_rule": [
+     659,
+     687
+    ],
+    "_token_combine_fwd_rule": [
+     454,
+     514
+    ],
+    "_token_dispatch_fwd_rule": [
+     237,
+     342
+    ]
+   },
+   "symbols": {
+    "<module-level>": "1c35c8e9744596c136d57e7f76cc8d4b81d81261527276075913b04d9b88b24a",
+    "_require_triton_permutation": "24b07d8761ebb07647f33c113195e6d75356cc9b891b038ff73c86f1ca6e784e",
+    "_sort_chunks_by_index_fwd_rule": "fc817dde3a481f4d874ec952ccc528580e863e3af089c389a4a7794f65d01bfd",
+    "_token_combine_fwd_rule": "6c6381c707eee49559c3dded858afbfc954a53164c95524da2b5db9ee67db813",
+    "_token_dispatch_fwd_rule": "4607f662829bfaf68cc570f4102d2af000e443df3ef9e4e9bc3e3167611f1ba6"
+   },
+   "target": "transformer_engine/jax/permutation.py"
+  },
+  "JX-012": {
+   "spans": {
+    "<module-level>": [
+     1,
+     414
+    ],
+    "_grouped_dequantize": [
+     297,
+     410
+    ]
+   },
+   "symbols": {
+    "<module-level>": "3464af37d7f6f325a968326f82b3c933c8bc7adb075f4f3a6aaa2a99f0149396",
+    "_grouped_dequantize": "584d82ccee0f7810b6d5c60b72e7a1d6dc80b8089c48ad133c8bbbc21f74465d"
+   },
+   "target": "transformer_engine/jax/quantize/dequantizer.py"
+  },
+  "JX-013": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1117
+    ],
+    "BlockScalingModeMetadataImpl": [
+     434,
+     778
+    ],
+    "ScalingMode": [
+     783,
+     1096
+    ]
+   },
+   "symbols": {
+    "<module-level>": "57d5d1c0b359496a96ffdfa4244852129d3e80065140d922b60b3c21b90b6aaf",
+    "BlockScalingModeMetadataImpl": "f7d2ab3f509c401cce9a09bb6cad30565d6a5ec586c51f3f4b1a8f51467755e1",
+    "ScalingMode": "709e3bf6e398593f891ade288a37e5b12040df47d1ee15fe56432d90e0f40e45"
+   },
+   "target": "transformer_engine/jax/quantize/scaling_modes.py"
+  },
+  "JX-014": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1663
+    ],
+    "AttnBiasType": [
+     25,
+     34
+    ],
+    "fused_attn": [
+     1447,
+     1662
+    ]
+   },
+   "symbols": {
+    "<module-level>": "17fd8ca331485799d40d556db42cd2e6055e38852984a5aeda74398833ef306f",
+    "AttnBiasType": "3b635c0e8879dbc12a416e7f0c78947e7b08b07a4977b573b5e062ac03f53d52",
+    "fused_attn": "52f7c45a1c9910da398e630403e0c6c495c4d3b1496bfcff15ffd4d88f8f0312"
+   },
+   "target": "transformer_engine/jax/attention.py"
+  },
+  "JX-015": {
+   "spans": {
+    "<module-level>": [
+     1,
+     35
+    ],
+    "is_fp8_gemm_with_all_layouts_supported": [
+     31,
+     34
+    ]
+   },
+   "symbols": {
+    "<module-level>": "4a56c3e3b6a1ed6ae8fea7dcc2b288a2cc8bf547752add3e77de88f20ffc6714",
+    "is_fp8_gemm_with_all_layouts_supported": "8bb060f92ea3ec54ba1f62ef70a044a3c72493abf6f2c39d148bd38ff09fc618"
+   },
+   "target": "transformer_engine/jax/quantize/device_utils.py"
+  },
+  "JX-016": {
+   "spans": {
+    "<module-level>": [
+     1,
+     324
+    ],
+    "register_primitive": [
+     202,
+     263
+    ]
+   },
+   "symbols": {
+    "<module-level>": "313da6609ab996eb742380127e43c217a45abcbeddce12828e1e6c3716cbfbfd",
+    "register_primitive": "8741c6ff903ccef0a5772b203dae1a1c194aafb266951b561ee3d384dfbbed41"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/base.py"
+  },
+  "JX-017": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1391
+    ],
+    "GroupedQuantizePrimitive": [
+     992,
+     1237
+    ]
+   },
+   "symbols": {
+    "<module-level>": "848935cb9d43cfe3a63d72b2c3d74bd9a97cdabeda8dae7777a9624ffeaffe13",
+    "GroupedQuantizePrimitive": "a2538358d1eab0994461cb00f959a67c73745d6fac60a7c2e1f41d8057c66b06"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/quantization.py"
+  },
+  "JX-019": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1661
+    ]
+   },
+   "symbols": {
+    "<module-level>": "6181abebf05f5b25cc480cd8efeff9fd57521cfd8a099e0d73b79afe93539c75"
+   },
+   "target": "transformer_engine/jax/cpp_extensions/activation.py"
+  },
+  "PT-001": {
+   "spans": {
+    "<module-level>": [
+     1,
+     545
+    ],
+    "_is_nvfp4_row_scaled_tensor": [
+     73,
+     75
+    ],
+    "general_gemm": [
+     105,
+     273
+    ],
+    "get_cublas_workspace_size_bytes": [
+     34,
+     39
+    ],
+    "validate_gemm_scale": [
+     64,
+     70
+    ]
+   },
+   "symbols": {
+    "<module-level>": "4ec9eccb94961baac1ae50552cf9c6317bdd128ef6f8f70e29eea8ba89e524c4",
+    "_is_nvfp4_row_scaled_tensor": "366a1f9bd3b1fe1ea8862174c07d9c4b32a04168182f125ce660a33ebafbd8df",
+    "general_gemm": "c287e8fa3e9fd149f4d3d304f9919df608d0bad32b4c473af237d9ad0b97e3a1",
+    "get_cublas_workspace_size_bytes": "441d80be9ef994848439b6b69fb57ef45d326c58d07d8d3deb64e8f5a20cf4e4",
+    "validate_gemm_scale": "3eaae284b827f3d4a4b8b94b3d7e6a301d8f6161f2929890ce6b2fca9d5fce11"
+   },
+   "target": "transformer_engine/pytorch/cpp_extensions/gemm.py"
+  },
+  "PT-002": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1983
+    ],
+    "TransformerEngineBaseModule": [
+     857,
+     1982
+    ],
+    "destroy_ub": [
+     569,
+     579
+    ],
+    "fill_userbuffers_buffer_for_all_gather": [
+     582,
+     729
+    ],
+    "get_ub_is_fp8": [
+     564,
+     566
+    ],
+    "initialize_ub": [
+     126,
+     547
+    ]
+   },
+   "symbols": {
+    "<module-level>": "d38285754da4d0df224c1590beccc96d1c8a31051cbf9c2907b09ca1240f5167",
+    "TransformerEngineBaseModule": "78398f54696d834402067702a824b6ba4699a69c66cb87f9fbd39941bffb2e02",
+    "destroy_ub": "e82c0e230ff063a3005c7601444f752c058266fd15a8ee01118dd4c1d2bfb532",
+    "fill_userbuffers_buffer_for_all_gather": "3331862cc7ed2504d0e271c6a0db53ac37170619a25f1f1049a2d1a911517c21",
+    "get_ub_is_fp8": "da48cb2407fef11b18ecda6446e3cf3a98fe9a2041c09978164af06a73440c81",
+    "initialize_ub": "f0934bfc3a262f5a808d85c09e2b1053ed58982846b91d73d93b4c2951cb2c51"
+   },
+   "target": "transformer_engine/pytorch/module/base.py"
+  },
+  "PT-004": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1968
+    ],
+    "FP8GlobalState": [
+     379,
+     402
+    ],
+    "FP8GlobalStateManager": [
+     405,
+     833
+    ],
+    "Float8BlockScalingRecipeState": [
+     1526,
+     1610
+    ],
+    "NVFP4BlockScalingRecipeState": [
+     1613,
+     1725
+    ],
+    "RecipeState": [
+     1169,
+     1384
+    ],
+    "_compute_fp8_block_scaling_support": [
+     178,
+     185
+    ],
+    "_compute_fp8_support": [
+     149,
+     159
+    ],
+    "_compute_mxfp8_support": [
+     162,
+     168
+    ],
+    "_compute_nvfp4_support": [
+     171,
+     175
+    ],
+    "check_fp8_block_scaling_support": [
+     216,
+     221
+    ],
+    "check_recipe_support": [
+     224,
+     239
+    ],
+    "get_align_size_for_quantization": [
+     262,
+     268
+    ],
+    "get_default_fp8_recipe": [
+     242,
+     254
+    ],
+    "get_fp8_te_dtype": [
+     280,
+     286
+    ],
+    "get_fp8_torch_dtype": [
+     271,
+     277
+    ],
+    "is_fp8_block_scaling_available": [
+     342,
+     357
+    ],
+    "is_nvfp4_available": [
+     360,
+     375
+    ]
+   },
+   "symbols": {
+    "<module-level>": "7e82e76b39fc195488dc24e0d5b74a78d3edeb2d3482cabc89b8de8276198f8e",
+    "FP8GlobalState": "6096c8b3cde6bdefc288a336b86d07e221cd683d10ea0168447cdf5b579fe4e9",
+    "FP8GlobalStateManager": "37a8f00ae802eb874e4a3e8953fce7a8ddedd11d5d6acb3cc17cbcacdabed739",
+    "Float8BlockScalingRecipeState": "2d1e7465b56c53d8ba31d46f37ca8f9dcc5eaa65a1ff79b7be80660dd3a18e7c",
+    "NVFP4BlockScalingRecipeState": "4b4560c05bc191934c378196db8fce7af9434720ddb19be55b22e52da9c4524f",
+    "RecipeState": "d0742d501d954555325ee086fba5897fd12d20bab8296d0ffd5ca2905e4a92eb",
+    "_compute_fp8_block_scaling_support": "0ff1b83a92ebd7dde7bb0defc2b4cd70a18916d032653db6993d030af8e91c91",
+    "_compute_fp8_support": "213109f6636c33f3af7bbdb79f0f9d6f9f789c3209d9b0194c0e24b9656b3873",
+    "_compute_mxfp8_support": "98684314e9c34e740bedeb889b2f4310f371bbf4ebc5e870f66ce29960e0dd3b",
+    "_compute_nvfp4_support": "7a10029eb3db791df779a7b55d49164fa4c66e7c128a2985861ba698d7e4b61f",
+    "check_fp8_block_scaling_support": "06eaa12d6f50f29294b6ff2d8c56d9a588a5d5229edd1ac48af132d3edc4bf37",
+    "check_recipe_support": "2b342bfaac13edb58376fcd43197e983d6ae888f57c6bb750e81d2fce1db0d6c",
+    "get_align_size_for_quantization": "1997313a81c3833c678e46299a2fc7b39f3e9f8e65ae243a062baa11c4e1c1fb",
+    "get_default_fp8_recipe": "da34501df7d415f1f3f7598e9d9a7ec2e88630357802341a022b173c5e1ff1cf",
+    "get_fp8_te_dtype": "a0278b57ce4e1adfee45c5d8a6064a1664f414eb2a878128600ad490b1b5c524",
+    "get_fp8_torch_dtype": "abfe7cf880de2e9089ad5f8a18c81efe4fd55f0261f48ffe1b79a33cd0e2445b",
+    "is_fp8_block_scaling_available": "b5bc3f23a9c1ce04ca860269ec8f70d952b597e5406044f96350fbc1b1a8f742",
+    "is_nvfp4_available": "1bcc7f138e78d0a1a386779dd4742e9476347fbae4fbe366cc30f3682b337247"
+   },
+   "target": "transformer_engine/pytorch/quantization.py"
+  },
+  "PT-006": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2765
+    ],
+    "LayerNormMLP": [
+     1829,
+     2764
+    ],
+    "_LayerNormMLP": [
+     171,
+     1826
+    ],
+    "_get_act_func_supported_list": [
+     99,
+     156
+    ]
+   },
+   "symbols": {
+    "<module-level>": "3786c1527816f307f3fb0d7e4b361ec4fe414067aee5f51281dbf60ed6cc4328",
+    "LayerNormMLP": "1d77976c5c37c42158cd3199b373a11897b2f0c5a769f026d178891b9fca9687",
+    "_LayerNormMLP": "3de2cedf64ac63084123a59cf66e8676a3132e88cf6cdb5bef0705dcd6ca3aab",
+    "_get_act_func_supported_list": "9ee037082ae2a11914ec3c2af9a0d7ee44f2e19a94dba8b2ed64f708e50110e0"
+   },
+   "target": "transformer_engine/pytorch/module/layernorm_mlp.py"
+  },
+  "PT-007": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1068
+    ],
+    "MXFP8Quantizer": [
+     27,
+     181
+    ],
+    "MXFP8Tensor": [
+     187,
+     851
+    ]
+   },
+   "symbols": {
+    "<module-level>": "92efd346aebe06048495272568b63b8d73bab52742d784608697ef7af307096e",
+    "MXFP8Quantizer": "04d0f73c17e22bb2ed9812d4032341e3cdd3c04cf67feb5e76d0ff684310f310",
+    "MXFP8Tensor": "b4f47d33834eca8cddcc98138ee6fd84ec7d18a1c9a43f42f318bfb0aafef319"
+   },
+   "target": "transformer_engine/pytorch/tensor/mxfp8_tensor.py"
+  },
+  "PT-008": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2167
+    ],
+    "Linear": [
+     1400,
+     2166
+    ],
+    "LinearBwdArgs": [
+     163,
+     243
+    ],
+    "LinearFwdArgs": [
+     90,
+     159
+    ],
+    "_Linear": [
+     1316,
+     1397
+    ],
+    "_linear_backward": [
+     740,
+     1313
+    ],
+    "_linear_forward_impl": [
+     256,
+     624
+    ],
+    "_linear_setup_ctx": [
+     627,
+     737
+    ]
+   },
+   "symbols": {
+    "<module-level>": "7d064c36e71b7aa933deecfefc1c667cb39f9e365d15dfbb3ab251eda4011253",
+    "Linear": "79df30d3839218acd0c9f4f3bfee2736434a7695b7d140f507eecc2a435bc6be",
+    "LinearBwdArgs": "5cae2a02f25e2b30252dc96ef2c4c54ee00c7f35781bee71e0d69c30c9f55879",
+    "LinearFwdArgs": "2b558b13aa298610fac97c1555ffd2e13d026640dc126d09c8910ec099d2eb84",
+    "_Linear": "a747cf5bef086cf54c5972c2770b19050c2348022c57e3c2e002e6a0c89a3f83",
+    "_linear_backward": "74cfba584ccc9bbe2cfccd5371be4dc73c4494cc9d2a462d113e9be377bcf7f7",
+    "_linear_forward_impl": "70e0598833bfd88521ac8a4750d8a8736dd7a3a52912c6a28e47e80e96487170",
+    "_linear_setup_ctx": "bdffe3272ba1d59ccf1198a3933afbd53542aaab56e1e509a962b113c9fb5d74"
+   },
+   "target": "transformer_engine/pytorch/module/linear.py"
+  },
+  "PT-009": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1979
+    ],
+    "LayerNormLinear": [
+     1178,
+     1978
+    ],
+    "_LayerNormLinear": [
+     94,
+     1175
+    ]
+   },
+   "symbols": {
+    "<module-level>": "a08a15b07ff5bee8bca3de3e732b74ac7b6ef336ea5db82a1ccc74e5f1d405b7",
+    "LayerNormLinear": "0ab78aafca5c22cb940d81c3c1bf203c1ad621ae4b8c0d8bdc73391bf3351ad2",
+    "_LayerNormLinear": "7637c7070b66ce84d273a1db9be4ab52cf7c0566097eda7bb97651dd91bef7ab"
+   },
+   "target": "transformer_engine/pytorch/module/layernorm_linear.py"
+  },
+  "PT-010": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2243
+    ],
+    "FusedAttention": [
+     1926,
+     2242
+    ],
+    "FusedAttnFunc": [
+     1292,
+     1923
+    ],
+    "UnfusedDotProductAttention": [
+     320,
+     733
+    ]
+   },
+   "symbols": {
+    "<module-level>": "d49038d43dbf7f5023705b35e4bfa0758c7ffc4ba9a921114966eab6f707e1cd",
+    "FusedAttention": "9713a9bb05235bbe6407ab416f2231437c41992e2397363b2db45b76a6d4394e",
+    "FusedAttnFunc": "ae19e35f105bf3c89326b6a3277d10f9f21bc9324e88e89bb03e250324fab587",
+    "UnfusedDotProductAttention": "0eb2e23f4aa8c60bb2919ed13e579bf5ef750b35b95641c9891a0b886dabe952"
+   },
+   "target": "transformer_engine/pytorch/attention/dot_product_attention/backends.py"
+  },
+  "PT-011": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2982
+    ],
+    "FlashAttentionUtils": [
+     114,
+     187
+    ],
+    "get_attention_backend": [
+     327,
+     1572
+    ]
+   },
+   "symbols": {
+    "<module-level>": "a913999c26adf0b83ef073702a20fa028695a77039141e0099ecd33206734eed",
+    "FlashAttentionUtils": "689a6e09f3599ac133d93b21943c376585aa01bbfe953b2e6a09bc9c5f056ed8",
+    "get_attention_backend": "42538b587c81fe87e87ea2d5695d5e0d9d17cb783d50a8d8a9f83da70f20f3a9"
+   },
+   "target": "transformer_engine/pytorch/attention/dot_product_attention/utils.py"
+  },
+  "PT-012": {
+   "spans": {
+    "<module-level>": [
+     1,
+     592
+    ],
+    "fused_attn_bwd": [
+     388,
+     591
+    ],
+    "fused_attn_fwd": [
+     117,
+     385
+    ]
+   },
+   "symbols": {
+    "<module-level>": "2236da14d75b24edcf727f63ba41b6f0a588609f776195744e51f361593a302f",
+    "fused_attn_bwd": "460abb9740fe195cd59c4e99aee027713d39b91a2dd5f5c95f92fb48ade3e0e3",
+    "fused_attn_fwd": "d1e06b5375b4908f9676398a8430d9a38d2930f21c0e0cbfd876a78d1ec207f5"
+   },
+   "target": "transformer_engine/pytorch/cpp_extensions/fused_attn.py"
+  },
+  "PT-014": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2130
+    ],
+    "checkpoint": [
+     657,
+     812
+    ]
+   },
+   "symbols": {
+    "<module-level>": "3c13b703fa6eb5547e713e1d09386d8d0d3708ea37e231d4e2dd46c455f19e8c",
+    "checkpoint": "9ab2a68329fa6e1042feb1dd9c72dda33b45bba7543995a301277ce74dc8269c"
+   },
+   "target": "transformer_engine/pytorch/distributed.py"
+  },
+  "PT-019": {
+   "spans": {
+    "<module-level>": [
+     1,
+     192
+    ],
+    "CachedWheelsCommand": [
+     116,
+     152
+    ]
+   },
+   "symbols": {
+    "<module-level>": "827123579ba14e3e5e07628ed41919dc94703529632e0ee1a4e65a17e1e6ca6e",
+    "CachedWheelsCommand": "8f4efe3e0b49d895a3b4cc8c48e8b0f66679c087eadf543dd6f753997410eab5"
+   },
+   "target": "transformer_engine/pytorch/setup.py"
+  },
+  "PT-021": {
+   "spans": {
+    "<module-level>": [
+     1,
+     974
+    ],
+    "assert_dim_for_fp8_exec": [
+     613,
+     623
+    ],
+    "get_cached_ones_tensor": [
+     30,
+     39
+    ],
+    "get_cudnn_version": [
+     666,
+     674
+    ],
+    "is_bf16_compatible": [
+     626,
+     630
+    ],
+    "is_non_tn_fp8_gemm_supported": [
+     657,
+     662
+    ]
+   },
+   "symbols": {
+    "<module-level>": "12b45d411827f9ce810403d6ab306d991ea38ecdbd1277536cd5a119871e832d",
+    "assert_dim_for_fp8_exec": "677d1809f5465bae087aa0d1d974e8ab105891347105c5d15d7401264e6d45ac",
+    "get_cached_ones_tensor": "f4be2afb87c591fd77e2562e5582d46ad50e721eccdc17754f764b1ab5ffcd3f",
+    "get_cudnn_version": "c0f11f6ad7eb8b1e3b94514044f2d59587589f7962e4ea446d715e7c17cfc12d",
+    "is_bf16_compatible": "eaa8140312311ccc9bead91b96986d263a5d9ac9e159fe92096530ea2f1c3fe5",
+    "is_non_tn_fp8_gemm_supported": "e38d4329ba413960ca6ceaffa80e2ca2f848395d0112962831763b8279a4a705"
+   },
+   "target": "transformer_engine/pytorch/utils.py"
+  },
+  "PT-022": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1796
+    ],
+    "GroupedLinear": [
+     68,
+     1795
+    ]
+   },
+   "symbols": {
+    "<module-level>": "170268bab1e830c195be235b9d08160eb25bdcf440dd5a18fd29d103ddb295b0",
+    "GroupedLinear": "1684856d32b3d049268e6bd82e3c72a90bd43b17ea6096124d80ba0c008747fe"
+   },
+   "target": "transformer_engine/pytorch/ops/basic/grouped_linear.py"
+  },
+  "PT-024": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1238
+    ],
+    "NVFP4QuantizerRef": [
+     343,
+     1237
+    ],
+    "cast_to_e4m3": [
+     130,
+     141
+    ],
+    "high_precision_gemm_ref": [
+     144,
+     187
+    ],
+    "nvfp4_ref_rht_2d_quantizer_factory": [
+     17,
+     46
+    ]
+   },
+   "symbols": {
+    "<module-level>": "029268212ba5a2c54069ecf1f6316e834b8103ce2c95be76cf2c970f08443277",
+    "NVFP4QuantizerRef": "e1f2e63af6cb542c2307ea7a7f7d61b3a2c8874ec10b71fb776c4e01d11e453f",
+    "cast_to_e4m3": "5d2299527a8b1aa247e9f1f59db5138d37acfde44acc5911d6fa3422baa47db6",
+    "high_precision_gemm_ref": "a18c872075ee8b9e65e790a2d6023614e9734eebee9c001a70b95024bc530afb",
+    "nvfp4_ref_rht_2d_quantizer_factory": "9f3da475507f2dfa2266d0698041c4647d0c6551a92d0712978b7bd3b2fd77c8"
+   },
+   "target": "transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py"
+  },
+  "PT-025": {
+   "spans": {
+    "<module-level>": [
+     1,
+     946
+    ],
+    "Float8BlockQuantizer": [
+     28,
+     215
+    ]
+   },
+   "symbols": {
+    "<module-level>": "49024563cb0f732e9d5a72ff9f130dc3b04860704f721b530229b918101a2b11",
+    "Float8BlockQuantizer": "f9aa9483f0c39f7463ac4faab594aee993f6dfc6fce133b386fe159e392db57c"
+   },
+   "target": "transformer_engine/pytorch/tensor/float8_blockwise_tensor.py"
+  },
+  "PT-026": {
+   "spans": {
+    "<module-level>": [
+     1,
+     5351
+    ],
+    "AttnFuncWithCPAndKVAllGather": [
+     3014,
+     4165
+    ],
+    "AttnFuncWithCPAndKVP2P": [
+     1356,
+     2973
+    ],
+    "AttnFuncWithCPAndQKVOA2A": [
+     4168,
+     4918
+    ]
+   },
+   "symbols": {
+    "<module-level>": "007f383085227e1be1ad2bcc2dac8700815956bd78cf4e8468bca7dec2f584ba",
+    "AttnFuncWithCPAndKVAllGather": "4a895f77d4e50626f328e91ea1ba2ce2eb29ac60ed559eecef2e1d9beed45b5b",
+    "AttnFuncWithCPAndKVP2P": "b3dc31129d09a4d7ec6775b8f34eaf0f79107fff8d53a98154e15f06ff5139ce",
+    "AttnFuncWithCPAndQKVOA2A": "f7389a93c770abdee9d94058c78efb01b4a4933c660ffd60a9e92b5ef767d0ce"
+   },
+   "target": "transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py"
+  },
+  "PT-028": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1401
+    ],
+    "_make_graphed_callables": [
+     99,
+     1072
+    ]
+   },
+   "symbols": {
+    "<module-level>": "0c4519fbad309f3e4baeb3375f833c970a56954a5ef714d609b65a3e5fb23f84",
+    "_make_graphed_callables": "cba3614a0d82360fabf2d177838c10a9c6fecbeb1d96838d64b30f9e914f0b10"
+   },
+   "target": "transformer_engine/pytorch/graph.py"
+  },
+  "PT-029": {
+   "spans": {
+    "<module-level>": [
+     1,
+     146
+    ],
+    "cross_entropy_backward": [
+     119,
+     145
+    ],
+    "cross_entropy_forward": [
+     26,
+     116
+    ]
+   },
+   "symbols": {
+    "<module-level>": "aa6695f2df0a9926d12edaf4eb7428b1cfa2a00d2af71308bb0eac3d1e8e24d0",
+    "cross_entropy_backward": "b63ec29449b4a54ceff90de14fc3a3f9b511a2ac6bf696ff9f55efdd5fd0a3c1",
+    "cross_entropy_forward": "8f67941fbae9892f757d89eda4383c7bcf9eeb58f4f36595910342f7eebef680"
+   },
+   "target": "transformer_engine/pytorch/triton/cross_entropy.py"
+  },
+  "PT-031": {
+   "spans": {
+    "<module-level>": [
+     1,
+     486
+    ],
+    "_FromNVFP4Func": [
+     35,
+     70
+    ]
+   },
+   "symbols": {
+    "<module-level>": "60b3c27be0c4f33a6a05abe9a9fa0077b0840307f1fb4e147be8314cc1b159e5",
+    "_FromNVFP4Func": "7b90195ea71dcbd480e79f8671236b9f20a28128b265b4dfbda3644fade8e299"
+   },
+   "target": "transformer_engine/pytorch/tensor/storage/nvfp4_tensor_storage.py"
+  },
+  "PT-032": {
+   "spans": {
+    "<module-level>": [
+     1,
+     162
+    ]
+   },
+   "symbols": {
+    "<module-level>": "6f5c8016257f80ba687feaf44b2eab691dfebe597474afc2173da4c36ce167f8"
+   },
+   "target": "transformer_engine/pytorch/__init__.py"
+  },
+  "PT-034": {
+   "spans": {
+    "<module-level>": [
+     1,
+     145
+    ],
+    "Fp8Padding": [
+     74,
+     144
+    ]
+   },
+   "symbols": {
+    "<module-level>": "07e39786c548ed89ce7db95259dd85098800461cfdf6564a298deec38a1737ef",
+    "Fp8Padding": "58f96c4d75b5fc9eded6aac7971ca47654e698d34f28d226f555fe4bd2106dd5"
+   },
+   "target": "transformer_engine/pytorch/module/fp8_padding.py"
+  },
+  "PT-038": {
+   "spans": {
+    "<module-level>": [
+     1,
+     719
+    ],
+    "UserbuffersBackwardLinear": [
+     37,
+     718
+    ]
+   },
+   "symbols": {
+    "<module-level>": "c31dda263908c4ec2ec1e35d96e405313a5e5e2d9347c49c20f0a84174af08fa",
+    "UserbuffersBackwardLinear": "c1642791f5f64f9cc83b011e13308a3b547d5fdc71a7e24c8518e18339af7c29"
+   },
+   "target": "transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py"
+  },
+  "PT-045": {
+   "spans": {
+    "<module-level>": [
+     1,
+     214
+    ]
+   },
+   "symbols": {
+    "<module-level>": "9a193026592fe54a13d7701e546c3ca1520c9c7f4c325bc672b866527daecb89"
+   },
+   "target": "transformer_engine/pytorch/_extra_state.py"
+  }
+ }
+}

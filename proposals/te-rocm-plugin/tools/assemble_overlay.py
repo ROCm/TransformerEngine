@@ -152,6 +152,8 @@ def load_patches(entries, base_sha: str, exclude: set[str] = frozenset()) -> lis
             die(f"{p.name}: header id {pid} != filename")
         if pid not in entries:
             die(f"{p.name}: manifest id {pid} not in manifest - refused")
+        if hdr.get("tests", "").strip() in ("", "TBD"):
+            die(f"{p.name}: '# tests:' must name at least one test (S3.1 governance)")
         if hdr["base"] != base_sha:
             print(f"  note: {p.name} was authored against {hdr['base'][:12]} (pin is {base_sha[:12]}) - certification mode, applicability decides")
         deps = [d for d in (entries[pid].get("dependencies") or []) if d in entries]

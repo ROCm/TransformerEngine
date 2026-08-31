@@ -382,7 +382,7 @@ Reinterpreted for one repository. There is no fork to freeze; there is a *proced
 
 | Gate | Evidence | Unlocks |
 |---|---|---|
-| **A** | Stage 1 exit (EXIT-B + P8 within budget) + B3 report incl. C++ arm (informational) | Stage 3 |
+| **A** | Stage 1 exit (EXIT-B + P8 within budget) + B3 report incl. C++ arm (informational) | Stage 3 — **PASSED 2026-08-31** (decision: Wen; packet: EXIT-A/B, P6, P8 PASS, backtest B3) |
 | **B** | Certified Stage 3 package on the existing backend (S3.7) | Stage 4 |
 | S4 exit | S3.7 checklist unchanged + C++ queue reapplies on one live bump | Stage 5 |
 | S5 exit | M2 down, checkpoint gate green both directions | Stage 6 (families), Stage 8 pilots |

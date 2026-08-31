@@ -2,7 +2,7 @@
 # base: 868d8d9216da361c666519652115e23688db5211
 # mechanism: custom-recipe
 # expiry: see features
-# tests: TBD
+# tests: tests/pytorch/test_recipe.py, tests/pytorch/test_custom_recipe.py, tests/pytorch/test_numerics.py
 # owner: TBD
 # seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
 --- a/transformer_engine/pytorch/quantization.py
