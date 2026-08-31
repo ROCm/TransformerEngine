@@ -62,6 +62,16 @@ jobs:
         run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py gen --verify
       - name: Overlay assembles and compiles (no binaries needed for check/py_compile of the tree)
         run: python3 proposals/te-rocm-plugin/tools/assemble_overlay.py check
+      - name: ABI-002 enum drift (pybind_helper vs public header, both branches)
+        run: python3 proposals/te-rocm-plugin/tools/check_pybind_enums.py
+      - name: Origin ledger is fresh (regenerating changes nothing)
+        run: |
+          python3 proposals/te-rocm-plugin/tools/origin_ledger.py --out /tmp/ledger.json
+          python3 -c "
+          import json
+          a = json.load(open('proposals/te-rocm-plugin/origin-ledger.json')); b = json.load(open('/tmp/ledger.json'))
+          assert a == b, 'origin-ledger.json is stale - regenerate with tools/origin_ledger.py'
+          print('ledger fresh:', a['counts'])" 
 
   job-b-upstream-main:
     if: github.event_name == 'schedule'

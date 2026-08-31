@@ -198,21 +198,21 @@ kernel's paired test.
 
 | Exit | `assemble_overlay.py --cxx` builds a `common/` tree that compiles and passes `ci/core.sh` bit-for-bit equivalent to the pre-S4 tree (compare test outputs, not binaries). |
 
-### S4.3 · Library identity — 2 days `[DECIDED: one repo]`
+### S4.3 · Library identity — **DONE 2026-09-01** `[DECIDED: one repo]`: `OUTPUT_NAME transformer_engine_rocm` + `SOVERSION 1` under the ROCm guard; loader resolves the exact ROCm name when `te_rocm_build` (mixed install stays loud via Multiple-files refusal); verified: import resolves `libtransformer_engine_rocm.so`, core_abi 1, P6 23/23 from the rebuilt overlay. SOVERSION wheel-payload behavior to be confirmed at the S4.6/S4.7 wheel rebuild
 
 `OUTPUT_NAME libtransformer_engine_rocm` in `common/CMakeLists.txt`; `so_prefix` in
 `common/__init__.py` follows; keep `INSTALL_RPATH "$ORIGIN/…"`. Versioned `SOVERSION` for hygiene —
 but per F13 the *enforced* identity is S3.3's load-time `nvte_rocm_core_abi_version()` check, not
 the SONAME. Bump the ABI version on any change to a symbol the extension or the ctypes callers use.
 
-### S4.4 · Origin ledger — 2 days
+### S4.4 · Origin ledger — **DONE 2026-09-01**: `tools/origin_ledger.py` -> `origin-ledger.json` (275 files under common/: 94 diverged / 123 identical / 58 rocm-only; strategies joined from cxx-strategy.yaml; patch_ids joined from the queue - CXX-* ids join in S4.2). Regenerated per pin bump; ledger diff = intake report
 
 Generated, not hand-written: for every file under `common/` that has an ancestor in the submodule,
 `origin-ledger.json` records `{fork_path, upstream_path, upstream_blob_at_pin, cxx_strategy,
 patch_ids}`. Files under the ROCm-only trees record `upstream: null`. Regenerated per pin bump; a
 diff of the ledger *is* the C++ upstream-intake report.
 
-### S4.5 · `pybind_helper.h` (ABI-002) — 1 day
+### S4.5 · `pybind_helper.h` (ABI-002) — **DONE 2026-09-01, by check not codegen** (deliberate deviation, recorded in the tool header: codegen on a hipified upstream-shared header would grow divergence; `tools/check_pybind_enums.py` asserts per-branch member-set equality between the public header and the binding — negative-tested — and runs as a blocking governance-CI step). Compile-into-extension-target moves with S4.2/S4.6; enum keeps both member sets until HDR-B2
 
 Decision from the S0 exit requirement, now implemented: the header is compiled into the **torch
 extension target**, and its enum member lists are generated from the backend's public headers so

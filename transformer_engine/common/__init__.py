@@ -112,7 +112,11 @@ def _get_shared_object_file(library: str) -> Path:
     # Check provided input and determine the correct prefix for .so.
     assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
     if library == "core":
-        so_prefix = "libtransformer_engine"
+        # ROCm library identity (S4.3): the core is libtransformer_engine_rocm. Resolving the
+        # exact ROCm name (not the upstream prefix, which would also prefix-match this file)
+        # keeps a mixed install loud: with an NVIDIA core present the upstream prefix matches
+        # both files and _find_shared_object_in_te_dir refuses with "Multiple files found".
+        so_prefix = "libtransformer_engine_rocm" if te_rocm_build else "libtransformer_engine"
     elif te_rocm_build and library == "torch":
         # ROCm seam (P2): the PyTorch extension is built as transformer_engine_rocm_torch.
         so_prefix = f"transformer_engine_rocm_{library}"

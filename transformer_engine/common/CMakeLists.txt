@@ -931,7 +931,13 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
-  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+  # Library identity (plugin plan S4.3): the ROCm core is its own artifact, not a build variant
+  # of upstream's. SOVERSION is hygiene only - per plan F13 the ENFORCED identity is the
+  # load-time nvte_rocm_core_abi_version() check (nothing binds by SONAME); keep the two in step.
+  set_target_properties(transformer_engine PROPERTIES
+                        OUTPUT_NAME transformer_engine_rocm
+                        SOVERSION 1
+                        INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")

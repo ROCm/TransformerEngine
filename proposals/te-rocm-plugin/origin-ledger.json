@@ -1,0 +1,2223 @@
+{
+ "pin": "868d8d9216da361c666519652115e23688db5211",
+ "generated_by": "tools/origin_ledger.py",
+ "schema": 1,
+ "counts": {
+  "diverged": 94,
+  "identical": 123,
+  "rocm-only": 58
+ },
+ "files": [
+  {
+   "fork_path": "transformer_engine/common/__init__.py",
+   "upstream_path": "transformer_engine/common/__init__.py",
+   "upstream_blob_at_pin": "231680321eb76d4d2bc5c9adb22154c89c6234d7",
+   "state": "diverged",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": [
+    "CM-002"
+   ]
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/activation_template.h",
+   "upstream_path": "transformer_engine/common/activation/activation_template.h",
+   "upstream_blob_at_pin": "ffbffafd1a1d402933486ea60c266594902ee9fe",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/gelu.cu",
+   "upstream_path": "transformer_engine/common/activation/gelu.cu",
+   "upstream_blob_at_pin": "6bd63672caaaa9ae1ea1ba2044b43532e037edaf",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/gelu_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/gelu_dbias.cu",
+   "upstream_blob_at_pin": "4eaa9e355b346c1f11ab33e8dfc9094b3223c874",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/gelu_grouped.cu",
+   "upstream_path": "transformer_engine/common/activation/gelu_grouped.cu",
+   "upstream_blob_at_pin": "c3267356f8e70d2b6e6508c6f61d537aaffcefda",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/gelu_grouped_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/gelu_grouped_dbias.cu",
+   "upstream_blob_at_pin": "e8b549f692ed8fc1ce71f620baa539b2a2d2300d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/glu.cu",
+   "upstream_path": "transformer_engine/common/activation/glu.cu",
+   "upstream_blob_at_pin": "45a6670672d1659bd9670095a34fff3d7e9f4a94",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/relu.cu",
+   "upstream_path": "transformer_engine/common/activation/relu.cu",
+   "upstream_blob_at_pin": "57222262f32f489e0f624ecedb1d76d73a089b79",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/relu_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/relu_dbias.cu",
+   "upstream_blob_at_pin": "bd14dc6c9e09e5608b3ca7f5218a91570dcf15af",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/relu_grouped.cu",
+   "upstream_path": "transformer_engine/common/activation/relu_grouped.cu",
+   "upstream_blob_at_pin": "93ce6b82fe60dd9e3523b89deec5822b2ab9eb46",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/relu_grouped_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/relu_grouped_dbias.cu",
+   "upstream_blob_at_pin": "2b9dcd35d485e0fd7fd959f4a4bcdefc20102638",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/scaled_activation.cu",
+   "upstream_path": "transformer_engine/common/activation/scaled_activation.cu",
+   "upstream_blob_at_pin": "4dce3185e09f261a7fc4623a970c7c0e13316f71",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/scaled_activation.h",
+   "upstream_path": "transformer_engine/common/activation/scaled_activation.h",
+   "upstream_blob_at_pin": "391bff684113791fe003d7fb09f71548259b4473",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/scaled_srelu.cu",
+   "upstream_path": "transformer_engine/common/activation/scaled_srelu.cu",
+   "upstream_blob_at_pin": "2e81bab6693508208d442a818e6cf431b89cf4b9",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/scaled_swiglu.cu",
+   "upstream_path": "transformer_engine/common/activation/scaled_swiglu.cu",
+   "upstream_blob_at_pin": "ee0692b1de7b6a8756004c24c344a74a4e706e6a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/swiglu.cu",
+   "upstream_path": "transformer_engine/common/activation/swiglu.cu",
+   "upstream_blob_at_pin": "7120a7eb6f5bd9cff9a3823748d4d7b17a42d15f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/swiglu_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/swiglu_dbias.cu",
+   "upstream_blob_at_pin": "0e532acc57d82a8ba34a2d7ab489fffb54594ecb",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/swiglu_grouped.cu",
+   "upstream_path": "transformer_engine/common/activation/swiglu_grouped.cu",
+   "upstream_blob_at_pin": "160ab662882f1e1cff98392ce2fc7e3ea7ab2803",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/activation/swiglu_grouped_dbias.cu",
+   "upstream_path": "transformer_engine/common/activation/swiglu_grouped_dbias.cu",
+   "upstream_blob_at_pin": "83d15e8024c34f2562fc25f3cd9f2151fc6db9f3",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/amd_detail/hip_float8.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/amd_detail/system.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/cast.cu",
+   "upstream_path": "transformer_engine/common/cast/cast.cu",
+   "upstream_blob_at_pin": "1e3c04573becbfd0f2a6f484dbdc3d7a530495cc",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/cast_dbias.cu",
+   "upstream_path": "transformer_engine/common/cast/cast_dbias.cu",
+   "upstream_blob_at_pin": "480e8ca7447c5fc73cdf17017750b7750d84f866",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/cast_grouped.cu",
+   "upstream_path": "transformer_engine/common/cast/cast_grouped.cu",
+   "upstream_blob_at_pin": "c48d94666e9fd9c95db98d7c841dc0399635dc51",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/cast_grouped_dbias.cu",
+   "upstream_path": "transformer_engine/common/cast/cast_grouped_dbias.cu",
+   "upstream_blob_at_pin": "5290255a00fb234f4ae58ad1d429d75a21e32a8d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/core/common.cuh",
+   "upstream_path": "transformer_engine/common/cast/core/common.cuh",
+   "upstream_blob_at_pin": "84749b0d0e6ee41d550ad90255706ef39e3b1320",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/core/grouped_layout.cuh",
+   "upstream_path": "transformer_engine/common/cast/core/grouped_layout.cuh",
+   "upstream_blob_at_pin": "8337e4481587ec552f14635aaa0c029612f23687",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/core/grouped_tma.cuh",
+   "upstream_path": "transformer_engine/common/cast/core/grouped_tma.cuh",
+   "upstream_blob_at_pin": "7ff501bb4938e0e3879954fb337a151db7d9cc73",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/dispatch/dequantize.cuh",
+   "upstream_path": "transformer_engine/common/cast/dispatch/dequantize.cuh",
+   "upstream_blob_at_pin": "bf4a0218118d627c4a1d7783c816f49c151a2881",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/dispatch/gated.cuh",
+   "upstream_path": "transformer_engine/common/cast/dispatch/gated.cuh",
+   "upstream_blob_at_pin": "06e8f0e306cd374a19995087a0ab50ece5b89b28",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/dispatch/quantize.cuh",
+   "upstream_path": "transformer_engine/common/cast/dispatch/quantize.cuh",
+   "upstream_blob_at_pin": "033d464bcfcd13867de1cad4c7dbf746696fac8e",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/dequantize_fp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8/dequantize_fp8.cuh",
+   "upstream_blob_at_pin": "6a0eaf94fb44403f8064dd89c57f66dc76fdd067",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/gated_fp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8/gated_fp8.cuh",
+   "upstream_blob_at_pin": "522a9add8f1d6dbc636685b60860f9b40ce39e83",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/group_amax_fp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8/group_amax_fp8.cuh",
+   "upstream_blob_at_pin": "5040f153812012ee1a5a4f0f76963948b96cdf9a",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/group_quantize_fp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8/group_quantize_fp8.cuh",
+   "upstream_blob_at_pin": "5186794dd7f43cdf83029ae2a01f796f216f6ffb",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/quantize_fp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8/quantize_fp8.cuh",
+   "upstream_blob_at_pin": "bad10c954eb7e85dbef384259ebaf435684bd996",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8/rocm_cast.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8_blockwise/group_dequantize_fp8_blockwise.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8_blockwise/group_dequantize_fp8_blockwise.cuh",
+   "upstream_blob_at_pin": "556dcad42815c145726742c44ccda04c8cee9de5",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/fp8_blockwise/group_quantize_fp8_blockwise.cuh",
+   "upstream_path": "transformer_engine/common/cast/fp8_blockwise/group_quantize_fp8_blockwise.cuh",
+   "upstream_blob_at_pin": "1fd1738f93a8aedd83a1286a531a06f74a576c7d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp4/cast_transpose_mxfp4_shuffled.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp4/quantize_mxfp4.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh",
+   "upstream_blob_at_pin": "1face261bd64ea2dae6868a9cb51f663edd2921f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/gated_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/gated_mxfp8.cuh",
+   "upstream_blob_at_pin": "83b5a49caed706916275cfad08d7aedfe8f9a836",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/group_dequantize_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/group_dequantize_mxfp8.cuh",
+   "upstream_blob_at_pin": "dad8d18d6f8673177d80acc44108e424761ed099",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/group_quantize_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/group_quantize_mxfp8.cuh",
+   "upstream_blob_at_pin": "14832573d7f31a107ca2ee70417deb3463e5659a",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh",
+   "upstream_blob_at_pin": "a9da143c3cf232cedb7d828fccd7b8dc725ba6b9",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/rocm_dequantize_mxfp8.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/rocm_gated_mxfp8.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/rocm_group_dequantize_mxfp8.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/rocm_quantize_mxfp8.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/rocm_vectorized_2d.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/specialized/quantize_mxfp8.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/specialized/quantize_mxfp8.cuh",
+   "upstream_blob_at_pin": "9459f0273a3f291d8f3a8c5d670d907a118bd67e",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/specialized/state_counter.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/specialized/state_counter.cuh",
+   "upstream_blob_at_pin": "5e68b3760c516ac814b4ac3c6511d861ecf9a34b",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/specialized/swizzle.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/specialized/swizzle.cuh",
+   "upstream_blob_at_pin": "dc2d650e7c2c45a7d7067d003a4edd54dbfafd11",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/mxfp8/swizzle.cuh",
+   "upstream_path": "transformer_engine/common/cast/mxfp8/swizzle.cuh",
+   "upstream_blob_at_pin": "e3876eb908e4f3d4ac4e256e55e937324c3d8ff4",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/core_nvfp4.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/core_nvfp4.cuh",
+   "upstream_blob_at_pin": "3820430d5bac5a1b4625a34fdfa3ab47de3f021f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh",
+   "upstream_blob_at_pin": "13bb01d50077f60b63f636b4cb90c08981fe0631",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh",
+   "upstream_blob_at_pin": "91c6af26b512fe590211312854c7a580c08549da",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/quantize_4over6_nvfp4.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/quantize_4over6_nvfp4.cuh",
+   "upstream_blob_at_pin": "50776a3ed6a10a0b3ac8469991c94b900e516026",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/quantize_transpose_nvfp4.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/quantize_transpose_nvfp4.cuh",
+   "upstream_blob_at_pin": "3a34c76de81b1464a9b8f87b8b7d7b6c21747cf1",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/rowwise_amax_nvfp4.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/specialized/quantize_transpose_nvfp4_tuned_1D.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/specialized/quantize_transpose_nvfp4_tuned_1D.cuh",
+   "upstream_blob_at_pin": "8f37229fd5b4cc0c3bed2a0b94b1cece03e32d4c",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cast/nvfp4/swizzle.cuh",
+   "upstream_path": "transformer_engine/common/cast/nvfp4/swizzle.cuh",
+   "upstream_blob_at_pin": "6e82974b6052dcc599e028712dd4616b63de3900",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/check_aiter_mha_args.py",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "fork-only-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/include/ck_fused_attn/ck_fused_attn.hpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/src/ck_fused_attn_bwd.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/src/ck_fused_attn_fwd.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/src/ck_fused_attn_utils.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ck_fused_attn/src/ck_fused_attn_utils.hpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm/comm_gemm.cpp",
+   "upstream_path": "transformer_engine/common/comm_gemm/comm_gemm.cpp",
+   "upstream_blob_at_pin": "3545347da47b52f76f9020d4047740e1a2e613e0",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/comm_gemm_overlap.cpp",
+   "upstream_path": "transformer_engine/common/comm_gemm_overlap/comm_gemm_overlap.cpp",
+   "upstream_blob_at_pin": "2eda743af995c643c1cb5b303fa66aa86219a170",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/rocm_comm_gemm_overlap.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/ipcsocket.h",
+   "upstream_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/ipcsocket.h",
+   "upstream_blob_at_pin": "985bc383b851397dd37ae870611547f3b83b51f9",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp",
+   "upstream_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp",
+   "upstream_blob_at_pin": "c8d5977fb0ef0e0b46e01dcdacf319b9dacfb956",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.cu",
+   "upstream_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.cu",
+   "upstream_blob_at_pin": "4bbbfc3c194b0ddcda2237e000c6ebbd2a10a022",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.h",
+   "upstream_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.h",
+   "upstream_blob_at_pin": "52be0af5386075327ee261d47f1b40486ea6b7e2",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/common.cu",
+   "upstream_path": "transformer_engine/common/common.cu",
+   "upstream_blob_at_pin": "ef757bac5fcfddef3e843822bcca1faf2d3cf070",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/common.h",
+   "upstream_path": "transformer_engine/common/common.h",
+   "upstream_blob_at_pin": "eb4dcc055c846493a48ac32ed173de6266ae210f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cudnn_utils.cpp",
+   "upstream_path": "transformer_engine/common/cudnn_utils.cpp",
+   "upstream_blob_at_pin": "05ee35ccc7fddf9e853f6b5c8d22658479eb1b8c",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/cudnn_utils.h",
+   "upstream_path": "transformer_engine/common/cudnn_utils.h",
+   "upstream_blob_at_pin": "0777d1e03d05cccab71fd38ec2b2dcc7fa9c7ebb",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/dropout/dropout.cu",
+   "upstream_path": "transformer_engine/common/dropout/dropout.cu",
+   "upstream_blob_at_pin": "b20b76bbf62783c2d71e270e8500860ee445e5c6",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ep/ep_api.cpp",
+   "upstream_path": "transformer_engine/common/ep/ep_api.cpp",
+   "upstream_blob_at_pin": "0981289ffe6aae7c36cd475239e201e72b9af0fe",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ep/ep_backend.cpp",
+   "upstream_path": "transformer_engine/common/ep/ep_backend.cpp",
+   "upstream_blob_at_pin": "a82ec1c98deee0451798d2749ae4073a8abc86a5",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/ep/ep_backend.h",
+   "upstream_path": "transformer_engine/common/ep/ep_backend.h",
+   "upstream_blob_at_pin": "80c9b9cea38ba15924daf4c685d5d5ee5be02994",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/context_parallel.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/context_parallel.cu",
+   "upstream_blob_at_pin": "0f7b820bbd6617e84555db88c48138b25b030d70",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/flash_attn.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/flash_attn.cu",
+   "upstream_blob_at_pin": "38bf09f8105dbc29467c6bbe2944146479ee5bd7",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/fused_attn.cpp",
+   "upstream_path": "transformer_engine/common/fused_attn/fused_attn.cpp",
+   "upstream_blob_at_pin": "fc217712977adca5a2b9e5e427298d87dc444842",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/fused_attn_f16_arbitrary_seqlen.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/fused_attn_f16_arbitrary_seqlen.cu",
+   "upstream_blob_at_pin": "bf34758a35250716a5f92faee6baa095618f8ea3",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/fused_attn_f16_arbitrary_seqlen.h",
+   "upstream_path": "transformer_engine/common/fused_attn/fused_attn_f16_arbitrary_seqlen.h",
+   "upstream_blob_at_pin": "8f79b5bb4a8c68bf2450b2021944c82a9372d4ef",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/fused_attn_fp8.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/fused_attn_fp8.cu",
+   "upstream_blob_at_pin": "000af41aeee76bc621f234666c55e2173128381f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/fused_attn_fp8.h",
+   "upstream_path": "transformer_engine/common/fused_attn/fused_attn_fp8.h",
+   "upstream_blob_at_pin": "b9660128ca3ffb1666cd9e77b4849028160fecbe",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/kv_cache.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/kv_cache.cu",
+   "upstream_blob_at_pin": "52b46a9774665924da6c32cbb86f3106b8355d84",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/utils.cu",
+   "upstream_path": "transformer_engine/common/fused_attn/utils.cu",
+   "upstream_blob_at_pin": "9b54a64cbe75bf6213aded2268651d0eba3c4bb9",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn/utils.h",
+   "upstream_path": "transformer_engine/common/fused_attn/utils.h",
+   "upstream_blob_at_pin": "1864f9417d30a846f669380094152640140b1e4b",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/fused_attn.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/fused_attn_aotriton.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/fused_attn_aotriton.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/fused_attn_ck.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/fused_attn_ck.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/utils.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_attn_rocm/utils.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_rope/fused_rope.cu",
+   "upstream_path": "transformer_engine/common/fused_rope/fused_rope.cu",
+   "upstream_blob_at_pin": "27dc11ab435f4e5113febf9ee7ec94f17ea90efe",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_router/async_loader.h",
+   "upstream_path": "transformer_engine/common/fused_router/async_loader.h",
+   "upstream_blob_at_pin": "32647f15450eacdbd0b6341d93861d0d3108b3eb",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_router/fused_moe_aux_loss.cu",
+   "upstream_path": "transformer_engine/common/fused_router/fused_moe_aux_loss.cu",
+   "upstream_blob_at_pin": "9fb5adcc1f4996f9c0587f627c46492111874f4f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
+   "upstream_path": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
+   "upstream_blob_at_pin": "4156a5dfc96ef4cea6149dfdf5cee930791a0794",
+   "state": "diverged",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
+   "upstream_path": "transformer_engine/common/fused_router/fused_topk_with_score_function.cu",
+   "upstream_blob_at_pin": "cd8eca05e07b83c94fd47d1d1c6225389bae6ffb",
+   "state": "diverged",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_router/utils.h",
+   "upstream_path": "transformer_engine/common/fused_router/utils.h",
+   "upstream_blob_at_pin": "117828a70426a4f53eb34834be361c3d70f44414",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu",
+   "upstream_path": "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu",
+   "upstream_blob_at_pin": "1f8e74847966c8b7a61ff6d3bda35bd7be793361",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_softmax/scaled_masked_softmax.cu",
+   "upstream_path": "transformer_engine/common/fused_softmax/scaled_masked_softmax.cu",
+   "upstream_blob_at_pin": "6f295ad00a1ec0245918abc959cb079ed48ac5bf",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu",
+   "upstream_path": "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu",
+   "upstream_blob_at_pin": "c18444f646075c8093ce45a411624e6a08f19521",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_common.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_impl.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nn.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_mx_grouped_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/config.cpp",
+   "upstream_path": "transformer_engine/common/gemm/config.cpp",
+   "upstream_blob_at_pin": "de533909f6abd7266e0f834529dfc3efff2d1346",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/config.h",
+   "upstream_path": "transformer_engine/common/gemm/config.h",
+   "upstream_blob_at_pin": "eed47e23d9d5ebd5e727d39a700e5b38b43fe93d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/cublaslt_gemm.cu",
+   "upstream_path": "transformer_engine/common/gemm/cublaslt_gemm.cu",
+   "upstream_blob_at_pin": "a0529c80c03ceb4d36d16cbd967ab8393d8bd5b6",
+   "state": "diverged",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/cublaslt_grouped_gemm.cu",
+   "upstream_path": "transformer_engine/common/gemm/cublaslt_grouped_gemm.cu",
+   "upstream_blob_at_pin": "3997e5249daa555c49c52b1b54d5f0dc226daba8",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/cutlass_grouped_gemm.cu",
+   "upstream_path": "transformer_engine/common/gemm/cutlass_grouped_gemm.cu",
+   "upstream_blob_at_pin": "ef720d1984fcb923bc76f74cdf65f3ab71275951",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/cutlass_grouped_gemm.cuh",
+   "upstream_path": "transformer_engine/common/gemm/cutlass_grouped_gemm.cuh",
+   "upstream_blob_at_pin": "aa2bde42032ef2ce3d7efec14c4e0acb5bd27763",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna3/blockwise_fp8_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna3/blockwise_fp8_gemm_helper.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/blockwise_fp8_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/blockwise_fp8_gemm_helper.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/fused_ag_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/fused_ag_gemm_nn.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/fused_ag_gemm_tn.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/cdna4/mxfp8_gemm.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/fused_ag_gemm.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/kittens_common.cpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/kittens_common.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/kittens/kittens_kernel_common.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/gemm/rocm_gemm.cu",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/customized_pipeline.cuh",
+   "upstream_path": "transformer_engine/common/hadamard_transform/customized_pipeline.cuh",
+   "upstream_blob_at_pin": "11754fbb50a1d3a530dda08b1449e1d2584da2b1",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/graph_safe_group_hadamard_transform.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/graph_safe_group_hadamard_transform.cu",
+   "upstream_blob_at_pin": "2316d9697ae06e831a332184fde434f52745cc1f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_blob_at_pin": "d5dbd0bd820328d9d4cac362548c08a09cb62f5a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/group_hadamard_transform.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/group_hadamard_transform.cu",
+   "upstream_blob_at_pin": "24d06e5d25ef5fe47c9d28572e283b9ef143a8f8",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/group_hadamard_transform_cast_fusion.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/group_hadamard_transform_cast_fusion.cu",
+   "upstream_blob_at_pin": "e2325dd0fc211e93d0b5c1aa187de3d5071f400c",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_blob_at_pin": "cab0b385898fb10c7851dbea0e4951c57dd15792",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/hadamard_transform.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/hadamard_transform.cu",
+   "upstream_blob_at_pin": "b5160cd317bb0b751da4d257af1671dba2aa5f33",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/hadamard_transform_cast_fusion.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/hadamard_transform_cast_fusion.cu",
+   "upstream_blob_at_pin": "50b9f63bdd1a2b330c1e68f31ceba30539c98987",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/hadamard_transform_utils.cuh",
+   "upstream_path": "transformer_engine/common/hadamard_transform/hadamard_transform_utils.cuh",
+   "upstream_blob_at_pin": "f86061abb0ce12cdfd0b0048271a74b2fc65217f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_path": "transformer_engine/common/hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu",
+   "upstream_blob_at_pin": "479922a9bf8b7a91d77aa29a62d98af8b0fb1974",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/hadamard_transform/wht16.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/activation.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/activation.h",
+   "upstream_blob_at_pin": "3df84954bfae143ebf340a97561a8b036784dd9a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/cast.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/cast.h",
+   "upstream_blob_at_pin": "554d8c1ac9147dfda3ed5f3e76dab1566301309e",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/cast_transpose_noop.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/cast_transpose_noop.h",
+   "upstream_blob_at_pin": "d21a28e521ddbe226c2db1385a629ea1423e7be4",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/comm_gemm.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/comm_gemm.h",
+   "upstream_blob_at_pin": "65d3aa5d9e964fa2d3689031efabb4d38b67799a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/comm_gemm_overlap.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/comm_gemm_overlap.h",
+   "upstream_blob_at_pin": "b1a7447f2a63e7dc729995f10d262795de10b39f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/comm_window.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/comm_window.h",
+   "upstream_blob_at_pin": "424c350bbd5cf7e1f3c2ea7e67995cba0ec76258",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/cudnn.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/cudnn.h",
+   "upstream_blob_at_pin": "ce44f87d9e84e4c1e4ea005a0d15cfe29ce76b18",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/dropout.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/dropout.h",
+   "upstream_blob_at_pin": "57866abcdb86206d94f564648bfd164b360658d0",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/ep.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/ep.h",
+   "upstream_blob_at_pin": "224622fd417a0e25f154677f0c2e76f1e17ff173",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/fused_attn.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/fused_attn.h",
+   "upstream_blob_at_pin": "41e4b136bdda5a592cc8e15869fa61fa1cd99c01",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/fused_rope.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/fused_rope.h",
+   "upstream_blob_at_pin": "aea5256a2cbf7875afa860dd718cd891c85f9857",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/fused_router.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/fused_router.h",
+   "upstream_blob_at_pin": "03fec2eb2c1de81af5ab99759a9738866e8290e6",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/gemm.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/gemm.h",
+   "upstream_blob_at_pin": "a99e0946ef0660dbd2a60e05502142b571e193fd",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/hadamard_transform.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/hadamard_transform.h",
+   "upstream_blob_at_pin": "8f1a213cec156fcc1a2bc991364e87047ceda512",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/multi_stream.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/multi_stream.h",
+   "upstream_blob_at_pin": "013a424941e90bdc34f74ca43180dea75a77d158",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/multi_tensor.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/multi_tensor.h",
+   "upstream_blob_at_pin": "09ab260f15bc908547f480b34a235141ac46f97e",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/newton_schulz.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/newton_schulz.h",
+   "upstream_blob_at_pin": "bea8e32b1ef72814fdd94e2d406ced761693377c",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/normalization.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/normalization.h",
+   "upstream_blob_at_pin": "29b98ca54f1c2acb8db567d8ac59327253e5eae9",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/nvte_rocm.h",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/padding.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/padding.h",
+   "upstream_blob_at_pin": "13775b65a5ea951e3856a5e492361e445b95e49f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/permutation.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/permutation.h",
+   "upstream_blob_at_pin": "1fb1963512a136f9a29befd82142da21a4986932",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/recipe.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/recipe.h",
+   "upstream_blob_at_pin": "47539a89a17f921c12f5599ea5f6c87e63ab4f44",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/softmax.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/softmax.h",
+   "upstream_blob_at_pin": "e8883017a09ed1a472b56e02e712fe6bee8d787e",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/swizzle.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/swizzle.h",
+   "upstream_blob_at_pin": "396093b5439d7c9eb3d16f14b0b907c3123130e7",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/topk.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/topk.h",
+   "upstream_blob_at_pin": "3fe9c9447896e6554eb9a5e33f155e73e650267b",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/transformer_engine.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/transformer_engine.h",
+   "upstream_blob_at_pin": "aa0405e177355b4b447c87e121d9953d4616dd2c",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/transpose.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/transpose.h",
+   "upstream_blob_at_pin": "659a48d97dcffce3ee927cc2a6c4a36dbe31dda8",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/include/transformer_engine/utils.h",
+   "upstream_path": "transformer_engine/common/include/transformer_engine/utils.h",
+   "upstream_blob_at_pin": "fda49dd549901b467b2d535e44e9d6d7152a36b2",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/adam.cu",
+   "upstream_path": "transformer_engine/common/multi_tensor/adam.cu",
+   "upstream_blob_at_pin": "b2c8f29a13c9cd381de56a8925443b52780b2242",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/compute_scale.cu",
+   "upstream_path": "transformer_engine/common/multi_tensor/compute_scale.cu",
+   "upstream_blob_at_pin": "e6a5dc78ec848c4b0e04c18453df1d7828a3ff0a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/l2norm.cu",
+   "upstream_path": "transformer_engine/common/multi_tensor/l2norm.cu",
+   "upstream_blob_at_pin": "5c2fdb2ca8663e9cf6b077d5c352cd292ee54ee5",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/multi_tensor_apply.cuh",
+   "upstream_path": "transformer_engine/common/multi_tensor/multi_tensor_apply.cuh",
+   "upstream_blob_at_pin": "d6ac23d4aff4b06efe6e54f3a8360e556ebc008f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/scale.cu",
+   "upstream_path": "transformer_engine/common/multi_tensor/scale.cu",
+   "upstream_blob_at_pin": "fecf179e91640d3a5bfea2a8f269fab5ea9c462e",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/multi_tensor/sgd.cu",
+   "upstream_path": "transformer_engine/common/multi_tensor/sgd.cu",
+   "upstream_blob_at_pin": "369e70ed26f18a7d918e0d0ec2259035c18a37cc",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/newton_schulz/newton_schulz.cpp",
+   "upstream_path": "transformer_engine/common/newton_schulz/newton_schulz.cpp",
+   "upstream_blob_at_pin": "0d6426a1569f7fc52337d00bf11594af3f1fc830",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/common.cpp",
+   "upstream_path": "transformer_engine/common/normalization/common.cpp",
+   "upstream_blob_at_pin": "375b109c23c03083fd06ee1f40c7fd1bf151e800",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/common.h",
+   "upstream_path": "transformer_engine/common/normalization/common.h",
+   "upstream_blob_at_pin": "31a547f62ca203ebaf151d1559ddc594b70661e6",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/kernel_params.h",
+   "upstream_path": "transformer_engine/common/normalization/kernel_params.h",
+   "upstream_blob_at_pin": "42dc423dd0907df929827f021daac605e26e7a76",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/kernel_traits.h",
+   "upstream_path": "transformer_engine/common/normalization/kernel_traits.h",
+   "upstream_blob_at_pin": "41be82e74220f751ec245a03b1cf56768ab52b25",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/ln_api.cpp",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/ln_api.cpp",
+   "upstream_blob_at_pin": "0f843019ced68ee9fa0647f0f6791ce47ff2beb8",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/ln_bwd_kernels.cuh",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/ln_bwd_kernels.cuh",
+   "upstream_blob_at_pin": "0480b588b9ba61e15d5e3d87281ae84aa093e6c7",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/ln_bwd_semi_cuda_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/ln_bwd_semi_cuda_kernel.cu",
+   "upstream_blob_at_pin": "2e3d5fd622ef8232955b1165a4e4d64582216e0a",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/ln_fwd_cuda_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/ln_fwd_cuda_kernel.cu",
+   "upstream_blob_at_pin": "5be13357b195ccf69e8b8dee83a07bdbcfd9cdda",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/ln_fwd_kernels.cuh",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/ln_fwd_kernels.cuh",
+   "upstream_blob_at_pin": "0e350146ea75beef12be13714e39b4010c2c7ab2",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/rtc/ln_bwd_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/rtc/ln_bwd_kernel.cu",
+   "upstream_blob_at_pin": "f93f9e6edb43a1c80500326ed00ca6fe21bb60bc",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/layernorm/rtc/ln_fwd_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/layernorm/rtc/ln_fwd_kernel.cu",
+   "upstream_blob_at_pin": "5c34f05e8de381a221ee414eed566007864b5cf0",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_api.cpp",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_api.cpp",
+   "upstream_blob_at_pin": "07ad3230aa192a17cfa14056680d9751e32b7e69",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_kernels.cuh",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_kernels.cuh",
+   "upstream_blob_at_pin": "492edd65f655473ce0b7bcf8eaae64e6b52d7d31",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu",
+   "upstream_blob_at_pin": "7e8a1cd624184bf0309c491dfd02e52ea809a899",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu",
+   "upstream_blob_at_pin": "c3308cbce07fdc5f0c09c2851f37c40d2c9c134e",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_kernels.cuh",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_kernels.cuh",
+   "upstream_blob_at_pin": "bb284a9ab1d577f6ef2768d3b2c468f0693f2ab7",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu",
+   "upstream_blob_at_pin": "706e79870ba09ce138c61c28ec1d58103d96ec63",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu",
+   "upstream_path": "transformer_engine/common/normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu",
+   "upstream_blob_at_pin": "4d1bd10a7b96138bc004d9dbc492e823cfd876c8",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rtc_dispatch.cpp",
+   "upstream_path": "transformer_engine/common/normalization/rtc_dispatch.cpp",
+   "upstream_blob_at_pin": "5ae81f4233da23db8ddf1c0b734d93884958698f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/normalization/rtc_dispatch.h",
+   "upstream_path": "transformer_engine/common/normalization/rtc_dispatch.h",
+   "upstream_blob_at_pin": "314f150f7076000cee246d31a6dbfeceba60253d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/nvshmem_api/nvshmem_waitkernel.cu",
+   "upstream_path": "transformer_engine/common/nvshmem_api/nvshmem_waitkernel.cu",
+   "upstream_blob_at_pin": "f81062d63bdba632d91eb0b273f5fefe92a18e53",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/nvshmem_api/nvshmem_waitkernel.h",
+   "upstream_path": "transformer_engine/common/nvshmem_api/nvshmem_waitkernel.h",
+   "upstream_blob_at_pin": "1f757bc27082728b5ed3e302f2816d7b44a53c7f",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/nvtx.h",
+   "upstream_path": "transformer_engine/common/nvtx.h",
+   "upstream_blob_at_pin": "f3ff10cf060e07510259d200af12f24252ef44cd",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/permutation/permutation.cu",
+   "upstream_path": "transformer_engine/common/permutation/permutation.cu",
+   "upstream_blob_at_pin": "aa7cb50e8b229e3b6324374dde50418463cd8c8f",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/__init__.py",
+   "upstream_path": "transformer_engine/common/recipe/__init__.py",
+   "upstream_blob_at_pin": "8a03f2f51a22189560d8dbe30ad28c35fc6885f2",
+   "state": "diverged",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": [
+    "CM-003"
+   ]
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/current_scaling.cu",
+   "upstream_path": "transformer_engine/common/recipe/current_scaling.cu",
+   "upstream_blob_at_pin": "3ba51dba7547c2dafbc8cda4c082b20a570c25d9",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/delayed_scaling.cu",
+   "upstream_path": "transformer_engine/common/recipe/delayed_scaling.cu",
+   "upstream_blob_at_pin": "a0da551d0f762c44472d98507fadd3ffcd3bb188",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/fp8_block_scaling.cu",
+   "upstream_path": "transformer_engine/common/recipe/fp8_block_scaling.cu",
+   "upstream_blob_at_pin": "f69fd6c262ecbbcb8acb870d2cd3add7010942fe",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/mxfp8_scaling.cu",
+   "upstream_path": "transformer_engine/common/recipe/mxfp8_scaling.cu",
+   "upstream_blob_at_pin": "be692d4563340b450d3db07ad18ecd652135ab8c",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/nvfp4.cu",
+   "upstream_path": "transformer_engine/common/recipe/nvfp4.cu",
+   "upstream_blob_at_pin": "576e6139c7ee1a4662d5c4e6cc774e908643d4fd",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/recipe/recipe_common.cuh",
+   "upstream_path": "transformer_engine/common/recipe/recipe_common.cuh",
+   "upstream_blob_at_pin": "07839407a3fed94aef9d6e54bb3575e946a3b945",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/rocshmem_api/rocshmem_waitkernel.hip",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/rocshmem_api/rocshmem_waitkernel.hpp",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/swizzle/swizzle.cu",
+   "upstream_path": "transformer_engine/common/swizzle/swizzle.cu",
+   "upstream_blob_at_pin": "38b526360e60a0f22b2d88efecc781c41f3a4c84",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/swizzle/swizzle_block_scaling.cu",
+   "upstream_path": "transformer_engine/common/swizzle/swizzle_block_scaling.cu",
+   "upstream_blob_at_pin": "90bc3985a42d81bf1002d9de5ba62b25b5d9da91",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transformer_engine.cpp",
+   "upstream_path": "transformer_engine/common/transformer_engine.cpp",
+   "upstream_blob_at_pin": "b3179d38fd8c96a95740ec75318f3269eef9855b",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/cast_transpose.cu",
+   "upstream_path": "transformer_engine/common/transpose/cast_transpose.cu",
+   "upstream_blob_at_pin": "dd27fa83ee97773f2dfb1f31336e6289305471ab",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/cast_transpose.h",
+   "upstream_path": "transformer_engine/common/transpose/cast_transpose.h",
+   "upstream_blob_at_pin": "c462b3014751a700d96393fa27d2e2143e175f97",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/cast_transpose_fusion.cu",
+   "upstream_path": "transformer_engine/common/transpose/cast_transpose_fusion.cu",
+   "upstream_blob_at_pin": "619e60220e63e26a4f39411a90b0795c16c6de29",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/multi_cast_transpose.cu",
+   "upstream_path": "transformer_engine/common/transpose/multi_cast_transpose.cu",
+   "upstream_blob_at_pin": "33e1c19d8f32779577fde67b1f9e8b6462cfcfa5",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/quantize_transpose_square_blockwise.cu",
+   "upstream_path": "transformer_engine/common/transpose/quantize_transpose_square_blockwise.cu",
+   "upstream_blob_at_pin": "3a8536587c25698ef6b52fe1c5b0a9f8d892011a",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu",
+   "upstream_path": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu",
+   "upstream_blob_at_pin": "df869b433171da2d5d02a16302f9d4e9ae3be83c",
+   "state": "diverged",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu",
+   "upstream_path": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu",
+   "upstream_blob_at_pin": "d5f2fa9a2c8c927f769845c57da8df4d594a6968",
+   "state": "diverged",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rocm_cast_transpose.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rocm_multi_cast_transpose.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rtc/cast_transpose.cu",
+   "upstream_path": "transformer_engine/common/transpose/rtc/cast_transpose.cu",
+   "upstream_blob_at_pin": "e40c463a6b5064f9bc7c4b6f3a360a20e4a3bcb5",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu",
+   "upstream_path": "transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu",
+   "upstream_blob_at_pin": "49b533ffbda5a9cb0fc48e10be75e87bd280f4aa",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rtc/swap_first_dims.cu",
+   "upstream_path": "transformer_engine/common/transpose/rtc/swap_first_dims.cu",
+   "upstream_blob_at_pin": "0e045fabdbc64559e396b2b682ea47c84ea0162e",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/rtc/transpose.cu",
+   "upstream_path": "transformer_engine/common/transpose/rtc/transpose.cu",
+   "upstream_blob_at_pin": "fb4c9feba3d2d1c9d212160ed34b8305edbf920d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/swap_first_dims.cu",
+   "upstream_path": "transformer_engine/common/transpose/swap_first_dims.cu",
+   "upstream_blob_at_pin": "33346e5499b51cf25a3a33235169f0e2f0166d59",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/transpose.cu",
+   "upstream_path": "transformer_engine/common/transpose/transpose.cu",
+   "upstream_blob_at_pin": "49f133302415097f1a6f7409b03a6663b3c935e5",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/transpose.h",
+   "upstream_path": "transformer_engine/common/transpose/transpose.h",
+   "upstream_blob_at_pin": "36246f4abd9f9068b809ca311510e550bb0502ec",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/transpose/transpose_fusion.cu",
+   "upstream_path": "transformer_engine/common/transpose/transpose_fusion.cu",
+   "upstream_blob_at_pin": "cfb99d214efb24eb03b1f352ab83438ee7ec8b86",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/__init__.py",
+   "upstream_path": "transformer_engine/common/triton/__init__.py",
+   "upstream_blob_at_pin": "dd9011e50d07abf402fc5a8ca209694e85c6bbe6",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/cross_entropy.py",
+   "upstream_path": "transformer_engine/common/triton/cross_entropy.py",
+   "upstream_blob_at_pin": "afc2ad4854e514ce84bb8d81de5e632f16abb7cc",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/grouped_dbias_dscales.py",
+   "upstream_path": "transformer_engine/common/triton/grouped_dbias_dscales.py",
+   "upstream_blob_at_pin": "592d5ace9a7bf02ab12b2e68f1548cc63195e92d",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/mhc.py",
+   "upstream_path": "transformer_engine/common/triton/mhc.py",
+   "upstream_blob_at_pin": "965bb437ffbb17f53af9bb942972d7d3f73248b1",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/pad.py",
+   "upstream_path": "transformer_engine/common/triton/pad.py",
+   "upstream_blob_at_pin": "3c43e0c53af31c9e48008931a5545c031d992dec",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/triton/permutation.py",
+   "upstream_path": "transformer_engine/common/triton/permutation.py",
+   "upstream_blob_at_pin": "b3893843af28dcfc73a22c00724ad60268c428e4",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_driver.cpp",
+   "upstream_path": "transformer_engine/common/util/cuda_driver.cpp",
+   "upstream_blob_at_pin": "1e98528e52f9507a06d5038c334c65bacad72682",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_driver.h",
+   "upstream_path": "transformer_engine/common/util/cuda_driver.h",
+   "upstream_blob_at_pin": "16242347f12e6a8b1de1e635928aa50b5d485f0c",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_nvml.cpp",
+   "upstream_path": "transformer_engine/common/util/cuda_nvml.cpp",
+   "upstream_blob_at_pin": "25e1a5351977e612bcf6d27eccdaf3947eb715a9",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_nvml.h",
+   "upstream_path": "transformer_engine/common/util/cuda_nvml.h",
+   "upstream_blob_at_pin": "ad5a496253c792a58dd77e4126d1f6ec19598ccf",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_runtime.cpp",
+   "upstream_path": "transformer_engine/common/util/cuda_runtime.cpp",
+   "upstream_blob_at_pin": "504d761bb181f9f838099810f1d2e6270923784c",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/cuda_runtime.h",
+   "upstream_path": "transformer_engine/common/util/cuda_runtime.h",
+   "upstream_blob_at_pin": "0f3559400106e7d31cc6cbc2dc728a5ed0bc11ef",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/curanddx.hpp",
+   "upstream_path": "transformer_engine/common/util/curanddx.hpp",
+   "upstream_blob_at_pin": "6dd0b5717752c19a6c5e6bddc0dcac742cb3ca30",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/handle_manager.h",
+   "upstream_path": "transformer_engine/common/util/handle_manager.h",
+   "upstream_blob_at_pin": "1a538eaff024935cd3133accdaab29638c58d12a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/logging.h",
+   "upstream_path": "transformer_engine/common/util/logging.h",
+   "upstream_blob_at_pin": "da8b9b377d873ce5a1705a5ad2a7f5c98608fac8",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/math.h",
+   "upstream_path": "transformer_engine/common/util/math.h",
+   "upstream_blob_at_pin": "64b6fa2d48fa38a8d75839e58b1b4ccbe08775f1",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/multi_stream.cpp",
+   "upstream_path": "transformer_engine/common/util/multi_stream.cpp",
+   "upstream_blob_at_pin": "6b19f367415a5b3b457b06c1513c651bc5f57d45",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/multi_stream.h",
+   "upstream_path": "transformer_engine/common/util/multi_stream.h",
+   "upstream_blob_at_pin": "c82af7e744481c9dd9b3bf473cf5133e24fb6dbf",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/padding.cu",
+   "upstream_path": "transformer_engine/common/util/padding.cu",
+   "upstream_blob_at_pin": "67f98a130933d99cf988b05cbd65dd5998e4788c",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/ptx.cuh",
+   "upstream_path": "transformer_engine/common/util/ptx.cuh",
+   "upstream_blob_at_pin": "2814aa3490d816048e11f3d21cf425a45da83d54",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/pybind_helper.h",
+   "upstream_path": "transformer_engine/common/util/pybind_helper.h",
+   "upstream_blob_at_pin": "f7ffb5ad8db1f8db4cc3a90052936b9ebaf03db3",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/rocm_device_utils.cuh",
+   "upstream_path": null,
+   "upstream_blob_at_pin": null,
+   "state": "rocm-only",
+   "cxx_strategy": "native-hip",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/rtc.cpp",
+   "upstream_path": "transformer_engine/common/util/rtc.cpp",
+   "upstream_blob_at_pin": "20616f8cb682c33c58866004ca1898bdb0492fbb",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/rtc.h",
+   "upstream_path": "transformer_engine/common/util/rtc.h",
+   "upstream_blob_at_pin": "745566ee60dc8ec1b1d399d787fe26a51d318764",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/shared_lib_wrapper.h",
+   "upstream_path": "transformer_engine/common/util/shared_lib_wrapper.h",
+   "upstream_blob_at_pin": "e8abe68a2a031c4f8d0ab084d3df19c07969ce0a",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/splits_to_offsets.cu",
+   "upstream_path": "transformer_engine/common/util/splits_to_offsets.cu",
+   "upstream_blob_at_pin": "2a06603dafcea65932119ee0e3b226cbd0803c3b",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/standalone_topk.cuh",
+   "upstream_path": "transformer_engine/common/util/standalone_topk.cuh",
+   "upstream_blob_at_pin": "3d19cbfcf202052882947a4fb33fcc6eda86ad68",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/string.h",
+   "upstream_path": "transformer_engine/common/util/string.h",
+   "upstream_blob_at_pin": "28f825b0368fa47ecf8f7ce540700215826140a4",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/system.h",
+   "upstream_path": "transformer_engine/common/util/system.h",
+   "upstream_blob_at_pin": "90c984a46a5ab62516d63a5accfccb75e00ac3e2",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/topk.cu",
+   "upstream_path": "transformer_engine/common/util/topk.cu",
+   "upstream_blob_at_pin": "21018a494897ecb03f88a397eba4016b9a01620e",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/utils.cu",
+   "upstream_path": "transformer_engine/common/util/utils.cu",
+   "upstream_blob_at_pin": "39d82624632c748d6204df75819863e3fb28fee8",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/util/vectorized_pointwise.h",
+   "upstream_path": "transformer_engine/common/util/vectorized_pointwise.h",
+   "upstream_blob_at_pin": "7707c68a08f68b1051cfca01dbb3d1aff0dd7a1d",
+   "state": "identical",
+   "cxx_strategy": "identical-at-pin",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/utils.cuh",
+   "upstream_path": "transformer_engine/common/utils.cuh",
+   "upstream_blob_at_pin": "0b75da622cfefde151ec615b45ac6a355ff153d6",
+   "state": "diverged",
+   "cxx_strategy": "patch-queue",
+   "patch_ids": []
+  },
+  {
+   "fork_path": "transformer_engine/common/utils.py",
+   "upstream_path": "transformer_engine/common/utils.py",
+   "upstream_blob_at_pin": "acbb1ca5fb7cab2784fb1f796a9b75023d17a90e",
+   "state": "identical",
+   "cxx_strategy": "vendored-python",
+   "patch_ids": []
+  }
+ ],
+ "counts_strategy": {
+  "vendored-python": 9,
+  "identical-at-pin": 116,
+  "native-hip": 62,
+  "patch-queue": 87,
+  "fork-only-python": 1
+ }
+}

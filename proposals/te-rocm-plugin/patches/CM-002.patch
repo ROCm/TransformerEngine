@@ -21,17 +21,23 @@
  
  @functools.lru_cache(maxsize=None)
  def _is_package_installed(package) -> bool:
-@@ -110,6 +113,9 @@
+@@ -109,7 +112,14 @@
+     # Check provided input and determine the correct prefix for .so.
      assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
      if library == "core":
-         so_prefix = "libtransformer_engine"
+-        so_prefix = "libtransformer_engine"
++        # ROCm library identity (S4.3): the core is libtransformer_engine_rocm. Resolving the
++        # exact ROCm name (not the upstream prefix, which would also prefix-match this file)
++        # keeps a mixed install loud: with an NVIDIA core present the upstream prefix matches
++        # both files and _find_shared_object_in_te_dir refuses with "Multiple files found".
++        so_prefix = "libtransformer_engine_rocm" if te_rocm_build else "libtransformer_engine"
 +    elif te_rocm_build and library == "torch":
 +        # ROCm seam (P2): the PyTorch extension is built as transformer_engine_rocm_torch.
 +        so_prefix = f"transformer_engine_rocm_{library}"
      else:
          so_prefix = f"transformer_engine_{library}"
  
-@@ -130,13 +136,15 @@
+@@ -130,13 +140,15 @@
      )
  
  
@@ -48,7 +54,7 @@
      for package in te_core_packages:
          if _is_package_installed(package):
              return True, package, version(package)
-@@ -157,52 +165,100 @@
+@@ -157,52 +169,100 @@
      module_name = f"transformer_engine_{framework}"
  
      # Name of the pip extra dependency for framework extensions from PyPI.
@@ -161,7 +167,7 @@
          assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
          assert version("transformer-engine") == te_core_version, (
              "Transformer Engine package version mismatch. Found "
-@@ -214,7 +270,10 @@
+@@ -214,7 +274,10 @@
      elif te_installed_via_pypi:
          raise RuntimeError(
              "Found empty `transformer-engine` meta package installed. "
@@ -173,7 +179,7 @@
              "'pip3 install --no-build-isolation transformer-engine[pytorch,jax]==VERSION'"
              " or 'pip3 install transformer-engine[core]` for the TE core lib only. The `core_cu12`"
              " or `core_cu13` extra deps can be used to specify CUDA version for the TE core lib."
-@@ -353,6 +412,14 @@
+@@ -353,6 +416,14 @@
  
      raise RuntimeError(f"{lib_name} shared object not found.")
  
@@ -188,7 +194,7 @@
  
  @functools.lru_cache(maxsize=None)
  def _load_core_library():
-@@ -362,25 +429,78 @@
+@@ -362,25 +433,78 @@
  
  if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
      sanity_checks_for_pypi_installation()
