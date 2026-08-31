@@ -51,8 +51,10 @@ def snapshot() -> dict:
         "alias_identity": _safe(lambda: sys.modules.get("transformer_engine_torch")
                                 is sys.modules.get("transformer_engine_rocm_torch")),
     }
-    # overlay bundle, when running from an assembled overlay
-    om = root / "overlay-manifest.json"
+    # overlay bundle: package-dir copy (installed wheel) or overlay root (dev PYTHONPATH tree)
+    om = Path(te.__file__).resolve().parent / "_overlay_manifest.json"
+    if not om.exists():
+        om = root / "overlay-manifest.json"
     if om.exists():
         m = json.loads(om.read_text())
         out["overlay"] = {"bundle_hash": m["bundle_hash"], "upstream_sha": m["upstream_sha"],

@@ -121,7 +121,7 @@ This closes **ABI-001** as a work item: the two ctypes symbols become the first 
 deliberately tiny, versioned introspection API — plus `seam_inventory.py` gains a
 `_TE_LIB_CTYPES.<name>` scan so ctypes demand is never invisible again.
 
-### S3.4 · Packaging — 4 days `[DECIDED: names kept]`
+### S3.4 · Packaging — **DONE 2026-08-31** `[DECIDED: names kept]`: `NVTE_BUILD_OVERLAY=1` emits the pure-Python `transformer_engine` wheel (py3-none-any, provenance manifest in-package); core wheel python-tree-stripped in `build_wheels.sh` (shadowing hazard closed); torch extension stays sdist-shipped (wheel compiled from sdist verified); lifecycle T1-T5b all PASS (`tests/te_rocm/lifecycle.sh`, baselines/2026-08-31-lifecycle.json). JAX wheel arm deferred to S7 as planned
 
 Today: one Python distribution `transformer_engine` (source tree) + core wheel
 `transformer_engine_rocm{major}`. After:
@@ -146,7 +146,7 @@ runtime overrides, contract versions (all three), build-compat tuple, `IS_HIP_EX
 versions, GPU arch, and — once S6 exists — selected implementation per op with rejection reasons.
 Printed by `python -m transformer_engine.te_rocm`. This is what a bug report attaches.
 
-### S3.6 · CI — 3 days `[F20]`
+### S3.6 · CI wiring — **DONE 2026-08-31**: `.github/workflows/te-plugin-governance.yml` — blocking: branch-aware three-way pin identity, divergence reproduction, seam-name inventory (LayerNorm allowlisted), check_manifest, fingerprint self-check, patch staleness (`gen --verify`: apply-at-pin, byte-compare), overlay assemble+py_compile; nightly Job B (non-gating) = fingerprint drift vs upstream main. Lifecycle tests (`tests/te_rocm/lifecycle.sh`) run in the wheel pipeline instead — building any wheel, even the pure one, needs the ROCm toolchain (`rocm_build()`)
 
 Add to `rocm-ci.yml`: (a) the **branch-aware** three-way identity job — on `dev`, submodule HEAD ==
 manifest `upstream_sha` == `merge-base(upstream/main, HEAD)`; on `release_v*_rocm`, against

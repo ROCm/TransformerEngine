@@ -425,6 +425,52 @@ if __name__ == "__main__":
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
 
+    # Pure-Python overlay wheel (ROCm plugin plan S3.4): package the assembled overlay tree
+    # (vendored upstream at the pin + patch queue applied + fork-only files + provenance
+    # manifest) as distribution `transformer_engine`, py3-none-any. No extensions, no hipify,
+    # no CMake - rebuilt on every pin bump, and only this. Binaries come from the existing
+    # transformer_engine_rocm{major} / transformer_engine_rocm_torch wheels; this wheel does
+    # NOT hard-depend on them so a missing core fails loudly at import, not silently at pip.
+    if bool(int(os.getenv("NVTE_BUILD_OVERLAY", "0"))):
+        assert rocm_build(), "NVTE_BUILD_OVERLAY is a ROCm-plugin build mode"
+        overlay_dir = Path(
+            os.getenv("NVTE_OVERLAY_DIR", current_file_path / "build" / "overlay")
+        ).resolve()
+        assert (overlay_dir / "transformer_engine" / "_overlay_manifest.json").exists(), (
+            f"no assembled overlay at {overlay_dir}: run "
+            "proposals/te-rocm-plugin/tools/assemble_overlay.py build first"
+        )
+        setuptools.setup(
+            name="transformer_engine",
+            version=__version__,
+            package_dir={"": os.path.relpath(overlay_dir, current_file_path)},
+            packages=setuptools.find_packages(
+                where=str(overlay_dir),
+                include=["transformer_engine", "transformer_engine.*"],
+            ),
+            package_data={
+                "transformer_engine": ["_overlay_manifest.json"],
+                "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
+            },
+            include_package_data=False,
+            install_requires=["pydantic", "importlib-metadata>=1.0", "packaging"],
+            extras_require={
+                "rocm": [f"transformer_engine_rocm{rocm_version()[0]}=={__version__}"],
+                "rocm7": [f"transformer_engine_rocm7=={__version__}"],
+                "rocm10": [f"transformer_engine_rocm10=={__version__}"],
+                "pytorch": [f"transformer_engine_rocm_torch=={__version__}"],
+                "jax": [f"transformer_engine_rocm_jax=={__version__}"],
+            },
+            description="Transformer acceleration library",
+            long_description=long_description,
+            long_description_content_type="text/x-rst",
+            python_requires=f">={min_python_version_str()}",
+            classifiers=["Programming Language :: Python :: 3"],
+            license_files=("LICENSE",),
+            options={"egg_info": {"egg_base": "build"}},  # keep metadata out of the source tree
+        )
+        raise SystemExit(0)
+
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
         assert bool(

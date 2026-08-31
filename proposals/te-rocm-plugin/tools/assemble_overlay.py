@@ -296,7 +296,11 @@ def build(args, d, entries, base_sha: str, check_only: bool):
         "bundle_hash": bundle,
     }
     (tree / "overlay-manifest.json").write_text(json.dumps(manifest, indent=1))
-    print(f"bundle hash   : {bundle[:16]}...  -> {tree / 'overlay-manifest.json'}")
+    # Second copy INSIDE the package: the pure-Python wheel (setup.py NVTE_BUILD_OVERLAY=1,
+    # plan S3.4) packages only transformer_engine/, so provenance must live there - a loose
+    # site-packages file would be pollution. Diagnostics reads either location.
+    (tree / "transformer_engine" / "_overlay_manifest.json").write_text(json.dumps(manifest, indent=1))
+    print(f"bundle hash   : {bundle[:16]}...  -> {tree / 'overlay-manifest.json'} (+ package copy)")
     print(f"\nuse: PYTHONPATH={tree} python -c 'import transformer_engine.pytorch'")
 
 

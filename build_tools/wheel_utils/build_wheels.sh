@@ -63,9 +63,37 @@ if $BUILD_METAPACKAGE ; then
         mv dist/* /wheelhouse/
 fi
 
+# ROCm plugin split (plan S3.4): the pure-Python `transformer_engine` wheel is the assembled
+# overlay (vendored upstream at the pin + patch queue + fork-only files), py3-none-any. It is
+# rebuilt on every pin bump - and only it. Set BUILD_OVERLAY=false to skip (e.g. CUDA builds).
+BUILD_OVERLAY=${BUILD_OVERLAY:-$ROCM_BUILD}
+if $BUILD_OVERLAY && $ROCM_BUILD ; then
+        cd /TransformerEngine
+        pip install pyyaml
+        python proposals/te-rocm-plugin/tools/assemble_overlay.py build 2>&1 | tee /wheelhouse/logs/overlay.txt
+        NVTE_BUILD_OVERLAY=1 python setup.py bdist_wheel 2>&1 | tee -a /wheelhouse/logs/overlay.txt
+        mv dist/transformer_engine-*-py3-none-any.whl /wheelhouse/
+        rm -rf dist
+fi
+
 if $BUILD_COMMON -a $ROCM_BUILD ; then
         # Create the wheel.
         python setup.py bdist_wheel --verbose --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+
+        # Plugin split (plan S3.4): with the pure-Python overlay wheel shipping the Python tree,
+        # the core wheel must carry ONLY binaries/headers - a second copy of the .py tree would
+        # silently shadow the overlay on install (both wheels own transformer_engine/). Same
+        # unpack/repack pattern as the CUDA rename below; `wheel pack` regenerates RECORD.
+        if $BUILD_OVERLAY ; then
+                pip install wheel
+                STRIP_DIR=$(mktemp -d)
+                python -m wheel unpack dist/*.whl -d $STRIP_DIR
+                find $STRIP_DIR -name '*.py' -path '*/transformer_engine/*' -delete
+                find $STRIP_DIR -name '__pycache__' -type d -exec rm -rf {} +
+                rm dist/*.whl
+                python -m wheel pack $STRIP_DIR/* -d dist
+                rm -rf $STRIP_DIR
+        fi
 
         # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)

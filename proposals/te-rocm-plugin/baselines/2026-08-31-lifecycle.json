@@ -1,0 +1,24 @@
+{
+ "date": "2026-08-31",
+ "gate": "S3.4 lifecycle",
+ "wheelhouse": {
+  "transformer_engine": "2.18.0.dev0 py3-none-any (overlay: bundle 75619213aa62831b, 45 patches, 30 fork-only files incl te_rocm_diagnostics)",
+  "transformer_engine_rocm7": "2.18.0.dev0 cp312 linux_x86_64, python tree STRIPPED (0 .py, 7 .so)",
+  "transformer_engine_rocm_torch": "2.18.0.dev0 cp312, built from the release sdist (production path)"
+ },
+ "results": {
+  "T1_install": "PASS - pure wheel installs standalone",
+  "T2_core_loud_failure": "PASS - import without core refused loudly",
+  "T3_upgrade": "PASS - force-reinstall clean, single copy",
+  "T4_uninstall": "PASS - site-packages left clean",
+  "T5a_framework_loud_failure": "PASS - torch importable + no extension wheel -> refusal names transformer_engine_rocm_torch",
+  "T5b_full_stack": "PASS - pure+core+torch wheels import; seam resolves; core_abi=1 (NVTE_FRAMEWORK=pytorch)"
+ },
+ "notes": [
+  "runner: tests/te_rocm/lifecycle.sh <wheelhouse>; imports from neutral cwd (cwd-shadowing guard)",
+  "T5 venv provisions rocm runtime via zz_rocm_provider.pth -> invoking env's site (rocm_sdk wheels); --system-site-packages is wrong when the invoking python is itself a venv (chains to base python)",
+  "core wheel python-strip: build_wheels.sh unpack/repack (RECORD regenerated); locally verified via zipfile strip",
+  "torch wheel must NOT be built with NVTE_RELEASE_BUILD=1 directly (skips hipify -> compiles CUDA sources); production = sdist under RELEASE, wheel compiled from sdist",
+  "version identity: all three dists must agree; NVTE_NO_LOCAL_VERSION=1 strips the +sha local tag independently of NVTE_RELEASE_BUILD"
+ ]
+}
