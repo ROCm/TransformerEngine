@@ -219,7 +219,7 @@ extension target**, and its enum member lists are generated from the backend's p
 `EXTENSION_API`'s enum-value inventory and the binding cannot drift apart. `NVTE_Fused_Attn_Backend`
 keeps both member sets until HDR-B2 lands upstream.
 
-### S4.6 · Prebuilt extension wheels for the certified matrix — 3 days
+### S4.6 · Prebuilt extension wheels for the certified matrix — **COMPAT TUPLE DONE 2026-09-01**: extension embeds `_rocm_build_compat` (torch M.m + ROCm M.m; Python ABI via the cpython so-tag) and the loader refuses a mismatched torch at import (negative-tested: fake torch 9.9 -> loud refusal naming both sides and the remedy). **REMAINING**: rocm-wheels-build.yml matrix expansion (per torch x ROCm major x arch set) - infra-gated, needs the certified matrix list and runner capacity
 
 `transformer_engine_rocm_pytorch` built per (Python ABI × torch version × ROCm major × GPU-arch
 set) from the certified matrix (§3.2); sdist fallback. `rocm-wheels-build.yml` matrix expansion.

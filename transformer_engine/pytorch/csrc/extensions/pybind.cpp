@@ -579,6 +579,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
 #endif
+#if defined(USE_ROCM) && defined(NVTE_ROCM_BUILD_COMPAT)
+  // Build-compat tuple (plugin plan S4.6): what this extension was built against. The loader
+  // in common/__init__.py compares it with the runtime at import and refuses on mismatch.
+  m.attr("_rocm_build_compat") = NVTE_ROCM_BUILD_COMPAT;
+#endif
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
         py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,

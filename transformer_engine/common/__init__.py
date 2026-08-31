@@ -236,6 +236,23 @@ def load_framework_extension(framework: str) -> None:
     spec.loader.exec_module(solib)
     sys.modules[module_name] = solib  # the seam: upstream's name -> ROCm's module
 
+    # Build-compat check (plugin plan S4.6): a prebuilt extension carries the torch/ROCm it was
+    # built against; refuse a mismatched torch at import - the alternative is an ABI crash or
+    # silently wrong behavior deep in a kernel call. Absent attribute = pre-S4.6 build: allowed.
+    if te_rocm_build and framework == "torch":
+        compat = getattr(solib, "_rocm_build_compat", None)
+        if compat is not None:
+            import torch as _torch
+            _torch_mm = ".".join(_torch.__version__.split("+")[0].split(".")[:2])
+            built_torch = compat.split("-")[0].removeprefix("torch")
+            if built_torch != _torch_mm:
+                raise RuntimeError(
+                    f"TE_ROCM_BUILD_COMPAT mismatch: extension built for torch {built_torch}"
+                    f" ({compat}), runtime has torch {_torch_mm}. Install the"
+                    f" transformer_engine_rocm_torch wheel matching this torch, or rebuild"
+                    f" from the sdist."
+                )
+
 
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""

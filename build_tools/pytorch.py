@@ -90,6 +90,16 @@ def setup_pytorch_extension(
 
     # Compiler flags
     cxx_flags = ["-O3", "-fvisibility=hidden"]
+
+    # Build-compat tuple (plugin plan S4.6): embed what this extension was built against so the
+    # loader can refuse a mismatched runtime at import instead of failing strangely later.
+    # Python ABI is already enforced by the cpython so-name tag; arches are runtime-dispatched.
+    if rocm_build():
+        import torch as _torch
+        from .utils import rocm_version as _rocm_version
+        _torch_mm = ".".join(_torch.__version__.split("+")[0].split(".")[:2])
+        _rocm_mm = ".".join(str(v) for v in _rocm_version()[:2])
+        cxx_flags.append(f'-DNVTE_ROCM_BUILD_COMPAT="torch{_torch_mm}-rocm{_rocm_mm}"')
     if debug_build_enabled():
         cxx_flags.append("-g")
         cxx_flags.append("-UNDEBUG")
