@@ -1,0 +1,192 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/normalization/common.cpp
++++ b/transformer_engine/common/normalization/common.cpp
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -39,11 +41,16 @@
+ namespace transformer_engine {
+ namespace normalization {
+ 
++#ifndef __HIP_PLATFORM_AMD__
++bool& use_zero_centered_gamma_in_weight_dtype();
++
+ cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
+   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
+                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
+ }
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ 
++// Keep this bit layout in sync with the decode helpers in common.h.
+ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
+                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
+                      uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
+@@ -61,12 +68,34 @@
+   return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
+ }
+ 
++namespace {
++
++[[maybe_unused]] const bool kNormKeyLayoutCheck = [] {
++  const uint64_t key = std::get<0>(get_key(
++      NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
++      DType::kFloat16, DType::kBFloat16, DType::kFloat8E4M3, DType::kFloat32,
++      1, 1, false, false));
++
++  NVTE_CHECK(decode_itype(key) == DType::kBFloat16);
++  NVTE_CHECK(decode_otype(key) == DType::kFloat8E4M3);
++  NVTE_CHECK(decode_ctype(key) == DType::kFloat32);
++  NVTE_CHECK(decode_wtype(key) == DType::kFloat16);
++  NVTE_CHECK(decode_norm_type(key) == NVTE_Norm_Type::RMSNorm);
++
++  return true;
++}();
++
++}  // namespace
++
+ template <typename KernelParamsType>
+ TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
+     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
+     DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
+-    const bool zero_centered_gamma, const bool is_tuned)
+-    : _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
++    const bool zero_centered_gamma, const bool is_tuned
++#ifdef __HIP_PLATFORM_AMD__
++    , const NVTEScalingMode mode, const bool training
++#endif
++  ) : _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
+   _launch_params.multiprocessorCount = sm_count;
+ 
+   auto& kernel_params = _launch_params.params;
+@@ -74,7 +103,18 @@
+   kernel_params.cols = hidden_size;
+   kernel_params.zero_centered_gamma = zero_centered_gamma;
+   if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
++#ifdef __HIP_PLATFORM_AMD__
++    if (is_fp8_dtype(otype)) {
++      if (is_tensor_scaling(mode)) {
++        kernel_params.fp8_out = true;
++      } else {
++        kernel_params.mxfp8_out = true;
++        _launch_params.training = training;
++      }
++    }
++#else
+     kernel_params.fp8_out = is_fp8_dtype(otype);
++#endif
+   }
+   // TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
+   auto key = get_key(NVTE_Norm_Backend::Te, NormType, NormStage, wtype, itype, otype, ctype, 0,
+@@ -102,6 +142,14 @@
+   kernel_params.scale = z->scale.dptr;
+   kernel_params.scale_inv = z->scale_inv.dptr;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  if (kernel_params.mxfp8_out) {
++    _launch_params.z_tensor = z;
++    // z is used as a high precision buffer before quantization for MXFP8. Buffer is assigned in _set_workspace()
++    kernel_params.z = nullptr;
++  }
++#endif
++
+   if (_is_layernorm) {
+     kernel_params.mu = mean_dptr;
+     kernel_params.beta = beta_dptr;
+@@ -149,6 +197,14 @@
+       NVTE_CHECK_CUDA(cudaMemsetAsync(_launch_params.params.barrier, 0,
+                                       _launch_params.barrier_bytes, _launch_params.stream));
+     }
++#ifdef __HIP_PLATFORM_AMD__
++    if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
++      if (_launch_params.params.mxfp8_out) {
++        size_t offset = _launch_params.workspace_bytes + _launch_params.barrier_bytes;
++        _launch_params.params.z = workspace_dptr + offset;
++      }
++    }
++#endif
+     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
+       _launch_params.params.dgamma_part =
+           workspace_dptr + _launch_params.workspace_bytes + _launch_params.barrier_bytes;
+@@ -200,6 +256,7 @@
+   _kernel(_launch_params, false);
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+                                                DType wtype, DType itype, DType otype, DType ctype,
+                                                const size_t batch_size, const size_t hidden_size,
+@@ -507,6 +564,7 @@
+   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
+   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
+ }
++#endif
+ 
+ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
+     NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+@@ -525,23 +583,35 @@
+   }
+ 
+   std::unique_ptr<NormalizationPlanBase> plan;
++#ifndef __HIP_PLATFORM_AMD__
+   if (NormBackend == NVTE_Norm_Backend::Cudnn) {
+     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
+                                                     batch_size, hidden_size, sm_count,
+                                                     zero_centered_gamma, mode, training);
+-  } else if (NormStage == NVTE_Norm_Stage::Forward) {
++  } else
++#endif
++  if (NormStage == NVTE_Norm_Stage::Forward) {
+     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
+         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+-        zero_centered_gamma, is_tuned);
++        zero_centered_gamma, is_tuned
++#ifdef __HIP_PLATFORM_AMD__
++        , mode, training
++#endif
++      );
+   } else {
+     plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
+         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+-        zero_centered_gamma, is_tuned);
++        zero_centered_gamma, is_tuned
++#ifdef __HIP_PLATFORM_AMD__
++        , mode, training
++#endif
++        );
+   }
+   normalizationPlanMap.insert({key, std::move(plan)});
+   return normalizationPlanMap[key].get();
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ bool& _cudnn_norm_fwd_flag() {
+   static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
+   return flag;
+@@ -561,10 +631,12 @@
+ }
+ 
+ bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
++#endif
+ 
+ }  //  namespace normalization
+ }  // namespace transformer_engine
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ void nvte_enable_cudnn_norm_fwd(bool enable) {
+   NVTE_API_CALL(nvte_enable_cudnn_norm_fwd);
+   transformer_engine::normalization::_cudnn_norm_fwd_flag() = enable;
+@@ -580,3 +652,4 @@
+   NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
+   transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
+ }
++#endif

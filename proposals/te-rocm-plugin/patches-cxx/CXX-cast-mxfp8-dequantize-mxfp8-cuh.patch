@@ -1,0 +1,91 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
++++ b/transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -12,7 +14,9 @@
+ #define TRANSFORMER_ENGINE_DEQUANTIZE_MXFP8_CUH_
+ 
+ #include <cuda.h>
++#ifndef __HIP_PLATFORM_AMD__
+ #include <cudaTypedefs.h>
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ #include <cuda_runtime.h>
+ #include <transformer_engine/transformer_engine.h>
+ 
+@@ -22,11 +26,17 @@
+ #include "../../utils.cuh"
+ #include "swizzle.cuh"
+ 
++#ifdef __HIP_PLATFORM_AMD__
++#include "./rocm_vectorized_2d.cuh"
++#endif
++
+ namespace transformer_engine {
+ namespace dispatch {
+ namespace mxfp8 {
+ namespace dequantize_kernel {
+-
++#ifdef __HIP_PLATFORM_AMD__
++#include "rocm_dequantize_mxfp8.cuh"
++#else
+ constexpr size_t CHUNK_DIM_Y = 128;
+ constexpr size_t CHUNK_DIM_X = 128;
+ constexpr size_t THREADS_PER_CHUNK = 128;
+@@ -232,13 +242,16 @@
+   }
+ #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+ }
++#endif // #ifndef __HIP_PLATFORM_AMD__
+ }  // namespace dequantize_kernel
+ 
+ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+   using namespace dequantize_kernel;
+   bool use_rowwise_scaling = input.has_data();
+   bool use_colwise_scaling = input.has_columnwise_data();
++#ifndef __HIP_PLATFORM_AMD__
+   checkCuDriverContext(stream);
++#endif
+ 
+   NVTE_CHECK(input.dim() >= 2, "Input must have at least 2 dimensions.");
+ 
+@@ -305,6 +318,13 @@
+               input.dtype(), IType,
+               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+                   output->dtype(), OType,
++#ifdef __HIP_PLATFORM_AMD__
++              TRANSFORMER_ENGINE_SWITCH_CONDITION(
++                  !(cols % (32 * sizeof(OType))), IS_ALIGNED,
++                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
++                  <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
++                                               rows, cols, scales_stride););  // NOLINT(*)
++#else // #ifdef __HIP_PLATFORM_AMD__
+                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                       with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+ 
+@@ -321,12 +341,14 @@
+                       <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
+                                                    rows, cols, scales_stride,
+                                                    num_scale_tiles_X););  // NOLINT(*)
++#endif // #ifdef __HIP_PLATFORM_AMD__
+               );                                                          // NOLINT(*)
+           );                                                              // NOLINT(*)
+       );                                                                  // NOLINT(*)
+   );                                                                      // NOLINT(*)
+   NVTE_CHECK_CUDA(cudaGetLastError());
+ }
++
+ }  // namespace mxfp8
+ }  // namespace dispatch
+ }  // namespace transformer_engine

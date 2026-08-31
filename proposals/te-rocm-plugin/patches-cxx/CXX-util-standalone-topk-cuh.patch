@@ -1,0 +1,60 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/standalone_topk.cuh
++++ b/transformer_engine/common/util/standalone_topk.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -7,7 +9,12 @@
+ #pragma once
+ 
+ #include <cooperative_groups.h>
++#ifndef __HIP_PLATFORM_AMD__
++// Only scan_warp_version needs cg::reduce, and that is excluded below on ROCm;
++// HIP keeps the reduce overloads behind an amd_detail header the umbrella one
++// does not pull in.
+ #include <cooperative_groups/reduce.h>
++#endif
+ #include <cuda_bf16.h>
+ 
+ #include <cub/device/device_radix_sort.cuh>
+@@ -15,6 +22,12 @@
+ #include <vector>
+ namespace cg = cooperative_groups;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++// hipify rewrites the CUB class templates but not Traits or the BLOCK_*
++// enumerators, so resolve the rest through the namespace.
++namespace cub = hipcub;
++#endif
++
+ // Workspace pointer-alignment helpers.
+ inline size_t calc_aligned_size(const std::vector<size_t> &sizes) {
+   const size_t ALIGN_BYTES = 256;
+@@ -485,6 +498,9 @@
+   }
+ }
+ 
++// Dead: the call site below is commented out upstream. Excluded on ROCm rather
++// than ported -- it is a wave32 reduction over a 32-bit mask, which HIP rejects.
++#ifndef __HIP_PLATFORM_AMD__
+ template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
+ __device__ void scan_warp_version(cg::thread_block_tile<WARP_SIZE> const &warp,
+                                   volatile IdxT *histogram, Counter<T, IdxT> *counter, const IdxT k,
+@@ -569,6 +585,7 @@
+     // }
+   }
+ }
++#endif  // !__HIP_PLATFORM_AMD__ (scan_warp_version)
+ // For one-block version, last_filter() could be called when pass < num_passes
+ // - 1. So `pass` could not be constexpr
+ template <typename T, typename IdxT, int BitsPerPass, bool store_out>

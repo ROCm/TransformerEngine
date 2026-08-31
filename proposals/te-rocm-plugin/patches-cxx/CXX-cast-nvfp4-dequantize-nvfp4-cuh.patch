@@ -1,0 +1,30 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh
++++ b/transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -63,7 +65,13 @@
+   fp4vec value;
+   value.vec = input_vectorized[my_index];
+   fp8e4m3 scale = scales[my_scale_index];
++  // NVFP4 may reach this path with scale present but no separate amax buffer.
++  // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
++#ifndef __HIP_PLATFORM_AMD__
+   float amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
++#else
++  float amax = (tensor_amax != nullptr) ? (ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0]) : 1.0f;
++#endif
+   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+   constexpr float factor_inv = 1.0f / (6.0f * static_cast<float>(E4M3_MAX));
+   float final_scale = static_cast<float>(scale) * amax * factor_inv;

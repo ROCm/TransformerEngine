@@ -1,0 +1,162 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh
++++ b/transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -12,7 +14,9 @@
+ #define TRANSFORMER_ENGINE_QUANTIZE_MXFP8_CUH_
+ 
+ #include <cuda.h>
++#ifndef __HIP_PLATFORM_AMD__
+ #include <cudaTypedefs.h>
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ #include <cuda_runtime.h>
+ #include <transformer_engine/transformer_engine.h>
+ 
+@@ -21,14 +25,23 @@
+ #include "../../util/ptx.cuh"
+ #include "../../utils.cuh"
+ #include "../core/common.cuh"
++#ifndef __HIP_PLATFORM_AMD__
+ #include "specialized/quantize_mxfp8.cuh"
+ #include "swizzle.cuh"
++#endif //#ifndef __HIP_PLATFORM_AMD__
++
++#ifdef __HIP_PLATFORM_AMD__
++#include "./rocm_vectorized_2d.cuh"
++#include "../../util/rocm_device_utils.cuh"
++#endif
+ 
+ namespace transformer_engine {
+ namespace dispatch {
+ namespace mxfp8 {
+ namespace quantize_kernel {
+-
++#ifdef __HIP_PLATFORM_AMD__
++#include "rocm_quantize_mxfp8.cuh"
++#else
+ constexpr size_t SCALE_DIM_Y = 32;
+ constexpr size_t SCALE_DIM_X = 32;
+ 
+@@ -566,6 +579,7 @@
+   }
+ }
+ 
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ }  // namespace quantize_kernel
+ 
+ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+@@ -573,7 +587,9 @@
+ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,  // TODO (ksivamani)
+               Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+   using namespace quantize_kernel;
++#ifndef __HIP_PLATFORM_AMD__
+   checkCuDriverContext(stream);
++#endif
+ 
+   bool use_rowwise_scaling = output->has_data();
+   bool use_colwise_scaling = output->has_columnwise_data();
+@@ -593,6 +609,84 @@
+   // Tensor dimensions
+   const auto [rows, cols] = input.flat_2d_dims();
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  // Choose chunk size based on tensor dimensions
++  const bool use_large_chunks = (rows * cols > 32 * 1024 * 1024);
++
++  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
++  const size_t scale_stride_colwise =
++      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
++
++  e8m0_t *const scales_rowwise_ptr =
++      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
++  e8m0_t *const scales_colwise_ptr =
++      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
++
++  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
++  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
++
++  TRANSFORMER_ENGINE_SWITCH_CONDITION(
++    use_large_chunks, USE_LARGE_CHUNKS,
++
++    constexpr size_t CHUNK_DIM_Y = USE_LARGE_CHUNKS ? 128 : 64;
++    constexpr size_t CHUNK_DIM_X = USE_LARGE_CHUNKS ? 128 : 64;
++    constexpr size_t THREADS_PER_CHUNK = USE_LARGE_CHUNKS ? 256 : 128;
++
++    const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
++    const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
++    const dim3 grid(blocks_X, blocks_Y);
++    const size_t block_size = THREADS_PER_CHUNK;
++    const size_t dbias_rows = blocks_Y;
++    const size_t dbias_cols = cols;
++
++    if constexpr (IS_DBIAS) {
++      NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
++      NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
++      NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
++
++      if (workspace->data.dptr == nullptr) {
++        workspace->data.shape = {dbias_rows, dbias_cols};
++        workspace->data.dtype = DType::kFloat32;
++        return;
++      }
++    }
++
++    float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
++
++    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
++        input.dtype(), IType,
++        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
++            output->dtype(), OType,
++            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
++              (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
++              TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
++                (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
++                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
++                    !(cols % (32 * sizeof(IType))), IS_ALIGNED,
++                    quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
++                                        SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
++                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
++                      <<<grid, block_size, 0, stream>>>(
++                        reinterpret_cast<const IType *>(input.data.dptr),
++                        (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
++                        reinterpret_cast<OType *>(output->data.dptr),
++                        reinterpret_cast<OType *>(output->columnwise_data.dptr),
++                        scales_rowwise_ptr, scales_colwise_ptr,
++                        noop_ptr, workspace_ptr, amax_ptr,
++                        rows, cols, scale_stride_rowwise, scale_stride_colwise);
++                    NVTE_CHECK_CUDA(cudaGetLastError());
++            )))));
++
++    if constexpr (IS_DBIAS) {
++      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
++          input.dtype(), IType,
++          common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
++      );  // NOLINT(*)
++    }
++  );
++#else
++  constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
++
+   // Tensor chunk handled by each CUDA block
+   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
+   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
+@@ -869,6 +963,7 @@
+               });  // NOLINT(*)
+       );           // NOLINT(*)
+   );               // NOLINT(*)
++#endif // #ifdef __HIP_PLATFORM_AMD__
+ }
+ 
+ }  // namespace mxfp8

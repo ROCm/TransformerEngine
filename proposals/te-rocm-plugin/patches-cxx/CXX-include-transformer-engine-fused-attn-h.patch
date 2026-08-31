@@ -1,0 +1,77 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/include/transformer_engine/fused_attn.h
++++ b/transformer_engine/common/include/transformer_engine/fused_attn.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -153,14 +155,30 @@
+ /*! \enum NVTE_Fused_Attn_Backend
+  *  \brief Fused attention backends
+  */
++#ifndef __HIP_PLATFORM_AMD__
+ enum NVTE_Fused_Attn_Backend {
+   /*! No supported backend */
+   NVTE_No_Backend = -1,
++  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length.
++   *  Upstream v2.17 removed the max512 backend implementation/dispatch; the ROCm fork
++   *  retains this enumerator so its CUDA-path bindings/consumers (pybind_helper.h,
++   *  cpp_extensions/fused_attn.py) still compile. */
++  NVTE_F16_max512_seqlen = 0,
+   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
+   NVTE_F16_arbitrary_seqlen = 1,
+   /*! cuDNN-based FP8 fused attention */
+   NVTE_FP8 = 2,
+ };
++#else
++enum NVTE_Fused_Attn_Backend {
++    /*! No supported backend */
++    NVTE_No_Backend = -1,
++    /*! AOTriton fused attn */
++    NVTE_AOTriton = 0,
++    /*! CK fused attn */
++    NVTE_CK = 1,
++};
++#endif
+ 
+ /*!  \brief Get QKV layout group for a given QKV layout.
+  *
+@@ -231,6 +249,14 @@
+  *  - D = Dropout(S)
+  *  - O = D * Transpose(V)
+  *
++ * Support Matrix for ROCm AOTriton:
++   \verbatim
++   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
++   | aotriton| FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
++   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
++   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
++   \endverbatim
++ *
+  * Notes:
+  *
+  * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
+@@ -299,6 +325,14 @@
+ 
+ /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+  *
++ * Support Matrix for ROCm AOTriton:
++   \verbatim
++   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
++   | aotriton| FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO                       | NO/CAUSAL                             |   Yes   |  arbitrary        | arbitrary        |
++   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
++   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
++   \endverbatim
++ *
+  * Notes:
+  *
+  * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`

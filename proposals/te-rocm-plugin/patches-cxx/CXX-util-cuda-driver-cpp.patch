@@ -1,0 +1,43 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/cuda_driver.cpp
++++ b/transformer_engine/common/util/cuda_driver.cpp
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -12,7 +14,17 @@
+ namespace transformer_engine {
+ 
+ namespace cuda_driver {
+-
++//TODO: hipGetDriverEntryPoint is supported in rocm 7.1
++#ifdef __HIP_PLATFORM_AMD__
++void *get_symbol(const char *symbol, int cuda_version) {
++  void *entry_point;
++  hipDriverProcAddressQueryResult driver_result;
++  NVTE_CHECK_CUDA(hipGetProcAddress(symbol, &entry_point, HIP_VERSION_MAJOR*100+HIP_VERSION_MINOR, 0, &driver_result));
++  NVTE_CHECK(driver_result == HIP_GET_PROC_ADDRESS_SUCCESS,
++             "Could not find CUDA driver entry point for ", symbol);
++  return entry_point;
++}
++#else
+ typedef cudaError_t (*VersionedGetEntryPoint)(const char *, void **, unsigned int,
+                                               unsigned long long,  // NOLINT(*)
+                                               cudaDriverEntryPointQueryResult *);
+@@ -43,6 +55,7 @@
+              "Could not find CUDA driver entry point for ", symbol);
+   return entry_point;
+ }
++#endif
+ 
+ void ensure_context_exists() {
+   static thread_local bool need_check = []() {

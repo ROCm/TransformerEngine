@@ -1,0 +1,38 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/fp8/group_amax_fp8.cuh
++++ b/transformer_engine/common/cast/fp8/group_amax_fp8.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -131,14 +133,16 @@
+       const size_t total_vecs = numel / NVEC;
+       const size_t tail_start = total_vecs * NVEC;
+ 
+-      InputType thread_amax_val = 0.f;
++      // Explicit conversion: hip_bfloat16 has no implicit float constructor, so
++      // upstream's `= 0.f` copy-initialization does not compile with hipcc.
++      InputType thread_amax_val = InputType(0.f);
+       const bool aligned = (reinterpret_cast<uintptr_t>(base) % IVecT::BYTES) == 0;
+ 
+       if (aligned) {
+-        InputType acc0 = 0.f;
+-        InputType acc1 = 0.f;
+-        InputType acc2 = 0.f;
+-        InputType acc3 = 0.f;
++        InputType acc0 = InputType(0.f);
++        InputType acc1 = InputType(0.f);
++        InputType acc2 = InputType(0.f);
++        InputType acc3 = InputType(0.f);
+         size_t v = tid;
+         // 4-way vectorized load and reduce
+         for (; v + 3 * blockDim.x < total_vecs; v += 4 * blockDim.x) {

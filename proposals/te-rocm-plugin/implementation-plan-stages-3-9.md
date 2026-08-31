@@ -183,7 +183,7 @@ guarded, ~480 sites): most files `patch-queue`; a handful of guard-dense files w
 owns the kernel path (attention dispatch, fused-attn glue) → `native-hip`. `freeze` is not an
 option for any file.
 
-### S4.2 · C++ patch queue over the submodule — 10 days `[EVIDENCE: S4.1]`
+### S4.2 · C++ patch queue over the submodule — **QUEUE ARM DONE 2026-09-01** `[EVIDENCE: S4.1]`: `tools/cxx_queue.py` gen/verify/assemble; 87 governed CXX-* patches in `patches-cxx/` (M2 stays Python-only); staleness negative-tested; **exit met by tree identity** - assembled common/ (116 upstream-identical + 87 patched + 62 fork-native) is byte-identical to the fork's 265 C++ files, so build inputs are identical and ci/core.sh equivalence follows without a second build. Both checks blocking in governance CI. **REMAINING**: the 5 native-hip conversions (move + de-guard + hipify exclusion + paired test, one reviewable commit each) and C++ fingerprints (ctags symbol ranges) for pin-bump repair reporting
 
 Extend the P4 assembler with a C++ mode: for each `cxx_strategy: patch-queue` file, source =
 `3rdparty/transformer_engine_nvidia/transformer_engine/common/<path>`, patch = the fork's guard

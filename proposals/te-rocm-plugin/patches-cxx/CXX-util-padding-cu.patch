@@ -1,0 +1,194 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/padding.cu
++++ b/transformer_engine/common/util/padding.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++* This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -13,13 +15,51 @@
+ 
+ #include "../common.h"
+ #include "../utils.cuh"
++#ifdef __HIP_PLATFORM_AMD__
++#include "rocm_device_utils.cuh"  // for rocm_upper_bound(), NTVec
++#endif
+ 
+ namespace transformer_engine {
+ 
+ namespace {
+ 
++#ifdef __HIP_PLATFORM_AMD__
++// Non-temporal store helper: uses NT store for full aligned vectors,
++// falls back to element-wise for partial/unaligned cases.
++// Note: NT loads were also benchmarked but hurt performance.
++template <bool use_nt, uint32_t nvec, typename Type>
++__device__ __forceinline__ void store_vec(const Vec<Type, nvec>& v, Type* ptr, int count) {
++  if constexpr (use_nt) {
++    NTVec<Type, nvec> nt;
++#pragma unroll
++    for (int i = 0; i < nvec; i++) nt.val[i] = v.data.elt[i];
++    nt.nt_store(ptr);
++  } else {
++#pragma unroll
++    for (int i = 0; i < nvec; i++) {
++      if (i < count) ptr[i] = v.data.elt[i];
++    }
++  }
++}
++
++template <uint32_t nvec, typename Type>
++__device__ __forceinline__ void store_vec_dispatch(const Vec<Type, nvec>& v,
++                                                   Type* ptr, int count) {
++  constexpr size_t VEC_BYTES = nvec * sizeof(Type);
++  if (count == nvec && reinterpret_cast<uint64_t>(ptr) % VEC_BYTES == 0) {
++    store_vec<true>(v, ptr, count);
++  } else {
++    store_vec<false>(v, ptr, count);
++  }
++}
++#endif
++
+ // Parameters to tune
++#ifdef __HIP_PLATFORM_AMD__
++constexpr int n_warps_per_tile = 16;
++#else
+ constexpr int n_warps_per_tile = 4;
++#endif
+ constexpr int threads_per_block = THREADS_PER_WARP * n_warps_per_tile;
+ constexpr int desired_load_store_size = 8;
+ constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
+@@ -65,15 +105,22 @@
+   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
+ 
+   // Find tensor corresponding to block
++#ifdef __HIP_PLATFORM_AMD__
++  const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
++#else
+   int tensor_id = 0;
+   while (args.block_range[tensor_id + 1] <= bid) {
+     ++tensor_id;
+   }
++#endif
+   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
+   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
+   const int num_rows = args.num_rows_list[tensor_id];
+   const int padded_num_rows = args.padded_num_rows_list[tensor_id];
+   const int row_length = args.row_length_list[tensor_id];
++#ifdef __HIP_PLATFORM_AMD__
++  const bool inplace = (input == output);
++#endif
+ 
+   // Find position of tile within tensor
+   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
+@@ -83,6 +130,36 @@
+   const int tile_row = tile_id_m * tile_dim_m;
+   const int tile_col = tile_id_n * tile_dim_n;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  // Process subtiles with vectorized loads/stores
++#pragma unroll
++  for (int iter = 0; iter < n_iterations; ++iter) {
++    const int i1 = tidy + iter * bdimy;
++    const int j1 = tidx;
++    const int col = tile_col + j1 * nvec;
++    const int remaining = row_length - col;
++    const int valid_cols = remaining > 0 ? min(remaining, nvec) : 0;
++#pragma unroll
++    for (int i2 = 0; i2 < nvec; ++i2) {
++      const int row = tile_row + i1 * nvec + i2;
++      if (row < num_rows) {
++        // Valid data row: skip copy when in-place
++        if (!inplace) {
++          const size_t offset = static_cast<size_t>(row) * row_length + col;
++          Vec v;
++          v.load_from_elts(input, offset, valid_cols);
++          store_vec_dispatch(v, output + offset, valid_cols);
++        }
++      } else if (row < padded_num_rows) {
++        // Padding row: fill with zeros
++        const size_t offset = static_cast<size_t>(row) * row_length + col;
++        Vec v;
++        v.clear();
++        store_vec_dispatch(v, output + offset, valid_cols);
++      }
++    }
++  }
++#else  // !__HIP_PLATFORM_AMD__
+   // Load input and store to registers
+   // Note: Each thread loads n_iterations subtiles, casts to output
+   // type, and transposes in registers.
+@@ -124,6 +201,7 @@
+       }
+     }
+   }
++#endif  // __HIP_PLATFORM_AMD__
+ }
+ 
+ template <int nvec, typename Type>
+@@ -149,14 +227,21 @@
+   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
+ 
+   // Find tensor corresponding to block
++#ifdef __HIP_PLATFORM_AMD__
++  const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
++#else
+   int tensor_id = 0;
+   while (args.block_range[tensor_id + 1] <= bid) {
+     ++tensor_id;
+   }
++#endif
+   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
+   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
+   const int num_rows = args.num_rows_list[tensor_id];
+   const int row_length = args.row_length_list[tensor_id];
++#ifdef __HIP_PLATFORM_AMD__
++  const bool inplace = (input == output);
++#endif
+ 
+   // Find position of tile within tensor
+   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
+@@ -166,6 +251,27 @@
+   const int tile_row = tile_id_m * tile_dim_m;
+   const int tile_col = tile_id_n * tile_dim_n;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  // Process subtiles with vectorized loads/stores
++#pragma unroll
++  for (int iter = 0; iter < n_iterations; ++iter) {
++    const int i1 = tidy + iter * bdimy;
++    const int j1 = tidx;
++    const int col = tile_col + j1 * nvec;
++    const int remaining = row_length - col;
++    const int valid_cols = remaining > 0 ? min(remaining, nvec) : 0;
++#pragma unroll
++    for (int i2 = 0; i2 < nvec; ++i2) {
++      const int row = tile_row + i1 * nvec + i2;
++      if (row < num_rows && !inplace) {
++        const size_t offset = static_cast<size_t>(row) * row_length + col;
++        Vec v;
++        v.load_from_elts(input, offset, valid_cols);
++        store_vec_dispatch(v, output + offset, valid_cols);
++      }
++    }
++  }
++#else  // !__HIP_PLATFORM_AMD__
+   // Load input and store to registers
+   // Note: Each thread loads n_iterations subtiles, casts to output
+   // type, and transposes in registers.
+@@ -200,6 +306,7 @@
+       }
+     }
+   }
++#endif  // __HIP_PLATFORM_AMD__
+ }
+ 
+ }  // namespace

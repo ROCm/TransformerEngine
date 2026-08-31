@@ -1,0 +1,43 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/rtc.h
++++ b/transformer_engine/common/util/rtc.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -34,6 +36,26 @@
+  */
+ bool is_enabled();
+ 
++/*! \brief Whether runtime-compiled kernels use fast math
++ *
++ * This tracks how the equivalent statically-compiled kernels are built, so
++ * that switching between the two does not change numerics. The CUDA build
++ * compiles them with fast math (see nvte_sources_with_fast_math in CMake),
++ * the ROCm build does not.
++ */
++#ifdef __HIP_PLATFORM_AMD__
++constexpr bool kUseFastMath = false;
++#else
++constexpr bool kUseFastMath = true;
++#endif  // __HIP_PLATFORM_AMD__
++
++/*! \brief Compiler options requesting fast math
++ *
++ * Empty if kUseFastMath is false. NVRTC spells the option "--use_fast_math"
++ * and rejects "-ffast-math"; hipRTC does the opposite.
++ */
++const std::vector<std::string> &fast_math_options();
++
+ /*! \brief Header made available to an NVRTC program */
+ struct Header {
+   const char *content;

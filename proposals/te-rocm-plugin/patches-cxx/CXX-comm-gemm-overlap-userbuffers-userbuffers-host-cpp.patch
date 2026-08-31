@@ -1,0 +1,52 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: reapplied cleanly in B3
+--- a/transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp
++++ b/transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -358,12 +360,12 @@
+   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);
+   NVTE_CHECK_CUDA(
+-      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * sizeof(int)));
++      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
+   NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->recv_id),
+-                             NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+-  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
++                             NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
++  NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
+   NVTE_CHECK_CUDA(
+-      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
++      cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * NVTE_ROCM_MAX_RINGS * sizeof(int)));
+   (*comm)->sms = 16;
+   (*comm)->threads = 1024;
+ 
+@@ -376,8 +378,11 @@
+       cudaMalloc(reinterpret_cast<void **>(&(*comm)->flags_baseptr), 2 * GPU_PAGE_SIZE));
+   NVTE_CHECK_CUDA(cudaMemset((*comm)->flags_baseptr, 0, 2 * GPU_PAGE_SIZE));
+   (*comm)->flags = reinterpret_cast<int *>(
++#ifdef __HIP_PLATFORM_AMD__
++      (reinterpret_cast<uintptr_t>((*comm)->flags_baseptr) + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
++#else
+       ((CUdeviceptr)(*comm)->flags_baseptr + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
+-
++#endif
+   using namespace std;
+ 
+   sched_param param;
+@@ -734,5 +739,4 @@
+   comm->mem_ptr[hndl] = *gpubuff;
+ 
+   return comm->free_region++;
+-  printf("***** Returning *****\n");
+ }

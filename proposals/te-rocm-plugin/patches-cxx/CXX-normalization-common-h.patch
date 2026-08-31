@@ -1,0 +1,280 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/normalization/common.h
++++ b/transformer_engine/common/normalization/common.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -7,9 +9,11 @@
+ #ifndef TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
+ #define TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ #include <cudnn.h>
+ #include <cudnn_frontend.h>
+ #include <cudnn_frontend_utils.h>
++#endif
+ #include <transformer_engine/normalization.h>
+ #include <transformer_engine/transformer_engine.h>
+ 
+@@ -19,10 +23,15 @@
+ #include <tuple>
+ #include <typeindex>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "../common.h"
++#ifndef __HIP_PLATFORM_AMD__
+ #include "../cudnn_utils.h"
++#else
++#include "../cast/mxfp8/quantize_mxfp8.cuh"
++#endif
+ #include "../util/system.h"
+ #include "kernel_params.h"
+ 
+@@ -30,7 +39,9 @@
+ 
+ namespace normalization {
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ namespace fe = cudnn_frontend;
++#endif
+ 
+ template <typename KernelParamsType>
+ struct LaunchParams {
+@@ -40,19 +51,37 @@
+   int multiprocessorCount;
+   cudaStream_t stream;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  size_t mxfp8_buffer_bytes = 0;
++  // TE MXFP8 quantization parameters
++  Tensor *z_tensor;
++  bool training;
++#endif
++
+   KernelParamsType params;
+ 
+   size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const {
++#ifdef __HIP_PLATFORM_AMD__
++    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes + mxfp8_buffer_bytes);
++#else
+     return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes);
++#endif
+   }
+   void alignWorkspace(size_t alignment = 16) {
+     workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
+     barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
+     dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
++#ifdef __HIP_PLATFORM_AMD__
++    mxfp8_buffer_bytes = DIVUP(mxfp8_buffer_bytes, alignment) * alignment;
++#endif
+   }
+ };
+ 
++#ifdef __HIP_PLATFORM_AMD__
++enum class NVTE_Norm_Backend { Te };
++#else
+ enum class NVTE_Norm_Backend { Te, Cudnn };
++#endif
+ enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
+ 
+ using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
+@@ -76,6 +105,60 @@
+                      bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
+                      bool training = true, bool gamma_in_weight_dtype = false);
+ 
++// These decode helpers assume the same general_key bit layout used by get_key()
++// in common.cpp. If get_key() changes, update these shifts/masks accordingly.
++inline DType decode_itype(uint64_t general_key) {
++  return static_cast<DType>(general_key & 0x1F);
++}
++
++inline DType decode_otype(uint64_t general_key) {
++  return static_cast<DType>((general_key >> 5) & 0x1F);
++}
++
++inline DType decode_ctype(uint64_t general_key) {
++  return static_cast<DType>((general_key >> 10) & 0x1F);
++}
++
++inline DType decode_wtype(uint64_t general_key) {
++  return static_cast<DType>((general_key >> 15) & 0x1F);
++}
++
++inline NVTE_Norm_Type decode_norm_type(uint64_t general_key) {
++  return static_cast<NVTE_Norm_Type>((general_key >> 20) & 0x3);
++}
++
++inline const char* dtype_to_string(DType dtype) {
++  switch (dtype) {
++    case DType::kFloat32:
++      return "fp32";
++    case DType::kFloat16:
++      return "fp16";
++    case DType::kBFloat16:
++      return "bf16";
++    case DType::kFloat8E4M3:
++      return "fp8e4m3";
++    case DType::kFloat8E5M2:
++      return "fp8e5m2";
++    case DType::kByte:
++      return "byte";
++    case DType::kInt32:
++      return "int32";
++    default:
++      return "unknown";
++  }
++}
++
++inline const char* norm_type_to_string(NVTE_Norm_Type norm_type) {
++  switch (norm_type) {
++    case NVTE_Norm_Type::LayerNorm:
++      return "LayerNorm";
++    case NVTE_Norm_Type::RMSNorm:
++      return "RMSNorm";
++    default:
++      return "unknown";
++  }
++}
++
+ template <typename KernelParamsType>
+ class TeNormalizationRegistry {
+  private:
+@@ -117,7 +200,24 @@
+     if (is_tuned) {
+       auto it = instance.tuned_function_map.find(key);
+       if (it != instance.tuned_function_map.end()) return it->second;
+-    }
++
++      static thread_local std::unordered_set<TupleKeyType, TupleHash> warned_keys;
++      if (warned_keys.insert(key).second) {
++        NVTE_WARN("Falling back to general normalization kernel because no tuned kernel "
++                  "is available for this config. norm_type=",
++                  norm_type_to_string(decode_norm_type(general_key)),
++                  ", hidden_size=",
++                  hidden_size,
++                  ", wtype=",
++                  dtype_to_string(decode_wtype(general_key)),
++                  ", itype=",
++                  dtype_to_string(decode_itype(general_key)),
++                  ", otype=",
++                  dtype_to_string(decode_otype(general_key)),
++                  ", ctype=",
++                  dtype_to_string(decode_ctype(general_key)));
++      }
++    } 
+     if (instance.general_function_map.count(general_key) == 0) {
+       NVTE_ERROR("Unavailable kernel for this normalization config.");
+     }
+@@ -158,7 +258,11 @@
+  public:
+   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
+-                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
++                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
++#ifdef __HIP_PLATFORM_AMD__
++                      , const NVTEScalingMode mode, const bool training
++#endif
++                    );
+   Shape getWorkspaceShape() const override;
+ 
+   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+@@ -180,6 +284,7 @@
+   const bool _is_layernorm;
+ };
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ class CudnnNormalizationPlan : public NormalizationPlanBase {
+  public:
+   CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+@@ -220,6 +325,7 @@
+   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;
+   cudnnHandle_t _handle;
+ };
++#endif
+ 
+ class NormalizationPlanRegistry {
+  public:
+@@ -248,9 +354,15 @@
+ using int32 = int32_t;
+ using fp32 = float;
+ using fp16 = half;
++#ifdef __HIP_PLATFORM_AMD__
++using bf16 = hip_bfloat16;
++using fp8e4m3 = te_hip_fp8_e4m3;
++using fp8e5m2 = te_hip_fp8_e5m2;
++#else
+ using bf16 = nv_bfloat16;
+ using fp8e4m3 = __nv_fp8_e4m3;
+ using fp8e5m2 = __nv_fp8_e5m2;
++#endif //__HIP_PLATFORM_AMD__
+ 
+ template <typename T>
+ struct TypeToDType;
+@@ -304,10 +416,55 @@
+   return ((reinterpret_cast<uintptr_t>(ptrs) % Alignment == 0) && ...);
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ bool use_cudnn_norm_fwd();
+ bool use_cudnn_norm_bwd();
+ 
+ bool& use_zero_centered_gamma_in_weight_dtype();
++#endif
++
++#ifdef __HIP_PLATFORM_AMD__
++template <typename compute_t = float>
++void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
++  const size_t rows = launch_params.params.rows;
++  const size_t cols = launch_params.params.cols;
++  const size_t scale_dim_X_rowwise = 32;
++  const size_t scale_dim_Y_colwise = launch_params.training ? 32 : 1;
++
++  const size_t blocks_Y = DIVUP(rows, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_Y);
++  const size_t blocks_X = DIVUP(cols, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_X);
++
++  const size_t scale_stride_rowwise = launch_params.z_tensor->scale_inv.shape[1];
++  const size_t scale_stride_colwise = launch_params.training ? launch_params.z_tensor->columnwise_scale_inv.shape[1] : 1;
++
++  e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(launch_params.z_tensor->scale_inv.dptr);
++  e8m0_t *const scales_colwise_ptr =
++      launch_params.training ? reinterpret_cast<e8m0_t *>(launch_params.z_tensor->columnwise_scale_inv.dptr) : nullptr;
++  
++  const dim3 block(dispatch::mxfp8::quantize_kernel::MXFP8_THREADS_PER_CHUNK);
++  const dim3 grid(blocks_X, blocks_Y);
++
++  using namespace dispatch::mxfp8::quantize_kernel;
++  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
++    scale_dim_Y_colwise, SCALE_DIM_Y,
++      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
++        launch_params.z_tensor->dtype(), OType,
++          TRANSFORMER_ENGINE_SWITCH_CONDITION(
++            !(cols % (32 * sizeof(compute_t))), IS_ALIGNED,
++              quantize_mxfp8_kernel<false, false, false, Empty, {}, compute_t, OType,
++                SCALE_DIM_Y, scale_dim_X_rowwise, IS_ALIGNED><<<grid, block, 0, launch_params.stream>>>(
++                reinterpret_cast<const compute_t*>(launch_params.params.z),
++                nullptr,
++                reinterpret_cast<OType *>(launch_params.z_tensor->data.dptr),
++                reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
++                scales_rowwise_ptr, scales_colwise_ptr,
++                nullptr, nullptr, nullptr,
++                rows, cols, scale_stride_rowwise, scale_stride_colwise);
++          );
++      );
++  );
++}
++#endif 
+ 
+ }  // namespace normalization
+ }  // namespace transformer_engine

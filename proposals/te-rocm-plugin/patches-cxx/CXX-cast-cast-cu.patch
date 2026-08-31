@@ -1,0 +1,45 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/cast.cu
++++ b/transformer_engine/common/cast/cast.cu
+@@ -1,11 +1,15 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+  ************************************************************************/
+ 
+ #include <cuda.h>
++#ifndef __HIP_PLATFORM_AMD__
+ #include <cudaTypedefs.h>
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ #include <cuda_runtime.h>
+ #include <transformer_engine/cast.h>
+ #include <transformer_engine/multi_stream.h>
+@@ -60,6 +64,19 @@
+   NVTE_API_CALL(nvte_multi_tensor_quantize);
+   using namespace transformer_engine;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  if (num_tensors > 0 &&
++      convertNVTETensorCheck(outputs[0])->scaling_mode == NVTE_MXFP8_1D_SCALING) {
++    std::vector<Tensor *> input_list, output_list;
++    for (size_t i = 0; i < num_tensors; i++) {
++      input_list.push_back(convertNVTETensorCheck(inputs[i]));
++      output_list.push_back(convertNVTETensorCheck(outputs[i]));
++    }
++    dispatch::multi_quantize_mxfp8(input_list, output_list, stream);
++    return;
++  }
++#endif
++
+   constexpr bool IS_ACT = false;
+ 
+   const size_t num_streams = nvte_get_num_compute_streams();

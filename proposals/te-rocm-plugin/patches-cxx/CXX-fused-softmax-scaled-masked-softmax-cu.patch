@@ -1,0 +1,100 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/fused_softmax/scaled_masked_softmax.cu
++++ b/transformer_engine/common/fused_softmax/scaled_masked_softmax.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -28,8 +30,12 @@
+ namespace transformer_engine {
+ 
+ #ifdef __CUDACC_RTC__
++#ifdef __HIP_PLATFORM_AMD__
++using bf16 = hip_bfloat16;
++#else
+ using bf16 = nv_bfloat16;
+ #endif
++#endif
+ 
+ #ifndef NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+ #define NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX 0
+@@ -86,11 +92,15 @@
+ template <typename T>
+ __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
+                                                   unsigned int mask = 0xffffffff) {
++#ifdef __HIP_PLATFORM_AMD__
++    return __shfl_xor(value, laneMask, width);
++#else
+ #if defined(__CUDACC_RTC__) || CUDA_VERSION >= 9000
+   return __shfl_xor_sync(mask, value, laneMask, width);
+ #else
+   return __shfl_xor(value, laneMask, width);
+ #endif
++#endif
+ }
+ 
+ template <typename acc_t, int WARP_BATCH, int WARP_SIZE, template <typename> class ReduceOp>
+@@ -458,7 +468,8 @@
+ template <typename Type>
+ std::string make_softmax_rtc_label(const char *variant, const char *direction, int log2_elements) {
+   return concat_strings("fused_softmax,variant=", variant, ",direction=", direction,
+-                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements, ",fast_math=1");
++                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements,
++                        ",fast_math=", rtc::kUseFastMath ? 1 : 0);
+ }
+ 
+ template <typename Type>
+@@ -476,7 +487,7 @@
+ }  // namespace
+ 
+ template <typename input_t, typename output_t, typename acc_t>
+-void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const input_t scale,
++void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const acc_t scale,
+                                      int query_seq_len, int key_seq_len, int batches,
+                                      int attn_heads, cudaStream_t stream) {
+   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
+@@ -511,7 +522,7 @@
+         rtc_manager.compile(
+             kernel_label,
+             make_softmax_rtc_kernel_name<input_t>("scaled_softmax_warp_forward", log2_elements),
+-            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile, {"--use_fast_math"});
++            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile, rtc::fast_math_options());
+       }
+       const acc_t rtc_scale = static_cast<acc_t>(scale);
+       rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, rtc_scale, batch_count,
+@@ -593,7 +604,7 @@
+ 
+ template <typename input_t, typename output_t, typename acc_t>
+ void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, const uint8_t *mask,
+-                                            const input_t scale, int query_seq_len, int key_seq_len,
++                                            const acc_t scale, int query_seq_len, int key_seq_len,
+                                             int batches, int attn_heads, int pad_batches,
+                                             cudaStream_t stream) {
+   NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 16384, "Unsupported shape.");
+@@ -629,7 +640,7 @@
+                             make_softmax_rtc_kernel_name<input_t>(
+                                 "scaled_masked_softmax_warp_forward", log2_elements),
+                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+-                            {"--use_fast_math"});
++                            rtc::fast_math_options());
+       }
+       const acc_t rtc_scale = static_cast<acc_t>(scale);
+       rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, mask, rtc_scale,
+@@ -761,7 +772,7 @@
+                             make_softmax_rtc_kernel_name<input_t>(
+                                 "scaled_masked_softmax_warp_backward", log2_elements),
+                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+-                            {"--use_fast_math"});
++                            rtc::fast_math_options());
+       }
+       rtc_manager.launch(kernel_label, blocks, threads, 0, stream, grad_input, grad, output, scale,
+                          batch_count, key_seq_len);

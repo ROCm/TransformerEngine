@@ -1,0 +1,58 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/normalization/layernorm/ln_api.cpp
++++ b/transformer_engine/common/normalization/layernorm/ln_api.cpp
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -67,19 +69,24 @@
+ 
+   NVTE_Norm_Backend norm_backend;
+   bool is_aligned = true;
++#ifndef __HIP_PLATFORM_AMD__
+   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
+ 
+   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
+     NVTE_CHECK(!cudnn_backend,
+                "cuDNN does not currently support amax output for non quantized output");
+   }
++#endif //__HIP_PLATFORM_AMD__
+ 
+   bool gamma_in_weight_dtype = false;
++#ifndef __HIP_PLATFORM_AMD__
+   if (cudnn_backend) {
+     // TODO: add check for GPU ARCH
+     norm_backend = NVTE_Norm_Backend::Cudnn;
+     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
+-  } else {
++  } else
++#endif //__HIP_PLATFORM_AMD__
++  {
+     norm_backend = NVTE_Norm_Backend::Te;
+     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
+                                 mu->data.dptr, rsigma->data.dptr);
+@@ -164,11 +171,14 @@
+   NVTE_Norm_Backend norm_backend;
+   bool is_aligned = true;
+   bool gamma_in_weight_dtype = false;
++#ifndef __HIP_PLATFORM_AMD__
+   if (use_cudnn_norm_bwd()) {
+     // TODO: add check for GPU ARCH
+     norm_backend = NVTE_Norm_Backend::Cudnn;
+     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
+-  } else {
++  } else
++#endif
++  {
+     norm_backend = NVTE_Norm_Backend::Te;
+     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr,
+                                 dx->data.dptr, dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr);

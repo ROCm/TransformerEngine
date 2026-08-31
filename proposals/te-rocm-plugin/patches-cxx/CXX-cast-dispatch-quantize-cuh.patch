@@ -1,0 +1,346 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/cast/dispatch/quantize.cuh
++++ b/transformer_engine/common/cast/dispatch/quantize.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -17,14 +19,33 @@
+ #include "../../transpose/cast_transpose.h"
+ #include "../../util/vectorized_pointwise.h"
+ #include "../core/common.cuh"
++#ifndef __HIP_PLATFORM_AMD__
++// Grouped delayed-scaling FP8 quantize uses CUDA-only inline PTX (st.global.cs).
+ #include "../fp8/group_quantize_fp8.cuh"
++#endif
+ #include "../fp8/quantize_fp8.cuh"
++#ifdef __HIP_PLATFORM_AMD__
++#include "../fp8/rocm_cast.cuh"
++#endif
++#ifndef __HIP_PLATFORM_AMD__
++// Grouped FP8 block-scaling quantize uses Hopper TMA (CUtensorMap), CUDA-only.
+ #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
++#endif
+ #include "../mxfp8/group_quantize_mxfp8.cuh"
+ #include "../mxfp8/quantize_mxfp8.cuh"
++#ifdef __HIP_PLATFORM_AMD__
++#include "../mxfp4/quantize_mxfp4.cuh"
++#endif //#ifdef __HIP_PLATFORM_AMD__
++// The optimized NVFP4 kernels are Blackwell-only (CUtensorMap/tcgen05); ROCm uses
++// the generic quantize_transpose_vector_blockwise_fp4 path plus this portable
++// row-wise amax for row-scaled NVFP4.
++#ifndef __HIP_PLATFORM_AMD__
+ #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
+ #include "../nvfp4/quantize_4over6_nvfp4.cuh"
+ #include "../nvfp4/quantize_transpose_nvfp4.cuh"
++#else
++#include "../nvfp4/rowwise_amax_nvfp4.cuh"
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ 
+ namespace transformer_engine {
+ namespace dispatch {
+@@ -76,9 +97,16 @@
+               dummy_workspace_tensor, stream);
+         }
+       } else if (output_tensor->has_data()) {
+-        fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+-            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+-            dummy_workspace_tensor, stream);
++#ifdef __HIP_PLATFORM_AMD__
++        if constexpr (!IS_ACT) {
++          fp8::rocm_cast_only(*input_tensor, *noop_tensor, output_tensor, stream);
++        } else
++#endif
++        {
++          fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
++              *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
++              dummy_workspace_tensor, stream);
++        }
+       }
+       break;
+     }
+@@ -91,6 +119,17 @@
+           dummy_workspace_tensor, stream);
+       break;
+     }
++#ifdef __HIP_PLATFORM_AMD__
++    case NVTE_MXFP4_1D_SCALING: {
++      const Tensor *dummy_input_tensor = nullptr;
++      Tensor *dummy_dbias_tensor = nullptr;
++      Tensor *dummy_workspace_tensor = nullptr;
++      mxfp4::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
++          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
++          dummy_workspace_tensor, quant_config_cpp, stream);
++      break;
++    }
++#endif //#ifdef __HIP_PLATFORM_AMD__
+     case NVTE_NVFP4_1D_SCALING: {
+       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+ 
+@@ -108,6 +147,11 @@
+                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                  "NVFP4 4over6 quantization does not support stochastic rounding.");
++#ifdef __HIP_PLATFORM_AMD__
++      // Refuse the fast-math error path rather than silently scoring with the exact one.
++      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
++                 "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
++#endif
+       if (row_scaled_nvfp4) {
+         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+@@ -123,7 +167,8 @@
+           (output_tensor->has_data() ||
+            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
+ 
+-      // Launch NVFP4 quantize kernel
++      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
++#ifndef __HIP_PLATFORM_AMD__
+       if (nvfp4_use_4over6) {
+         if (quant_config_cpp.nvfp4_2d_quantization) {
+           nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+@@ -141,6 +186,7 @@
+               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+         }
+       } else {
++#endif
+         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
+                                                                   : output_tensor->columnwise_amax;
+         quantize_transpose_vector_blockwise_fp4(
+@@ -156,8 +202,12 @@
+             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
+             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+             /*noop_tensor=*/noop_tensor->data,
++            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
++            /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
+             /*stream=*/stream);
++#ifndef __HIP_PLATFORM_AMD__
+       }
++#endif
+       break;
+     }
+     case NVTE_BLOCK_SCALING_2D: {
+@@ -256,6 +306,14 @@
+           stream);
+       break;
+     }
++#ifdef __HIP_PLATFORM_AMD__
++    case NVTE_MXFP4_1D_SCALING: {
++      mxfp4::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
++          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
++          quant_config_cpp, stream);
++      break;
++    }
++#endif
+     case NVTE_NVFP4_1D_SCALING: {
+       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
+                  "IS_DBIAS and IS_DACT are not supported by BWD NVTE_NVFP4_1D_SCALING");
+@@ -273,6 +331,11 @@
+                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                  "NVFP4 4over6 quantization does not support stochastic rounding.");
++#ifdef __HIP_PLATFORM_AMD__
++      // Refuse the fast-math error path rather than silently scoring with the exact one.
++      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
++                 "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
++#endif
+       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
+                  "Backward NVFP4 quantization does not support row-scaled outputs.");
+       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+@@ -283,7 +346,8 @@
+           (output_tensor->has_data() ||
+            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
+ 
+-      // Launch NVFP4 quantize kernel
++      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
++#ifndef __HIP_PLATFORM_AMD__
+       if (nvfp4_use_4over6) {
+         if (quant_config_cpp.nvfp4_2d_quantization) {
+           nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+@@ -301,6 +365,7 @@
+               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+         }
+       } else {
++#endif
+         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
+                                                                   : output_tensor->columnwise_amax;
+         quantize_transpose_vector_blockwise_fp4(
+@@ -316,8 +381,12 @@
+             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
+             /*row_scaled_nvfp4=*/false,
+             /*noop_tensor=*/noop_tensor->data,
++            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
++            /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
+             /*stream=*/stream);
++#ifndef __HIP_PLATFORM_AMD__
+       }
++#endif
+       break;
+     }
+     case NVTE_BLOCK_SCALING_2D: {
+@@ -396,6 +465,7 @@
+ 
+   // Dispatch to quantization kernel depending on data format
+   switch (scaling_mode) {
++#ifndef __HIP_PLATFORM_AMD__
+     case NVTE_NVFP4_1D_SCALING: {
+       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+ 
+@@ -425,6 +495,7 @@
+           &quant_config_cpp, stream);
+       break;
+     }
++#endif //#ifndef __HIP_PLATFORM_AMD__
+     default:
+       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
+   }
+@@ -463,8 +534,13 @@
+   // Dispatch to quantization kernel depending on data format
+   switch (scaling_mode) {
+     case NVTE_DELAYED_TENSOR_SCALING: {
++#ifndef __HIP_PLATFORM_AMD__
+       fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
+                                                &quant_config_cpp, stream);
++#else
++      NVTE_ERROR(
++          "Grouped delayed-scaling FP8 quantization is not supported on ROCm platform.");
++#endif
+       break;
+     }
+     case NVTE_MXFP8_1D_SCALING: {
+@@ -479,8 +555,13 @@
+                  "Fused grouped FP8 block-scaling quantize does not support "
+                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
++#ifndef __HIP_PLATFORM_AMD__
+       fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
+                                                  quant_config_cpp.amax_epsilon, stream);
++#else
++      NVTE_ERROR(
++          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
++#endif
+       break;
+     }
+     case NVTE_BLOCK_SCALING_2D: {
+@@ -489,8 +570,13 @@
+                  "Fused grouped FP8 block-scaling quantize does not support "
+                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
++#ifndef __HIP_PLATFORM_AMD__
+       fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
+                                                  quant_config_cpp.amax_epsilon, stream);
++#else
++      NVTE_ERROR(
++          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
++#endif
+       break;
+     }
+     default:
+@@ -541,6 +627,7 @@
+                  "Fused grouped FP8 block-scaling quantize does not support "
+                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
++#ifndef __HIP_PLATFORM_AMD__
+       // dbias is computed in-kernel and reduced per-expert inside group_quantize_blockwise_{1d,2d}
+       // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
+       GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
+@@ -554,6 +641,10 @@
+                                                    quant_config_cpp.amax_epsilon, stream, dbias_arg,
+                                                    workspace_arg);
+       }
++#else
++      NVTE_ERROR(
++          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
++#endif
+       break;
+     }
+     default:
+@@ -561,6 +652,79 @@
+   }
+ }
+ 
++#ifdef __HIP_PLATFORM_AMD__
++inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
++                          std::vector<Tensor *> &output_list, cudaStream_t stream) {
++  const size_t num_tensors = input_list.size();
++  if (num_tensors == 0) return;
++  NVTE_CHECK(num_tensors <= mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors,
++             "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
++             mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
++
++  DType itype = input_list[0]->data.dtype;
++  DType otype = output_list[0]->dtype();
++  const bool use_rowwise = output_list[0]->has_data();
++  const bool use_colwise = output_list[0]->has_columnwise_data();
++
++  constexpr size_t CDY = 64;   // tile height (rows)
++  constexpr size_t CDX = 64;   // tile width (cols)
++  constexpr size_t TPC = 128;  // threads per block
++
++  mxfp8::quantize_kernel::MultiQuantizeMXFP8Args args;
++  args.num_tensors = 0;
++  args.block_range[0] = 0;
++  int tiles_x = 0;
++
++  for (size_t i = 0; i < num_tensors; i++) {
++    const int rows = input_list[i]->flat_first_dim();
++    const int cols = input_list[i]->flat_last_dim();
++    const int row_tiles = DIVUP(static_cast<size_t>(rows), CDY);
++    const int col_tiles = DIVUP(static_cast<size_t>(cols), CDX);
++    if (col_tiles > tiles_x) {
++      tiles_x = col_tiles;
++    }
++    const int pos = args.num_tensors;
++
++    args.input_list[pos] = input_list[i]->data.dptr;
++    args.output_rowwise_list[pos] = use_rowwise ? output_list[i]->data.dptr : nullptr;
++    args.output_colwise_list[pos] = use_colwise ? output_list[i]->columnwise_data.dptr : nullptr;
++    args.scales_rowwise_list[pos] = use_rowwise ? output_list[i]->scale_inv.dptr : nullptr;
++    args.scales_colwise_list[pos] = use_colwise ? output_list[i]->columnwise_scale_inv.dptr : nullptr;
++    args.amax_list[pos] = reinterpret_cast<float *>(output_list[i]->amax.dptr);
++    args.rows_list[pos] = rows;
++    args.cols_list[pos] = cols;
++    args.block_range[pos + 1] = args.block_range[pos] + row_tiles;
++    args.num_tensors++;
++  }
++
++  if (args.num_tensors == 0) return;
++
++  bool is_aligned = true;
++  for (int i = 0; i < args.num_tensors; i++) {
++    if (args.cols_list[i] % (32 * typeToSize(itype)) != 0) {
++      is_aligned = false;
++      break;
++    }
++  }
++
++  const dim3 grid(tiles_x, args.block_range[args.num_tensors]);
++  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(itype, IType,
++    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(otype, OType,
++      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH((use_colwise ? 32 : 1), SCALE_DIM_Y,
++        TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH((use_rowwise ? 32 : 1), SCALE_DIM_X,
++          if (is_aligned) {
++            mxfp8::quantize_kernel::multi_quantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, true, CDY, CDX, TPC>
++                <<<grid, TPC, 0, stream>>>(args);
++          } else {
++            mxfp8::quantize_kernel::multi_quantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, false, CDY, CDX, TPC>
++                <<<grid, TPC, 0, stream>>>(args);
++          }
++        ));
++      ));
++  NVTE_CHECK_CUDA(cudaGetLastError());
++}
++#endif  // __HIP_PLATFORM_AMD__
++
+ }  // namespace dispatch
+ }  // namespace transformer_engine
+ 

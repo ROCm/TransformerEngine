@@ -1,0 +1,28 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/recipe/delayed_scaling.cu
++++ b/transformer_engine/common/recipe/delayed_scaling.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -32,7 +34,11 @@
+ inline float fp8_dtype_max(DType dtype) {
+   switch (dtype) {
+     case DType::kFloat8E4M3:
++#ifndef __HIP_PLATFORM_AMD__
+       return 448;
++#else
++      return te_fp8_fnuz() ? 240 : 448;
++#endif
+     case DType::kFloat8E5M2:
+       return 57344;
+     default:

@@ -1,0 +1,28 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/normalization/kernel_params.h
++++ b/transformer_engine/common/normalization/kernel_params.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -60,6 +62,11 @@
+ 
+   // Whether to compute scale and amax
+   bool fp8_out = false;
++
++#ifdef __HIP_PLATFORM_AMD__
++  // Whether the output is MXFP8-quantized (ROCm norm backend).
++  bool mxfp8_out = false;
++#endif
+ };
+ 
+ struct BackwardKernelParams : public KernelParamsBase {

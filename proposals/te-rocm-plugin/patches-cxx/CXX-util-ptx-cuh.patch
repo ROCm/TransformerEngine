@@ -1,0 +1,262 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/ptx.cuh
++++ b/transformer_engine/common/util/ptx.cuh
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -27,6 +29,7 @@
+ 
+ namespace ptx {
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ template <int N>
+ struct ArchSpecific {
+   constexpr static int id = N * 10;
+@@ -345,6 +348,17 @@
+   }
+ }
+ 
++#else
++
++// Native FP4 stochastic rounding is available on gfx950 and later.
++#if defined(__gfx950__)
++#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
++#else
++#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
++#endif
++
++#endif  // __HIP_PLATFORM_AMD__
++
+ constexpr uint32_t BF16_MANTISSA_BITS = 7;
+ constexpr uint32_t FP32_MANTISSA_BITS = 23;
+ constexpr uint32_t FP32_EXPONENT_BIAS = 127;
+@@ -384,6 +398,7 @@
+ }
+ 
+ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
++#ifndef __HIP_PLATFORM_AMD__
+   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+   if constexpr (is_blackwell) {
+     uint16_t out;
+@@ -395,6 +410,7 @@
+         : "f"(val));
+     return *reinterpret_cast<e8m0_t *>(&out);
+   } else {
++#endif //#ifndef __HIP_PLATFORM_AMD__
+     // TODO: nan/inf needs to be set for any value
+     // of nan/inf in input not just amax.
+     if (isnan(val)) {
+@@ -414,9 +430,12 @@
+       ++exponent;
+     }
+     return exponent;
++#ifndef __HIP_PLATFORM_AMD__
+   }
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
+ // shared::cta -> global
+ __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
+@@ -526,6 +545,8 @@
+ #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+ }
+ 
++#endif //!__HIP_PLATFORM_AMD__
++
+ template <typename T>
+ struct alignas(2 * sizeof(T)) FPx2 {
+   T x;
+@@ -603,6 +624,7 @@
+ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
+     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+   uint16_t out_4x = 0;
++#ifndef __HIP_PLATFORM_AMD__
+   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+   if constexpr (has_rs) {
+     asm volatile(
+@@ -637,14 +659,21 @@
+         "FP4 cvt PTX instructions are architecture-specific. "
+         "Try recompiling with sm_XXXa instead of sm_XXX.");
+   }
++#else
++  NVTE_DEVICE_ERROR(
++      "mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");
++#endif
+   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
+ }
+ 
+ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
+                                                                     const float2 scale,
+                                                                     const uint32_t rbits) {
++#ifndef __HIP_PLATFORM_AMD__
+   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
++#endif
+   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
++#ifndef __HIP_PLATFORM_AMD__
+   if constexpr (is_blackwell) {
+     // NOTE: rbits unused for rn.
+     asm volatile(
+@@ -683,6 +712,10 @@
+         "FP4 cvt PTX instructions are architecture-specific. "
+         "Try recompiling with sm_XXXa instead of sm_XXX.");
+   }
++#else
++  NVTE_DEVICE_ERROR(
++      "mul_cvt_bf16_to_fp4_4x_with_rn is not supported on AMDGPU.");
++#endif
+   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
+ }
+ 
+@@ -700,6 +733,66 @@
+ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+     const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
+   uint16_t out_4x = 0;
++#ifdef __HIP_PLATFORM_AMD__
++  const float scaled[4] = {
++      in01.x * scale.x, in01.y * scale.x,
++      in23.x * scale.y, in23.y * scale.y
++  };
++#if ARCH_HAS_STOCHASTIC_ROUNDING
++  // opsel=1 always writes to byte 1, result read from fp4x2[1]
++  // Matches HIP's own usage, see e.g.
++  // https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
++  union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
++  __amd_floatx2_storage_t packed01{scaled[0], scaled[1]};
++  __amd_floatx2_storage_t packed23{scaled[2], scaled[3]};
++  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed01, rbits, 1.0f, 1);
++  const __hip_fp4x2_storage_t lo = u.fp4x2[1];
++  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed23, rbits, 1.0f, 1);
++  const __hip_fp4x2_storage_t hi = u.fp4x2[1];
++  __hip_fp4x4_e2m1 result;
++  result.__x = static_cast<__hip_fp4x4_storage_t>(lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
++  return result;
++#else
++  // Stochastic rounding fallback for AMD GPUs without native
++  // FP4 SR instructions (e.g. gfx942).
++  //
++  // FP4 E2M1 has 8 non-negative magnitudes whose 3-bit codes happen to
++  // be sorted: {0->0.0, 1->0.5, 2->1.0, 3->1.5, 4->2.0, 5->3.0,
++  //             6->4.0, 7->6.0}.
++  //
++  // For each value we:
++  //  1. Clamp |x| into [0, 6] (the FP4 representable range).
++  //  2. Find the floor index fi in the FP4 grid via branchless
++  //     comparisons (sum of (|x| >= threshold) for each level).
++  //  3. Compute the fractional position within [kV[fi], kV[ci]]
++  //     where ci = min(fi+1, 7) is the ceiling index.
++  //  4. Draw a uniform random value r in [0,1) from 8 bits of rbits.
++  //  5. Round up to ci if r < frac, otherwise keep fi.
++  //     This gives E[round(x)] = x (unbiased).
++  //  6. Set the sign bit (bit 3) if the original value was negative.
++  {
++    constexpr float kV[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
++    __hip_fp4_storage_t q[4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++      const float av = fminf(fabsf(scaled[i]), 6.0f);
++      const int fi = int(av >= 0.5f) + int(av >= 1.0f) + int(av >= 1.5f) +
++                     int(av >= 2.0f) + int(av >= 3.0f) + int(av >= 4.0f) + int(av >= 6.0f);
++      const int ci = min(fi + 1, 7);
++      const float gap = kV[ci] - kV[fi];
++      const float frac = (gap > 0.0f) ? (av - kV[fi]) / gap : 0.0f;
++      const float r = static_cast<float>((rbits >> (8 * i)) & 0xFFu) * (1.0f / 256.0f);
++      const int ri = (r < frac) ? ci : fi;
++      q[i] = static_cast<__hip_fp4_storage_t>((scaled[i] < 0.0f) ? (ri | 0x8) : ri);
++    }
++    __nv_fp4x4_e2m1 result;
++    result.__x = static_cast<__hip_fp4x4_storage_t>(
++        (q[0] & 0xFu) | ((q[1] & 0xFu) << 4) |
++        ((q[2] & 0xFu) << 8) | ((q[3] & 0xFu) << 12));
++    return result;
++  }
++#endif // ARCH_HAS_STOCHASTIC_ROUNDING
++#else
+   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+   if constexpr (has_rs) {
+     asm volatile(
+@@ -730,12 +823,28 @@
+         "Try recompiling with sm_XXXa instead of sm_XXX.");
+   }
+   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
++#endif
+ }
+ 
+ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+                                                                     const float2 in23,
+                                                                     const float2 scale,
+                                                                     const uint32_t rbits) {
++#ifdef __HIP_PLATFORM_AMD__
++  const float scaled[4] = {
++      in01.x * scale.x, in01.y * scale.x,
++      in23.x * scale.y, in23.y * scale.y
++  };
++  const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(scaled[0], __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(scaled[1], __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(scaled[2], __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(scaled[3], __HIP_E2M1, hipRoundNearest);
++
++  __hip_fp4x4_e2m1 result;
++  result.__x = static_cast<__hip_fp4x4_storage_t>(
++        (q0 & 0xFu) | ((q1 & 0xFu) << 4) | ((q2 & 0xFu) << 8) | ((q3 & 0xFu) << 12));
++  return result;
++#else
+   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
+   if constexpr (is_blackwell) {
+@@ -772,6 +881,7 @@
+         "Try recompiling with sm_XXXa instead of sm_XXX.");
+   }
+   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
++#endif
+ }
+ 
+ template <bool USE_STOCHASTIC_ROUNDING>
+@@ -785,6 +895,8 @@
+   }
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
++
+ template <typename SCALING_COEFFICIENT_TYPE>
+ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
+     const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
+@@ -957,8 +1069,11 @@
+   return out_8x;
+ }
+ 
++#endif //!__HIP_PLATFORM_AMD__
+ #endif  // FP4_TYPE_SUPPORTED
+ 
++#ifndef __HIP_PLATFORM_AMD__
++
+ // SIMD like "Fused" cast + multiplication (x2)
+ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
+                                            const floatx2 &scale) {
+@@ -1996,6 +2111,7 @@
+   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
+ }
+ #endif
++#endif //!__HIP_PLATFORM_AMD__
+ }  // namespace ptx
+ 
+ namespace {
+@@ -2056,6 +2172,7 @@
+ #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+ }
+ 
++
+ __forceinline__ __device__ void copy_2d_to_shared(void *dst, const void *src, const size_t chunk_X,
+                                                   const size_t chunk_Y, const size_t num_bytes,
+                                                   uint64_t *barrier, const bool is_master_thread) {

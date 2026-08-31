@@ -1,0 +1,77 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/cuda_runtime.h
++++ b/transformer_engine/common/util/cuda_runtime.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -10,7 +12,6 @@
+ #include <cuda_runtime_api.h>
+ 
+ #include <string>
+-
+ namespace transformer_engine {
+ 
+ namespace cuda {
+@@ -30,6 +31,24 @@
+  */
+ int sm_arch(int device_id = -1);
+ 
++#ifdef __HIP_PLATFORM_AMD__
++/* \brief Compute capability of device
++ *
++ * \param[in] device_id HIP device (default is current device)
++ *
++ * \return GPU arch name and compute capabilities string.
++ */
++const std::string &sm_arch_name(int device_id = -1);
++
++/* \brief Warp/wavefront size on a device
++ *
++ * \param[in] device_id CUDA/HIP device (default is current device)
++ *
++ * \return Number of threads per warp (NVIDIA) or wavefront (AMD)
++ */
++int warp_size(int device_id = -1);
++#endif
++
+ /* \brief Number of multiprocessors on a device
+  *
+  * \param[in] device_id CUDA device (default is current device)
+@@ -56,9 +75,9 @@
+  */
+ bool supports_multicast(int device_id = -1);
+ 
+-/* \brief Path to CUDA Toolkit headers
++/* \brief Path to CUDA/ROCm Toolkit headers
+  *
+- * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
++ * On CUDA platform the path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
+  * environment. Otherwise searches in common install paths.
+  *
+  * \param[in] required Whether to throw exception if not found
+@@ -67,6 +86,7 @@
+  */
+ const std::string &include_directory(bool required = false);
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ /* \brief Version number of CUDA Toolkit headers
+  *
+  * The headers are accessed at run-time and its CUDA version may
+@@ -93,6 +113,7 @@
+  * Versions may differ between compile-time and run-time.
+  */
+ size_t cublas_version();
++#endif
+ 
+ }  // namespace cuda
+ 

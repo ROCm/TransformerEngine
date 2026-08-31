@@ -1,0 +1,186 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/rtc.cpp
++++ b/transformer_engine/common/util/rtc.cpp
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -26,6 +28,11 @@
+ #include "string_code_util_math_h.h"
+ #include "string_code_utils_cuh.h"
+ 
++#ifdef __HIP_PLATFORM_AMD__
++#include "string_code_amd_detail_hip_float8_h.h"
++#endif // __HIP_PLATFORM_AMD__
++
++#ifndef __HIP_PLATFORM_AMD__
+ /*! \brief Latest compute capability that NVRTC supports
+  *
+  * \return Compute capability as int. Last digit is minor revision,
+@@ -43,14 +50,36 @@
+   }
+   return arch_;
+ }
++#endif // __HIP_PLATFORM_AMD__
+ 
+ }  // namespace
+ 
+ bool is_enabled() {
+-  static const bool is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
++  static bool is_enabled_ = false;
++  static bool need_to_check_env = true;
++  if (need_to_check_env) {
++    is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
++    need_to_check_env = false;
++  }
+   return is_enabled_;
+ }
+ 
++const std::vector<std::string>& fast_math_options() {
++  static const std::vector<std::string> opts = [] {
++    if (!kUseFastMath) {
++      return std::vector<std::string>{};
++    }
++#ifdef __HIP_PLATFORM_AMD__
++    // "--use_fast_math" is nvcc/NVRTC spelling; hipRTC rejects it while parsing
++    // arguments and takes "-ffast-math" instead.
++    return std::vector<std::string>{"-ffast-math"};
++#else
++    return std::vector<std::string>{"--use_fast_math"};
++#endif  // __HIP_PLATFORM_AMD__
++  }();
++  return opts;
++}
++
+ Kernel::Kernel(std::string mangled_name, std::string compiled_code)
+     : mangled_name_{std::move(mangled_name)},
+       compiled_code_{std::move(compiled_code)},
+@@ -62,6 +91,9 @@
+   for (int device_id = 0; device_id < static_cast<int>(modules_.size()); ++device_id) {
+     // Unload CUDA modules if needed
+     if (modules_[device_id] != null_module) {
++#ifdef __HIP_PLATFORM_AMD__
++      (void)cuda_driver::call("hipModuleUnload", modules_[device_id]);
++#else
+       CUdevice device;
+       CUcontext context;
+       if (cuda_driver::call("cuDeviceGet", &device, device_id) != CUDA_SUCCESS) {
+@@ -75,6 +107,7 @@
+       }
+       cuda_driver::call("cuModuleUnload", modules_[device_id]);
+       cuda_driver::call("cuDevicePrimaryCtxRelease", device);
++#endif // __HIP_PLATFORM_AMD__
+     }
+   }
+ }
+@@ -156,22 +189,33 @@
+     return;
+   }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+   // Choose whether to compile to PTX or cubin
+   const int sm_arch_ = cuda::sm_arch(device_id);
+   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
+   const bool compile_ptx = sm_arch_ != compile_sm_arch;
++#endif // __HIP_PLATFORM_AMD__
+ 
+   // Compilation flags
+   std::vector<std::string> opts = {
+ #if NDEBUG == 0
++#ifdef __HIP_PLATFORM_AMD__
++      // "-G" is nvcc/NVRTC spelling; hipRTC rejects it while parsing arguments
++      // (unknown argument -> HIPRTC_ERROR_COMPILATION) and takes "-g" instead.
++      "-g",
++#else
+       "-G",
+-#endif
++#endif  // __HIP_PLATFORM_AMD__
++#endif  // NDEBUG == 0
+       "--std=c++17"};
++
++#ifndef __HIP_PLATFORM_AMD__
+   if (compile_ptx) {
+     opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
+   } else {
+     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
+   }
++#endif //__HIP_PLATFORM_AMD__
+   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
+   opts.insert(opts.end(), extra_options.begin(), extra_options.end());
+   std::vector<const char*> opts_ptrs;
+@@ -181,8 +225,15 @@
+ 
+   // Compile source
+   nvrtcProgram program;
++#ifdef __HIP_PLATFORM_AMD__
++  std::vector<const char*> headers = {string_code_utils_cuh, string_code_util_math_h,
++                                      string_code_amd_detail_hip_float8_h};
++  std::vector<const char*> include_names = {"utils_hip.cuh", "util/math.h",
++                                            "common/amd_detail/hip_float8.h"};
++#else
+   std::vector<const char*> headers = {string_code_utils_cuh, string_code_util_math_h};
+   std::vector<const char*> include_names = {"utils.cuh", "util/math.h"};
++#endif // __HIP_PLATFORM_AMD__
+   headers.reserve(headers.size() + extra_headers.size());
+   include_names.reserve(include_names.size() + extra_headers.size());
+   for (const auto& header : extra_headers) {
+@@ -200,6 +251,7 @@
+   if (compile_result != NVRTC_SUCCESS) {
+     std::string log;
+ 
++#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
+     // Decode CUDA version number to "major.minor" string
+     auto version_string = [](int v) -> std::string {
+       if (v < 0) {
+@@ -227,6 +279,7 @@
+           "Consider changing the CUDA header search path (by setting NVTE_CUDA_INCLUDE_DIR) "
+           "or the linked CUDA Runtime (by setting CUDA_HOME or LD_LIBRARY_PATH).\n\n");
+     }
++#endif
+ 
+     // Get build log
+     log += concat_strings("NVRTC compilation log for ", filename, ":\n");
+@@ -248,6 +301,14 @@
+ 
+   // Get compiled code
+   std::string compiled_code;
++#ifdef __HIP_PLATFORM_AMD__
++  {
++    size_t compiled_size;
++    NVTE_CHECK_NVRTC(hiprtcGetCodeSize(program, &compiled_size));
++    compiled_code.resize(compiled_size);
++    NVTE_CHECK_NVRTC(hiprtcGetCode(program, compiled_code.data()));
++  }
++#else
+   if (compile_ptx) {
+     size_t compiled_size;
+     NVTE_CHECK_NVRTC(nvrtcGetPTXSize(program, &compiled_size));
+@@ -259,6 +320,7 @@
+     compiled_code.resize(compiled_size);
+     NVTE_CHECK_NVRTC(nvrtcGetCUBIN(program, compiled_code.data()));
+   }
++#endif //__HIP_PLATFORM_AMD__
+ 
+   // Cache compiled code
+   kernel_cache_.insert({key, Kernel(mangled_name, std::move(compiled_code))});
+@@ -304,7 +366,11 @@
+ 
+ std::string KernelManager::get_kernel_cache_key(const std::string& kernel_label,
+                                                 int device_id) const {
++#ifdef __HIP_PLATFORM_AMD__
++  return concat_strings(cuda::sm_arch_name(device_id), ",", kernel_label);
++#else
+   return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);
++#endif
+ }
+ 
+ }  // namespace rtc

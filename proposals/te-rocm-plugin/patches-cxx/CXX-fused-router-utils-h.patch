@@ -1,0 +1,229 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/fused_router/utils.h
++++ b/transformer_engine/common/fused_router/utils.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -58,6 +60,15 @@
+ //   2. The intermediate buffer is initialized in FP32.
+ using CompType = float;
+ 
++#if defined(__HIP_PLATFORM_AMD__) && __HIP_VERSION__ < 70000000
++__device__ inline void __syncwarp()
++{
++    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
++    __builtin_amdgcn_wave_barrier();
++    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
++
++}
++#endif
+ constexpr size_t kThreadsPerWarp = 32;
+ constexpr int kThreadsPerBlock =
+     128;  // Using 4 warps in 1 CTA, Each warp is responsible for 1 token.
+@@ -68,6 +79,17 @@
+   MAX,
+ };
+ 
++// Reduction helpers for masked_warp_reduce_on_shmem.
++template <typename T>
++__device__ inline T max(T a, T b) {
++  return a > b ? a : b;
++}
++
++template <typename T>
++__device__ inline T sum(T a, T b) {
++  return a + b;
++}
++
+ // Warp-level reduction over shared memory data.  Templated on the reduction
+ // type to enable compile-time dispatch (no function pointer overhead).
+ template <typename T, ReduceFuncType type>
+@@ -86,6 +108,22 @@
+   }
+ 
+   // Warp shuffle butterfly reduction
++#ifdef __HIP_PLATFORM_AMD__
++  if constexpr (type == ReduceFuncType::SUM) {
++    val += __shfl_xor(val, 16, kThreadsPerWarp);
++    val += __shfl_xor(val, 8, kThreadsPerWarp);
++    val += __shfl_xor(val, 4, kThreadsPerWarp);
++    val += __shfl_xor(val, 2, kThreadsPerWarp);
++    val += __shfl_xor(val, 1, kThreadsPerWarp);
++  } else {
++    auto shfl_max = [](CompType a, CompType b) { return a > b ? a : b; };
++    val = shfl_max(val, __shfl_xor(val, 16, kThreadsPerWarp));
++    val = shfl_max(val, __shfl_xor(val, 8, kThreadsPerWarp));
++    val = shfl_max(val, __shfl_xor(val, 4, kThreadsPerWarp));
++    val = shfl_max(val, __shfl_xor(val, 2, kThreadsPerWarp));
++    val = shfl_max(val, __shfl_xor(val, 1, kThreadsPerWarp));
++  }
++#else
+   if constexpr (type == ReduceFuncType::SUM) {
+     val += __shfl_xor_sync(0xffffffff, val, 16);
+     val += __shfl_xor_sync(0xffffffff, val, 8);
+@@ -100,6 +138,48 @@
+     val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 2));
+     val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 1));
+   }
++#endif
++  __syncwarp();
++  return T(val);
++}
++
++template <typename T>
++__device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int data_size,
++                                                ReduceFuncType type, int lane_id) {
++  T (*reduce_func)(T, T);
++  CompType default_val = 0.0;
++  if (type == ReduceFuncType::SUM) {
++    reduce_func = sum;
++    default_val = 0.0;
++  } else if (type == ReduceFuncType::MAX) {
++    reduce_func = max;
++    default_val = -std::numeric_limits<CompType>::infinity();
++  }
++
++  // Some value is handled in local thread
++  // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
++  // Reduce the value in local thread
++  CompType val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : default_val;
++  for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
++    if (mask[i]) {
++      val = reduce_func(val, data_ptr[i]);
++    }
++  }
++
++  // Warp shuffle between threads
++#ifdef __HIP_PLATFORM_AMD__
++  val = reduce_func(val, __shfl_xor(val, 16, kThreadsPerWarp));
++  val = reduce_func(val, __shfl_xor(val, 8, kThreadsPerWarp));
++  val = reduce_func(val, __shfl_xor(val, 4, kThreadsPerWarp));
++  val = reduce_func(val, __shfl_xor(val, 2, kThreadsPerWarp));
++  val = reduce_func(val, __shfl_xor(val, 1, kThreadsPerWarp));
++#else
++  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
++  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
++  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
++  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
++  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
++#endif
+   __syncwarp();
+   return T(val);
+ }
+@@ -228,6 +308,30 @@
+   Radix = 1,
+ };
+ 
++#ifdef __HIP_PLATFORM_AMD__
++/*******************************************************************************
++ * warp_prefix_count — Shuffle-based exclusive prefix sum for a boolean predicate
++ *
++ * Replaces __ballot_sync + __popcll which are broken on wave64: HIP's ballot
++ * returns 64 bits covering the full wavefront, but the kernel assumes 32-lane
++ * warps. Uses __shfl_up with width=kThreadsPerWarp instead — HIP partitions
++ * the 64-lane wavefront into independent 32-lane sub-groups when width=32.
++ ******************************************************************************/
++__device__ inline void warp_prefix_count(bool pred, int lane_id,
++                                         int &exclusive_prefix, int &total) {
++  int val = pred ? 1 : 0;
++#pragma unroll
++  for (int offset = 1; offset < static_cast<int>(kThreadsPerWarp); offset *= 2) {
++    int up = __shfl_up(val, offset, kThreadsPerWarp);
++    if (lane_id >= offset) {
++      val += up;
++    }
++  }
++  exclusive_prefix = val - (pred ? 1 : 0);
++  total = __shfl(val, kThreadsPerWarp - 1, kThreadsPerWarp);
++}
++#endif
++
+ // Maximum num_experts supported by the packed 8-bit radix topk histogram.
+ // Each thread processes ceil(data_size/32) elements per bucket.  With 8-bit
+ // counters the max per-thread count is 255, so data_size <= 255 * 32 = 8160.
+@@ -370,10 +474,15 @@
+     unsigned int u = valid ? float_to_ordered_uint(scores[i]) : 0;
+     bool is_greater = valid && (u > desired);
+ 
++    int lane_prefix, total_qualifying;
++#ifdef __HIP_PLATFORM_AMD__
++    warp_prefix_count(is_greater, lane_id, lane_prefix, total_qualifying);
++#else
+     // Warp ballot to count how many lanes have a qualifying element
+     unsigned int ballot = __ballot_sync(0xffffffff, is_greater);
+-    int lane_prefix = __popc(ballot & ((1u << lane_id) - 1));  // exclusive prefix
+-    int total_qualifying = __popc(ballot);
++    lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1)); // exclusive prefix
++    total_qualifying = __popcll(ballot);
++#endif
+ 
+     if (is_greater) {
+       int out_idx = write_pos + lane_prefix;
+@@ -395,9 +504,14 @@
+     unsigned int u = valid ? float_to_ordered_uint(scores[i]) : 0;
+     bool is_equal = valid && (u == desired);
+ 
++    int lane_prefix, total_equal;
++#ifdef __HIP_PLATFORM_AMD__
++    warp_prefix_count(is_equal, lane_id, lane_prefix, total_equal);
++#else
+     unsigned int ballot = __ballot_sync(0xffffffff, is_equal);
+-    int lane_prefix = __popc(ballot & ((1u << lane_id) - 1));
+-    int total_equal = __popc(ballot);
++    lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));
++    total_equal = __popcll(ballot);
++#endif
+ 
+     if (is_equal && lane_prefix < tie_remaining) {
+       int out_idx = write_pos + lane_prefix;
+@@ -444,16 +558,26 @@
+       }
+     }
+     for (int s = kThreadsPerWarp / 2; s > 0; s /= 2) {
++#ifdef __HIP_PLATFORM_AMD__
++      auto shuffled_val = __shfl_xor(val, s, kThreadsPerWarp);
++      auto shuffled_index = __shfl_xor(index, s, kThreadsPerWarp);
++#else
+       auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);
+       auto shuffled_index = __shfl_xor_sync(0xffffffff, index, s);
++#endif
+       if (shuffled_val > val) {
+         val = shuffled_val;
+         index = shuffled_index;
+       }
+     }
+ 
++#ifdef __HIP_PLATFORM_AMD__
++    CompType chosen_val = __shfl(val, 0, kThreadsPerWarp);
++    int chosen_index = __shfl(index, 0, kThreadsPerWarp);
++#else
+     CompType chosen_val = __shfl_sync(0xffffffff, val, 0);
+     int chosen_index = __shfl_sync(0xffffffff, index, 0);
++#endif
+     if (lane_id == 0) {
+       topk_indices[k] = chosen_index;
+       topk_scores[k] = chosen_val;
+@@ -495,8 +619,13 @@
+     }
+     // Warp shuffle between threads
+     for (int s = 16; s > 0; s /= 2) {
++#ifdef __HIP_PLATFORM_AMD__
++      auto shuffled_val = __shfl_xor(val, s, kThreadsPerWarp);
++      auto shuffled_index = __shfl_xor(index, s, kThreadsPerWarp);
++#else
+       auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);
+       auto shuffled_index = __shfl_xor_sync(0xffffffff, index, s);
++#endif
+       if (shuffled_val > val) {
+         val = shuffled_val;
+         index = shuffled_index;

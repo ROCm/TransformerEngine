@@ -1,0 +1,132 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/transpose/cast_transpose_fusion.cu
++++ b/transformer_engine/common/transpose/cast_transpose_fusion.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -171,7 +173,11 @@
+ #pragma unroll
+     for (unsigned int j = 0; j < nvec_in; ++j) {
+       CType elt = step_dbias.data.elt[j];
+-      elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in a warp
++#ifdef __HIP_PLATFORM_AMD__
++      elt = __shfl(elt, dbias_shfl_src_lane, THREADS_PER_WARP);
++#else
++      elt = __shfl_sync(0xffffffff, elt, dbias_shfl_src_lane);  // shuffle data in warp
++#endif
+       out_dbias.data.elt[j] += elt;
+     }
+   }
+@@ -252,9 +258,9 @@
+   const size_t reduce_dbias_row_length = row_length;
+   const size_t reduce_dbias_num_rows =
+       DIVUP(num_rows, static_cast<size_t>(nvec_out * THREADS_PER_WARP));
+-  const size_t reduce_dbias_num_blocks =
+-      DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
+ 
++  const size_t reduce_dbias_num_blocks =
++    DIVUP(row_length, reduce_dbias_num_threads * reduce_dbias_nvec);
+   using DbiasOutputType = fp32;
+   reduce_dbias_kernel<reduce_dbias_nvec, DbiasOutputType, InputType>
+       <<<reduce_dbias_num_blocks, reduce_dbias_num_threads, 0, stream>>>(
+@@ -484,8 +490,43 @@
+     "dsrelu"     // 12
+ };
+ 
++/* HIPCC has strict rules for __device__ functions usage on host.
++   It forbids not only calling but also other ODR-use assigning to variables
++   https://github.com/llvm/llvm-project/issues/105825
++   Use templated struct wrapper to work around
++ */
++template<typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP &)>
++struct ActivationType
++{
++    static constexpr auto op = OP;
++};
++
+ template <typename ComputeType, typename ParamOP, ComputeType (*OP)(ComputeType, const ParamOP &)>
+ constexpr int get_activation_type() {
++#ifdef __HIP_PLATFORM_AMD__
++  constexpr decltype(OP) ActivationList[] = {
++      ActivationType<ComputeType, ParamOP, nullptr>::op,                              // 0
++      ActivationType<ComputeType, ParamOP, &sigmoid<ComputeType, ComputeType>>::op,   // 1
++      ActivationType<ComputeType, ParamOP, &dsigmoid<ComputeType, ComputeType>>::op,  // 2
++      ActivationType<ComputeType, ParamOP, &gelu<ComputeType, ComputeType>>::op,      // 3
++      ActivationType<ComputeType, ParamOP, &dgelu<ComputeType, ComputeType>>::op,     // 4
++      ActivationType<ComputeType, ParamOP, &qgelu<ComputeType, ComputeType>>::op,     // 5
++      ActivationType<ComputeType, ParamOP, &dqgelu<ComputeType, ComputeType>>::op,    // 6
++      ActivationType<ComputeType, ParamOP, &silu<ComputeType, ComputeType>>::op,      // 7
++      ActivationType<ComputeType, ParamOP, &dsilu<ComputeType, ComputeType>>::op,     // 8
++      ActivationType<ComputeType, ParamOP, &relu<ComputeType, ComputeType>>::op,      // 9
++      ActivationType<ComputeType, ParamOP, &drelu<ComputeType, ComputeType>>::op,     // 10
++      ActivationType<ComputeType, ParamOP, &srelu<ComputeType, ComputeType>>::op,     // 11
++      ActivationType<ComputeType, ParamOP, &dsrelu<ComputeType, ComputeType>>::op     // 12
++  };
++  using act = ActivationType<ComputeType, ParamOP, OP>;
++#pragma unroll
++  for (int i = 0; i < sizeof(ActivationList) / sizeof(ActivationList[0]); ++i) {
++    if (act::op == ActivationList[i]) {
++      return i;
++    }
++  }
++#else //#ifdef __HIP_PLATFORM_AMD__
+   constexpr decltype(OP) ActivationList[] = {
+       nullptr,                              // 0
+       &sigmoid<ComputeType, ComputeType>,   // 1
+@@ -507,6 +548,7 @@
+       return i;
+     }
+   }
++#endif //#ifdef __HIP_PLATFORM_AMD__
+   return 0;
+ }
+ 
+@@ -735,10 +777,12 @@
+             NVTE_CHECK(row_length % nvec_in == 0, "Unsupported shape.");
+             NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");
+ 
++#ifndef __HIP_PLATFORM_AMD__
+             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                 cast_transpose_fused_kernel_notaligned<IS_DBIAS, IS_DACT, IS_ACT, ComputeType,
+                                                        Param, nvec_in, nvec_out, Empty, OP>,
+                 cudaFuncAttributePreferredSharedMemoryCarveout, 100));
++#endif
+             cast_transpose_fused_kernel_notaligned<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Param,
+                                                    nvec_in, nvec_out, Empty, OP>
+                 <<<num_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
+@@ -1196,10 +1240,12 @@
+           const size_t shmem_size = cast_transpose_num_threads / n_warps_per_tile *
+                                     (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>);
+           if (full_tile) {
++#ifndef __HIP_PLATFORM_AMD__
+             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                 dgated_act_cast_transpose_kernel<nvec_in, nvec_out, ComputeType, InputType,
+                                                  OutputType, Empty, OP1, OP2>,
+                 cudaFuncAttributePreferredSharedMemoryCarveout, 100));
++#endif
+ 
+             dgated_act_cast_transpose_kernel<nvec_in, nvec_out, ComputeType, InputType, OutputType,
+                                              Empty, OP1, OP2>
+@@ -1214,10 +1260,12 @@
+                     n_tiles);
+             NVTE_CHECK_CUDA(cudaGetLastError());
+           } else {
++#ifndef __HIP_PLATFORM_AMD__
+             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                 dgated_act_cast_transpose_kernel_notaligned<nvec_in, nvec_out, ComputeType,
+                                                             InputType, OutputType, Empty, OP1, OP2>,
+                 cudaFuncAttributePreferredSharedMemoryCarveout, 100));
++#endif
+             dgated_act_cast_transpose_kernel_notaligned<nvec_in, nvec_out, ComputeType, InputType,
+                                                         OutputType, Empty, OP1, OP2>
+                 <<<n_blocks, cast_transpose_num_threads, shmem_size, stream>>>(

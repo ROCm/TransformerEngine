@@ -1,0 +1,26 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/cuda_driver.h
++++ b/transformer_engine/common/util/cuda_driver.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -75,7 +77,8 @@
+     const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                                       \
+     if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                                         \
+       const char *desc_NVTE_CHECK_CUDA_DRIVER;                                                   \
+-      ::transformer_engine::cuda_driver::call("cuGetErrorString", status_NVTE_CHECK_CUDA_DRIVER, \
++      (void)::transformer_engine::cuda_driver::call("cuGetErrorString",                          \
++                                              status_NVTE_CHECK_CUDA_DRIVER,                     \
+                                               &desc_NVTE_CHECK_CUDA_DRIVER);                     \
+       NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                                   \
+     }                                                                                            \

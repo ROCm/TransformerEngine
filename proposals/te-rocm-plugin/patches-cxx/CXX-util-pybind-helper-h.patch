@@ -1,0 +1,69 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: no trip evidence; default B
+--- a/transformer_engine/common/util/pybind_helper.h
++++ b/transformer_engine/common/util/pybind_helper.h
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -14,6 +16,22 @@
+ 
+ #include "cuda_runtime.h"
+ 
++// Define fused-attention handles separately for USE_ROCM
++#ifndef USE_ROCM
++#define NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                    \
++  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
++      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)            \
++      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
++      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
++      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
++#else
++#define NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                    \
++  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
++        .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)                            \
++        .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)                                        \
++        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend); 
++#endif
++
+ #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \
+   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
+       .value("kByte", transformer_engine::DType::kByte)                                            \
+@@ -87,15 +105,6 @@
+       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
+       .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD)          \
+       .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);                         \
+-  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
+-      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
+-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
+-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                         \
+-  pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
+-      m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
+-      .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
+-      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
+-      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);                \
+   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
+                                                        pybind11::module_local())                   \
+       .value("RS", transformer_engine::CommOverlapType::RS)                                        \
+@@ -153,6 +162,11 @@
+   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
+         py::call_guard<py::gil_scoped_release>());                                                 \
+   m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
+-        py::call_guard<py::gil_scoped_release>());
+-
++        py::call_guard<py::gil_scoped_release>());                                                 \
++  NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                          \
++  pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
++      m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
++      .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
++      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
++      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);
+ #endif

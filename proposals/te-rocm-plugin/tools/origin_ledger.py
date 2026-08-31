@@ -59,7 +59,7 @@ def main() -> int:
 
     # patch ids per target file (python patches today; CXX-* join in S4.2)
     patch_ids = {}
-    for p in sorted((PROP / "patches").glob("*.patch")):
+    for p in sorted(list((PROP / "patches").glob("*.patch")) + list((PROP / "patches-cxx").glob("*.patch"))):
         for l in p.read_text().splitlines():
             if l.startswith("--- a/"):
                 patch_ids.setdefault(l[6:], []).append(p.stem)

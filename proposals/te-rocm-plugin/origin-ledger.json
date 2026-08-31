@@ -184,7 +184,9 @@
    "upstream_blob_at_pin": "1e3c04573becbfd0f2a6f484dbdc3d7a530495cc",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-cast-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/cast_dbias.cu",
@@ -232,7 +234,9 @@
    "upstream_blob_at_pin": "7ff501bb4938e0e3879954fb337a151db7d9cc73",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-core-grouped-tma-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/dispatch/dequantize.cuh",
@@ -240,7 +244,9 @@
    "upstream_blob_at_pin": "bf4a0218118d627c4a1d7783c816f49c151a2881",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-dispatch-dequantize-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/dispatch/gated.cuh",
@@ -248,7 +254,9 @@
    "upstream_blob_at_pin": "06e8f0e306cd374a19995087a0ab50ece5b89b28",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-dispatch-gated-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/dispatch/quantize.cuh",
@@ -256,7 +264,9 @@
    "upstream_blob_at_pin": "033d464bcfcd13867de1cad4c7dbf746696fac8e",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-dispatch-quantize-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/fp8/dequantize_fp8.cuh",
@@ -264,7 +274,9 @@
    "upstream_blob_at_pin": "6a0eaf94fb44403f8064dd89c57f66dc76fdd067",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-fp8-dequantize-fp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/fp8/gated_fp8.cuh",
@@ -272,7 +284,9 @@
    "upstream_blob_at_pin": "522a9add8f1d6dbc636685b60860f9b40ce39e83",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-fp8-gated-fp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/fp8/group_amax_fp8.cuh",
@@ -280,7 +294,9 @@
    "upstream_blob_at_pin": "5040f153812012ee1a5a4f0f76963948b96cdf9a",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-fp8-group-amax-fp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/fp8/group_quantize_fp8.cuh",
@@ -296,7 +312,9 @@
    "upstream_blob_at_pin": "bad10c954eb7e85dbef384259ebaf435684bd996",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-fp8-quantize-fp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/fp8/rocm_cast.cuh",
@@ -344,7 +362,9 @@
    "upstream_blob_at_pin": "1face261bd64ea2dae6868a9cb51f663edd2921f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-mxfp8-dequantize-mxfp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/mxfp8/gated_mxfp8.cuh",
@@ -352,7 +372,9 @@
    "upstream_blob_at_pin": "83b5a49caed706916275cfad08d7aedfe8f9a836",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-mxfp8-gated-mxfp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/mxfp8/group_dequantize_mxfp8.cuh",
@@ -360,7 +382,9 @@
    "upstream_blob_at_pin": "dad8d18d6f8673177d80acc44108e424761ed099",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-mxfp8-group-dequantize-mxfp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/mxfp8/group_quantize_mxfp8.cuh",
@@ -368,7 +392,9 @@
    "upstream_blob_at_pin": "14832573d7f31a107ca2ee70417deb3463e5659a",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-mxfp8-group-quantize-mxfp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh",
@@ -376,7 +402,9 @@
    "upstream_blob_at_pin": "a9da143c3cf232cedb7d828fccd7b8dc725ba6b9",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-mxfp8-quantize-mxfp8-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/mxfp8/rocm_dequantize_mxfp8.cuh",
@@ -464,7 +492,9 @@
    "upstream_blob_at_pin": "13bb01d50077f60b63f636b4cb90c08981fe0631",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-cast-nvfp4-dequantize-nvfp4-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh",
@@ -576,7 +606,9 @@
    "upstream_blob_at_pin": "2eda743af995c643c1cb5b303fa66aa86219a170",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-comm-gemm-overlap-comm-gemm-overlap-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/comm_gemm_overlap/rocm_comm_gemm_overlap.cpp",
@@ -600,7 +632,9 @@
    "upstream_blob_at_pin": "c8d5977fb0ef0e0b46e01dcdacf319b9dacfb956",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-comm-gemm-overlap-userbuffers-userbuffers-host-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.cu",
@@ -608,7 +642,9 @@
    "upstream_blob_at_pin": "4bbbfc3c194b0ddcda2237e000c6ebbd2a10a022",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-comm-gemm-overlap-userbuffers-userbuffers-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.h",
@@ -616,7 +652,9 @@
    "upstream_blob_at_pin": "52be0af5386075327ee261d47f1b40486ea6b7e2",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-comm-gemm-overlap-userbuffers-userbuffers-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/common.cu",
@@ -624,7 +662,9 @@
    "upstream_blob_at_pin": "ef757bac5fcfddef3e843822bcca1faf2d3cf070",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-common-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/common.h",
@@ -632,7 +672,9 @@
    "upstream_blob_at_pin": "eb4dcc055c846493a48ac32ed173de6266ae210f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-common-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/cudnn_utils.cpp",
@@ -656,7 +698,9 @@
    "upstream_blob_at_pin": "b20b76bbf62783c2d71e270e8500860ee445e5c6",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-dropout-dropout-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/ep/ep_api.cpp",
@@ -696,7 +740,9 @@
    "upstream_blob_at_pin": "38bf09f8105dbc29467c6bbe2944146479ee5bd7",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-attn-flash-attn-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_attn/fused_attn.cpp",
@@ -752,7 +798,9 @@
    "upstream_blob_at_pin": "9b54a64cbe75bf6213aded2268651d0eba3c4bb9",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-attn-utils-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_attn/utils.h",
@@ -832,7 +880,9 @@
    "upstream_blob_at_pin": "32647f15450eacdbd0b6341d93861d0d3108b3eb",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-router-async-loader-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_router/fused_moe_aux_loss.cu",
@@ -840,7 +890,9 @@
    "upstream_blob_at_pin": "9fb5adcc1f4996f9c0587f627c46492111874f4f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-router-fused-moe-aux-loss-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu",
@@ -864,7 +916,9 @@
    "upstream_blob_at_pin": "117828a70426a4f53eb34834be361c3d70f44414",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-router-utils-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu",
@@ -872,7 +926,9 @@
    "upstream_blob_at_pin": "1f8e74847966c8b7a61ff6d3bda35bd7be793361",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-softmax-scaled-aligned-causal-masked-softmax-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_softmax/scaled_masked_softmax.cu",
@@ -880,7 +936,9 @@
    "upstream_blob_at_pin": "6f295ad00a1ec0245918abc959cb079ed48ac5bf",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-softmax-scaled-masked-softmax-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu",
@@ -888,7 +946,9 @@
    "upstream_blob_at_pin": "c18444f646075c8093ce45a411624e6a08f19521",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-fused-softmax-scaled-upper-triang-masked-softmax-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/gemm/ck_grouped_gemm/ck_grouped_gemm.cpp",
@@ -1024,7 +1084,9 @@
    "upstream_blob_at_pin": "3997e5249daa555c49c52b1b54d5f0dc226daba8",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-gemm-cublaslt-grouped-gemm-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/gemm/cutlass_grouped_gemm.cu",
@@ -1200,7 +1262,9 @@
    "upstream_blob_at_pin": "b5160cd317bb0b751da4d257af1671dba2aa5f33",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-hadamard-transform-hadamard-transform-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/hadamard_transform/hadamard_transform_cast_fusion.cu",
@@ -1272,7 +1336,9 @@
    "upstream_blob_at_pin": "b1a7447f2a63e7dc729995f10d262795de10b39f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-comm-gemm-overlap-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/comm_window.h",
@@ -1312,7 +1378,9 @@
    "upstream_blob_at_pin": "41e4b136bdda5a592cc8e15869fa61fa1cd99c01",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-fused-attn-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/fused_rope.h",
@@ -1336,7 +1404,9 @@
    "upstream_blob_at_pin": "a99e0946ef0660dbd2a60e05502142b571e193fd",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-gemm-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/hadamard_transform.h",
@@ -1352,7 +1422,9 @@
    "upstream_blob_at_pin": "013a424941e90bdc34f74ca43180dea75a77d158",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-multi-stream-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/multi_tensor.h",
@@ -1360,7 +1432,9 @@
    "upstream_blob_at_pin": "09ab260f15bc908547f480b34a235141ac46f97e",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-multi-tensor-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/newton_schulz.h",
@@ -1376,7 +1450,9 @@
    "upstream_blob_at_pin": "29b98ca54f1c2acb8db567d8ac59327253e5eae9",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-normalization-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/nvte_rocm.h",
@@ -1408,7 +1484,9 @@
    "upstream_blob_at_pin": "47539a89a17f921c12f5599ea5f6c87e63ab4f44",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-recipe-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/softmax.h",
@@ -1440,7 +1518,9 @@
    "upstream_blob_at_pin": "aa0405e177355b4b447c87e121d9953d4616dd2c",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-transformer-engine-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/transpose.h",
@@ -1448,7 +1528,9 @@
    "upstream_blob_at_pin": "659a48d97dcffce3ee927cc2a6c4a36dbe31dda8",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-include-transformer-engine-transpose-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/include/transformer_engine/utils.h",
@@ -1464,7 +1546,9 @@
    "upstream_blob_at_pin": "b2c8f29a13c9cd381de56a8925443b52780b2242",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-multi-tensor-adam-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/multi_tensor/compute_scale.cu",
@@ -1480,7 +1564,9 @@
    "upstream_blob_at_pin": "5c2fdb2ca8663e9cf6b077d5c352cd292ee54ee5",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-multi-tensor-l2norm-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/multi_tensor/multi_tensor_apply.cuh",
@@ -1520,7 +1606,9 @@
    "upstream_blob_at_pin": "375b109c23c03083fd06ee1f40c7fd1bf151e800",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-common-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/common.h",
@@ -1528,7 +1616,9 @@
    "upstream_blob_at_pin": "31a547f62ca203ebaf151d1559ddc594b70661e6",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-common-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/kernel_params.h",
@@ -1536,7 +1626,9 @@
    "upstream_blob_at_pin": "42dc423dd0907df929827f021daac605e26e7a76",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-kernel-params-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/kernel_traits.h",
@@ -1544,7 +1636,9 @@
    "upstream_blob_at_pin": "41be82e74220f751ec245a03b1cf56768ab52b25",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-kernel-traits-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/layernorm/ln_api.cpp",
@@ -1552,7 +1646,9 @@
    "upstream_blob_at_pin": "0f843019ced68ee9fa0647f0f6791ce47ff2beb8",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-layernorm-ln-api-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/layernorm/ln_bwd_kernels.cuh",
@@ -1568,7 +1664,9 @@
    "upstream_blob_at_pin": "2e3d5fd622ef8232955b1165a4e4d64582216e0a",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-layernorm-ln-bwd-semi-cuda-kernel-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/layernorm/ln_fwd_cuda_kernel.cu",
@@ -1576,7 +1674,9 @@
    "upstream_blob_at_pin": "5be13357b195ccf69e8b8dee83a07bdbcfd9cdda",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-layernorm-ln-fwd-cuda-kernel-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/layernorm/ln_fwd_kernels.cuh",
@@ -1584,7 +1684,9 @@
    "upstream_blob_at_pin": "0e350146ea75beef12be13714e39b4010c2c7ab2",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-layernorm-ln-fwd-kernels-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/layernorm/rtc/ln_bwd_kernel.cu",
@@ -1608,7 +1710,9 @@
    "upstream_blob_at_pin": "07ad3230aa192a17cfa14056680d9751e32b7e69",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-rmsnorm-rmsnorm-api-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_kernels.cuh",
@@ -1624,7 +1728,9 @@
    "upstream_blob_at_pin": "7e8a1cd624184bf0309c491dfd02e52ea809a899",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-rmsnorm-rmsnorm-bwd-semi-cuda-kernel-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu",
@@ -1632,7 +1738,9 @@
    "upstream_blob_at_pin": "c3308cbce07fdc5f0c09c2851f37c40d2c9c134e",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-rmsnorm-rmsnorm-fwd-cuda-kernel-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_kernels.cuh",
@@ -1640,7 +1748,9 @@
    "upstream_blob_at_pin": "bb284a9ab1d577f6ef2768d3b2c468f0693f2ab7",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-rmsnorm-rmsnorm-fwd-kernels-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu",
@@ -1664,7 +1774,9 @@
    "upstream_blob_at_pin": "5ae81f4233da23db8ddf1c0b734d93884958698f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-normalization-rtc-dispatch-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/normalization/rtc_dispatch.h",
@@ -1704,7 +1816,9 @@
    "upstream_blob_at_pin": "aa7cb50e8b229e3b6324374dde50418463cd8c8f",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-permutation-permutation-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/__init__.py",
@@ -1722,7 +1836,9 @@
    "upstream_blob_at_pin": "3ba51dba7547c2dafbc8cda4c082b20a570c25d9",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-current-scaling-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/delayed_scaling.cu",
@@ -1730,7 +1846,9 @@
    "upstream_blob_at_pin": "a0da551d0f762c44472d98507fadd3ffcd3bb188",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-delayed-scaling-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/fp8_block_scaling.cu",
@@ -1738,7 +1856,9 @@
    "upstream_blob_at_pin": "f69fd6c262ecbbcb8acb870d2cd3add7010942fe",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-fp8-block-scaling-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/mxfp8_scaling.cu",
@@ -1746,7 +1866,9 @@
    "upstream_blob_at_pin": "be692d4563340b450d3db07ad18ecd652135ab8c",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-mxfp8-scaling-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/nvfp4.cu",
@@ -1754,7 +1876,9 @@
    "upstream_blob_at_pin": "576e6139c7ee1a4662d5c4e6cc774e908643d4fd",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-nvfp4-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/recipe/recipe_common.cuh",
@@ -1762,7 +1886,9 @@
    "upstream_blob_at_pin": "07839407a3fed94aef9d6e54bb3575e946a3b945",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-recipe-recipe-common-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/rocshmem_api/rocshmem_waitkernel.hip",
@@ -1786,7 +1912,9 @@
    "upstream_blob_at_pin": "38b526360e60a0f22b2d88efecc781c41f3a4c84",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-swizzle-swizzle-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/swizzle/swizzle_block_scaling.cu",
@@ -1802,7 +1930,9 @@
    "upstream_blob_at_pin": "b3179d38fd8c96a95740ec75318f3269eef9855b",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transformer-engine-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/cast_transpose.cu",
@@ -1810,7 +1940,9 @@
    "upstream_blob_at_pin": "dd27fa83ee97773f2dfb1f31336e6289305471ab",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-cast-transpose-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/cast_transpose.h",
@@ -1818,7 +1950,9 @@
    "upstream_blob_at_pin": "c462b3014751a700d96393fa27d2e2143e175f97",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-cast-transpose-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/cast_transpose_fusion.cu",
@@ -1826,7 +1960,9 @@
    "upstream_blob_at_pin": "619e60220e63e26a4f39411a90b0795c16c6de29",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-cast-transpose-fusion-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/multi_cast_transpose.cu",
@@ -1834,7 +1970,9 @@
    "upstream_blob_at_pin": "33e1c19d8f32779577fde67b1f9e8b6462cfcfa5",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-multi-cast-transpose-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/quantize_transpose_square_blockwise.cu",
@@ -1842,7 +1980,9 @@
    "upstream_blob_at_pin": "3a8536587c25698ef6b52fe1c5b0a9f8d892011a",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-quantize-transpose-square-blockwise-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu",
@@ -1890,7 +2030,9 @@
    "upstream_blob_at_pin": "49b533ffbda5a9cb0fc48e10be75e87bd280f4aa",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-rtc-cast-transpose-fusion-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/transpose/rtc/swap_first_dims.cu",
@@ -1938,7 +2080,9 @@
    "upstream_blob_at_pin": "cfb99d214efb24eb03b1f352ab83438ee7ec8b86",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-transpose-transpose-fusion-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/triton/__init__.py",
@@ -1994,7 +2138,9 @@
    "upstream_blob_at_pin": "1e98528e52f9507a06d5038c334c65bacad72682",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-cuda-driver-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/cuda_driver.h",
@@ -2002,7 +2148,9 @@
    "upstream_blob_at_pin": "16242347f12e6a8b1de1e635928aa50b5d485f0c",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-cuda-driver-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/cuda_nvml.cpp",
@@ -2026,7 +2174,9 @@
    "upstream_blob_at_pin": "504d761bb181f9f838099810f1d2e6270923784c",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-cuda-runtime-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/cuda_runtime.h",
@@ -2034,7 +2184,9 @@
    "upstream_blob_at_pin": "0f3559400106e7d31cc6cbc2dc728a5ed0bc11ef",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-cuda-runtime-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/curanddx.hpp",
@@ -2058,7 +2210,9 @@
    "upstream_blob_at_pin": "da8b9b377d873ce5a1705a5ad2a7f5c98608fac8",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-logging-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/math.h",
@@ -2066,7 +2220,9 @@
    "upstream_blob_at_pin": "64b6fa2d48fa38a8d75839e58b1b4ccbe08775f1",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-math-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/multi_stream.cpp",
@@ -2090,7 +2246,9 @@
    "upstream_blob_at_pin": "67f98a130933d99cf988b05cbd65dd5998e4788c",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-padding-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/ptx.cuh",
@@ -2098,7 +2256,9 @@
    "upstream_blob_at_pin": "2814aa3490d816048e11f3d21cf425a45da83d54",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-ptx-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/pybind_helper.h",
@@ -2106,7 +2266,9 @@
    "upstream_blob_at_pin": "f7ffb5ad8db1f8db4cc3a90052936b9ebaf03db3",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-pybind-helper-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/rocm_device_utils.cuh",
@@ -2122,7 +2284,9 @@
    "upstream_blob_at_pin": "20616f8cb682c33c58866004ca1898bdb0492fbb",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-rtc-cpp"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/rtc.h",
@@ -2130,7 +2294,9 @@
    "upstream_blob_at_pin": "745566ee60dc8ec1b1d399d787fe26a51d318764",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-rtc-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/shared_lib_wrapper.h",
@@ -2154,7 +2320,9 @@
    "upstream_blob_at_pin": "3d19cbfcf202052882947a4fb33fcc6eda86ad68",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-standalone-topk-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/string.h",
@@ -2170,7 +2338,9 @@
    "upstream_blob_at_pin": "90c984a46a5ab62516d63a5accfccb75e00ac3e2",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-system-h"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/topk.cu",
@@ -2178,7 +2348,9 @@
    "upstream_blob_at_pin": "21018a494897ecb03f88a397eba4016b9a01620e",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-util-topk-cu"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/util/utils.cu",
@@ -2202,7 +2374,9 @@
    "upstream_blob_at_pin": "0b75da622cfefde151ec615b45ac6a355ff153d6",
    "state": "diverged",
    "cxx_strategy": "patch-queue",
-   "patch_ids": []
+   "patch_ids": [
+    "CXX-utils-cuh"
+   ]
   },
   {
    "fork_path": "transformer_engine/common/utils.py",
