@@ -1,0 +1,278 @@
+# manifest: BK-001
+# base: 868d8d9216da361c666519652115e23688db5211
+# mechanism: cxx-guard-patch
+# expiry: pin-bump-review
+# tests: ci/core.sh
+# owner: TBD
+# evidence: ROCm branch REUSES upstream nvte_* wrapper bodies (fork adds a fwd-decl to rocm_gemm.cu + guard-outs); native fork would decouple from upstream wrapper evolution; stays patch-queue (2nd amendment)
+--- a/transformer_engine/common/gemm/cublaslt_gemm.cu
++++ b/transformer_engine/common/gemm/cublaslt_gemm.cu
+@@ -1,12 +1,17 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+  ************************************************************************/
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ #include <cublasLt.h>
+ #include <cublas_v2.h>
+ #include <cuda.h>
++#endif // #ifndef __HIP_PLATFORM_AMD__
++
+ #include <transformer_engine/gemm.h>
+ #include <transformer_engine/multi_stream.h>
+ #include <transformer_engine/recipe.h>
+@@ -22,9 +27,15 @@
+ #include "../util/handle_manager.h"
+ #include "../util/logging.h"
+ #include "../util/multi_stream.h"
++#include "../util/system.h"
+ #include "./config.h"
++#ifndef __HIP_PLATFORM_AMD__
+ #include "./cutlass_grouped_gemm.cuh"
++#else
++#include "ck_grouped_gemm/ck_grouped_gemm.h"
++#endif
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ namespace {
+ 
+ /* Use CUDA const memory to store scalar 1 and 0 for cublas usage
+@@ -307,9 +318,21 @@
+ }
+ 
+ }  // namespace
++#endif // __HIP_PLATFORM_AMD__
++
+ 
+ namespace transformer_engine {
+ 
++#ifdef __HIP_PLATFORM_AMD__
++//Forward declaration. The implementation is in rocm_gemm.cu
++void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
++                 const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
++                 cublasOperation_t transb, bool grad, void* workspace, size_t workspaceSize,
++                 const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
++                 int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
++                 hipStream_t stream, int compute_stream_offset = -1);
++#else // Use cublasLt
++
+ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+ 
+ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
+@@ -797,6 +820,7 @@
+   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
+   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+ }
++#endif // __HIP_PLATFORM_AMD__
+ 
+ }  // namespace transformer_engine
+ 
+@@ -927,6 +951,9 @@
+                              cudaStream_t stream) {
+   NVTE_API_CALL(nvte_cublas_atomic_gemm);
+   using namespace transformer_engine;
++
++#ifndef __HIP_PLATFORM_AMD__
++  // Check CUDA and cuBLAS versions
+ #if !(CUDA_VERSION >= 12020 && CUDA_VERSION < 13000)
+   NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA version is ",
+              CUDA_VERSION);
+@@ -945,6 +972,7 @@
+           transformer_engine::cuda::cublas_version() < 130000,
+       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
+       transformer_engine::cuda::cublas_version());
++#endif
+ 
+   const Tensor *inputA = convertNVTETensorCheck(A);
+   const Tensor *inputB = convertNVTETensorCheck(B);
+@@ -964,7 +992,7 @@
+               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+               alpha_ptr, beta_ptr, use_split_accumulator, math_sm_count, m_split, n_split,
+               gemm_producer, inputCounter, stream);
+-#endif
++#endif //#ifndef __HIP_PLATFORM_AMD__
+ }
+ 
+ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+@@ -985,6 +1013,24 @@
+   }
+ 
+   for (int i = 0; i < num_gemms; i++) {
++#ifdef __HIP_PLATFORM_AMD__
++    const Tensor *inputA = convertNVTETensorCheck(A[i]);
++    const Tensor *inputB = convertNVTETensorCheck(B[i]);
++    Tensor *outputD = convertNVTETensorCheck(D[i]);
++    const Tensor *biasTensor = convertNVTETensorCheck(bias[i]);
++    Tensor *outputGelu = convertNVTETensorCheck(pre_gelu_out[i]);
++    Tensor *wspace = convertNVTETensorCheck(workspace[i % num_streams]);
++
++    // Scales
++    const float alpha = 1;
++    const float beta = accumulate ? 1 : 0;
++
++    cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
++                (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
++                wspace->data.dptr, wspace->data.shape[0], &alpha, &beta,
++                use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
++                detail::get_compute_stream(i % num_streams), i % num_streams);
++#else
+     // Check whether GELU or dGELU epilogue is requested
+     Tensor *pre_gelu_tensor = convertNVTETensor(pre_gelu_out[i]);
+     bool with_gelu_dgelu_epilogue =
+@@ -1009,6 +1055,7 @@
+     nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
+                         workspace[i % num_streams], &config,
+                         detail::get_compute_stream(i % num_streams));
++#endif
+   }
+ 
+   // record events on compute streams
+@@ -1041,6 +1088,7 @@
+                            accumulate, use_split_accumulator, math_sm_count, stream);
+ }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+ namespace transformer_engine {
+ 
+ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+@@ -1048,6 +1096,18 @@
+ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
+ 
+ }  //  namespace transformer_engine
++#endif // __HIP_PLATFORM_AMD__
++
++#ifdef USE_HIPKITTENS_GEMM
++namespace transformer_engine {
++bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
++    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
++    bool accumulate, cudaStream_t stream);
++bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
++    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
++    bool accumulate, cudaStream_t stream);
++}
++#endif
+ 
+ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+@@ -1060,9 +1120,13 @@
+     return;
+   }
+ 
++#ifndef __HIP_PLATFORM_AMD__
+   const int current_device = transformer_engine::cuda::current_device();
+   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
++#endif
++  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)
++                        || transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false)
++                        || transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
+   const bool warn_fallback =
+       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+ 
+@@ -1071,8 +1135,12 @@
+                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
+   };
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  if (!use_cutlass || num_gemms == 1) {
++#else
+   // Currently only support cutlass group gemm on Hopper Arch
+   if (!(is_hopper && use_cutlass)) {
++#endif
+     cublas_path();
+     return;
+   }
+@@ -1085,6 +1153,7 @@
+     return true;
+   };
+ 
++#ifndef __HIP_PLATFORM_AMD__
+   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
+     int64_t ref_k = -1;
+     for (size_t i = 0; i < num_gemms; i++) {
+@@ -1101,17 +1170,40 @@
+ 
+     return true;
+   };
++#endif
+ 
+   auto is_supported_dtype = [&]() -> bool {
+     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
++#ifdef __HIP_PLATFORM_AMD__
++    auto effective_dtype = [](const transformer_engine::Tensor *t) {
++      NVTE_CHECK(t->has_data() || t->has_columnwise_data(),
++                "Input tensor has neither row-wise nor column-wise data.");
++      return t->has_data() ? t->data.dtype : t->columnwise_data.dtype;
++    };
++
++    auto A_dt = effective_dtype(inputA);
++    auto B_dt = effective_dtype(inputB);
++    auto D_dt = OutputD->data.dtype;
++
++    // Supported grouped-GEMM dtype combinations for the CK path:
++    //   - FP8 inputs: A and B both FP8 (D dtype handled by the FP8 path).
++    //   - 16-bit inputs: A and B the same 16-bit type (both BF16 or both FP16),
++    //     with output D either that same 16-bit type or Float32
++    //     (fused wgrad accumulation into an FP32 main_grad buffer).
++    return ((is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt)) ||
++            ((A_dt == B_dt) && is_fp16_dtype(A_dt) &&
++             (A_dt == D_dt || D_dt == transformer_engine::DType::kFloat32)));
++
++#else
+     auto A_type = get_cuda_dtype(inputA->data.dtype);
+     auto B_type = get_cuda_dtype(inputB->data.dtype);
+     auto D_type = get_cuda_dtype(OutputD->data.dtype);
+ 
+     return (A_type == B_type) && (A_type == D_type) &&
+            ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
++#endif
+   };
+ 
+   // CUTLASS Grouped GEMM fast path (SM90/TMA)
+@@ -1124,9 +1216,40 @@
+   //
+   // Otherwise, fall back to cuBLAS.
+   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
++#ifdef __HIP_PLATFORM_AMD__
++      true)                               {
++    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
++
++    bool handled_by_ck = false;
++    if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
++#ifdef USE_HIPKITTENS_GEMM
++      if (transformer_engine::try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb,
++                                         workspace, accumulate, stream)) {
++        return;
++      }
++      if (transformer_engine::try_kittens_grouped_mxfp8_wgrad(A, B, D, num_gemms, transa, transb,
++                                         workspace, accumulate, stream)) {
++        return;
++      }
++#endif
++      handled_by_ck = ck_tile_mx_grouped_gemm(
++          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
++    } else {
++      handled_by_ck = ck_tile_grouped_gemm(
++          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
++    }
++
++    if (!handled_by_ck) {
++      if (warn_fallback) {
++        NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
++      }
++      cublas_path();
++    }
++#else
+       all_groups_uniform_k128(B, transb)) {
+     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+                          current_device, math_sm_count, stream);
++#endif
+   } else {
+     if (warn_fallback) {
+       NVTE_WARN("Fallback to cuBLAS grouped GEMM.");

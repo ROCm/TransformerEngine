@@ -2087,6 +2087,155 @@
     }
    ]
   },
+  "CXX-gemm-cublaslt-gemm-cu": {
+   "file": "transformer_engine/common/gemm/cublaslt_gemm.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      12
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "a9ead39c632760f1"
+    },
+    {
+     "span": [
+      22,
+      30
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "2e4b7e150714393d"
+    },
+    {
+     "span": [
+      307,
+      315
+     ],
+     "symbol": "cublasHandleManager",
+     "kind": "variable",
+     "sha256_span": "f9243e6b7da1407d"
+    },
+    {
+     "span": [
+      797,
+      802
+     ],
+     "symbol": "cublas_gemm",
+     "kind": "function",
+     "sha256_span": "9eab370f2e5200b3"
+    },
+    {
+     "span": [
+      927,
+      932
+     ],
+     "symbol": "nvte_cublas_atomic_gemm",
+     "kind": "function",
+     "sha256_span": "19d64f52da8b5a53"
+    },
+    {
+     "span": [
+      945,
+      950
+     ],
+     "symbol": "nvte_cublas_atomic_gemm",
+     "kind": "function",
+     "sha256_span": "8e1da83c708d0358"
+    },
+    {
+     "span": [
+      964,
+      970
+     ],
+     "symbol": "nvte_cublas_atomic_gemm",
+     "kind": "function",
+     "sha256_span": "48811e284f80c2ec"
+    },
+    {
+     "span": [
+      985,
+      990
+     ],
+     "symbol": "multi_stream_cublas_gemm",
+     "kind": "function",
+     "sha256_span": "0e1d91e6f07732cd"
+    },
+    {
+     "span": [
+      1009,
+      1014
+     ],
+     "symbol": "multi_stream_cublas_gemm",
+     "kind": "function",
+     "sha256_span": "a2113d6c781f8fdb"
+    },
+    {
+     "span": [
+      1041,
+      1046
+     ],
+     "symbol": "cublasHandleManager",
+     "kind": "variable",
+     "sha256_span": "9b116ea6a2d07e1c"
+    },
+    {
+     "span": [
+      1048,
+      1053
+     ],
+     "symbol": "nvte_cublas_handle_init",
+     "kind": "function",
+     "sha256_span": "180be6b7fdf3c852"
+    },
+    {
+     "span": [
+      1060,
+      1068
+     ],
+     "symbol": "nvte_multi_tensor_gemm",
+     "kind": "function",
+     "sha256_span": "e4391dca533873f0"
+    },
+    {
+     "span": [
+      1071,
+      1078
+     ],
+     "symbol": "nvte_multi_tensor_gemm",
+     "kind": "function",
+     "sha256_span": "6597a209af91cb3d"
+    },
+    {
+     "span": [
+      1085,
+      1090
+     ],
+     "symbol": "nvte_multi_tensor_gemm",
+     "kind": "function",
+     "sha256_span": "6d1c589ebc2bc49a"
+    },
+    {
+     "span": [
+      1101,
+      1117
+     ],
+     "symbol": "nvte_multi_tensor_gemm",
+     "kind": "function",
+     "sha256_span": "96ed6cffe81707fc"
+    },
+    {
+     "span": [
+      1124,
+      1132
+     ],
+     "symbol": "nvte_multi_tensor_gemm",
+     "kind": "function",
+     "sha256_span": "75e3027c3a2e82e4"
+    }
+   ]
+  },
   "CXX-gemm-cublaslt-grouped-gemm-cu": {
    "file": "transformer_engine/common/gemm/cublaslt_grouped_gemm.cu",
    "hunks": [
@@ -3642,7 +3791,7 @@
       168,
       178
      ],
-     "symbol": "__anona0f3a1c10202",
+     "symbol": "__anon34467f590202",
      "kind": "function",
      "sha256_span": "97825675245fe3c7"
     },
@@ -3651,7 +3800,7 @@
       195,
       200
      ],
-     "symbol": "__anona0f3a1c10202",
+     "symbol": "__anon34467f590202",
      "kind": "function",
      "sha256_span": "0d6d22e4c662003d"
     },
@@ -3660,7 +3809,7 @@
       212,
       218
      ],
-     "symbol": "__anona0f3a1c10202",
+     "symbol": "__anon34467f590202",
      "kind": "function",
      "sha256_span": "9db2a15cdc7c819a"
     },
@@ -3678,7 +3827,7 @@
       292,
       297
      ],
-     "symbol": "__anona0f3a1c10302",
+     "symbol": "__anon34467f590302",
      "kind": "function",
      "sha256_span": "ac836d5087d48478"
     },
@@ -3687,7 +3836,7 @@
       302,
       307
      ],
-     "symbol": "__anona0f3a1c10302",
+     "symbol": "__anon34467f590302",
      "kind": "function",
      "sha256_span": "99b5d04c91d641d7"
     },
@@ -3705,7 +3854,7 @@
       375,
       380
      ],
-     "symbol": "__anona0f3a1c10502",
+     "symbol": "__anon34467f590502",
      "kind": "function",
      "sha256_span": "ac836d5087d48478"
     },
@@ -3714,7 +3863,7 @@
       385,
       390
      ],
-     "symbol": "__anona0f3a1c10502",
+     "symbol": "__anon34467f590502",
      "kind": "function",
      "sha256_span": "99b5d04c91d641d7"
     }
@@ -4290,7 +4439,7 @@
       1141,
       1146
      ],
-     "symbol": "__anon52c94e470502",
+     "symbol": "__anon43e9d1eb0502",
      "kind": "function",
      "sha256_span": "b81163b89f7c59b0"
     },
@@ -4636,6 +4785,331 @@
     }
    ]
   },
+  "CXX-transpose-quantize-transpose-vector-blockwise-cu": {
+   "file": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      145,
+      158
+     ],
+     "symbol": "kNVecIn",
+     "kind": "variable",
+     "sha256_span": "4628835249c9a66f"
+    },
+    {
+     "span": [
+      166,
+      171
+     ],
+     "symbol": "kNumWarps",
+     "kind": "variable",
+     "sha256_span": "db3c64e9a27c3c6a"
+    },
+    {
+     "span": [
+      196,
+      201
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "cbd1e7c66f9d5ab0"
+    },
+    {
+     "span": [
+      241,
+      246
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "7a531731191ec06b"
+    },
+    {
+     "span": [
+      258,
+      265
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "9b50ba05b5f643ec"
+    },
+    {
+     "span": [
+      284,
+      295
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "12e38ce410c591da"
+    },
+    {
+     "span": [
+      332,
+      337
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "e46c288a0e09da46"
+    },
+    {
+     "span": [
+      349,
+      356
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "9b50ba05b5f643ec"
+    },
+    {
+     "span": [
+      373,
+      384
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "4e55f3bd1ee74c68"
+    },
+    {
+     "span": [
+      419,
+      424
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "6ba44f20139262eb"
+    },
+    {
+     "span": [
+      474,
+      480
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "51f0018ba96933f4"
+    },
+    {
+     "span": [
+      617,
+      623
+     ],
+     "symbol": "quantize_transpose_vector_blockwise",
+     "kind": "function",
+     "sha256_span": "685ab9f4a15f7c86"
+    },
+    {
+     "span": [
+      625,
+      631
+     ],
+     "symbol": "quantize_transpose_vector_blockwise",
+     "kind": "function",
+     "sha256_span": "f4937da107ccb7af"
+    }
+   ]
+  },
+  "CXX-transpose-quantize-transpose-vector-blockwise-fp4-cu": {
+   "file": "transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu",
+   "hunks": [
+    {
+     "span": [
+      1,
+      4
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "d5394a9a71040fa5"
+    },
+    {
+     "span": [
+      20,
+      29
+     ],
+     "symbol": null,
+     "kind": null,
+     "sha256_span": "4ed609766df82949"
+    },
+    {
+     "span": [
+      135,
+      146
+     ],
+     "symbol": "kNFP4PerContainer",
+     "kind": "variable",
+     "sha256_span": "d9f13f062915235b"
+    },
+    {
+     "span": [
+      154,
+      168
+     ],
+     "symbol": "WARP_REDUCE_AMAX_GROUP_MASKS",
+     "kind": "variable",
+     "sha256_span": "9771708fe4993076"
+    },
+    {
+     "span": [
+      182,
+      194
+     ],
+     "symbol": "ComputeOutputFP4",
+     "kind": "function",
+     "sha256_span": "a20f7eceb917f2d2"
+    },
+    {
+     "span": [
+      258,
+      263
+     ],
+     "symbol": "cvt_fp32_to_fp4_4x_with_stochastic_rounding",
+     "kind": "function",
+     "sha256_span": "168d7ba900086db1"
+    },
+    {
+     "span": [
+      275,
+      285
+     ],
+     "symbol": "cvt_fp32_to_fp4_4x_with_stochastic_rounding",
+     "kind": "function",
+     "sha256_span": "ba5c8bf979fa4d2e"
+    },
+    {
+     "span": [
+      302,
+      307
+     ],
+     "symbol": "cvt_fp32_to_fp4_4x_with_rn",
+     "kind": "function",
+     "sha256_span": "3a792bc87a4ddc8b"
+    },
+    {
+     "span": [
+      316,
+      329
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "3386cf61b3841639"
+    },
+    {
+     "span": [
+      361,
+      372
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "21fe9e7e39a402be"
+    },
+    {
+     "span": [
+      414,
+      421
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "98a9bbdaebdd413d"
+    },
+    {
+     "span": [
+      510,
+      524
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "52c5045a097adfd6"
+    },
+    {
+     "span": [
+      630,
+      635
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "497cb9fe2ad39c1c"
+    },
+    {
+     "span": [
+      657,
+      662
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "810d54482356c1a9"
+    },
+    {
+     "span": [
+      701,
+      709
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "764d62474ea57030"
+    },
+    {
+     "span": [
+      764,
+      770
+     ],
+     "symbol": "__launch_bounds__",
+     "kind": "function",
+     "sha256_span": "af3b4ea3fd767926"
+    },
+    {
+     "span": [
+      778,
+      786
+     ],
+     "symbol": "quantize_transpose_vector_blockwise_fp4",
+     "kind": "function",
+     "sha256_span": "384642364e44da49"
+    },
+    {
+     "span": [
+      807,
+      812
+     ],
+     "symbol": "quantize_transpose_vector_blockwise_fp4",
+     "kind": "function",
+     "sha256_span": "38ca498408073098"
+    },
+    {
+     "span": [
+      825,
+      832
+     ],
+     "symbol": "quantize_transpose_vector_blockwise_fp4",
+     "kind": "function",
+     "sha256_span": "317fb4e9cf2327fe"
+    },
+    {
+     "span": [
+      852,
+      858
+     ],
+     "symbol": "quantize_transpose_vector_blockwise_fp4",
+     "kind": "function",
+     "sha256_span": "b49fa6acbf757e83"
+    },
+    {
+     "span": [
+      875,
+      912
+     ],
+     "symbol": "quantize_transpose_vector_blockwise_fp4",
+     "kind": "function",
+     "sha256_span": "cc604a72553bfe30"
+    }
+   ]
+  },
   "CXX-transpose-rtc-cast-transpose-fusion-cu": {
    "file": "transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu",
    "hunks": [
@@ -4717,7 +5191,7 @@
       43,
       48
      ],
-     "symbol": "__anon69ccb4bd0102",
+     "symbol": "__anon0fa7c1080102",
      "kind": "function",
      "sha256_span": "d532b9916b6da316"
     }
@@ -4763,7 +5237,7 @@
       21,
       32
      ],
-     "symbol": "__anonaf6de3320202",
+     "symbol": "__anon8be5aa8f0202",
      "kind": "function",
      "sha256_span": "668c3bc08b04540b"
     },
@@ -4835,7 +5309,7 @@
       246,
       251
      ],
-     "symbol": "__anonaf6de3320702",
+     "symbol": "__anon8be5aa8f0702",
      "kind": "function",
      "sha256_span": "801d539f42a15585"
     },
@@ -5320,7 +5794,7 @@
       26,
       31
      ],
-     "symbol": "__anon4e460a3c0111",
+     "symbol": "__anon44de89a50111",
      "kind": "namespace",
      "sha256_span": "0f3b0a120333080b"
     },
@@ -5374,7 +5848,7 @@
       200,
       205
      ],
-     "symbol": "__anon4e460a3c0302",
+     "symbol": "__anon44de89a50302",
      "kind": "function",
      "sha256_span": "dcebcc7ca99a2e82"
     },

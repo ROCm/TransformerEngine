@@ -7,7 +7,7 @@
 # Census at pin 868d8d9216da: 92 modified C++ files, 6329 changed lines, 507 guard sites.
 # (Manifest cxx_facts said 85 files: that count excluded public headers under include/ and
 #  counted at the previous measurement; this file is the per-file authority from S4.1 on.)
-# assignment (amended): 3 native-hip, 89 patch-queue
+# assignment (2nd amendment): 0 native-hip conversions of upstream-ancestor files; 92 patch-queue
 # AMENDED 2026-09-01 (same day, on per-file divergence measurement): the two fused_router
 # files tripped in B3 on UPSTREAM CHURN in the whole-file replay, while their fork-side
 # divergence is 2 and 7 added lines with 0-1 guards. Converting ~700-1500 lines to native-hip
@@ -15,9 +15,18 @@
 # minutes-scale repair; a native fork is a permanent full-file divergence. They return to
 # patch-queue. The amended rule: native-hip requires trip evidence AND substantial fork-side
 # divergence (guards or changed-share), not churn-trips alone.
+# 2ND AMENDMENT 2026-09-01, on AMD-only-share measurement of the remaining 3 candidates:
+# whole-file native-hip conversion is counter-indicated for ALL upstream-ancestor files.
+# Measured: fp4 blockwise 291 AMD-only of 1201 ROCm-active lines; blockwise 5/951 (its added
+# lines are shared-code additions); cublaslt_gemm's ROCm branch reuses upstream wrapper bodies.
+# A whole-file fork copies 900+ shared upstream-evolving lines to own a fraction - increasing
+# the silent-drift risk the program exists to remove. native-hip remains the class for
+# genuinely ROCm-only trees (fused_attn_rocm/, amd_detail/, ...). Future conversion criterion:
+# an EXTRACTABLE AMD-only kernel exceeding ~50% of the file, moved alone - never the file.
 decided: '2026-09-01'
 decider: 'Wen Chen (Gate B: ''Start stage 4'')'
 amended: '2026-09-01: fused_router pair -> patch-queue (churn-trip, minimal fork divergence)'
+amended_2: '2026-09-01: all 3 remaining candidates -> patch-queue on AMD-only-share measurement; 0 whole-file conversions'
 default: patch-queue
 files:
 - file: transformer_engine/common/cast/cast.cu
@@ -213,11 +222,12 @@ files:
   changed_share: 0.026
   evidence: no trip evidence; default B
 - file: transformer_engine/common/gemm/cublaslt_gemm.cu
-  cxx_strategy: native-hip
+  cxx_strategy: patch-queue
   guards: 14
   changed_lines: 127
   changed_share: 0.101
-  evidence: TRIPPED in B3 replay; hipblaslt path is AMD-owned kernel dispatch
+  evidence: ROCm branch REUSES upstream nvte_* wrapper bodies (fork adds a fwd-decl to rocm_gemm.cu + guard-outs);
+    native fork would decouple from upstream wrapper evolution; stays patch-queue (2nd amendment)
 - file: transformer_engine/common/gemm/cublaslt_grouped_gemm.cu
   cxx_strategy: patch-queue
   guards: 1
@@ -459,17 +469,19 @@ files:
   changed_share: 0.058
   evidence: no trip evidence; default B
 - file: transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu
-  cxx_strategy: native-hip
+  cxx_strategy: patch-queue
   guards: 11
   changed_lines: 359
   changed_share: 0.36
-  evidence: sibling kernel of the tripped fp4 variant (11 guards, 0.36 share); one family, one strategy
+  evidence: AMD-only share 5/951 - the 358 added lines are shared-code additions; whole-file fork counter-indicated;
+    stays patch-queue (2nd amendment)
 - file: transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu
-  cxx_strategy: native-hip
+  cxx_strategy: patch-queue
   guards: 22
   changed_lines: 496
   changed_share: 0.376
-  evidence: TRIPPED in B3 replay; highest churn share (0.376), 22 guard sites
+  evidence: AMD-only share 291/1201 ROCm-active lines - a whole-file fork copies ~900 shared upstream-evolving lines;
+    stays patch-queue (2nd amendment)
 - file: transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu
   cxx_strategy: patch-queue
   guards: 1
