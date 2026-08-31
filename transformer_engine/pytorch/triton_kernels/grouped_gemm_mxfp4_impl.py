@@ -40,6 +40,7 @@ import torch.nn.functional as F
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..utils import round_up_to_nearest_multiple
 from .grouped_gemm_mxfp4 import (
+    _is_gfx950,
     grouped_gemm_mxfp4_triton_kernel,
     grouped_gemm_mxfp4_variable_k_triton_kernel,
 )
@@ -75,6 +76,15 @@ def _check_contract(dim: int, name: str) -> None:
         raise ValueError(
             f"grouped MXFP4 GEMM requires the contraction dim ({name}={dim}) to be a"
             f" multiple of {BLOCK_SIZE_K}."
+        )
+
+
+def _require_gfx950() -> None:
+    # The kernels use the CDNA4 scaled-FP4 MFMA (tl.dot_scaled e2m1); no other arch has it.
+    if not _is_gfx950():
+        raise RuntimeError(
+            "grouped MXFP4 GEMM requires gfx950 (CDNA4); the current device lacks the"
+            " scaled-FP4 MFMA used by tl.dot_scaled(..., \"e2m1\", ...)."
         )
 
 
@@ -153,6 +163,7 @@ def grouped_gemm_mxfp4_fprop(
     """
     K = a.shape[1]
     N = weights[0].shape[0]
+    _require_gfx950()
     _check_contract(K, "K")
 
     a_data, a_scale = _row_operand(a)  # (total_M, K/2), (total_M, K/32)
@@ -202,6 +213,7 @@ def grouped_gemm_mxfp4_dgrad(
     """
     N = grad_out.shape[1]
     K = weights[0].shape[1]
+    _require_gfx950()
     _check_contract(N, "N")
 
     go_data, go_scale = _row_operand(grad_out)  # (total_M, N/2), (total_M, N/32)
@@ -252,6 +264,7 @@ def grouped_gemm_mxfp4_wgrad(
     N = grad_out.shape[1]
     K = a.shape[1]
     G = len(m_splits)
+    _require_gfx950()
 
     lhs_data, lhs_scale, go_pad = _col_operand_grouped_padded(grad_out, m_splits)  # (N, Mpad/2)
     rhs_data, rhs_scale, _ = _col_operand_grouped_padded(a, m_splits)  # (K, Mpad/2)
@@ -268,3 +281,53 @@ def grouped_gemm_mxfp4_wgrad(
         out_dtype=out_dtype,
         num_cu=num_cu,
     )
+
+
+class _GroupedGemmMXFP4Func(torch.autograd.Function):
+    """Autograd for grouped MXFP4 linear: ``out[g] = a[g] @ weight[g]^T``.
+
+    Forward/backward pair the MXFP4 recipe exactly (fprop / dgrad / wgrad). Each
+    op quantizes its own operands independently; sharing the quantization across
+    the three passes is a future optimization.
+    """
+
+    @staticmethod
+    def forward(ctx, a, weight, m_splits):
+        out = grouped_gemm_mxfp4_fprop(
+            a, list(torch.unbind(weight, dim=0)), m_splits, out_dtype=a.dtype
+        )
+        ctx.save_for_backward(a, weight)
+        ctx.m_splits = m_splits
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        a, weight = ctx.saved_tensors
+        m_splits = ctx.m_splits
+        grad_out = grad_out.contiguous()
+        grad_a = grad_weight = None
+        if ctx.needs_input_grad[0]:
+            grad_a = grouped_gemm_mxfp4_dgrad(
+                grad_out, list(torch.unbind(weight, dim=0)), m_splits, out_dtype=a.dtype
+            )
+        if ctx.needs_input_grad[1]:
+            grad_weight = grouped_gemm_mxfp4_wgrad(a, grad_out, m_splits, out_dtype=weight.dtype)
+        return grad_a, grad_weight, None
+
+
+def grouped_linear_mxfp4(
+    a: torch.Tensor,
+    weight: torch.Tensor,
+    m_splits: Sequence[int],
+) -> torch.Tensor:
+    """Autograd-enabled grouped MXFP4 linear.
+
+    Args:
+        a: [total_M, K] activations, grouped along M by ``m_splits``.
+        weight: [G, N, K] stacked per-expert weights.
+        m_splits: per-group token counts (len G).
+
+    Returns:
+        [total_M, N] output.
+    """
+    return _GroupedGemmMXFP4Func.apply(a, weight, tuple(int(m) for m in m_splits))

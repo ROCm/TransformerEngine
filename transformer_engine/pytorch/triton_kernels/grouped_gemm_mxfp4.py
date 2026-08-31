@@ -125,11 +125,11 @@ def _scoped_amd_knobs(func):
 
 
 # ===============================================================================
-# Chiplet transform -- map the AMD round-robin program_id onto XCD-contiguous
+# Chiplet transform: map the AMD round-robin program_id onto XCD-contiguous
 # chunks so a band of programs shares B columns in L2.
 # ===============================================================================
 
-NUM_XCDS = 8  # MI300 / MI350 chiplet count
+NUM_XCDS = 8  # gfx942/gfx950 chiplet count
 
 
 @triton.jit
