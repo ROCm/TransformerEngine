@@ -21,6 +21,10 @@
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "../gemm/kittens/comm_gemm.h"
+#endif
+
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
@@ -825,10 +829,19 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
   if (_is_reduce_scatter) {
-    // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
-    // outputs for reduction at the end of the pipelining.
-    buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
-    _num_ubuf_chunks = _tp_size * 2 - 1;
+#ifdef USE_HIPKITTENS_GEMM
+    if (_fused) {
+      // Fused RS adds an additional 4K-aligned control block over pipeline.
+      _num_ubuf_chunks = _tp_size * 2;
+      buffer_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
+    } else
+#endif
+    {
+      // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
+      // outputs for reduction at the end of the pipelining.
+      buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
+      _num_ubuf_chunks = _tp_size * 2 - 1;
+    }
   }
 
   void *buffer_ptr;

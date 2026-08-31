@@ -214,6 +214,22 @@ class CommOverlapCore {
                                      cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void fused_overlap_bulk_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                     bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                     TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
+                                     bool grad, bool accumulate, bool use_split_accumulator,
+                                     TensorWrapper &rs_output, cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
+
+  virtual void fused_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator,
+                                TensorWrapper &rs_output, cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -222,6 +238,9 @@ class CommOverlapBase : public CommOverlapCore {
   bool _rs_overlap_first_gemm;
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
+#ifdef __HIP_PLATFORM_AMD__
+  uint64_t _rs_signal_base = 0;
+#endif
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
@@ -255,6 +274,9 @@ class CommOverlapBase : public CommOverlapCore {
                     TensorWrapper &workspace, bool grad, bool accumulate,
                     bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
                     cudaStream_t stream_main) override;
+
+#ifdef __HIP_PLATFORM_AMD__
+#endif
 
   void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                               bool transb, TensorWrapper &D, TensorWrapper &bias,
@@ -442,6 +464,24 @@ class CommOverlapP2PBase : public CommOverlapCore {
                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                              bool accumulate, bool use_split_accumulator,
                              cudaStream_t stream_main) override;
+
+  /*
+  ** ROCm fused bulk ReduceScatter implemented with hipKittens
+  */
+  void fused_overlap_bulk_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                             bool transb, TensorWrapper &D, TensorWrapper &bias,
+                             TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                             bool accumulate, bool use_split_accumulator, TensorWrapper &rs_output,
+                             cudaStream_t stream_main) override;
+
+  /*
+  ** ROCm fused ReduceScatter + GEMM implemented with hipKittens
+  */
+  void fused_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &rs_output,
+                        cudaStream_t stream_main) override;
 
   bool is_fused() override { return _fused; }
 

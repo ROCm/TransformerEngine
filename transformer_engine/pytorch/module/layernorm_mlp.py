@@ -30,6 +30,7 @@ from .base import (
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    _ub_is_fused,
     ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
@@ -2139,7 +2140,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if ub_overlap_disabled("fc1_dgrad"):
                 self.ub_overlap_rs_dgrad = False
                 self.ub_bulk_dgrad = False
-            if ub_overlap_disabled("fc1_wgrad"):
+            if ub_overlap_disabled("fc1_wgrad") or (
+                IS_HIP_EXTENSION and not _ub_is_fused("fc1_wgrad")
+            ):
                 self.ub_bulk_wgrad = False
 
         if any(

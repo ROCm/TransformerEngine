@@ -6,6 +6,7 @@
 
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
+#include "overlap_common.cuh"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -13,22 +14,7 @@
 
 namespace hk_ag_tn {
 
-using namespace kittens;
-
-constexpr int SCHED_ROUNDS = 2;
-constexpr int NUM_WARPS    = 8;
-constexpr int WARPS_ROW    = 2;
-constexpr int WARPS_COL    = 4;
-constexpr int BLOCK_ROW    = 256;
-constexpr int BLOCK_COL    = 256;
-constexpr int K_STEP       = 64;
-constexpr int HALF_ROW     = BLOCK_ROW / 2;
-constexpr int HALF_COL     = BLOCK_COL / 2;
-constexpr int REG_M        = BLOCK_ROW / WARPS_ROW / 2;
-constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
-constexpr int NUM_THREADS  = NUM_WARPS * WARP_THREADS;
-
-using G_group = kittens::group<NUM_WARPS>;
+using namespace hk_overlap;
 
 struct TileDesc {
     int chunk_id;
@@ -36,27 +22,35 @@ struct TileDesc {
     int tile_n;
 };
 
+using namespace kittens;
+
+constexpr int SCHED_ROUNDS = 2;
+
+using G_group = kittens::group<NUM_WARPS>;
+
+
 // Per-PE pointer to each peer's [M,K] A buffer.
 struct PeerPtrs {
     bf16 *base[8];
 };
 
-#ifndef GATH_WG
-#define GATH_WG 8
-#endif
 
-constexpr int NUM_XCDS_AFF = 8;
 
-struct XcdBuckets {
-    int off[NUM_XCDS_AFF];
-    int cnt[NUM_XCDS_AFF];
-};
 
-#define AG_PUBLISH(p) __hip_atomic_fetch_add((p), 1u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT)
-#define AG_SPIN(p) __hip_atomic_load((p), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
-#define AG_ACQUIRE(p) ((void)__hip_atomic_load((p), __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT))
 
 // NT selects nontemporal stores for the gathered shard for performance.
+template <int U, bool NT>
+__device__ __forceinline__
+void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
+                size_t chunk_bytes, unsigned int *arrive) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+    }
+}
+
 template <int U, bool NT>
 __device__ __forceinline__
 void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t nbytes) {
@@ -113,21 +107,6 @@ void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chun
     __syncthreads();
     if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
     __syncthreads();
-}
-
-__host__ __device__ __forceinline__
-int tile_xcd(int chunk_id) { return chunk_id & (NUM_XCDS_AFF - 1); }
-
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
-                size_t chunk_bytes, unsigned int *arrive) {
-    const int pi   = (int)blockIdx.x / gath_wg;
-    const int sub  = (int)blockIdx.x % gath_wg;
-    const int peer = pi + (pi >= my_pe ? 1 : 0);
-    for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    }
 }
 
 template <typename U, typename RT>
@@ -533,20 +512,6 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
     return queue;
 }
 
-// Stable-partition the queue into one contiguous segment per XCD.
-static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, XcdBuckets &bk) {
-    std::vector<TileDesc> out;
-    out.reserve(q.size());
-    for (int b = 0; b < NUM_XCDS_AFF; b++) {
-        bk.off[b] = (int)out.size();
-        for (size_t i = 0; i < q.size(); i++) {
-            if (tile_xcd(q[i].chunk_id) == b) out.push_back(q[i]);
-        }
-        bk.cnt[b] = (int)out.size() - bk.off[b];
-    }
-    return out;
-}
-
 static void launch_persistent(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, bf16 *d_c, TileDesc *d_queue,
                               int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe,
                               int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
@@ -561,9 +526,8 @@ static void launch_persistent(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, b
 
     // Gatherers are dedicated (blockIdx < NGATH) and only join the compute queue once their peer's chunk has landed.
     const int NGATH = (tp_size - 1) * gath_wg;
-    static const int grid_cap = getenv("HK_GRID_CAP") ? atoi(getenv("HK_GRID_CAP")) : 256;
     int grid = tiles_M * tiles_N + NGATH;
-    if (grid_cap > 0 && grid > grid_cap) grid = grid_cap;
+    if (grid > GRID_CAP) grid = GRID_CAP;
     if (grid < NGATH) grid = NGATH;
 
     persistent_ag_bf16_gemm<<<grid, NUM_THREADS, 0, stream>>>(

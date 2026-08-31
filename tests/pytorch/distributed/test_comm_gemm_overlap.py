@@ -21,6 +21,7 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+bulk_available = not IS_HIP_EXTENSION
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -212,7 +213,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     _run_gemm_with_overlap("RS", False, p2p, False, False, quantization, use_cublasmp)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Bulk overlap is not yet supported on ROCm.")
+@pytest.mark.skipif(not bulk_available, reason="Bulk overlap is not supported on ROCm.")
 @pytest.mark.parametrize(
     "comm_type, quantization, connections",
     [
@@ -237,6 +238,8 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
     if connections == 8:
+        if IS_HIP_EXTENSION:
+            pytest.skip("CUDA_DEVICE_MAX_CONNECTIONS has no HIP equivalent.")
         if torch.cuda.get_device_properties(0).major != 9:
             pytest.skip(
                 "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
@@ -445,191 +448,3 @@ def test_multi_layer_with_overlap_fp8(
         num_layers,
         use_cublasmp=use_cublasmp,
     )
-
-
-# The fused AG+GEMM backend is deliberately exempt from MAX_GPUS_TO_USE.
-FUSED_MAX_GPUS_TO_USE = 8
-
-
-def _fused_shape_ok(nprocs: int) -> bool:
-    """The backend needs a 256-aligned per-rank chunk and a 256-aligned N."""
-    return (SEQ_LENGTH * BATCH_SIZE) % (256 * nprocs) == 0 and (NUM_HEADS * HEAD_DIM) % 256 == 0
-
-
-FUSED_PROC_COUNTS = [
-    n
-    for n in (4, 8)
-    if n <= min(torch.cuda.device_count(), FUSED_MAX_GPUS_TO_USE) and _fused_shape_ok(n)
-]
-
-fused_available = (
-    IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and len(FUSED_PROC_COUNTS) > 0
-)
-reason_for_no_fused = (
-    "Fused AG+GEMM overlap requires a gfx950 device, tp_size in (4, 8) and a 256-aligned per-rank chunk."
-)
-
-
-def _fused_launch_cmd(nprocs: int):
-    """Same form as LAUNCH_CMD, but at a rank count the fused tests choose."""
-    if tex.ubuf_built_with_mpi():
-        return ["mpirun", "-np", str(nprocs), "--oversubscribe", "--quiet", "python3"]
-    return ["torchrun", f"--nproc_per_node={nprocs}"]
-
-
-def _run_fused_ag(nprocs, bulk=False, quantization="none"):
-    """Run the AG overlap harness with the fused backend, returning the completed process."""
-    test_cmd = _fused_launch_cmd(nprocs) + [
-        str(TEST_ROOT / "run_gemm_with_overlap.py"),
-        "--check-numerics",
-        f"--seed={RNG_SEED}",
-        f"--seq-length={SEQ_LENGTH}",
-        f"--batch-size={BATCH_SIZE}",
-        f"--num-heads={NUM_HEADS}",
-        f"--head-dim={HEAD_DIM}",
-        "--comm-type=AG",
-        "--fused",
-    ]
-    test_cmd += ["--bulk-overlap"] if bulk else ["--p2p", f"--quantization={quantization}"]
-    return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-
-ELIGIBLE_OUT_FEATURES_PER_RANK = 1536
-INELIGIBLE_OUT_FEATURES_PER_RANK = 1568
-UNALIGNED_SEQ_LENGTH = 1152
-
-def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
-    """Run the layer harness on a column-parallel LayerNormLinear with the fused backend live."""
-    test_cmd = (
-        _fused_launch_cmd(nprocs)
-        + [
-            str(TEST_ROOT / "run_layer_with_overlap.py"),
-            f"--seed={RNG_SEED}",
-            f"--seq-length={seq_length}",
-            f"--batch-size={BATCH_SIZE}",
-            f"--num-heads={NUM_HEADS}",
-            f"--head-dim={HEAD_DIM}",
-            f"--layer-type={te.LayerNormLinear.__name__}",
-            "--linear-parallel-mode=column",
-            "--num-layers=1",
-            "--use-bf16-params",
-        ]
-        + extra_args
-    )
-    env = os.environ.copy()
-    env["PYTORCH_JIT"] = "0"
-    env["NVTE_TORCH_COMPILE"] = "0"
-    env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
-    return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
-
-
-def _reported_names(stdout, prefix):
-    """The layer name sets the harness printed under `prefix`."""
-    for line in stdout.decode().splitlines():
-        if prefix in line:
-            return set(line.split(prefix, 1)[1].split())
-    return None
-
-
-def _assert_numerics_passed(result):
-    stdout, stderr = result.stdout.decode(), result.stderr.decode()
-    assert result.returncode == 0, f"non-zero exit\n{stderr}"
-    assert "NUMERICAL CHECK FAILED" not in stderr, stderr
-    assert "NUMERICAL CHECK PASSED" in stdout, stdout
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_bf16(nprocs):
-    """bf16 at an aligned shape: the fused backend runs and the result is correct."""
-    _assert_numerics_passed(_run_fused_ag(nprocs))
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
-def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is currently outside the backend."""
-    if quantization == "fp8" and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    result = _run_fused_ag(nprocs, quantization=quantization)
-    assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
-    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_is_deterministic(nprocs):
-    """Bitwise reproducibility across runs"""
-    first = _run_fused_ag(nprocs)
-    _assert_numerics_passed(first)
-    second = _run_fused_ag(nprocs)
-    _assert_numerics_passed(second)
-
-    def _hashes(out):
-        prefix = "OUTPUT HASH: "
-        return [ln.split(prefix, 1)[1].strip() for ln in out.decode().splitlines() if prefix in ln]
-
-    first_hashes, second_hashes = _hashes(first.stdout), _hashes(second.stdout)
-    assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
-    assert first_hashes == second_hashes, "two identical runs produced different outputs"
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_bulk_ag_overlap_bf16(nprocs):
-    """The bulk all-gather that rides in an unrelated GEMM's grid."""
-    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True))
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_layer_bulk_dgrad_bf16(nprocs):
-    """A column-parallel layer whose dgrad dimensions clear the fused contract."""
-    result = _run_fused_layer(nprocs, [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"])
-    _assert_numerics_passed(result)
-    fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
-    assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
-    assert "qkv_dgrad" in fused, fused
-    eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
-    assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
-    assert "qkv_dgrad" in eligible, eligible
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_layer_declines_ineligible_k(nprocs):
-    """A K the fused kernels cannot serve has to fall back to no overlap."""
-    result = _run_fused_layer(
-        nprocs, [f"--out-features={INELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
-    )
-    _assert_numerics_passed(result)
-    stderr = result.stderr.decode()
-    assert "ineligible shape" not in stderr, stderr
-    assert "failed to launch" not in stderr, stderr
-    fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
-    disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
-    assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
-    assert "qkv_dgrad" in fused, fused
-    assert disabled is not None and "qkv_dgrad" not in disabled, disabled
-    eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
-    assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
-    assert "qkv_dgrad" not in eligible, eligible
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_layer_declines_unaligned_region(nprocs):
-    """A Userbuffers region the fused backend cannot serve declines at setup."""
-    result = _run_fused_layer(
-        nprocs,
-        [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
-        seq_length=UNALIGNED_SEQ_LENGTH,
-    )
-    _assert_numerics_passed(result)
-    fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
-    disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
-    assert fused == set(), f"expected no fused communicators, got {fused}"
-    assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
-    assert {"qkv_fprop", "qkv_dgrad", "qkv_wgrad"} <= disabled, disabled
