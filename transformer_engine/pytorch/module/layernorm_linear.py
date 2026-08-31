@@ -1703,7 +1703,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             for weight in self.weight_names:
                 set_tensor_model_parallel_attributes(
                     tensor=getattr(self, weight),
-                    is_parallel=True,
+                    # Replicated when parallel_mode is None; see Linear.reset_parameters.
+                    is_parallel=self.parallel_mode is not None,
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
