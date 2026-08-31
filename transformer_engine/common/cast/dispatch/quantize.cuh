@@ -167,7 +167,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             "multiples of 32.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
         if (output_tensor->has_columnwise_data()) {
+#ifndef __HIP_PLATFORM_AMD__
           nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+#else
+          NVTE_ERROR("Row-scaled NVFP4 columnwise output is not supported on ROCm.");
+#endif
         }
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
@@ -367,7 +371,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             "multiples of 32.");
         nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
         if (output_tensor->has_columnwise_data()) {
+#ifndef __HIP_PLATFORM_AMD__
           nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+#else
+          NVTE_ERROR("Row-scaled NVFP4 columnwise output is not supported on ROCm.");
+#endif
         }
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
