@@ -170,10 +170,12 @@ budget → M1/M2 → matrix + provenance → tag.
 
 ## 4. Stage 4 — backend separation, in this repository `[GATE-B]` · ~6-8 wk (was 4-6; C++ queue added)
 
+> **Gate B: PASSED 2026-09-01** — certifier Wen Chen ("Start stage 4"), on the Stage-3 packet `certification-stage3.md` / tag `stage3-cert-20260831`.
+
 Goal: the compiled layers become independently built, versioned targets, and — the part the
 proposal never planned — the C++ gets a maintenance mechanism.
 
-### S4.1 · Decide `cxx_maintenance_strategy` — 1 day `[EVIDENCE: cxx_arm]`
+### S4.1 · Decide `cxx_maintenance_strategy` — **DONE 2026-09-01** `[EVIDENCE: cxx_arm]`: B3 trip rate 0.50 = DISCUSS band -> per-file. `cxx-strategy.yaml`: 87 patch-queue / 5 native-hip (the 4 B3-tripped files + the fp4 kernel's blockwise sibling) / 0 freeze; census 92 files, 6329 lines, 507 guard sites at the pin; escalation: 2 consecutive pin-bump trips -> native-hip review
 
 Read `thresholds.yaml`'s bands against the B3 trip rate. Assign `cxx_strategy` **per file** in the
 manifest (BK-001 gets per-file children for the 85). Expected shape given the guard census (78 of 85

@@ -1,0 +1,566 @@
+# C++ maintenance strategy, per file (plugin plan S4.1) - DECIDED 2026-09-01
+# Evidence: B3 backtest cxx arm trip rate 0.50 over 8 samples -> band "discuss: decide per file".
+# Rule: default = patch-queue (B). native-hip (C) ONLY with evidence: the 4 B3-tripped files
+# plus the tripped fp4 kernel's sibling (one kernel family, one strategy). freeze (A) assigned
+# to no file, per plan. Regenerate the census with tools/ (s41 census rules) at every pin bump;
+# a file that trips on 2 consecutive pin bumps is promoted to native-hip review.
+# Census at pin 868d8d9216da: 92 modified C++ files, 6329 changed lines, 507 guard sites.
+# (Manifest cxx_facts said 85 files: that count excluded public headers under include/ and
+#  counted at the previous measurement; this file is the per-file authority from S4.1 on.)
+# assignment: 5 native-hip, 87 patch-queue
+decided: '2026-09-01'
+decider: 'Wen Chen (Gate B: ''Start stage 4'')'
+default: patch-queue
+files:
+- file: transformer_engine/common/cast/cast.cu
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 17
+  changed_share: 0.16
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/core/grouped_tma.cuh
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 7
+  changed_share: 0.031
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/dispatch/dequantize.cuh
+  cxx_strategy: patch-queue
+  guards: 10
+  changed_lines: 18
+  changed_share: 0.171
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/dispatch/gated.cuh
+  cxx_strategy: patch-queue
+  guards: 6
+  changed_lines: 14
+  changed_share: 0.069
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/dispatch/quantize.cuh
+  cxx_strategy: patch-queue
+  guards: 24
+  changed_lines: 174
+  changed_share: 0.238
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/fp8/dequantize_fp8.cuh
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 4
+  changed_share: 0.069
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/fp8/gated_fp8.cuh
+  cxx_strategy: patch-queue
+  guards: 4
+  changed_lines: 6
+  changed_share: 0.015
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/fp8/group_amax_fp8.cuh
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 14
+  changed_share: 0.049
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/fp8/quantize_fp8.cuh
+  cxx_strategy: patch-queue
+  guards: 14
+  changed_lines: 159
+  changed_share: 0.215
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/mxfp8/dequantize_mxfp8.cuh
+  cxx_strategy: patch-queue
+  guards: 9
+  changed_lines: 24
+  changed_share: 0.067
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/mxfp8/gated_mxfp8.cuh
+  cxx_strategy: patch-queue
+  guards: 15
+  changed_lines: 88
+  changed_share: 0.09
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/mxfp8/group_dequantize_mxfp8.cuh
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 140
+  changed_share: 0.228
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/mxfp8/group_quantize_mxfp8.cuh
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 134
+  changed_share: 0.119
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/mxfp8/quantize_mxfp8.cuh
+  cxx_strategy: patch-queue
+  guards: 10
+  changed_lines: 97
+  changed_share: 0.1
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/cast/nvfp4/dequantize_nvfp4.cuh
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 8
+  changed_share: 0.053
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/comm_gemm_overlap/comm_gemm_overlap.cpp
+  cxx_strategy: patch-queue
+  guards: 4
+  changed_lines: 41
+  changed_share: 0.028
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 16
+  changed_share: 0.022
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.cu
+  cxx_strategy: patch-queue
+  guards: 14
+  changed_lines: 91
+  changed_share: 0.032
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/comm_gemm_overlap/userbuffers/userbuffers.h
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 36
+  changed_share: 0.103
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/common.cu
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 8
+  changed_share: 0.03
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/common.h
+  cxx_strategy: patch-queue
+  guards: 26
+  changed_lines: 135
+  changed_share: 0.102
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/dropout/dropout.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 8
+  changed_share: 0.022
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/fused_attn/flash_attn.cu
+  cxx_strategy: patch-queue
+  guards: 6
+  changed_lines: 18
+  changed_share: 0.02
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_attn/utils.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 4
+  changed_share: 0.006
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_router/async_loader.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 4
+  changed_share: 0.015
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_router/fused_moe_aux_loss.cu
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 2
+  changed_share: 0.006
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_router/fused_score_for_moe_aux_loss.cu
+  cxx_strategy: native-hip
+  guards: 0
+  changed_lines: 2
+  changed_share: 0.003
+  evidence: TRIPPED in B3 replay
+- file: transformer_engine/common/fused_router/fused_topk_with_score_function.cu
+  cxx_strategy: native-hip
+  guards: 1
+  changed_lines: 7
+  changed_share: 0.005
+  evidence: TRIPPED in B3 replay
+- file: transformer_engine/common/fused_router/utils.h
+  cxx_strategy: patch-queue
+  guards: 9
+  changed_lines: 137
+  changed_share: 0.181
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 21
+  changed_share: 0.031
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_softmax/scaled_masked_softmax.cu
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 23
+  changed_share: 0.023
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 19
+  changed_share: 0.026
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/gemm/cublaslt_gemm.cu
+  cxx_strategy: native-hip
+  guards: 14
+  changed_lines: 127
+  changed_share: 0.101
+  evidence: TRIPPED in B3 replay; hipblaslt path is AMD-owned kernel dispatch
+- file: transformer_engine/common/gemm/cublaslt_grouped_gemm.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 44
+  changed_share: 0.02
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/hadamard_transform/hadamard_transform.cu
+  cxx_strategy: patch-queue
+  guards: 13
+  changed_lines: 291
+  changed_share: 0.295
+  evidence: reapplied cleanly in B3
+- file: transformer_engine/common/include/transformer_engine/comm_gemm_overlap.h
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 87
+  changed_share: 0.196
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/fused_attn.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 34
+  changed_share: 0.046
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/gemm.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 4
+  changed_share: 0.006
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/multi_stream.h
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 4
+  changed_share: 0.082
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/multi_tensor.h
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 57
+  changed_share: 0.147
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/normalization.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 4
+  changed_share: 0.02
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/recipe.h
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 29
+  changed_share: 0.06
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/transformer_engine.h
+  cxx_strategy: patch-queue
+  guards: 10
+  changed_lines: 94
+  changed_share: 0.058
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/include/transformer_engine/transpose.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 19
+  changed_share: 0.05
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/multi_tensor/adam.cu
+  cxx_strategy: patch-queue
+  guards: 4
+  changed_lines: 510
+  changed_share: 0.327
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/multi_tensor/l2norm.cu
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 201
+  changed_share: 0.295
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/common.cpp
+  cxx_strategy: patch-queue
+  guards: 12
+  changed_lines: 83
+  changed_share: 0.127
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/common.h
+  cxx_strategy: patch-queue
+  guards: 12
+  changed_lines: 161
+  changed_share: 0.341
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/kernel_params.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 7
+  changed_share: 0.074
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/kernel_traits.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 6
+  changed_share: 0.039
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/layernorm/ln_api.cpp
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 14
+  changed_share: 0.059
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 45
+  changed_share: 0.114
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/layernorm/ln_fwd_cuda_kernel.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 176
+  changed_share: 0.297
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/layernorm/ln_fwd_kernels.cuh
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 39
+  changed_share: 0.101
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/rmsnorm/rmsnorm_api.cpp
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 31
+  changed_share: 0.099
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 78
+  changed_share: 0.185
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 131
+  changed_share: 0.364
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 40
+  changed_share: 0.11
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/normalization/rtc_dispatch.cpp
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 60
+  changed_share: 0.076
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/permutation/permutation.cu
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 48
+  changed_share: 0.118
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/current_scaling.cu
+  cxx_strategy: patch-queue
+  guards: 13
+  changed_lines: 150
+  changed_share: 0.329
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/delayed_scaling.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 6
+  changed_share: 0.014
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/fp8_block_scaling.cu
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 14
+  changed_share: 0.054
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/mxfp8_scaling.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 6
+  changed_share: 0.023
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/nvfp4.cu
+  cxx_strategy: patch-queue
+  guards: 6
+  changed_lines: 26
+  changed_share: 0.026
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/recipe/recipe_common.cuh
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 8
+  changed_share: 0.099
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/swizzle/swizzle.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 208
+  changed_share: 0.077
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transformer_engine.cpp
+  cxx_strategy: patch-queue
+  guards: 13
+  changed_lines: 124
+  changed_share: 0.085
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/cast_transpose.cu
+  cxx_strategy: patch-queue
+  guards: 8
+  changed_lines: 140
+  changed_share: 0.278
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/cast_transpose.h
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 5
+  changed_share: 0.064
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/cast_transpose_fusion.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 54
+  changed_share: 0.037
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/multi_cast_transpose.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 91
+  changed_share: 0.213
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/quantize_transpose_square_blockwise.cu
+  cxx_strategy: patch-queue
+  guards: 7
+  changed_lines: 36
+  changed_share: 0.058
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu
+  cxx_strategy: native-hip
+  guards: 11
+  changed_lines: 359
+  changed_share: 0.36
+  evidence: sibling kernel of the tripped fp4 variant (11 guards, 0.36 share); one family, one strategy
+- file: transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu
+  cxx_strategy: native-hip
+  guards: 22
+  changed_lines: 496
+  changed_share: 0.376
+  evidence: TRIPPED in B3 replay; highest churn share (0.376), 22 guard sites
+- file: transformer_engine/common/transpose/rtc/cast_transpose_fusion.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 6
+  changed_share: 0.023
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/transpose/transpose_fusion.cu
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 10
+  changed_share: 0.019
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/cuda_driver.cpp
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 15
+  changed_share: 0.192
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/cuda_driver.h
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 5
+  changed_share: 0.054
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/cuda_runtime.cpp
+  cxx_strategy: patch-queue
+  guards: 9
+  changed_lines: 72
+  changed_share: 0.212
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/cuda_runtime.h
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 27
+  changed_share: 0.221
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/logging.h
+  cxx_strategy: patch-queue
+  guards: 5
+  changed_lines: 25
+  changed_share: 0.162
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/math.h
+  cxx_strategy: patch-queue
+  guards: 2
+  changed_lines: 29
+  changed_share: 0.206
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/padding.cu
+  cxx_strategy: patch-queue
+  guards: 9
+  changed_lines: 107
+  changed_share: 0.217
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/ptx.cuh
+  cxx_strategy: patch-queue
+  guards: 13
+  changed_lines: 117
+  changed_share: 0.052
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/pybind_helper.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 36
+  changed_share: 0.209
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/rtc.cpp
+  cxx_strategy: patch-queue
+  guards: 11
+  changed_lines: 70
+  changed_share: 0.185
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/rtc.h
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 22
+  changed_share: 0.084
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/standalone_topk.cuh
+  cxx_strategy: patch-queue
+  guards: 3
+  changed_lines: 17
+  changed_share: 0.013
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/system.h
+  cxx_strategy: patch-queue
+  guards: 0
+  changed_lines: 6
+  changed_share: 0.057
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/util/topk.cu
+  cxx_strategy: patch-queue
+  guards: 1
+  changed_lines: 8
+  changed_share: 0.118
+  evidence: no trip evidence; default B
+- file: transformer_engine/common/utils.cuh
+  cxx_strategy: patch-queue
+  guards: 20
+  changed_lines: 134
+  changed_share: 0.114
+  evidence: no trip evidence; default B

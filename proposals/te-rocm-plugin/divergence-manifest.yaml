@@ -2291,8 +2291,8 @@ entries:
     path: "common/ C++ ONLY -> separate BUILD TARGET in this repo: libtransformer_engine_rocm.so (SONAME, versioned, $ORIGIN)"
     disposition: build-target
     repo_decision: "2026-08-29: all C++ stays in ROCm/TransformerEngine; no separate backend repo. Separation is by build target and directory, not by repository."
-    cxx_strategy: patch-queue            # PROVISIONAL default for all 85 files; per-file overrides allowed
-    cxx_strategy_status: provisional     # becomes `decided` at Stage 4 via open_decisions.cxx_maintenance_strategy
+    cxx_strategy: per-file               # cxx-strategy.yaml is the per-file authority (S4.1, 2026-09-01)
+    cxx_strategy_status: decided-per-file  # 5 native-hip (4 B3-tripped + 1 family sibling), 87 patch-queue, 0 freeze
     cxx_facts:
       modified_upstream_cxx_files: 85
       all_hipified: true                 # none in ck_fused_attn/, amd_detail/, rocshmem_api/ (those are ROCm-only ADDED files)
@@ -2698,6 +2698,7 @@ open_decisions:
       the 3-way merge - mechanically small. Caveat: whole-file patches are an UPPER bound on
       trip rate; a feature-split queue trips less. Full packet:
       baselines/2026-08-31-backtest-b3.json.
+    resolution_2026_09_01: "RESOLVED per-file at S4.1 under Gate B: default patch-queue; native-hip only with trip evidence (4 B3-tripped files + quantize_transpose_vector_blockwise.cu as family sibling); freeze for none. Authority: cxx-strategy.yaml. Escalation rule: a file tripping on 2 consecutive pin bumps is promoted to native-hip review."
     why_it_matters: >-
       B keeps upstream's commodity kernels flowing under the same governance as the Python queue,
       but does not shrink the divergence: the guards ARE the divergence. Whether B is a mechanized
