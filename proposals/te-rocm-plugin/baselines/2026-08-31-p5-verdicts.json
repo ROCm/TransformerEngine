@@ -1,0 +1,266 @@
+{
+ "CM-001": {
+  "status": "needed(import)",
+  "detail": "RuntimeError: /workspace/TransformerEngine/transformer_engine/common/util/hip_runtime.cpp:268 in function include_directory: Could not find hip/hip_runtime.h in ROCM_PATH=<unset>, HIP_PATH=<unset>, /o",
+  "target": "transformer_engine/__init__.py",
+  "secs": 7
+ },
+ "CM-002": {
+  "status": "needed(import)",
+  "detail": "RuntimeError: cudnn shared object not found.",
+  "target": "transformer_engine/common/__init__.py",
+  "secs": 3
+ },
+ "CM-003": {
+  "status": "needed(import)",
+  "detail": "ImportError: cannot import name 'MXFP4BlockScaling' from 'transformer_engine.common.recipe' (/workspace/TransformerEngine/build/shrink/overlay-without-CM-003/transformer_engine/common/recipe/__init__.",
+  "target": "transformer_engine/common/recipe/__init__.py",
+  "secs": 5
+ },
+ "PT-001": {
+  "status": "needed(tests)",
+  "detail": "test_numerics.py: 880 passed, 29 skipped, 625 deselected, 18 warnings in 94.33s (0:01:34) | mxfp4: 1 failed, 17 warnings in 5.01s",
+  "target": "transformer_engine/pytorch/cpp_extensions/gemm.py",
+  "secs": 112
+ },
+ "PT-002": {
+  "status": "needed(import)",
+  "detail": "ImportError: cannot import name 'fused_ag_gemm_eligible' from 'transformer_engine.pytorch.module.base' (/workspace/TransformerEngine/build/shrink/overlay-without-PT-002/transformer_engine/pytorch/modu",
+  "target": "transformer_engine/pytorch/module/base.py",
+  "secs": 5
+ },
+ "PT-003": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 25% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/module/grouped_linear.py",
+  "secs": 166
+ },
+ "PT-004": {
+  "status": "needed(import)",
+  "detail": "ImportError: cannot import name 'MXFP4BlockScalingRecipeState' from 'transformer_engine.pytorch.quantization' (/workspace/TransformerEngine/build/shrink/overlay-without-PT-004/transformer_engine/pytor",
+  "target": "transformer_engine/pytorch/quantization.py",
+  "secs": 4
+ },
+ "PT-006": {
+  "status": "needed(tests)",
+  "detail": "test_numerics.py: 1 failed, 36 passed, 625 deselected, 18 warnings in 13.37s",
+  "target": "transformer_engine/pytorch/module/layernorm_mlp.py",
+  "secs": 20
+ },
+ "PT-007": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 12% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/tensor/mxfp8_tensor.py",
+  "secs": 380
+ },
+ "PT-008": {
+  "status": "needed(tests)",
+  "detail": "test_numerics.py: 1 failed, 24 passed, 625 deselected, 18 warnings in 10.70s",
+  "target": "transformer_engine/pytorch/module/linear.py",
+  "secs": 17
+ },
+ "PT-009": {
+  "status": "needed(tests)",
+  "detail": "test_numerics.py: 1 failed, 48 passed, 625 deselected, 18 warnings in 14.53s",
+  "target": "transformer_engine/pytorch/module/layernorm_linear.py",
+  "secs": 21
+ },
+ "PT-010": {
+  "status": "needed(tests)",
+  "detail": "test_attention.py: 1 failed, 21 warnings in 3.45s",
+  "target": "transformer_engine/pytorch/attention/dot_product_attention/backends.py",
+  "secs": 9
+ },
+ "PT-011": {
+  "status": "needed(import)",
+  "detail": "AttributeError: type object 'FlashAttentionUtils' has no attribute 'use_aiter_triton'",
+  "target": "transformer_engine/pytorch/attention/dot_product_attention/utils.py",
+  "secs": 5
+ },
+ "PT-012": {
+  "status": "needed(import)",
+  "detail": "AttributeError: type object 'transformer_engine_rocm_torch.NVTE_Fused_Attn_Backend' has no attribute 'NVTE_F16_arbitrary_seqlen'",
+  "target": "transformer_engine/pytorch/cpp_extensions/fused_attn.py",
+  "secs": 5
+ },
+ "PT-013": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 27% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/optimizers/__init__.py",
+  "secs": 16
+ },
+ "PT-014": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 0% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/distributed.py",
+  "secs": 119
+ },
+ "PT-017": {
+  "status": "retired(gfx950-only; FNUZ untested)",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 87% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/tensor/float8_tensor.py",
+  "secs": 359
+ },
+ "PT-018": {
+  "status": "retired(gfx950-only; FNUZ untested)",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 96% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/constants.py",
+  "secs": 109
+ },
+ "PT-019": {
+  "status": "not-applicable(build-system)",
+  "detail": "pytorch/setup.py: no import exercises it; S3.4 packaging",
+  "target": "transformer_engine/pytorch/setup.py",
+  "secs": 112
+ },
+ "PT-020": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 95% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/optimizers/fused_adam.py",
+  "secs": 16
+ },
+ "PT-021": {
+  "status": "needed(import)",
+  "detail": "ImportError: cannot import name 'is_fp8_fnuz' from 'transformer_engine.pytorch.utils' (/workspace/TransformerEngine/build/shrink/overlay-without-PT-021/transformer_engine/pytorch/utils.py)",
+  "target": "transformer_engine/pytorch/utils.py",
+  "secs": 5
+ },
+ "PT-022": {
+  "status": "needed(tests)",
+  "detail": "test_fusible_ops.py: 1 failed, 1117 passed, 1705 skipped, 342 warnings in 19.42s",
+  "target": "transformer_engine/pytorch/ops/basic/grouped_linear.py",
+  "secs": 27
+ },
+ "PT-023": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/module/_common.py",
+  "secs": 167
+ },
+ "PT-024": {
+  "status": "needed(tests)",
+  "detail": "test_custom_recipe.py: 1 failed, 23 passed, 2 skipped, 18 warnings in 7.86s",
+  "target": "transformer_engine/pytorch/custom_recipes/quantization_ref_nvfp4.py",
+  "secs": 14
+ },
+ "PT-025": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 6% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/tensor/float8_blockwise_tensor.py",
+  "secs": 362
+ },
+ "PT-026": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 7% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py",
+  "secs": 55
+ },
+ "PT-027": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 60% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/quantized_tensor.py",
+  "secs": 331
+ },
+ "PT-028": {
+  "status": "needed(tests)",
+  "detail": "test_cuda_graphs.py: ssssssssssss.",
+  "target": "transformer_engine/pytorch/graph.py",
+  "secs": 73129
+ },
+ "PT-029": {
+  "status": "needed(tests)",
+  "detail": "test_parallel_cross_entropy.py: 1 failed, 17 warnings in 3.37s",
+  "target": "transformer_engine/pytorch/triton/cross_entropy.py",
+  "secs": 10
+ },
+ "PT-030": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/ops/basic/rmsnorm.py",
+  "secs": 34
+ },
+ "PT-031": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 0% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/tensor/storage/nvfp4_tensor_storage.py",
+  "secs": 382
+ },
+ "PT-032": {
+  "status": "needed(tests)",
+  "detail": "Phase C interaction: pytorch/__init__.py exports is_mxfp4_available, imported at collection by tests/pytorch/mxfp4/*; Phase B's mapping (numerics+recipe) never exercised it - mapping gap found by the all-at-once check",
+  "target": "transformer_engine/pytorch/__init__.py",
+  "secs": 0
+ },
+ "PT-033": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 67% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/ops/basic/layer_norm.py",
+  "secs": 33
+ },
+ "PT-034": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 11% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/module/fp8_padding.py",
+  "secs": 169
+ },
+ "PT-035": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 43% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/tensor/storage/mxfp8_tensor_storage.py",
+  "secs": 369
+ },
+ "PT-036": {
+  "status": "retired(gfx950-only; FNUZ untested)",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 25% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/tensor/utils.py",
+  "secs": 365
+ },
+ "PT-037": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/transformer.py",
+  "secs": 122
+ },
+ "PT-038": {
+  "status": "untested(kept)",
+  "detail": "tests pass without it but only 17% of added lines executed - vacuous; kept pending targeted tests",
+  "target": "transformer_engine/pytorch/ops/fused/userbuffers_backward_linear.py",
+  "secs": 33
+ },
+ "PT-039": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py",
+  "secs": 55
+ },
+ "PT-040": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 50% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/optimizers/multi_tensor_apply.py",
+  "secs": 16
+ },
+ "PT-041": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/tensor/nvfp4_tensor.py",
+  "secs": 365
+ },
+ "PT-043": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 100% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/jit.py",
+  "secs": 45
+ },
+ "PT-044": {
+  "status": "retired",
+  "detail": "tests pass without it (run from /tmp, overlay import verified per process); 33% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 flips",
+  "target": "transformer_engine/pytorch/ops/fused/userbuffers_forward_linear.py",
+  "secs": 32
+ },
+ "PT-045": {
+  "status": "needed(tests)",
+  "detail": "test_checkpoint.py: 9 passed, 2 skipped, 17 warnings in 2.83s | test_recipe.py: 1 failed, 130 passed, 2 skipped, 18 warnings in 7.43s",
+  "target": "transformer_engine/pytorch/_extra_state.py",
+  "secs": 21
+ }
+}

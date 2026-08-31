@@ -149,8 +149,13 @@ def run_tests(cmds: list[str], overlay: Path) -> tuple[bool, str]:
         parts = c.split(" ", 1); abs_c = str(ROOT / parts[0]) + (" " + parts[1] if len(parts) > 1 else "")
         env = {**ENV, "PYTHONPATH": str(overlay),
                "NVTE_TEST_CHECKPOINT_ARTIFACT_PATH": os.environ.get("NVTE_TEST_CHECKPOINT_ARTIFACT_PATH", "")}
-        r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x --rootdir {ROOT} {desel} {abs_c}", shell=True,
-                           capture_output=True, text=True, cwd="/tmp", env=env)
+        try:
+            # 20-minute cap: PT-028's removal hung test_cuda_graphs for 20 HOURS (hipGraph capture
+            # deadlock on upstream's graph.py). A hang IS a NEEDED verdict; never wait forever.
+            r = subprocess.run(f"{sys.executable} -m pytest -q -p no:cacheprovider -x --rootdir {ROOT} {desel} {abs_c}", shell=True,
+                               capture_output=True, text=True, cwd="/tmp", env=env, timeout=1200)
+        except subprocess.TimeoutExpired:
+            return False, f"HANG >20min in {parts[0]} (killed; treat as NEEDED - see CLAUDE.md GPU-hang triage)"
         te_seen = subprocess.run([sys.executable, "-c", "import transformer_engine as t; print(t.__file__)"],
                                  capture_output=True, text=True, cwd="/tmp", env=env).stdout
         if str(overlay) not in te_seen:

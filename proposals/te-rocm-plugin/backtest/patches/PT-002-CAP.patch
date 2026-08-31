@@ -1,0 +1,370 @@
+# backtest-case: PT-002-CAP
+# kind: case
+# base: 42b840051647eef89761a16dfdff87e82bb253ab
+# derived: diff(BASE:transformer_engine/pytorch/module/base.py, PRE:transformer_engine/pytorch/module/base.py)
+--- a/transformer_engine/pytorch/module/base.py
++++ b/transformer_engine/pytorch/module/base.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -13,10 +15,12 @@
+ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+ from contextlib import contextmanager
+ from types import MethodType
++from itertools import chain
+ 
+ import torch
+ import torch.nn.functional as F
+ from torch.distributed.tensor import DTensor
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ 
+ import transformer_engine_torch as tex
+ 
+@@ -26,6 +30,7 @@
+     DelayedScalingRecipeState,
+     Float8CurrentScalingRecipeState,
+     Float8BlockScalingRecipeState,
++    MXFP4BlockScalingRecipeState,
+     NVFP4BlockScalingRecipeState,
+     FP8GlobalStateManager,
+     RecipeState,
+@@ -42,6 +47,9 @@
+ from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+ from ..tensor.mxfp8_tensor import MXFP8Quantizer
+ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
++if IS_HIP_EXTENSION:
++    from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
++    from ..triton_kernels.cast import te_quantize_triton
+ from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+ from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+@@ -281,22 +289,43 @@
+     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
+     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+     # Default overlap methods for layers
+-    methods = {
+-        "ring_exchange": [
+-            "qkv_fprop",
+-            "fc1_fprop",
+-            "proj_dgrad",
+-            "fc2_dgrad",
+-        ],
+-        "pipeline": ["proj_fprop", "fc2_fprop"],
+-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+-        "external": ["proj_wgrad", "fc2_wgrad"],
+-    }
++    if IS_HIP_EXTENSION:
++        methods = {
++            "ring_exchange": [
++                "qkv_fprop",
++                "fc1_fprop",
++                "proj_dgrad",
++                "fc2_dgrad",
++                "proj_wgrad",
++                "fc2_wgrad",
++                "proj_fprop",
++                "fc2_fprop",
++                "qkv_dgrad",
++                "fc1_dgrad",
++                "qkv_wgrad",
++                "fc1_wgrad"
++            ],
++            "pipeline": [],
++            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
++            "bulk": [],
++        }
++    else:
++        methods = {
++            "ring_exchange": [
++                "qkv_fprop",
++                "fc1_fprop",
++                "proj_dgrad",
++                "fc2_dgrad",
++            ],
++            "pipeline": ["proj_fprop", "fc2_fprop"],
++            "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
++            "external": ["proj_wgrad", "fc2_wgrad"],
++        }
+ 
+     # AG-RS overlap pairs of layers forming a tensor-parallel block
+     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
+     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
+-    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
++    external_gemm_to_overlap = {} if IS_HIP_EXTENSION else {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
+     global layers_atomic_ring_exchange
+     layers_atomic_ring_exchange = []
+ 
+@@ -317,7 +346,7 @@
+             "is_reduce_scatter": is_reduce_scatter,
+             "num_sm": 1 if method == "ring_exchange" else 16,
+             "cga_size": 1 if method == "ring_exchange" else 2,
+-            "set_sm_margin": not method == "ring_exchange",
++            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
+             "num_splits": tp_size if method == "ring_exchange" else 4,
+             "aggregate": False,
+             "atomic_gemm": False,
+@@ -403,6 +432,7 @@
+             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
+             else dtype
+         )
++
+         if method == "ring_exchange":
+             ub_obj = tex.CommOverlapP2P(
+                 shape,  # Communication buffer shape
+@@ -453,16 +483,27 @@
+                             f"corresponding dgrad '{name}' uses a non-bulk overlap method "
+                             f"('{user_ub_cfg[name]['method']}')"
+                         )
+-                    layers_reduce_scatter_overlap.remove(wgrad_name)
+-                    layers_all_gather_overlap.remove(name)
+-                    layers_reduce_scatter_overlap.append(name)
+-                    methods["bulk"].remove(name)
++                    if wgrad_name in layers_reduce_scatter_overlap:
++                        layers_reduce_scatter_overlap.remove(wgrad_name)
++                    if name in layers_all_gather_overlap:
++                        layers_all_gather_overlap.remove(name)
++                    if name not in layers_reduce_scatter_overlap:
++                        layers_reduce_scatter_overlap.append(name)
++                    if name in methods["bulk"]:
++                        methods["bulk"].remove(name)
+                     new_method = user_ub_cfg[name]["method"]
+-                    methods[new_method].append(name)
++                    if name not in methods[new_method]:
++                        methods[new_method].append(name)
+ 
+-        for name in (
+-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
+-        ):
++        if IS_HIP_EXTENSION and user_ub_cfg is not None:
++            for name, cfg in user_ub_cfg.items():
++                if cfg.get("method") == "bulk":
++                    raise NotImplementedError(
++                        f"Bulk overlap method for '{name}' is not supported on HIP/ROCm. "
++                        "Please use 'ring_exchange' method instead."
++                    )
++
++        for name in chain.from_iterable(methods.values()):
+             ub_cfg = get_default_config(name)
+             if user_ub_cfg is not None and name in user_ub_cfg:
+                 fp8_buf = (name in layers_all_gather_overlap) or (
+@@ -587,7 +628,7 @@
+         comm.copy_into_buffer(local_data, local_chunk=True)
+ 
+         # Gather scaling-inverses
+-        if math.prod(local_shape[:-1]) % 128 != 0:
++        if math.prod(local_shape[:-1]) % 128 != 0 and not IS_HIP_EXTENSION:
+             raise ValueError(
+                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
+                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
+@@ -787,6 +828,8 @@
+         self.fsdp_group = None
+         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
+         self.activation_dtype: Optional[torch.dtype] = None
++        self.keep_fp8_weight_transpose_cache: bool = True
++        self.use_fsdp2 = False
+         self.wgrad_accumulation_and_reduce_hooks = []
+         self.wgrad_store = None
+ 
+@@ -886,6 +929,8 @@
+                 recipe_state, Float8BlockScalingRecipeState
+             ):
+                 return
++            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
++                return
+             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
+                 return
+ 
+@@ -1151,6 +1196,9 @@
+ 
+         _original_recipe = None
+ 
++        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:
++            FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True
++
+         if fp8_parameters or fp8_enabled:
+             _original_recipe = meta.get("recipe", None)
+             if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
+@@ -1166,6 +1214,13 @@
+             meta["num_gemms"] = num_gemms
+             self.init_fp8_meta_tensors(meta["recipe"])
+ 
++        # Force the transpose cache to be kept whenever the recipe is MXFP8 / MXFP4,
++        # regardless of whether we are currently inside an fp8_autocast region or not.
++        # reset_parameters() would disable columnwise_usage for params constructed inside
++        # `fp8_model_init` / `quantized_model_init`, leaving `_columnwise_data=None`).
++        if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
++            self.keep_fp8_weight_transpose_cache = True
++
+         if fp8_enabled:
+             # Set FP8 and other FP8 metadata
+             meta["num_gemms"] = num_gemms
+@@ -1453,6 +1508,9 @@
+                     raise RuntimeError("Weight quantizer has not been initialized")
+                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                 quantizer.internal = False
++                if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
++                    quantizer.columnwise_usage=False
++
+                 if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                     device_mesh = dtensor_param.device_mesh
+                     amax_reduction_group = (
+@@ -1464,6 +1522,14 @@
+                     quantizer.with_amax_reduction = True
+                 # Quantize parameter
+                 param = quantizer(param)
++            if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
++                self.keep_fp8_weight_transpose_cache = False
++                param = FSDPAGTensor(
++                    param, 
++                    module=self, 
++                    fp8_meta_index=fp8_meta_index, 
++                    keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache
++                )
+ 
+             # Redo parameter wrap in case we broke it above
+             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
+@@ -1521,6 +1587,141 @@
+     def forward(self):
+         """Needs override."""
+ 
++    def get_weight_workspace(
++        self,
++        *,
++        tensor: Optional[torch.Tensor] = None,
++        quantizer: Optional[Quantizer] = None,
++        cache_name: Optional[str] = None,
++        update_workspace: bool = True,
++        skip_update_flag: Optional[torch.Tensor] = None,
++        fsdp_group: Optional[dist_group_type] = None,
++        workspace_dtype: Optional[torch.dtype] = None,
++    ) -> QuantizedTensor:
++        """Get workspace buffer for weights and maybe update its values
++
++        The workspace buffer may be cached for future function calls.
++
++        Parameters
++        ----------
++        tensor : torch.Tensor, optional
++            Values to copy into workspace. Required if the workspace
++            is being constructed or updated.
++        quantizer: Quantizer, optional
++            Quantizer used to cast the weights. Required if the
++            workspace is being constructed or updated.
++        cache_name: str, optional
++            Key for caching.
++        update_workspace: bool, default = True
++            Update workspace with values from `tensor`.
++        skip_update_flag: torch.Tensor, optional
++            GPU flag to skip updating the workspace. Take precedence
++            over `update_workspace` if provided.
++        fsdp_group: bool, default = None
++            FSDP process group that the weights are distributed over.
++        workspace_dtype: torch.dtype, default = None
++            If weight workspace contains high-precision tensor - for example
++            for debug quantization, this is dtype of the tensor.
++        """
++
++        # Handle case where weights are already quantized
++        # Note: Make sure weights have required usages, but do not
++        # destroy unnecessary usages since they may be used later.
++        if isinstance(tensor, QuantizedTensor):
++            update_rowwise_usage = True if quantizer.rowwise_usage else None
++            update_columnwise_usage = True if quantizer.columnwise_usage else None
++            tensor.update_usage(
++                rowwise_usage=update_rowwise_usage,
++                columnwise_usage=update_columnwise_usage,
++            )
++
++            if isinstance(quantizer, DebugQuantizer):
++                tensor = quantizer.wrap_quantized_tensor(tensor)
++
++            return tensor
++
++        # Try getting workspace from cache
++        out = None
++        if cache_name is not None:
++            out = self._fp8_workspaces.get(cache_name, None)
++
++        # Reset cache if workspace is invalid
++        if out is not None and quantizer is not None:
++            reset_cache = False
++            if isinstance(out, Float8TensorStorage):
++                if (
++                    not is_non_tn_fp8_gemm_supported()
++                    and quantizer.columnwise_usage
++                    and out._transpose is None
++                ):
++                    reset_cache = True
++            elif isinstance(out, MXFP8TensorStorage):
++                if quantizer.rowwise_usage and out._rowwise_data is None:
++                    reset_cache = True
++                elif quantizer.columnwise_usage and out._columnwise_data is None:
++                    reset_cache = True
++            elif isinstance(out, NVFP4TensorStorage):
++                if quantizer.rowwise_usage and out._rowwise_data is None:
++                    reset_cache = True
++                elif quantizer.columnwise_usage and out._columnwise_data is None:
++                    reset_cache = True
++            if isinstance(out, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
++                reset_cache = True
++            if reset_cache:
++                out = None
++                del self._fp8_workspaces[cache_name]
++
++        # Gather cached Fp8 workspace if it's distributed
++        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
++        #       for models initialized with Fp8 primary weights.
++        if (
++            out is not None
++            and tensor is not None
++            and fsdp_group is not None
++            and out.data.shape != tensor.data.shape
++        ):
++            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
++
++        # Construct workspace if needed
++        if out is None:
++            if tensor is None or quantizer is None:
++                raise ValueError(
++                    "tensor and quantizer kwargs must be provided to construct FP8 workspace"
++                )
++
++            if cache_name is not None:
++                # Ensure the tensor in the cache is an instance of torch.Tensor,
++                # as it persists beyond a single forward pass.
++                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
++                quantizer_internal = quantizer.internal
++                quantizer.internal = False
++            out = quantizer.quantize(tensor, dtype=workspace_dtype)
++            if cache_name is not None:
++                quantizer.internal = quantizer_internal
++
++            # Update cache
++            if cache_name is not None:
++                self._fp8_workspaces[cache_name] = out
++            return out
++
++        # Update workspace if needed
++        if skip_update_flag is not None:
++            update_workspace = True
++        if update_workspace:
++            if tensor is None:
++                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
++            if hasattr(out, "quantize_"):
++                out.quantize_(tensor, noop_flag=skip_update_flag)
++            else:
++                if IS_HIP_EXTENSION:
++                    use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
++                    quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
++                    quantize_func(tensor, quantizer, out, skip_update_flag)
++                else:
++                    tex.quantize(tensor, quantizer, out, skip_update_flag)
++
++        return out
++
+     def _load_from_state_dict(
+         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+     ):

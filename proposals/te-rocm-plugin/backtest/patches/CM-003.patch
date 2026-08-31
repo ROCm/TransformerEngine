@@ -1,0 +1,137 @@
+# backtest-case: CM-003
+# kind: case
+# base: 42b840051647eef89761a16dfdff87e82bb253ab
+# derived: diff(BASE:transformer_engine/common/recipe/__init__.py, PRE:transformer_engine/common/recipe/__init__.py)
+--- a/transformer_engine/common/recipe/__init__.py
++++ b/transformer_engine/common/recipe/__init__.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -9,6 +11,7 @@
+ from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+ from dataclasses import field
+ from pydantic.dataclasses import dataclass
++from transformer_engine.common import is_fp8_fnuz, te_rocm_build
+ 
+ 
+ _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
+@@ -18,10 +21,31 @@
+     """
+     Stores max FP8 values for fprop and bprop a `Format`.
+     """
+-
+     max_fwd: float
+     max_bwd: float
+ 
++class _FormatHelperFP8(NamedTuple):
++    """
++    Stores max FP8 values for fprop and bprop a `Format`.
++    """
++    fwd: tuple
++    bwd: tuple
++
++    @property
++    def max_fwd(self) -> float: 
++        return self.fwd[is_fp8_fnuz()]
++
++    @property
++    def max_bwd(self) -> float:
++        return self.bwd[is_fp8_fnuz()]
++
++class _FormatMaxVals(Enum):
++    """
++    Tuples of FP8 (OCP, FNUZ) values for different formats.
++    """
++    E2M1 = (6, 6)
++    E4M3 = (448, 240)
++    E5M2 = (57344, 57344)
+ 
+ class Format(Enum):
+     """
+@@ -40,11 +64,10 @@
+             FP8 tensors in the forward pass are in e4m3 format,
+             FP8 tensors in the backward pass are in e5m2 format
+     """
+-
+     E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
+-    E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
+-    E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
+-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
++    E4M3 = _FormatHelperFP8(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value)
++    E5M2 = _FormatHelperFP8(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
++    HYBRID = _FormatHelperFP8(fwd=E4M3.fwd, bwd=E5M2.bwd)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -102,6 +125,11 @@
+         return issubclass(cls, MXFP8BlockScaling)
+ 
+     @classmethod
++    def mxfp4(cls):
++        """Whether the given recipe is MXFP4 block scaling."""
++        return issubclass(cls, MXFP4BlockScaling)
++
++    @classmethod
+     def delayed(cls):
+         """Whether the given recipe is delayed scaling."""
+         return issubclass(cls, DelayedScaling)
+@@ -589,3 +617,56 @@
+             f"qfactory={self.qfactory}, "
+             f"backward_override={self.backward_override}"
+         )
++
++@dataclass()
++class MXFP4BlockScaling(Recipe):
++    """
++    Use the MXFP4 scaling factor strategy.
++
++    In this strategy, tensors are scaled in blockwise fashion. Each group
++    of 32 (same as MXFP8) consecutive values is scaled together using
++    their own scaling factor. The type of the scaling factor is E8M0
++    (8 bits of exponent, 0 bits of mantissa), equivalent to scaling
++    by a power of 2. FP4 (E2M1) values are stored two per byte,
++    with a single uint8 holding two 4-bit elements.
++
++    Since the scaling happens in a particular direction (either rowwise
++    or columnwise), in this recipe the quantized tensor and its transpose
++    are not numerically equivalent. Due to this, when Transformer Engine
++    needs both the MXFP4 tensor and its transpose (e.g. to calculate both
++    forward and backward pass), during the quantization both versions are
++    computed from the high precision input to avoid double quantization
++    errors.
++
++    Unlike MXFP8, the columnwise (transpose) FP4 data is stored in transposed
++    layout: buffer shape is (K, M/2) for logical (M, K), i.e. N×M rather
++    than M×N. Rowwise remains (M, K/2).
++
++    Parameters
++    ----------
++    fp4_format : {Format.E2M1}, default = Format.E2M1
++             FP4 data format.
++    """
++
++    margin: int = 0
++    fp4_format: Format = Format.E2M1
++    # Must remain set: Recipe paths expect a valid `fp8_format` even
++    # though the MXFP4 code path is FP4-only. Changing it can break compatibility.
++    fp8_format: Format = Format.E4M3
++    fp8_dpa: bool = False
++    fp8_mha: bool = False
++    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
++    use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
++
++    def __post_init__(self) -> None:
++        assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
++        assert (
++            self.backward_override in _BACKWARD_OVERRIDES
++        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
++
++    def __repr__(self) -> str:
++        return (
++            f"recipe_type={self.__class__.__name__}, "
++            f"margin={self.margin}, "
++            f"fp4_format={str(self.fp4_format).split('.')[1]}"
++        )

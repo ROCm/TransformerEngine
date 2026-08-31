@@ -1,0 +1,280 @@
+# backtest-case: CXX-quantize_transpose_vector_blockwise_fp4
+# kind: cxx
+# base: 42b840051647eef89761a16dfdff87e82bb253ab
+# derived: diff(BASE:transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu, PRE:transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu)
+--- a/transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu
++++ b/transformer_engine/common/transpose/quantize_transpose_vector_blockwise_fp4.cu
+@@ -1,4 +1,6 @@
+ /*************************************************************************
++ * This file was modified for portability to AMDGPU
++ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  *
+  * See LICENSE for license information.
+@@ -20,10 +22,13 @@
+ #include "common/util/curanddx.hpp"
+ #include "common/util/ptx.cuh"
+ #include "common/utils.cuh"
++#ifdef __HIP_PLATFORM_AMD__
++#include "common/util/cuda_runtime.h"
++#endif
+ 
+ namespace transformer_engine {
+ 
+-#if CUDA_VERSION >= 12080
++#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
+ namespace quantize_transpose_nvfp4 {
+ namespace {
+ 
+@@ -135,12 +140,32 @@
+ constexpr int kNFP4PerContainer = 2;
+ 
+ // Hyperparameters for performance tuning
++#ifndef __HIP_PLATFORM_AMD__
+ constexpr int kTileDim = 128;
++#endif
+ // constexpr int kScaleDim = 32;
+ constexpr int kNVecIn = 8;             // The number of elements each LDG touches
+ constexpr int kNVecOut = 16;           // The number of elements each STG touches
+ constexpr int kNVecSMem = 2;           // The number of elements each LDS/STS touches
++#ifndef __HIP_PLATFORM_AMD__
+ constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
++#endif
++
++// Tile dimension and thread block size:
++//   gfx942:          kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
++//   gfx950 / NVIDIA: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
++// On AMD, __gfx950__ is only defined during device compilation, so the host
++// must select tile_dim at runtime via cuda::sm_arch() using the constants below.
++#ifdef __HIP_PLATFORM_AMD__
++constexpr int kTileDimGfx950 = 128;
++constexpr int kTileDimGfx942 = 64;
++#if !defined(__gfx950__)
++constexpr int kTileDim = kTileDimGfx942;
++#else
++constexpr int kTileDim = kTileDimGfx950;
++#endif
++constexpr int kThreadsPerBlock = 2 * kTileDim;
++#endif
+ 
+ // Auto-calculated constants, do not modify directly)
+ static_assert(kNVecIn % kNVecSMem == 0, "kNVecIn must be divisible by kNVecSMem");
+@@ -154,6 +179,14 @@
+ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kThreadsPerWarp");
+ static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
+ 
++#ifdef __HIP_PLATFORM_AMD__
++// Host-side helper: computes shared memory size for a runtime tile dimension.
++// Needed because the host determines tile_dim at runtime via cuda::sm_arch().
++constexpr int smem_size_for_tile(int tile_dim) {
++  return tile_dim * ((tile_dim / kNVecSMem) + 1) * kNVecSMem;
++}
++#endif
++
+ // for 2D block scaling, we need to reduce amax in warp
+ static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
+     0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
+@@ -162,7 +195,12 @@
+ template <int group_size, int shfl_down_stride>
+ __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
+   for (int offset = group_size / 2; offset > 0; offset /= 2) {
++#ifdef __HIP_PLATFORM_AMD__
++    (void)groupMask;  // unused on AMD, __shfl_down does not take a mask
++    val = max(val, __shfl_down(val, offset * shfl_down_stride, kThreadsPerWarp));
++#else
+     val = max(val, __shfl_down_sync(groupMask, val, offset * shfl_down_stride));
++#endif
+   }
+   return val;
+ }
+@@ -188,7 +226,12 @@
+ }
+ 
+ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
++#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
++  // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)
++  const float fp8_max = TypeExtrema<fp8e4m3>::max;
++#else
+   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
++#endif
+   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
+   float global_encode_scale = fp8_max * fp4_max / global_amax;
+   // If scale is infinity, return max value of float32
+@@ -258,6 +301,7 @@
+ 
+ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
+     const float2 in01, const float2 in23, const uint32_t rbits) {
++#ifndef __HIP_PLATFORM_AMD__
+   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+   if constexpr (has_rs) {
+     uint16_t out_4x;
+@@ -275,11 +319,83 @@
+     uint16_t dummy = 0;
+     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+   }
++#else
++  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding but w/o scaling
++  // TODO: should ptx.cuh method be reused?
++#if ARCH_HAS_STOCHASTIC_ROUNDING
++  // opsel=1 always writes to byte 1, result read from fp4x2[1]
++  // Matches HIP's own usage, see e.g. https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
++  union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
++  __amd_floatx2_storage_t packed01{in01.x, in01.y};
++  __amd_floatx2_storage_t packed23{in23.x, in23.y};
++  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed01, rbits, 1.0f, 1);
++  const __hip_fp4x2_storage_t lo = u.fp4x2[1];
++  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed23, rbits, 1.0f, 1);
++  const __hip_fp4x2_storage_t hi = u.fp4x2[1];
++  __hip_fp4x4_e2m1 result;
++  result.__x = static_cast<__hip_fp4x4_storage_t>(lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
++  return result;
++#else
++  // Stochastic rounding fallback for AMD GPUs without native
++  // FP4 SR instructions (e.g. gfx942).
++  //
++  // FP4 E2M1 has 8 non-negative magnitudes whose 3-bit codes happen to
++  // be sorted: {0->0.0, 1->0.5, 2->1.0, 3->1.5, 4->2.0, 5->3.0,
++  //             6->4.0, 7->6.0}.
++  //
++  // For each value we:
++  //  1. Clamp |x| into [0, 6] (the FP4 representable range).
++  //  2. Find the floor index fi in the FP4 grid via branchless
++  //     comparisons (sum of (|x| >= threshold) for each level).
++  //  3. Compute the fractional position within [kV[fi], kV[ci]]
++  //     where ci = min(fi+1, 7) is the ceiling index.
++  //  4. Draw a uniform random value r in [0,1) from 8 bits of rbits.
++  //  5. Round up to ci if r < frac, otherwise keep fi.
++  //     This gives E[round(x)] = x (unbiased).
++  //  6. Set the sign bit (bit 3) if the original value was negative.
++  {
++    constexpr float kV[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
++    const float vals[4] = {in01.x, in01.y, in23.x, in23.y};
++    __hip_fp4_storage_t q[4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++      const float av = fminf(fabsf(vals[i]), 6.0f);
++      const int fi = int(av >= 0.5f) + int(av >= 1.0f) + int(av >= 1.5f) +
++                     int(av >= 2.0f) + int(av >= 3.0f) + int(av >= 4.0f) + int(av >= 6.0f);
++      const int ci = min(fi + 1, 7);
++      const float gap = kV[ci] - kV[fi];
++      const float frac = (gap > 0.0f) ? (av - kV[fi]) / gap : 0.0f;
++      const float r = static_cast<float>((rbits >> (8 * i)) & 0xFFu) * (1.0f / 256.0f);
++      const int ri = (r < frac) ? ci : fi;
++      q[i] = static_cast<__hip_fp4_storage_t>((vals[i] < 0.0f) ? (ri | 0x8) : ri);
++    }
++    __nv_fp4x4_e2m1 result;
++    result.__x = static_cast<__hip_fp4x4_storage_t>(
++        (q[0] & 0xFu) | ((q[1] & 0xFu) << 4) |
++        ((q[2] & 0xFu) << 8) | ((q[3] & 0xFu) << 12));
++    return result;
++  }
++#endif // ARCH_HAS_STOCHASTIC_ROUNDING
++#endif // !__HIP_PLATFORM_AMD__
+ }
+ 
++
+ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
+                                                                       const float2 in23,
+                                                                       const uint32_t rbits) {
++#ifdef __HIP_PLATFORM_AMD__
++  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_rn but w/o scaling
++  // TODO: should ptx.cuh method be reused?
++  const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
++  const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(in23.y, __HIP_E2M1, hipRoundNearest);
++
++  __hip_fp4x4_e2m1 result;
++  result.__x = static_cast<__hip_fp4x4_storage_t>(
++        (q0 & 0xFu) | ((q1 & 0xFu) << 4) | ((q2 & 0xFu) << 8) | ((q3 & 0xFu) << 12));
++  return result;
++#else
+   constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
+   if constexpr (has_fp4) {
+     // NOTE: rbits unused for rn.
+@@ -302,6 +418,7 @@
+     uint16_t dummy = 0;
+     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+   }
++  #endif
+ }
+ 
+ template <bool kApplyStochasticRounding>
+@@ -417,8 +534,13 @@
+   __syncthreads();
+ 
+   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
++#ifdef __HIP_PLATFORM_AMD__
++  const float global_encode_scale =
++      (kIsE8Scaling || global_amax == nullptr) ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
++#else
+   const float global_encode_scale =
+       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
++#endif
+   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
+   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+   const float global_decode_scale = 1.0 / global_encode_scale;
+@@ -711,7 +833,7 @@
+     const NVTETensor rng_state_tensor, const bool use_2d_quantization,
+     const SimpleTensor& noop_tensor, cudaStream_t stream) {
+   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
+-#if CUDA_VERSION >= 12080
++#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
+ 
+   // pow 2 scale is for MXFP4 since it's using E8M0 scaling
+   // raise error if pow2_scale is true
+@@ -754,8 +876,16 @@
+ 
+   using namespace transformer_engine::quantize_transpose_nvfp4;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++  // Tile dimension is selected at compile time based on the target architecture.
++  // The host still needs the runtime value for grid/smem computation.
++  const int tile_dim = (cuda::sm_arch() >= 95) ? kTileDimGfx950 : kTileDimGfx942;
++  const size_t num_blocks_x = DIVUP(row_length, static_cast<size_t>(tile_dim));
++  const size_t num_blocks_y = DIVUP(num_rows, static_cast<size_t>(tile_dim));
++#else
+   const size_t num_blocks_x = DIVUP(row_length, static_cast<size_t>(kTileDim));
+   const size_t num_blocks_y = DIVUP(num_rows, static_cast<size_t>(kTileDim));
++#endif
+ 
+   // noop tensor for cuda graph
+   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
+@@ -781,7 +911,11 @@
+           using ScaleType = fp8e4m3; constexpr int kScaleBlockDim = 16;
+           constexpr bool kPow2Scale = false;
+ 
++#ifdef __HIP_PLATFORM_AMD__
++          const bool full_tile = row_length % tile_dim == 0 && num_rows % tile_dim == 0;
++#else
+           const bool full_tile = row_length % kTileDim == 0 && num_rows % kTileDim == 0;
++#endif
+ 
+           TRANSFORMER_ENGINE_SWITCH_CONDITION(
+               return_identity, kReturnIdentity,
+@@ -801,7 +935,11 @@
+                               TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                                   use_2d_quantization, kIs2DBlockScaling,
+ 
++#ifdef __HIP_PLATFORM_AMD__
++                                  size_t smem_bytes = smem_size_for_tile(tile_dim) * sizeof(InputType);
++#else
+                                   size_t smem_bytes = kSMemSize * sizeof(InputType);
++#endif
+                                   auto kernel = block_scaled_1d_cast_transpose_kernel<
+                                       kReturnIdentity, kReturnTranspose, kPow2Scale, kAligned,
+                                       float, InputType, OutputType, ScaleType, kSwizzledScale,
+@@ -812,8 +950,13 @@
+                                         smem_bytes);
+                                     NVTE_CHECK(err == cudaSuccess,
+                                                "Failed to set dynamic shared memory size.");
++#ifdef __HIP_PLATFORM_AMD__
++                                  } kernel<<<grid, tile_dim * 2, smem_bytes,
++                                             stream>>>(
++#else
+                                   } kernel<<<grid, kThreadsPerBlock, smem_bytes,
+                                              stream>>>(
++#endif
+                                       reinterpret_cast<const InputType*>(input.dptr),
+                                       reinterpret_cast<const float*>(global_amax.dptr),
+                                       reinterpret_cast<OutputType*>(output.dptr),

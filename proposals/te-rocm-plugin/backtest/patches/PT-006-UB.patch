@@ -1,0 +1,278 @@
+# backtest-case: PT-006-UB
+# kind: case
+# base: 42b840051647eef89761a16dfdff87e82bb253ab
+# derived: diff(BASE:transformer_engine/pytorch/module/layernorm_mlp.py, PRE:transformer_engine/pytorch/module/layernorm_mlp.py)
+--- a/transformer_engine/pytorch/module/layernorm_mlp.py
++++ b/transformer_engine/pytorch/module/layernorm_mlp.py
+@@ -1,3 +1,5 @@
++# This file was modified for portability to AMDGPU
++# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ #
+ # See LICENSE for license information.
+@@ -14,6 +16,7 @@
+ from torch.nn.parameter import Parameter
+ from torch.nn import init
+ 
++from torch.utils.cpp_extension import IS_HIP_EXTENSION
+ import transformer_engine_torch as tex
+ 
+ from transformer_engine.common.recipe import Recipe
+@@ -90,6 +93,9 @@
+ from ..export import is_in_onnx_export_mode, assert_warmed_up
+ from ...debug.pytorch.debug_state import TEDebugState
+ 
++if IS_HIP_EXTENSION:
++    from ..triton_kernels.norms_common import te_layernorm_bwd_triton, te_rmsnorm_bwd_triton
++
+ __all__ = ["LayerNormMLP"]
+ 
+ 
+@@ -133,6 +139,7 @@
+     if (
+         recipe.float8_current_scaling()
+         or recipe.float8_block_scaling()
++        or recipe.mxfp4()
+         or recipe.nvfp4()
+         or recipe.custom()
+     ):
+@@ -227,8 +234,8 @@
+             ub_overlap_ag,
+             ub_overlap_rs,
+             ub_overlap_rs_dgrad,
+-            ub_bulk_wgrad,
+-            ub_bulk_dgrad,
++            ub_bulk_wgrad, #ROCm: there is a but in upstream - order of dgrad and wgrad here bug here
++            ub_bulk_dgrad, #does not match order in LayerNormMLP::forward. Fix it there
+             gemm_gelu_fusion,
+             fsdp_group,
+             fp8_meta,
+@@ -237,6 +244,8 @@
+             symmetric_ar_type,
+             checkpoint,
+             debug,
++            keep_fp8_weight_transpose_cache,
++            use_fsdp2,
+             recompute_for_bwd,
+         ) = non_tensor_args
+         if fp8:
+@@ -338,6 +347,8 @@
+                 "symmetric_ar_type": symmetric_ar_type,
+                 "checkpoint": checkpoint,
+                 "debug": debug,
++                "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
++                "use_fsdp2": use_fsdp2,
+                 "recompute_for_bwd": True,  # set this to true for recomputation phase
+             }
+         # Make sure input dimensions are compatible
+@@ -411,6 +422,10 @@
+             and not custom
+         )
+ 
++        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
++        if IS_HIP_EXTENSION and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
++            with_quantized_norm = False
++
+         # Apply normalization
+         ln_out, mu, rsigma = apply_normalization(
+             inputmat,
+@@ -487,12 +502,12 @@
+             if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
+                 fc1_weight_quantizer = fc1_weight._quantizer
+             elif fc1_weight_quantizer is not None:
+-                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
++                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
+ 
+             if isinstance(fc2_weight, QuantizedTensorStorage) and not debug:
+                 fc2_weight_quantizer = fc2_weight._quantizer
+             elif fc2_weight_quantizer is not None:
+-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
++                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
+ 
+             fc1_weight_final, new_fc1_weight_workspace = quantize_weight(
+                 tensor=fc1_weight,
+@@ -557,6 +572,10 @@
+                 gemm_gelu_fusion = False
+         if debug:
+             gemm_gelu_fusion = False
++
++        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
++            assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
++
+         fc1_outputs = general_gemm(
+             fc1_weight_final,
+             ln_out_total,
+@@ -660,6 +679,9 @@
+             # ------------------------------------------------------
+             # FC2 GEMM
+             # ------------------------------------------------------
++            if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
++                assert fc2_weight_final._transpose is None or fc2_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
++
+             gemm_out, *_, reduce_scatter_out = general_gemm(
+                 fc2_weight_final,
+                 act_out,
+@@ -697,6 +719,20 @@
+                 fc2_out = gemm_out
+             fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
+ 
++        # Cache state for backward pass
++        if is_grad_enabled:
++            # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
++            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
++                if isinstance(fc1_weight_final, QuantizedTensorStorage):
++                    fc1_weight_final.update_usage(columnwise_usage=True)
++                if isinstance(fc2_weight_final, QuantizedTensorStorage):
++                    fc2_weight_final.update_usage(columnwise_usage=True)
++
++            if cpu_offloading:
++                mark_activation_offload(
++                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
++                )
++
+         # now saving stuff for bwd:
+         # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
+         # if we are not checkpointing, then we must save this if grad is enabled
+@@ -853,6 +889,9 @@
+             )
+             ctx.normalization = normalization
+             ctx.reduce_and_update_bwd_fp8_tensors = False
++            ctx.autocast_fp8_reduction_skipped = False
++            ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
++            ctx.use_fsdp2 = use_fsdp2
+             if ctx.fp8 and requires_grad(
+                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
+             ):
+@@ -1198,6 +1237,9 @@
+             else:
+                 fc2_dgrad = gemm_output
+ 
++            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
++                fc2_weight.update_usage(columnwise_usage=False)
++
+             # --------------------------------------------------
+             # Finished FC2 DGRAD...
+             # --------------------------------------------------
+@@ -1449,6 +1491,9 @@
+                 bulk_overlap=ctx.ub_bulk_dgrad,
+             )
+ 
++            if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
++                fc1_weight.update_usage(columnwise_usage=False)
++
+             # Prepare grad input tensor
+             # Note: Perform tensor-parallel communication
+             fc1_dgrad = None
+@@ -1608,7 +1653,9 @@
+             dgamma = None
+             dbeta = None
+             if ctx.normalization == "LayerNorm":
+-                dgrad, dgamma, dbeta = tex.layernorm_bwd(
++                use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
++                layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd
++                dgrad, dgamma, dbeta = layernorm_bwd_func(
+                     dgrad,
+                     inputmat,
+                     mu,
+@@ -1618,7 +1665,9 @@
+                     ctx.zero_centered_gamma,
+                 )
+             elif ctx.normalization == "RMSNorm":
+-                dgrad, dgamma = tex.rmsnorm_bwd(
++                use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
++                rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
++                dgrad, dgamma = rmsnorm_bwd_func(
+                     dgrad,
+                     inputmat,
+                     rsigma,
+@@ -1681,6 +1730,8 @@
+ 
+         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
++            if ctx.autocast_fp8_reduction_skipped:
++                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
+ 
+         # FIX THIS
+         # Scatter Fp8 tranposed-weight buffers
+@@ -1813,6 +1864,20 @@
+                    This can help in latency bound communication situations.
+                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
+                    is used.
++    keep_fp8_weight_transpose_cache: bool, default = `True`
++                Controls whether to cache the FP8 weight transpose buffer during training.
++
++                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation,
++                which can improve performance but significantly increases memory usage.
++                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed.
++                This reduces memory consumption, especially during checkpoint loading and runtime.
++
++                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training.
++                Caching FP8 weight transposes can double memory usage for modules such as `Linear`,
++                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and
++                reduced efficiency of PyTorch's caching allocator.
++
++                Use this setting to balance memory usage and performance based on your training configuration.
+     checkpoint : bool, default = False
+                 whether to use selective activation checkpointing, where activations are not saved for bwd,
+                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
+@@ -1853,6 +1918,8 @@
+         delay_wgrad_compute: bool = False,
+         symmetric_ar_type: Optional[str] = None,
+         checkpoint: bool = False,
++        keep_fp8_weight_transpose_cache: bool = True,
++        use_fsdp2: bool = False,
+     ) -> None:
+         super().__init__(name)
+ 
+@@ -1874,6 +1941,8 @@
+         self.zero_centered_gamma = zero_centered_gamma
+         self.symmetric_ar_type = symmetric_ar_type
+         self.checkpoint = checkpoint
++        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
++        self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
+ 
+         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
+         self.gemm_gelu_fusion = (
+@@ -2154,7 +2223,8 @@
+                     fc2_weight = fc2_weight.dequantize()
+ 
+             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
+-            if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
++            if ( not IS_HIP_EXTENSION
++                and self.bias_gelu_nvfusion and not use_reentrant_activation_recompute() ):
+                 self.fast_setattr("bias_gelu_nvfusion", False)
+ 
+             if is_grad_enabled:
+@@ -2212,8 +2282,8 @@
+                 self.ub_overlap_ag,
+                 self.ub_overlap_rs,
+                 self.ub_overlap_rs_dgrad,
+-                self.ub_bulk_dgrad,
+-                self.ub_bulk_wgrad,
++                self.ub_bulk_wgrad, #ROCm: there is a bug in upstream with dgrad and wgrad
++                self.ub_bulk_dgrad, #order not matching _LayerNormMLP::_forward
+                 self.gemm_gelu_fusion and not debug,
+                 self.fsdp_group,
+                 self.fp8_meta,
+@@ -2222,6 +2292,8 @@
+                 self.symmetric_ar_type,
+                 self.checkpoint,
+                 debug,
++                self.keep_fp8_weight_transpose_cache,
++                self.use_fsdp2,
+             )
+             out, ln_out, new_fc1_ws, new_fc2_ws = fwd_fn(
+                 *autograd_ctx,
+@@ -2553,8 +2625,12 @@
+             return [None, None]
+         fc1_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+         fc1_weight_quantizer.internal = True
++        if IS_HIP_EXTENSION:
++            fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+         fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
+         fc2_weight_quantizer.internal = True
++        if IS_HIP_EXTENSION:
++            fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+         return [fc1_weight_quantizer, fc2_weight_quantizer]
+ 
+     def backward_dw(self):
