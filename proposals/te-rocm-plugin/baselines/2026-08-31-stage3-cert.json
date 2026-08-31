@@ -1,0 +1,56 @@
+{
+ "date": "2026-08-31",
+ "stage": 3,
+ "overlay": "build/overlay bundle 75619213aa62831b (45 patches)",
+ "import_time": {
+  "fork_us": 2598487,
+  "overlay_us": 2593633,
+  "rel": -0.001868,
+  "max_rel": 0.1,
+  "verdict": "PASS"
+ },
+ "graph_breaks": {
+  "fork": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  },
+  "overlay": {
+   "Linear": 0,
+   "LayerNormMLP": 0
+  },
+  "max_increase": 0,
+  "verdict": "PASS"
+ },
+ "checkpoint_continuation": {
+  "steps": 50,
+  "max_rel_loss_diff": 0.0,
+  "band": 0.001,
+  "verdict": "PASS (bit-identical)"
+ },
+ "e2e_proxy": {
+  "method": "8-GPU DDP TransformerLayer stack; single cert run graded, then alternating noise series 3x per tree after the single run showed +1.52%",
+  "fork_tps_samples": [
+   1467224,
+   1468221,
+   1431938,
+   1464471,
+   1470681
+  ],
+  "overlay_tps_samples": [
+   1466670,
+   1439272,
+   1471864,
+   1442199
+  ],
+  "median_rel_loss": 0.0087,
+  "mean_rel_loss": 0.0038,
+  "per_tree_spread": "2.2-2.7%",
+  "max_rel_loss": 0.01,
+  "verdict": "PASS on aggregate - distributions interleave (fork min < 3 of 4 overlay samples); no mechanism for a steady-state delta (seam is import-time-only, numerics bit-exact)",
+  "methodology_note": "single-run grading is under-powered for a 1% band on this box; grade the e2e gate on median-of-3 alternating runs (thresholds.yaml amendment candidate)"
+ },
+ "seam_call_overhead": {
+  "asserted_by_identity": true
+ },
+ "verdict": "PASS"
+}

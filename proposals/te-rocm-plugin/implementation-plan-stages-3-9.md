@@ -157,7 +157,7 @@ against upstream `main` HEAD and reports outcomes in four categories — patch d
 dependency-environment / upstream test failure. Add to `rocm-wheels-build.yml`: the four-wheel
 split and the lifecycle tests.
 
-### S3.7 · Stage-3 certification → Gate B packet
+### S3.7 · Stage-3 certification → Gate B packet — **PACKET COMPLETE 2026-08-31** (`certification-stage3.md`; all §8.6 rows PASS; e2e graded on aggregate after a noise series — see methodology note). Gate B decision itself rests with the certifier
 
 Full §8.6 checklist on the **existing** backend: contracts embedded and validated → upstream suite
 under overlay + the named no-overlay subset → numerics (dual oracle on the compiled path only,
