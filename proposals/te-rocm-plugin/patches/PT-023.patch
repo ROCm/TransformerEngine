@@ -1,10 +1,11 @@
 # manifest: PT-023
+# revived: 2026-09-01 - module/_common.py gained the Stage-6 select_norm chooser; a retired file must not carry new divergence ungoverned
 # base: 868d8d9216da361c666519652115e23688db5211
 # mechanism: split-features
 # expiry: see features
-# tests: TBD
+# tests: tests/pytorch/triton_kernels/test_norms.py, tests/pytorch/test_layernorm_saved_tensors_logic.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (2 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (2 feature sub-entries)
 --- a/transformer_engine/pytorch/module/_common.py
 +++ b/transformer_engine/pytorch/module/_common.py
 @@ -1,20 +1,32 @@
@@ -40,27 +41,29 @@
  
  def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
      """Set the amax reduction group on a quantizer; no-op if it doesn't support it.
-@@ -32,13 +44,15 @@
+@@ -32,18 +44,9 @@
  
  
  def _get_normalization_func(normalization: str, forward: bool):
-+    use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-+    use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-     fwd_normalization_funcs = {
+-    fwd_normalization_funcs = {
 -        "LayerNorm": tex.layernorm_fwd,
 -        "RMSNorm": tex.rmsnorm_fwd,
-+        "LayerNorm":  te_layernorm_fwd_triton if use_layernorm_triton else tex.layernorm_fwd,
-+        "RMSNorm": te_rmsnorm_fwd_triton if use_rmsnorm_triton else tex.rmsnorm_fwd,
-     }
-     bwd_normalization_funcs = {
+-    }
+-    bwd_normalization_funcs = {
 -        "LayerNorm": tex.layernorm_bwd,
 -        "RMSNorm": tex.rmsnorm_bwd,
-+        "LayerNorm": te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd,
-+        "RMSNorm": te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd,
-     }
+-    }
+-
+-    if forward:
+-        return fwd_normalization_funcs[normalization]
+-    return bwd_normalization_funcs[normalization]
++    from transformer_engine.te_rocm.registry import select_norm
++    op = {"LayerNorm": "layernorm", "RMSNorm": "rmsnorm"}[normalization]
++    return select_norm(op, forward=forward)
  
-     if forward:
-@@ -145,6 +159,7 @@
+ 
+ def apply_normalization(
+@@ -145,6 +148,7 @@
  
          # Out-of-place concatenation if tensor properties do not match
          data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
@@ -68,7 +71,7 @@
          for tensor in tensors[1:]:
              if (
                  tensor.dtype != dtype
-@@ -154,6 +169,14 @@
+@@ -154,6 +158,14 @@
              ):
                  return torch.cat(tensors, dim=dim)
              data_ptr += tensor.size(dim) * data_ptr_stride

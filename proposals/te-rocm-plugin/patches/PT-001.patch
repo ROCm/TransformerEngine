@@ -44,7 +44,7 @@
      """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
      if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
          # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
-@@ -70,6 +83,16 @@
+@@ -70,6 +83,17 @@
      return 0.0
  
  
@@ -54,6 +54,7 @@
 +    get_tensor_device,
 +    _select_kernel_fp4,
 +    _fp4_gemm_core,
++    _should_use_bf16_output_for_nvfp4_tn,
 +    mxfp4_gemm,
 +)
 +
@@ -61,7 +62,7 @@
  def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
      """Whether tensor carries row-scaled NVFP4 global amax metadata."""
      return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
-@@ -130,8 +153,27 @@
+@@ -130,8 +154,27 @@
  
      alpha = validate_gemm_scale(alpha, True)
      beta = validate_gemm_scale(beta, accumulate)
@@ -89,7 +90,7 @@
      if ub_type is not None:
          assert ub is not None, (
              f"{'AG+GEMM' if ub_type == tex.CommOverlapType.AG else 'GEMM+RS'} overlap requires"
-@@ -176,10 +218,44 @@
+@@ -176,10 +219,44 @@
      # Use bfloat16 as default bias_dtype
      bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
  
@@ -134,7 +135,7 @@
      args = (
          A,
          transa,  # transa
-@@ -207,7 +283,20 @@
+@@ -207,7 +284,20 @@
          "beta": beta,
      }
  
@@ -156,7 +157,7 @@
          out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
      else:
          if _is_nvfp4_row_scaled_tensor(A):
-@@ -267,6 +356,9 @@
+@@ -267,6 +357,9 @@
          elif requested_out_dtype is not None and requested_out_dtype != torch.float32:
              out = out.to(dtype=requested_out_dtype)
  

@@ -74,6 +74,50 @@ def select_quantize(quantizer: Any) -> Callable:
     return te_quantize_triton
 
 
+_NORM_POLICY: Dict[str, Optional[bool]] = {"layernorm": None, "rmsnorm": None}
+_NORM_ENV = {"layernorm": "NVTE_USE_LAYERNORM_TRITON", "rmsnorm": "NVTE_USE_RMSNORM_TRITON"}
+
+
+def select_norm(op: str, forward: bool) -> Callable:
+    """Family 2: norms. Select the layernorm/rmsnorm implementation. Pure; call before launch.
+
+    Policy env per op, frozen at first selection for that op (covers capture). The triton
+    norms have no shape/dtype eligibility limits beyond running on HIP; a non-HIP build with
+    the policy set gets a strict refusal, not a silent fallback.
+    """
+    import transformer_engine_torch as tex
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+    assert op in _NORM_ENV, f"unknown norm op {op!r}"
+    if _NORM_POLICY[op] is None:
+        _NORM_POLICY[op] = bool(int(os.environ.get(_NORM_ENV[op], "0")))
+        _LOG.setdefault("norms", {})[op] = {"policy_triton": _NORM_POLICY[op], "rejections": []}
+    compiled = {
+        ("layernorm", True): tex.layernorm_fwd, ("layernorm", False): tex.layernorm_bwd,
+        ("rmsnorm", True): tex.rmsnorm_fwd, ("rmsnorm", False): tex.rmsnorm_bwd,
+    }[(op, forward)]
+    if not _NORM_POLICY[op]:
+        _LOG["norms"][op]["selected"] = "compiled"
+        return compiled
+    if not IS_HIP_EXTENSION:
+        reason = f"{_NORM_ENV[op]}=1 but this is not a HIP build"
+        _LOG["norms"][op]["rejections"].append(reason)
+        raise RuntimeError(reason)
+    from transformer_engine.te_rocm.triton_kernels.norms_common import (
+        te_layernorm_bwd_triton,
+        te_layernorm_fwd_triton,
+        te_rmsnorm_bwd_triton,
+        te_rmsnorm_fwd_triton,
+    )
+
+    triton = {
+        ("layernorm", True): te_layernorm_fwd_triton, ("layernorm", False): te_layernorm_bwd_triton,
+        ("rmsnorm", True): te_rmsnorm_fwd_triton, ("rmsnorm", False): te_rmsnorm_bwd_triton,
+    }[(op, forward)]
+    _LOG["norms"][op]["selected"] = "triton"
+    return triton
+
+
 def registry_state() -> dict:
     """For the diagnostics snapshot: selections and rejection reasons so far."""
     return dict(_LOG)

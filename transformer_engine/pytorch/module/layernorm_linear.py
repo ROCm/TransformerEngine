@@ -1163,8 +1163,8 @@ class _LayerNormLinear(torch.autograd.Function):
             dbeta = None
             nvtx_range_push(f"{nvtx_label}.norm")
             if ctx.normalization == "LayerNorm":
-                use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-                layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else tex.layernorm_bwd
+                from transformer_engine.te_rocm.registry import select_norm
+                layernorm_bwd_func = select_norm("layernorm", forward=False)
                 dgrad, dgamma, dbeta = layernorm_bwd_func(
                     dgrad,
                     inputmat,
@@ -1176,8 +1176,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 dgrad = dgrad.reshape(inputmat.size())
             elif ctx.normalization == "RMSNorm":
-                use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-                rmsnorm_bwd_func = te_rmsnorm_bwd_triton if use_rmsnorm_triton else tex.rmsnorm_bwd
+                from transformer_engine.te_rocm.registry import select_norm
+                rmsnorm_bwd_func = select_norm("rmsnorm", forward=False)
                 dgrad, dgamma = rmsnorm_bwd_func(
                     dgrad,
                     inputmat,

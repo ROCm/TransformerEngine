@@ -968,6 +968,33 @@
    },
    "target": "transformer_engine/pytorch/ops/basic/grouped_linear.py"
   },
+  "PT-023": {
+   "spans": {
+    "_NoopCatFunc": [
+     77,
+     174
+    ],
+    "_get_normalization_func": [
+     34,
+     46
+    ],
+    "apply_normalization": [
+     49,
+     74
+    ],
+    "set_quantizer_amax_reduction_group": [
+     19,
+     31
+    ]
+   },
+   "symbols": {
+    "_NoopCatFunc": "4a9e38e6b3ad107ad8a6e5161ca0242251b8534f1274de6e143a9216299ca67c",
+    "_get_normalization_func": "47326d51ac7cc5a3abf4a78c2aaead9c3e8129dcea81719f9df71ac8af35f8bb",
+    "apply_normalization": "3bb8788fefa7c29fbe5af005dc7f543dc2a2801bcf16a5c52307573ae4f88c22",
+    "set_quantizer_amax_reduction_group": "b0418f9a5adbc2d2229546349b6c27ba58bcfacfa9dfe2c45ecb43b350be6da1"
+   },
+   "target": "transformer_engine/pytorch/module/_common.py"
+  },
   "PT-024": {
    "spans": {
     "<module-level>": [
@@ -1083,6 +1110,23 @@
    },
    "target": "transformer_engine/pytorch/triton/cross_entropy.py"
   },
+  "PT-030": {
+   "spans": {
+    "<module-level>": [
+     1,
+     255
+    ],
+    "RMSNorm": [
+     30,
+     254
+    ]
+   },
+   "symbols": {
+    "<module-level>": "c21401a45516add9488ab65cea79d226d24fb0d7d00805cf73ab02d5fc05dd6b",
+    "RMSNorm": "508dc131be5777faf4f43ff30af57b8956643157cff3eb3f829e8dc247ec40be"
+   },
+   "target": "transformer_engine/pytorch/ops/basic/rmsnorm.py"
+  },
   "PT-031": {
    "spans": {
     "<module-level>": [
@@ -1111,6 +1155,23 @@
     "<module-level>": "6f5c8016257f80ba687feaf44b2eab691dfebe597474afc2173da4c36ce167f8"
    },
    "target": "transformer_engine/pytorch/__init__.py"
+  },
+  "PT-033": {
+   "spans": {
+    "<module-level>": [
+     1,
+     277
+    ],
+    "LayerNorm": [
+     30,
+     276
+    ]
+   },
+   "symbols": {
+    "<module-level>": "5193783a70d78c3e78e9a25d2ef59951db833bb86b326c27f048bb8715bbd4f5",
+    "LayerNorm": "d1df79ab8a954090cc121dd1b1427dc4081e4d804fd226035260aee881759818"
+   },
+   "target": "transformer_engine/pytorch/ops/basic/layer_norm.py"
   },
   "PT-034": {
    "spans": {

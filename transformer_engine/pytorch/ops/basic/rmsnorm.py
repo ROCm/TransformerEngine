@@ -87,7 +87,6 @@ class RMSNorm(BasicOperation):
         super().__init__()
         self.eps: float = eps
         self.zero_centered_gamma: bool = zero_centered_gamma
-        self.use_rmsnorm_triton = bool(int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0'))) and IS_HIP_EXTENSION
 
         # Parameter shape
         if not isinstance(normalized_shape, Iterable):
@@ -194,7 +193,8 @@ class RMSNorm(BasicOperation):
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         # Compute RMSNorm forward pass
-        rmsnorm_fwd_func = te_rmsnorm_fwd_triton if self.use_rmsnorm_triton else rmsnorm_fwd
+        from transformer_engine.te_rocm.registry import select_norm
+        rmsnorm_fwd_func = select_norm("rmsnorm", forward=True)
         y, _, rstdevs = rmsnorm_fwd_func(
             x,
             w,
@@ -236,7 +236,8 @@ class RMSNorm(BasicOperation):
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm backward pass
-        rmsnorm_bwd_func = te_rmsnorm_bwd_triton if self.use_rmsnorm_triton else rmsnorm_bwd
+        from transformer_engine.te_rocm.registry import select_norm
+        rmsnorm_bwd_func = select_norm("rmsnorm", forward=False)
         dx, dw = rmsnorm_bwd_func(
             dy,
             x,

@@ -207,8 +207,8 @@ class LayerNorm(BasicOperation):
 
         # Compute layer norm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
-        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-        layernorm_fwd_func = te_layernorm_fwd_triton if use_layernorm_triton else layernorm_fwd
+        from transformer_engine.te_rocm.registry import select_norm
+        layernorm_fwd_func = select_norm("layernorm", forward=True)
         y, means, rstdevs = layernorm_fwd_func(
             x,
             w,
@@ -251,8 +251,8 @@ class LayerNorm(BasicOperation):
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute layer norm backward pass
-        use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
-        layernorm_bwd_func = te_layernorm_bwd_triton if use_layernorm_triton else layernorm_bwd
+        from transformer_engine.te_rocm.registry import select_norm
+        layernorm_bwd_func = select_norm("layernorm", forward=False)
         dx, dw, db = layernorm_bwd_func(
             dy,
             x,

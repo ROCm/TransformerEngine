@@ -89,6 +89,7 @@ from transformer_engine.te_rocm.mxfp4_gemm import (  # noqa: E402
     get_tensor_device,
     _select_kernel_fp4,
     _fp4_gemm_core,
+    _should_use_bf16_output_for_nvfp4_tn,
     mxfp4_gemm,
 )
 

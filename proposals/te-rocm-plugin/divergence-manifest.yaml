@@ -1189,7 +1189,7 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-023
-    p5_status: retired
+    p5_status: revived-2026-09-01  # was: retired; Stage-6 registry sites added
     p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/module/_common.py
     added_lines: 27
@@ -1346,7 +1346,7 @@ entries:
     status: proposed
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
   - id: PT-030
-    p5_status: retired
+    p5_status: revived-2026-09-01  # was: retired; Stage-6 registry sites added
     p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 82% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/ops/basic/rmsnorm.py
     added_lines: 14
@@ -1402,7 +1402,7 @@ entries:
     last_verified_base: "dev@8af6efc vs 868d8d92 (2026-08-28)"
     dependencies: [CM-001]
   - id: PT-033
-    p5_status: retired
+    p5_status: revived-2026-09-01  # was: retired; Stage-6 registry sites added
     p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 67% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/ops/basic/layer_norm.py
     added_lines: 11
