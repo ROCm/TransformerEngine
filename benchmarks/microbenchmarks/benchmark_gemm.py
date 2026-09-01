@@ -123,6 +123,10 @@ def pytest_generate_tests(metafunc):
 
 @pytest.mark.benchmark
 def test_gemm(microbench, case, monkeypatch):
+    if case["Precision"] == "mxfp4" and any(
+        dim % 32 for dim in (case["M"], case["N"], case["K"])
+    ):
+        pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
     apply_backend_env(monkeypatch, GEMM_BACKENDS[case["Backend"]])
     microbench.run(
         case,

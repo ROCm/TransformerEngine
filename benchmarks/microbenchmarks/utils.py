@@ -48,9 +48,9 @@ MODEL_CONFIGS = [
 
 # Unique (model_name, hidden_size) pairs for element-wise benchmarks
 MODEL_HIDDEN_SIZES = [
-    ("Llama3-8B",   4096),
-    ("Llama3-70B",  8192),
-    ("Llama3-405B", 16384),
+    ("Llama3.1-8B",   4096),
+    ("Llama3.1-70B",  8192),
+    ("Llama3.1-405B", 16384),
     ("Qwen2.5-7B",  3584),
     ("Qwen2.5-72B", 8192),
 ]
@@ -881,11 +881,12 @@ def _times_ms(measurement):
 
 
 def _result_rows(store):
-    """Flatten *store* into (name, stats_ms, throughput, unit) rows for the summary."""
+    """Flatten *store* into (suite, name, stats_ms, throughput, unit) rows for the summary."""
     import numpy as np
 
     rows = []
-    for fam in store.values():
+    for family, fam in store.items():
+        suite = family[len("benchmark_"):] if family.startswith("benchmark_") else family
         for _case_params, records, node_name in fam.case_metrics:
             base = node_name
             if base.endswith("]") and "[" in base:
@@ -902,7 +903,7 @@ def _result_rows(store):
                     }
                 else:  # no per-sample distribution: show the single value as the median
                     stats = {"min": None, "median": m["ms"], "max": None, "std": None}
-                rows.append((name, stats, m["throughput"], m["unit"]))
+                rows.append((suite, name, stats, m["throughput"], m["unit"]))
     return rows
 
 
@@ -915,24 +916,26 @@ def format_results_table(store):
     def cell(v):
         return "-" if v is None else f"{v:.4f}"
 
-    headers = ["Name", "Min (ms)", "Median (ms)", "Max (ms)", "StdDev (ms)", "Throughput"]
+    headers = [
+        "Benchmark", "Config", "Min (ms)", "Median (ms)", "Max (ms)", "StdDev (ms)", "Throughput",
+    ]
     body = []
-    for name, s, thr, unit in sorted(rows, key=lambda r: r[0]):
+    for suite, name, s, thr, unit in sorted(rows, key=lambda r: (r[0], r[1])):
         body.append([
-            name, cell(s["min"]), cell(s["median"]),
+            suite, name, cell(s["min"]), cell(s["median"]),
             cell(s["max"]), cell(s["std"]), f"{thr:.2f} {unit}",
         ])
     widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
 
     def row(cells):
+        # Left-align the text columns (Benchmark, Config); right-align the numerics.
         padded = [
-            c.ljust(widths[i]) if i == 0 else c.rjust(widths[i]) for i, c in enumerate(cells)
+            c.ljust(widths[i]) if i <= 1 else c.rjust(widths[i]) for i, c in enumerate(cells)
         ]
         return "| " + " | ".join(padded) + " |"
 
-    # Markdown delimiter row: left-align Name, right-align the numeric columns.
     align = [
-        ":" + "-" * (widths[i] - 1) if i == 0 else "-" * (widths[i] - 1) + ":"
+        ":" + "-" * (widths[i] - 1) if i <= 1 else "-" * (widths[i] - 1) + ":"
         for i in range(len(headers))
     ]
     caption = f"benchmark: {len(body)} tests"

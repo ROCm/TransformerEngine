@@ -70,24 +70,24 @@ def _fp8_quantizer(fp8_dtype):
 #   MXFP4 : 0.5 data + E8M0 1 byte / 32-elem block  -> 0.5 + 1/32
 # MXFP4 has no packed-FP4 dequantize kernel yet, so it runs the quantize direction only.
 _CAST_FORMATS = (
-    ("FP8-E4M3", _fp8_quantizer(TE_FP8_E4M3), 1.0, check_fp8_support, True),
-    ("FP8-E5M2", _fp8_quantizer(TE_FP8_E5M2), 1.0, check_fp8_support, True),
+    ("fp8-e4m3", _fp8_quantizer(TE_FP8_E4M3), 1.0, check_fp8_support, True),
+    ("fp8-e5m2", _fp8_quantizer(TE_FP8_E5M2), 1.0, check_fp8_support, True),
     (
-        "MXFP8-E4M3",
+        "mxfp8-e4m3",
         lambda: MXFP8Quantizer(TE_FP8_E4M3, rowwise=True, columnwise=False),
         1.0 + 1.0 / 32,
         check_mxfp8_support,
         True,
     ),
     (
-        "MXFP8-E5M2",
+        "mxfp8-e5m2",
         lambda: MXFP8Quantizer(TE_FP8_E5M2, rowwise=True, columnwise=False),
         1.0 + 1.0 / 32,
         check_mxfp8_support,
         True,
     ),
     (
-        "NVFP4",
+        "nvfp4",
         lambda: NVFP4Quantizer(
             fp4_dtype=TE_FP4_E2M1, rowwise=True, columnwise=False, with_rht=False
         ),
@@ -96,7 +96,7 @@ _CAST_FORMATS = (
         True,
     ),
     (
-        "MXFP4",
+        "mxfp4",
         lambda: MXFP4Quantizer(fp4_dtype=TE_FP4_E2M1, rowwise=True, columnwise=False),
         0.5 + 1.0 / 32,
         check_mxfp4_support,
@@ -134,8 +134,8 @@ def _triton_applies(fmt, direction):
     # Cast-transpose Triton covers FP8/MXFP8/MXFP4 quantize (not NVFP4); the
     # dequantize Triton path exists only for MXFP8 (mxfp8_tensor_storage).
     if direction == "quantize":
-        return fmt != "NVFP4"
-    return fmt.startswith("MXFP8")
+        return fmt != "nvfp4"
+    return fmt.startswith("mxfp8")
 
 
 def _backends_for(fmt, direction):
