@@ -103,6 +103,10 @@ def is_op_fuser_grouped_tensor_path_supported(
     * Single grouped parameters have no split-quantize fallback, so callers
       must reject them when this function returns ``False``.
     """
+    # ROCm has no cuBLASLt grouped-tensor GEMM path.
+    if IS_HIP_EXTENSION:
+        return False
+
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 

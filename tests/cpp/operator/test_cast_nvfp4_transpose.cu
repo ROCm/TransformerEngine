@@ -1514,14 +1514,25 @@ void performTestRowScaledTranspose(const std::vector<size_t>& shape) {
     const std::array<size_t, 4> sd = get_scale_tensor_dims(rows, cols, 1, 16);
     const std::array<size_t, 4> sd_t = get_scale_tensor_dims(cols, rows, 1, 16);
     size_t scale_mismatches = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    std::vector<size_t> mismatches_scales_indices;
+#endif  //#ifdef __HIP_PLATFORM_AMD__
     compare_scaling_factors<fp8e4m3>("rowwise_scales",
                                      output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                      ref_row.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                     sd[0], sd[1], sd[3], scale_mismatches);
+                                     sd[0], sd[1], sd[3],
+#ifdef __HIP_PLATFORM_AMD__
+                                     mismatches_scales_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
+                                     scale_mismatches);
     compare_scaling_factors<fp8e4m3>("columnwise_scales",
                                      output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                      ref_col.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                     sd_t[0], sd_t[1], sd_t[3], scale_mismatches);
+                                     sd_t[0], sd_t[1], sd_t[3],
+#ifdef __HIP_PLATFORM_AMD__
+                                     mismatches_scales_indices,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
+                                     scale_mismatches);
     ASSERT_EQ(scale_mismatches, 0u);
 
     // Per-row / per-col amaxes must match the reference amaxes exactly.

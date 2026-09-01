@@ -713,16 +713,29 @@ void performTest_2d_quantize(const std::vector<size_t>& shape,
         scales_stride_colwise);
 
     const size_t scale_diff_abs_tolerance = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    // ROCm computes e8m0 scales with legitimate +/-1 ulp rounding differences at
+    // block boundaries; tolerate a small fraction, matching performTest above.
+    const double abs_tolerable_mismatches_limit = 1.0;
+    const double rel_tolerable_mismatches_limit = 1.0e-4;
+#else
     const double abs_tolerable_mismatches_limit = 0.0;
     const double rel_tolerable_mismatches_limit = 0.0;
+#endif
 
     auto [atol, rtol] = getTolerances(otype);
 
     if (rowwise) {
         size_t mismatches_scales_rowwise = 0;
+#ifdef __HIP_PLATFORM_AMD__
+        std::vector<size_t> mismatches_scales_indices_rowwise;
+#endif  //#ifdef __HIP_PLATFORM_AMD__
         compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                mismatches_scales_indices_rowwise,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                                 mismatches_scales_rowwise,
                                 scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit,
@@ -732,9 +745,15 @@ void performTest_2d_quantize(const std::vector<size_t>& shape,
 
     if (colwise) {
         size_t mismatches_scales_colwise = 0;
+#ifdef __HIP_PLATFORM_AMD__
+        std::vector<size_t> mismatches_scales_indices_colwise;
+#endif  //#ifdef __HIP_PLATFORM_AMD__
         compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
                                 unpadded_blocks_X_colwise, scales_stride_colwise,
+#ifdef __HIP_PLATFORM_AMD__
+                                mismatches_scales_indices_colwise,
+#endif  //#ifdef __HIP_PLATFORM_AMD__
                                 mismatches_scales_colwise,
                                 scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit,
