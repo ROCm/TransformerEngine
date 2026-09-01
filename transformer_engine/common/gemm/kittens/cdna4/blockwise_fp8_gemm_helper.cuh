@@ -80,7 +80,7 @@ __device__ inline void store_output(OType *c_ptr, const AccType &acc,
 
 // Deliberate: the reference rounds to the output type before the beta*C add
 // (blockwise_fp8_gemm_reference.py::qgemm). This TU is built with -ffast-math, which folds
-// fpext(fptrunc(x)) back to x, so the empty asm is required to keeWp the conversion.
+// fpext(fptrunc(x)) back to x, so the empty asm is required to keep the conversion.
 template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
