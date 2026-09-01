@@ -822,12 +822,24 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None, kernel_profile=Fal
     import pandas as pd
     from pathlib import Path
 
+    # When an explicit filename is given but several families run in one session
+    # (e.g. `pytest .`), insert the family name so they don't overwrite each other.
+    multi = sum(1 for fam in store.values() if fam.rows) > 1
+
+    def _dest(explicit, family, default_name):
+        if not isinstance(explicit, str):
+            return default_name
+        if not multi:
+            return explicit
+        p = Path(explicit)
+        return str(p.with_name(f"{p.stem}-{family}{p.suffix}"))
+
     written = []
     for family, fam in store.items():
         if not fam.rows:
             continue
         if csv is not None:
-            out = csv if isinstance(csv, str) else f"{family}.csv"
+            out = _dest(csv, family, f"{family}.csv")
             pd.DataFrame(fam.rows, columns=fam.param_columns + fam.metric_columns).to_csv(
                 out, index=False
             )
@@ -840,7 +852,7 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None, kernel_profile=Fal
                 pd.DataFrame(fam.kernel_rows, columns=cols).to_csv(kout, index=False)
                 written.append(kout)
         if csv_samples is not None:
-            sout = csv_samples if isinstance(csv_samples, str) else f"{family}_samples.csv"
+            sout = _dest(csv_samples, family, f"{family}_samples.csv")
             sample_rows = []
             for case_params, records, _node in fam.case_metrics:
                 for metric in records:
