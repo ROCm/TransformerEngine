@@ -51,6 +51,10 @@ def snapshot() -> dict:
         "alias_identity": _safe(lambda: sys.modules.get("transformer_engine_torch")
                                 is sys.modules.get("transformer_engine_rocm_torch")),
     }
+    # op-family registry (Stage 6): selections + rejection reasons
+    out["registry"] = _safe(lambda: __import__(
+        "transformer_engine.te_rocm.registry", fromlist=["registry_state"]).registry_state())
+
     # overlay bundle: package-dir copy (installed wheel) or overlay root (dev PYTHONPATH tree)
     om = Path(te.__file__).resolve().parent / "_overlay_manifest.json"
     if not om.exists():

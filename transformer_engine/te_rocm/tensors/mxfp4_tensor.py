@@ -104,10 +104,8 @@ class MXFP4Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        use_cast_transpose_triton = bool(
-            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
-        )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        from transformer_engine.te_rocm.registry import select_quantize
+        quantize_func = select_quantize(self)
         quantize_func(src, self, dst, noop_flag)
 
         # Update FP4 dtype
@@ -117,10 +115,8 @@ class MXFP4Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        use_cast_transpose_triton = bool(
-            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
-        )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        from transformer_engine.te_rocm.registry import select_quantize
+        quantize_func = select_quantize(self)
         return quantize_func(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:

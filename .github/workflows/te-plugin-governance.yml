@@ -69,6 +69,8 @@ jobs:
             --upstream $(git -C 3rdparty/transformer_engine_nvidia rev-parse HEAD) | tee /tmp/cfp.txt
           N=$(ls proposals/te-rocm-plugin/patches-cxx/CXX-*.patch | wc -l)
           grep -q "{\"target-unchanged\": $N}" /tmp/cfp.txt || { echo "::error::cxx fingerprints drifted at the pin"; exit 1; }
+      - name: Retired-residue invariant (a retired file must not gain new divergence)
+        run: python3 proposals/te-rocm-plugin/tools/check_retired_residue.py
       - name: C++ patch queue - staleness (apply-at-pin, byte-compare)
         run: python3 proposals/te-rocm-plugin/tools/cxx_queue.py verify
       - name: C++ patch queue - assembled tree identity vs fork common/

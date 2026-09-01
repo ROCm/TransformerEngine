@@ -27,7 +27,6 @@ from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     import os
-    from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten
 
@@ -84,8 +83,8 @@ class MXFP8Quantizer(Quantizer):
 
         # Launch cast kernel
         if IS_HIP_EXTENSION:
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            from transformer_engine.te_rocm.registry import select_quantize
+            quantize_func = select_quantize(self)
             quantize_func(src, self, dst, noop_flag)
         else:
             tex.quantize(src, self, dst, noop_flag)
@@ -98,9 +97,8 @@ class MXFP8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
-            quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+            from transformer_engine.te_rocm.registry import select_quantize
+            quantize_func = select_quantize(self)
             return quantize_func(tensor, self)
         else:
             return tex.quantize(tensor, self)

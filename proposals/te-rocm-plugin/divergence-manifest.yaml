@@ -1001,7 +1001,7 @@ entries:
       still exists but belongs to the release_218_gap decision, not to this entry.
   # PT-015, PT-016 RETIRED (see retired_entries)
   - id: PT-017
-    p5_status: retired(gfx950-only; FNUZ untested)
+    p5_status: revived-2026-09-01  # was retired(gfx950-only; FNUZ untested); file gained Stage-6 registry sites - new divergence must be governed. FNUZ hunks still pending MI300
     p5_detail: "tests pass without it (run from /tmp, overlay import verified per process); 87% of added lines executed; Phase C (all 17 removed at once) identical to P0, 0 fli"
     path: transformer_engine/pytorch/tensor/float8_tensor.py
     added_lines: 34

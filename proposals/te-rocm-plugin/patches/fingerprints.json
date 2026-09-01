@@ -875,6 +875,28 @@
    },
    "target": "transformer_engine/pytorch/distributed.py"
   },
+  "PT-017": {
+   "spans": {
+    "<module-level>": [
+     1,
+     1139
+    ],
+    "Float8CurrentScalingQuantizer": [
+     185,
+     388
+    ],
+    "Float8Quantizer": [
+     41,
+     182
+    ]
+   },
+   "symbols": {
+    "<module-level>": "feb63e75b3f4b0010bcd01d1bc3d70bf08b5b98119772530b98cdd7078f1d2be",
+    "Float8CurrentScalingQuantizer": "ce2d26d623297d88fc62a4cec410c1d87e514ccdf141aaf6d4f3c20736449711",
+    "Float8Quantizer": "e224c34297d50a0d1b9c3bb3524acee3b3835ae484054395f219c25daffe7d0b"
+   },
+   "target": "transformer_engine/pytorch/tensor/float8_tensor.py"
+  },
   "PT-019": {
    "spans": {
     "<module-level>": [

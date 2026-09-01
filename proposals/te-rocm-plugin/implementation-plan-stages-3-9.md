@@ -288,6 +288,10 @@ checkpoint gate above green in both directions; `te.fp8.fnuz` has exactly one im
 
 ## 6. Stage 6 — registry expansion, one op family at a time · ongoing
 
+> **Family 1 (cast/quantize) SHIPPED 2026-09-01**: `te_rocm/registry.py` under the full sec-3.5 contract - pure supports() predicate, selection before launch, STRICT refusal when policy requests a rejected path, policy frozen at first selection (covers capture), selections+rejections in the diagnostics snapshot. The nine scattered `NVTE_USE_CAST_TRANSPOSE_TRITON` env-dispatch sites replaced by `select_quantize()`. Dual-policy conformance: 908 passed (default) / 938 passed (triton), zero failures. **No facade yet, deliberately**: family-1 routing is at fork-owned call sites; the synthesized facade becomes necessary only when a family must intercept upstream's own tex.* calls.
+>
+> **Governance find**: the family-1 work exposed that a P5-retired file (float8_tensor.py) had gained ungoverned new divergence that silently never reached the overlay. PT-017 revived (queue 45 -> 46); new blocking CI invariant `check_retired_residue.py` (negative-tested): a retired file's divergence must equal its retired patch exactly.
+
 Goal: the compiled-only milestone ends; AITER / Triton / reference implementations enter under the
 §3.5 dispatch contract. **This is the stage where the synthesized facade becomes necessary** — the
 loader alias re-exports the compiled module verbatim, and the registry needs a module whose
