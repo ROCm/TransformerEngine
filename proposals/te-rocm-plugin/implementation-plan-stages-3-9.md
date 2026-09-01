@@ -321,6 +321,8 @@ only when its paired conformance test and tensor-state tests are green.
 
 ## 7. Stage 7 — JAX beta track · parallel from S3, own milestone
 
+> **Environment gate REMOVED 2026-09-01**: the JAX extension builds on this box (first time attempted; `NVTE_FRAMEWORK=jax build_ext --inplace`, warnings only), loads, and registers 27 FFI targets at runtime - reconciled against the S7.2 static inventory (the 8 absent names are #ifdef-gated: te_ep_* NCCL-EP, score-mod attention, rht_amax; runtime-only none). fnuz provider delegation live in-process on the jax side. First functional suite: tests/jax/test_functions.py 57/57. S7.1 (handler-dict seam) and S7.3 (JAX overlay) are now actionable with real verification.
+
 ### S7.1 · Handler-dict seam — 2 days `[F16]`
 
 `te_rocm/jax_handlers.py` returns a dict; `cpp_extensions/base.py`'s registration loop (CM-005, a
