@@ -1,10 +1,11 @@
 # manifest: PT-003
+# revived: 2026-09-01 - module/grouped_linear.py gained the Stage-6 grouped-gemm registry decision; a retired file must not carry new divergence ungoverned
 # base: 868d8d9216da361c666519652115e23688db5211
 # mechanism: split-features
 # expiry: see features
-# tests: TBD
+# tests: tests/pytorch/triton_kernels/test_grouped_gemm.py, tests/pytorch/test_numerics.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (4 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (4 feature sub-entries)
 --- a/transformer_engine/pytorch/module/grouped_linear.py
 +++ b/transformer_engine/pytorch/module/grouped_linear.py
 @@ -1,3 +1,5 @@
@@ -45,17 +46,20 @@
          ) = non_tensor_args
          if fp8:
              backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
-@@ -493,6 +506,9 @@
+@@ -493,6 +506,12 @@
          elif backward_override == "dequantized":
              save_original_input = False
  
 +        # Check if Triton kernel should be used
-+        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
++        from transformer_engine.te_rocm.registry import grouped_gemm_use_triton
++        use_grouped_gemm_triton = grouped_gemm_use_triton(
++            fp8=fp8, fuse_wgrad_accumulation=fuse_wgrad_accumulation
++        )
 +
          num_gemms = len(m_splits)
          weights = weights_and_biases[:num_gemms]
          biases = weights_and_biases[num_gemms:]
-@@ -599,16 +615,19 @@
+@@ -599,16 +618,19 @@
              # Disable bulk allocation when CPU offloading is active: offloading skips small
              # tensors (like scales), but bulk allocation shares storage across all tensors,
              # so if scales can't be offloaded, nothing in the group can be offloaded.
@@ -80,7 +84,7 @@
          else:
              inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
  
-@@ -658,7 +677,13 @@
+@@ -658,7 +680,13 @@
                  use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
  
          # Perform GEMM
@@ -95,7 +99,7 @@
              weights_fp8,
              inputmats,
              [out],
-@@ -669,8 +694,20 @@
+@@ -669,8 +697,20 @@
              bias=biases,
              use_bias=use_bias,
              use_split_accumulator=use_split_accumulator,
@@ -116,7 +120,7 @@
          if fp8_calibration:
              for i in range(num_gemms):
                  input_quantizers[i].calibrate(inputmats[i])
-@@ -743,6 +780,9 @@
+@@ -743,6 +783,9 @@
              ctx.device = device
              ctx.output_quantizers = output_quantizers
              ctx.m_splits = m_splits
@@ -126,7 +130,7 @@
              ctx.num_gemms = num_gemms
              ctx.activation_dtype = activation_dtype
              ctx.fp8 = fp8
-@@ -765,6 +805,8 @@
+@@ -765,6 +808,8 @@
              ctx.debug = debug
              ctx.save_original_input = save_original_input
              ctx.input_quantizers = input_quantizers
@@ -135,7 +139,7 @@
              ctx.dgrad_out = dgrad_out
  
              # backward overrides
-@@ -984,10 +1026,11 @@
+@@ -984,10 +1029,11 @@
  
              saved_tensors = restore_from_func_ctx(ctx)
              N = ctx.num_gemms
@@ -151,7 +155,7 @@
  
              # Restore from weakrefs to get original weight python objects
              # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
-@@ -1008,11 +1051,22 @@
+@@ -1008,11 +1054,22 @@
  
              # Preprocess grad output
              grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -175,7 +179,7 @@
                      recipe = ctx.fp8_recipe
                      if recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8():
                          # Fused bias grad + quantize kernel
-@@ -1026,17 +1080,13 @@
+@@ -1026,17 +1083,13 @@
                          for i in range(ctx.num_gemms):
                              grad_biases[i] = grad_output_mats[i].sum(dim=0)
                          grad_output = tex.split_quantize(
@@ -197,7 +201,7 @@
              elif ctx.debug:
                  grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                  for i in range(ctx.num_gemms):
-@@ -1050,10 +1100,13 @@
+@@ -1050,10 +1103,13 @@
              else:
                  # Only split grad output. Grad bias is fused with
                  # wgrad GEMM.
@@ -212,7 +216,7 @@
  
              if ctx.is_first_microbatch is not None:
                  accumulate_wgrad_into_param_main_grad = (
-@@ -1077,6 +1130,7 @@
+@@ -1077,6 +1133,7 @@
                      ctx.activation_dtype,
                      ctx.device,
                  )
@@ -220,7 +224,7 @@
                  weights_for_dgrad = weights
                  if ctx.backward_override == "dequantized":
                      weights_for_dgrad = [
-@@ -1098,10 +1152,19 @@
+@@ -1098,10 +1155,19 @@
                      ]
                  # Make sure weights are available in column-wise format
                  # for dgrad computation.
@@ -244,7 +248,7 @@
                      weights_for_dgrad,
                      grad_output,
                      [dgrad],
-@@ -1112,8 +1175,20 @@
+@@ -1112,8 +1178,20 @@
                      m_splits=ctx.m_splits,
                      grad=True,
                      use_split_accumulator=dgrad_gemm_use_split_accumulator,
@@ -265,7 +269,7 @@
              if ctx.weights_requires_grad:
                  wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                  if ctx.fp8:
-@@ -1125,13 +1200,20 @@
+@@ -1125,13 +1203,20 @@
                  if ctx.fuse_wgrad_accumulation:
                      wgrad_list = main_grads
                  else:
@@ -293,7 +297,7 @@
  
                  if ctx.save_original_input:
                      inp = inputmats[0]
-@@ -1148,7 +1230,13 @@
+@@ -1148,7 +1233,13 @@
                                  input_quantizer.set_usage(rowwise=False, columnwise=True)
                      inputmats: list
                      if ctx.fp8 and not ctx.debug:
@@ -308,7 +312,7 @@
                      elif ctx.debug:
                          inputmats = DebugQuantizer.multi_tensor_quantize(
                              inp_view,
-@@ -1157,9 +1245,12 @@
+@@ -1157,9 +1248,12 @@
                              ctx.activation_dtype,
                          )
                      else:
@@ -324,7 +328,7 @@
                  elif ctx.backward_override == "dequantized":
                      inputmats_dequant = []
                      for inputmat in inputmats:
-@@ -1170,8 +1261,15 @@
+@@ -1170,8 +1264,15 @@
                          else:
                              inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                      inputmats = inputmats_dequant
@@ -341,7 +345,7 @@
                      quantization_params=ctx.grad_weight_quantizers,
                      out_dtype=ctx.activation_dtype,
                      layout="NT",
-@@ -1185,6 +1283,7 @@
+@@ -1185,6 +1286,7 @@
                          if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                          else False
                      ),
@@ -349,7 +353,7 @@
                  )
                  # WGRAD
                  if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-@@ -1739,6 +1838,9 @@
+@@ -1739,6 +1841,9 @@
          inp: torch.Tensor,
          m_splits: torch.Tensor,
          is_first_microbatch: Optional[bool] = None,
@@ -359,7 +363,7 @@
          out: Optional[torch.Tensor] = None,
          dgrad_out: Optional[torch.Tensor] = None,
      ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
-@@ -1764,6 +1866,14 @@
+@@ -1764,6 +1869,14 @@
                               * it also allows skipping gradient accumulation during the
                                 first microbatch (since it is the first gradient being
                                 produced)
@@ -374,7 +378,7 @@
          out : torch.Tensor, default = None
               Optional preallocated buffer for the forward output; the returned tensor
               aliases it with no copy. Must be a 2D, contiguous, non-grad tensor of shape
-@@ -1873,6 +1983,9 @@
+@@ -1873,6 +1986,9 @@
                  skip_fp8_weight_update,
                  self.save_original_input,
                  debug,

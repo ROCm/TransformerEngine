@@ -289,7 +289,10 @@ def general_gemm(
     # NVFP4 is not supported by the Triton path; when the Triton backend is
     # opted into, te_generic_gemm_triton raises ValueError for NVFP4 inputs
     # (surfaced as a pytest.skip via tests/pytorch/conftest.py).
-    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    from transformer_engine.te_rocm.registry import generic_gemm_use_triton
+    use_gemm_triton = generic_gemm_use_triton(
+        _is_nvfp4_row_scaled_tensor(A), _is_nvfp4_row_scaled_tensor(B)
+    )
     if use_gemm_triton:
         # Lazy: only pull in Triton when the backend is opted into. Keeps
         # `triton` off the module-import path when NVTE_USE_GEMM_TRITON is

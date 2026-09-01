@@ -118,6 +118,66 @@ def select_norm(op: str, forward: bool) -> Callable:
     return triton
 
 
+_GEMM_POLICY: Dict[str, Optional[bool]] = {"generic": None, "grouped": None, "dequantize": None}
+
+
+def _policy(kind: str, env: str) -> bool:
+    if _GEMM_POLICY[kind] is None:
+        _GEMM_POLICY[kind] = bool(int(os.environ.get(env, "0")))
+    return _GEMM_POLICY[kind]
+
+
+def generic_gemm_use_triton(a_row_scaled_nvfp4: bool, b_row_scaled_nvfp4: bool) -> bool:
+    """Family 3: policy + predicate for the generic-GEMM triton path (single call site).
+
+    STRICT: row-scaled NVFP4 inputs have no triton kernel; requesting the triton path for
+    them raises with the reason rather than silently computing something else.
+    """
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+    use = _policy("generic", "NVTE_USE_GEMM_TRITON") and IS_HIP_EXTENSION
+    log = _LOG.setdefault("generic_gemm", {})
+    log["policy_triton"] = _GEMM_POLICY["generic"]
+    if use and (a_row_scaled_nvfp4 or b_row_scaled_nvfp4):
+        reason = "row-scaled NVFP4 GEMM has no triton kernel"
+        log.setdefault("rejections", []).append(reason)
+        raise RuntimeError(f"NVTE_USE_GEMM_TRITON=1 but {reason}")
+    log["selected"] = "triton" if use else "compiled"
+    return use
+
+
+def grouped_gemm_use_triton(*, fp8: bool, fuse_wgrad_accumulation: bool) -> bool:
+    """Family 4: policy + predicate for grouped GEMM (single decision site).
+
+    SOFT fallback by design: the pre-registry env contract allowed one process to mix
+    eligible and ineligible calls (fp8 / wgrad-fused fall back to the compiled path
+    silently), so a strict refusal here would break existing runs. The rejection reason is
+    logged for the diagnostics snapshot instead.
+    """
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+    use = _policy("grouped", "NVTE_USE_GROUPED_GEMM_TRITON") and IS_HIP_EXTENSION
+    log = _LOG.setdefault("grouped_gemm", {})
+    log["policy_triton"] = _GEMM_POLICY["grouped"]
+    if use and (fp8 or fuse_wgrad_accumulation):
+        log.setdefault("rejections", []).append(
+            f"soft fallback to compiled: fp8={fp8}, fuse_wgrad_accumulation={fuse_wgrad_accumulation}"
+        )
+        log["selected"] = "compiled (soft fallback)"
+        return False
+    log["selected"] = "triton" if use else "compiled"
+    return use
+
+
+def dequantize_use_triton() -> bool:
+    """Family 1 (dequantize direction): env policy, frozen at first selection."""
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+    use = _policy("dequantize", "NVTE_USE_DEQUANTIZE_TRITON") and IS_HIP_EXTENSION
+    _LOG.setdefault("dequantize", {})["selected"] = "triton" if use else "compiled"
+    return use
+
+
 def registry_state() -> dict:
     """For the diagnostics snapshot: selections and rejection reasons so far."""
     return dict(_LOG)

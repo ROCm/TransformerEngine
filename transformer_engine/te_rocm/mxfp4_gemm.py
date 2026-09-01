@@ -16,6 +16,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import cast_if_needed
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 _FP4_USE_TUNED_GEMM = int(os.environ.get("NVTE_FP4_USE_TUNED_GEMM", "1"))
 

@@ -42,7 +42,8 @@ class _FromMXFP8Func(torch.autograd.Function):
 
         te_dtype = torch_to_transformer_engine_dtype[dtype]
 
-        if IS_HIP_EXTENSION and int(os.environ.get('NVTE_USE_DEQUANTIZE_TRITON', '0')):
+        from transformer_engine.te_rocm.registry import dequantize_use_triton
+        if dequantize_use_triton():
             from ...triton_kernels.cast import te_dequantize_triton
             return te_dequantize_triton(tensor, te_dtype)
 

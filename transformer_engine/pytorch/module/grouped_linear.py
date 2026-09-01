@@ -507,7 +507,10 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input = False
 
         # Check if Triton kernel should be used
-        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+        from transformer_engine.te_rocm.registry import grouped_gemm_use_triton
+        use_grouped_gemm_triton = grouped_gemm_use_triton(
+            fp8=fp8, fuse_wgrad_accumulation=fuse_wgrad_accumulation
+        )
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]

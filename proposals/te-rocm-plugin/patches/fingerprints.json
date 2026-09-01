@@ -582,6 +582,28 @@
    },
    "target": "transformer_engine/pytorch/module/base.py"
   },
+  "PT-003": {
+   "spans": {
+    "<module-level>": [
+     1,
+     2082
+    ],
+    "GroupedLinear": [
+     1254,
+     2081
+    ],
+    "_GroupedLinear": [
+     71,
+     1251
+    ]
+   },
+   "symbols": {
+    "<module-level>": "3205039b90ebf68f6c63a6f0484e056328b4757a00e211c09857554dedb6a3b2",
+    "GroupedLinear": "b69627fe751697c60806163f14386d5993c917f7431735540e71c195f73f1bf1",
+    "_GroupedLinear": "b5feba1407e74c562c1b3fabe4267a39b818e1be4a6f8089b724fffe102cae54"
+   },
+   "target": "transformer_engine/pytorch/module/grouped_linear.py"
+  },
   "PT-004": {
    "spans": {
     "<module-level>": [
@@ -1189,6 +1211,23 @@
     "Fp8Padding": "58f96c4d75b5fc9eded6aac7971ca47654e698d34f28d226f555fe4bd2106dd5"
    },
    "target": "transformer_engine/pytorch/module/fp8_padding.py"
+  },
+  "PT-035": {
+   "spans": {
+    "<module-level>": [
+     1,
+     325
+    ],
+    "_FromMXFP8Func": [
+     23,
+     56
+    ]
+   },
+   "symbols": {
+    "<module-level>": "7aee47475a9fa7af763cef5304ff05b4b38d2c1ef597c0b6c5bd4a9596d7b1fc",
+    "_FromMXFP8Func": "b9673a93a4ed4a7d48230bee3ba7680bb9f0ee2cb142293e571067e97de0ea21"
+   },
+   "target": "transformer_engine/pytorch/tensor/storage/mxfp8_tensor_storage.py"
   },
   "PT-038": {
    "spans": {
