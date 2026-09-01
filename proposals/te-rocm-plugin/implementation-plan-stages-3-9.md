@@ -279,7 +279,7 @@ guard census:
    capability with a reason string. Progress metric: `classify_hunks.py`'s **guard** bucket for the
    file goes down; **unmarked** must not go up.
 
-### S5.4 · Stage-5 exit
+### S5.4 · Stage-5 exit — **IN PROGRESS 2026-09-01**: fnuz single-implementation DONE; checkpoint gate DONE both directions; sidecar burn-down started with the working pattern (extract class bodies to te_rocm, re-export - NOT guard relabeling): MXFP4BlockScaling body moved, CM-003 +77 -> +32, recipe/__init__ sidecar weight 61 -> 4, TOTAL fork divergence 2930 -> 2877 with unmarked DOWN. Remaining sidecar mass: gemm.py 247 (isinstance-dispatch wiring - different shape, assess separately), base.py 154, quantization.py 37
 
 M2 measurably lower (sidecar bucket → near zero; guard bucket down by the converted files); the
 checkpoint gate above green in both directions; `te.fp8.fnuz` has exactly one implementation.
