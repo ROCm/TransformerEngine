@@ -4,7 +4,7 @@
 # expiry: TBD
 # tests: tests/pytorch/test_numerics.py, tests/pytorch/test_recipe.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
 --- a/transformer_engine/pytorch/utils.py
 +++ b/transformer_engine/pytorch/utils.py
 @@ -1,3 +1,5 @@
@@ -30,7 +30,7 @@
  
  @functools.lru_cache(maxsize=None)
  def get_cached_ones_tensor(
-@@ -622,8 +627,30 @@
+@@ -622,8 +627,34 @@
                  f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
              )
  
@@ -49,7 +49,11 @@
 +
 +@functools.lru_cache(maxsize=None)
 +def is_fp8_fnuz():
-+    return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
++    # Delegates to the capability provider (plugin plan S5.3): one library-backed answer
++    # instead of a device-arch table that could drift from what the kernels were built for.
++    from transformer_engine.te_rocm.capabilities import fnuz
++
++    return fnuz()
 +
 +get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 +get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
@@ -61,7 +65,7 @@
      """Replaces torch.cuda.is_bf16_compatible() with an explicit
      check on device compute capability to enforce sm_80 or higher.
      """
-@@ -658,6 +685,9 @@
+@@ -658,6 +689,9 @@
      """Checks whether the device supports
      non-TN layouts for FP8 GEMMs.
      """
@@ -71,7 +75,7 @@
      device_capability = torch.cuda.get_device_capability()
      return (10, 0) <= device_capability < (12, 0) or device_capability >= (13, 0)
  
-@@ -665,6 +695,9 @@
+@@ -665,6 +699,9 @@
  @functools.lru_cache(maxsize=None)
  def get_cudnn_version() -> Tuple[int, int, int]:
      """Runtime cuDNN version (major, minor, patch)"""

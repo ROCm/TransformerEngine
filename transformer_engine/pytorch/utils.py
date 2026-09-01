@@ -642,7 +642,11 @@ if IS_HIP_EXTENSION:
 
 @functools.lru_cache(maxsize=None)
 def is_fp8_fnuz():
-    return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
+    # Delegates to the capability provider (plugin plan S5.3): one library-backed answer
+    # instead of a device-arch table that could drift from what the kernels were built for.
+    from transformer_engine.te_rocm.capabilities import fnuz
+
+    return fnuz()
 
 get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2

@@ -3,7 +3,6 @@
 from functools import cache
 import importlib.metadata
 import re
-import subprocess, sys
 import jax.numpy as jnp
 
 # check whether ROCm is supported by JAX
@@ -23,15 +22,14 @@ if is_hip_extension():
   
 @cache
 def is_fp8_fnuz():
+  # Delegates to the capability provider (plugin plan S5.3). The subprocess shell-out this
+  # replaces existed to dodge package-init side effects; by the time any caller runs,
+  # transformer_engine.common is already imported (the package init loads it first), so the
+  # in-process query is safe - and ~1000x cheaper.
   if not is_hip_extension():
     return False
-  ret = subprocess.run(
-    [sys.executable, "-c",
-     "import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; "+
-     "import os; os.environ['NVTE_FRAMEWORK']='none'; "+
-     "import transformer_engine as te; exit(not te.common.is_fp8_fnuz())"]
-     ).returncode
-  return ret == 0
+  from transformer_engine.te_rocm.capabilities import fnuz
+  return fnuz()
 
 get_jnp_float8_e4m3_type = lambda: jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
 get_jnp_float8_e5m2_type = lambda: jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2

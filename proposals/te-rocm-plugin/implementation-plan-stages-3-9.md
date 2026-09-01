@@ -262,7 +262,7 @@ carries for its earlier rename. Register the new class paths with `torch.seriali
 
 | Stage-5 checkpoint gate (§8.5) | a checkpoint written *before* S5 (BF16, FP8-delayed, MXFP4 weights) loads *after* S5 and trains 50 steps within band; a checkpoint written after S5 loads on a pre-S5 build (rollback) — this direction needs the shim to exist on both sides, which is why the shim ships one release *before* the move. |
 
-### S5.3 · Capability provider (PyTorch) — 6 days
+### S5.3 · Capability provider — **FNUZ ARM DONE 2026-09-01** (the end-to-end proof): `te_rocm/capabilities.py` - `supports(op, context) -> Decision` with mandatory rejection reasons + registry; `te.fp8.fnuz` backed by the S3.3 library symbol. pytorch/utils.py's device-arch table and jax/util.py's SUBPROCESS shell-out both retire into delegations (verified in-process on both sides; the jax extension itself was never built on this box - pre-existing). **REMAINING**: attention-backend eligibility queries (HDR-B2 half) and IS_HIP_EXTENSION site conversion file-by-file (base.py first)
 
 `te_rocm/capabilities.py` implementing §3.6's `supports(op, context) -> decision{supported,
 reason, …}` and the static/version/dynamic split. Order of retirement, chosen by the manifest's
