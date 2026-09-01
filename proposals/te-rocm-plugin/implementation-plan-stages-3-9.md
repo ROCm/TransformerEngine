@@ -337,14 +337,14 @@ Extend `seam_inventory.py` with a JAX mode: the 35 `te_*_ffi` names **plus** att
 Python primitives. Name-only inventories are not enough here for the same reason enum-value
 inventories were needed on the torch side.
 
-### S7.3 · JAX overlay + capability provider — 5 days
+### S7.3 · JAX overlay + capability provider — **SUBSTANTIALLY DONE 2026-09-01** (largely absorbed by earlier stages): the JX patches have been in the unified queue since P4/P5 (framework-neutral assembler); jax/util.py's subprocess is_fp8_fnuz retired into te_rocm.capabilities in S5.3; the jax extension now links into the overlay. REMAINING here: JX-001 hold-internal stays until the ROCm JAX plugin fixes land; sharding.py/moe.py upstream compat PRs are external items
 
 The P4 assembler is framework-neutral; JX-001..019 become patches (18 files, 563/120). `jax/util.py`
 (37 lines, REL-003) → `te_rocm.capabilities` (shared with S5.3; the subprocess `is_fp8_fnuz` dies
 here). JX-001's HSACO/prewarm workarounds (`hold-internal`) stay as patches until the ROCm JAX
 plugin fixes land; `sharding.py` (JX-002) goes upstream as a compat PR; `moe.py` (JX-005) likewise.
 
-### S7.4 · JAX milestone
+### S7.4 · JAX milestone — **FIRST HALF EVIDENCED 2026-09-01**: tests/jax under the overlay - test_functions.py + test_custom_call_compute.py = 1384 passed / 172 skipped, tree verified as the overlay. REMAINING: the fuller tests/jax sweep (9,889 collected) and the named MaxText-class workload with its JAX-specific signed band in thresholds.yaml (workload choice is the certifier's)
 
 `tests/jax` under overlay + a named MaxText-class workload within a JAX-specific signed band
 (added to `thresholds.yaml` when the workload is chosen). Until then the JAX wheel is marked beta.
