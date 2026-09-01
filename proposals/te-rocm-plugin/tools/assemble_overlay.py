@@ -273,7 +273,9 @@ def build(args, d, entries, base_sha: str, check_only: bool):
     if gen.exists():
         shutil.copy2(gen, tree / "transformer_engine" / "_rocm_init.py")
     linked = []
-    for so in list(ROOT.glob("libtransformer_engine*.so")) + list(ROOT.glob("transformer_engine_rocm_torch*.so")):
+    for so in (list(ROOT.glob("libtransformer_engine*.so"))
+               + list(ROOT.glob("transformer_engine_rocm_torch*.so"))
+               + list(ROOT.glob("transformer_engine_jax*.so"))):
         (tree / so.name).symlink_to(so); linked.append(so.name)
     libdir = ROOT / "transformer_engine" / "lib"
     if libdir.is_dir():
