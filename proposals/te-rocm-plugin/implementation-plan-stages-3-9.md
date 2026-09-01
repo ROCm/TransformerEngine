@@ -323,7 +323,7 @@ only when its paired conformance test and tensor-state tests are green.
 
 > **Environment gate REMOVED 2026-09-01**: the JAX extension builds on this box (first time attempted; `NVTE_FRAMEWORK=jax build_ext --inplace`, warnings only), loads, and registers 27 FFI targets at runtime - reconciled against the S7.2 static inventory (the 8 absent names are #ifdef-gated: te_ep_* NCCL-EP, score-mod attention, rht_amax; runtime-only none). fnuz provider delegation live in-process on the jax side. First functional suite: tests/jax/test_functions.py 57/57. S7.1 (handler-dict seam) and S7.3 (JAX overlay) are now actionable with real verification.
 
-### S7.1 · Handler-dict seam — 2 days `[F16]`
+### S7.1 · Handler-dict seam — **DONE 2026-09-01** `[F16]`: `te_rocm/jax_handlers.py` (`handlers()` + `register_override`; ships EMPTY - overrides land per op family under the Stage-6 contract); the merge is 6 lines inside the existing JX-016 patch (+13/-3 total), not a new CM-005. Conformance: a spy-based seam test proves an override reaches `ffi.register_ffi_target` without leaking onto other names, and the empty dict is behavior-identical - tests/jax/test_custom_call_compute.py 1327 passed / 172 skipped BIT-FOR-BIT pre-seam (worktree) vs post-seam
 
 `te_rocm/jax_handlers.py` returns a dict; `cpp_extensions/base.py`'s registration loop (CM-005, a
 new build-tier patch of ~4 lines) merges it over `transformer_engine_jax.registrations()` before

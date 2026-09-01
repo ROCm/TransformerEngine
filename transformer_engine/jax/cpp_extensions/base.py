@@ -266,7 +266,14 @@ def register_primitive(cls, outer_only=False):
     cls.outer_primitive = outer_p
 
 
-for _name, _value in transformer_engine_jax.registrations().items():
+# ROCm handler-dict seam (plugin plan S7.1): fork-side overrides merge over the compiled
+# registrations before any target is registered. Empty dict = byte-identical behavior.
+_registrations = dict(transformer_engine_jax.registrations())
+if is_hip_extension():
+    from transformer_engine.te_rocm.jax_handlers import handlers as _te_rocm_jax_handlers
+
+    _registrations.update(_te_rocm_jax_handlers())
+for _name, _value in _registrations.items():
     ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension() else "CUDA")
 
 # Register EpInstanceState (no-op when TE is built without NCCL EP).
