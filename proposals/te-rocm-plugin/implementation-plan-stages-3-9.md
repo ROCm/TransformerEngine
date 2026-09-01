@@ -370,7 +370,7 @@ queues), certify, ship. Record wall-clock and engineer-days per bump. **This is 
 than weeks" becomes a claim or is retracted** — the proposal's claim discipline (§5) makes this
 the only evidence that counts. The backtest's numbers were retrospective; these are live.
 
-### S8.4 · Ops documentation
+### S8.4 · Ops documentation — **DONE 2026-09-01** (`runbooks/`: pin-bump, patch-repair, rollback, diagnostics-triage, cxx-intake; one page each, distilled from the prototype sessions' actual procedures)
 
 Runbooks: pin bump, patch repair, rollback, diagnostics snapshot triage, C++ intake via the origin
 ledger. One page each.
