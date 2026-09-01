@@ -35,14 +35,27 @@ import pytest
 import torch
 
 
+_force_exit = False
+_exitstatus = 0
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
+    global _force_exit, _exitstatus
+
     # Only ROCm hits the hsa_shut_down teardown segfault; leave CUDA/CPU exit
     # semantics (and their normal atexit cleanup) untouched.
-    if getattr(torch.version, "hip", None) is None:
-        return
-    # trylast ensures the junitxml plugin and te_ci_result_sink have already
-    # written their reports in this same hook before we hard-exit.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0 if exitstatus == 0 else int(exitstatus))
+    if getattr(torch.version, "hip", None) is not None:
+        _force_exit = True
+        _exitstatus = int(exitstatus)
+
+# trylast ensures the junitxml plugin and te_ci_result_sink have already
+# written their reports in this same hook before we hard-exit.
+# unconfigure is the last hook called before pytest exits
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    global _force_exit, _exitstatus
+
+    if _force_exit:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(_exitstatus)
