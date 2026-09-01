@@ -886,16 +886,16 @@ def _result_rows(store):
                     a = np.asarray(times)
                     stats = {
                         "min": float(a.min()), "median": float(np.median(a)),
-                        "mean": float(a.mean()), "max": float(a.max()), "std": float(a.std()),
+                        "max": float(a.max()), "std": float(a.std()),
                     }
-                else:  # derived metric: only the mean is meaningful
-                    stats = {"min": None, "median": None, "mean": m["ms"], "max": None, "std": None}
+                else:  # no per-sample distribution: show the single value as the median
+                    stats = {"min": None, "median": m["ms"], "max": None, "std": None}
                 rows.append((name, stats, m["throughput"], m["unit"]))
     return rows
 
 
 def format_results_table(store):
-    """Render a pytest-benchmark-style results table from *store* (times in ms)."""
+    """Render the results as a Markdown table (times in ms) with a caption line."""
     rows = _result_rows(store)
     if not rows:
         return ""
@@ -903,20 +903,27 @@ def format_results_table(store):
     def cell(v):
         return "-" if v is None else f"{v:.4f}"
 
-    headers = ["Name (time in ms)", "Min", "Median", "Mean", "Max", "StdDev", "Throughput"]
+    headers = ["Name", "Min (ms)", "Median (ms)", "Max (ms)", "StdDev (ms)", "Throughput"]
     body = []
     for name, s, thr, unit in sorted(rows, key=lambda r: r[0]):
         body.append([
-            name, cell(s["min"]), cell(s["median"]), cell(s["mean"]),
+            name, cell(s["min"]), cell(s["median"]),
             cell(s["max"]), cell(s["std"]), f"{thr:.2f} {unit}",
         ])
     widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
 
-    def line(cells):
-        return "  ".join(
+    def row(cells):
+        padded = [
             c.ljust(widths[i]) if i == 0 else c.rjust(widths[i]) for i, c in enumerate(cells)
-        )
+        ]
+        return "| " + " | ".join(padded) + " |"
 
-    sep = "-" * (sum(widths) + 2 * (len(widths) - 1))
-    title = f" benchmark: {len(body)} tests ".center(len(sep), "-")
-    return "\n".join([title, line(headers), sep, *(line(r) for r in body), sep])
+    # Markdown delimiter row: left-align Name, right-align the numeric columns.
+    align = [
+        ":" + "-" * (widths[i] - 1) if i == 0 else "-" * (widths[i] - 1) + ":"
+        for i in range(len(headers))
+    ]
+    caption = f"benchmark: {len(body)} tests"
+    return "\n".join(
+        [caption, "", row(headers), "| " + " | ".join(align) + " |", *(row(r) for r in body)]
+    )
