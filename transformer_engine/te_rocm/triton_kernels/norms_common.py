@@ -15,7 +15,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-from ..quantized_tensor import Quantizer, QuantizedTensor
+from transformer_engine.pytorch.quantized_tensor import Quantizer, QuantizedTensor
 from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms, use_cuda_graph_autotune
 from .common import get_fp8_max
 from .rmsnorm import (

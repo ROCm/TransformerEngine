@@ -110,6 +110,8 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import (
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     _make_float8_blockwise_tensor_in_reduce_ex,
 )
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Tensor, MXFP4Quantizer
+from transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
@@ -151,6 +153,11 @@ try:
             _make_mxfp8_tensor_in_reduce_ex,
             _make_nvfp4_tensor_in_reduce_ex,
             _make_float8_blockwise_tensor_in_reduce_ex,
+            # MXFP4 (ROCm; registered since S5.2 - reduce goes through the classmethod, so
+            # the class itself is the pickle GLOBAL)
+            MXFP4Tensor,
+            MXFP4Quantizer,
+            MXFP4TensorStorage,
         ]
     )
 except (ImportError, AttributeError):

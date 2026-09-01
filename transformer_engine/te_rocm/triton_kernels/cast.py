@@ -8,14 +8,14 @@ import functools
 import torch
 import warnings
 
-from ..utils import is_non_tn_fp8_gemm_supported
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
-from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
-from ..quantized_tensor import QuantizedTensor, Quantizer
-from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, Quantizer
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
@@ -91,7 +91,7 @@ def te_quantize_triton(
         if input_tensor.nelement() > 0:
             if not out._transpose_invalid:
                 quantizer = out._get_quantizer()
-                from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
+                from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
                 is_current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
                 if is_current_scaling:
                     # Current scaling computes amax/scale in the kernel; supply workspace buffers.

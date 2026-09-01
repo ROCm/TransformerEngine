@@ -251,7 +251,7 @@ Recipe-class injections go away, and the guard bucket starts converting to capab
 - Keep `CM-003-FNUZFMT` (the `Format` enum rewrite) as a build-tier patch — it is not a recipe
   concern; it retires with the capability provider (S5.3).
 
-### S5.2 · Relocation with pickle shims — 4 days `[F15]`
+### S5.2 · Relocation with pickle shims — **DONE 2026-09-01** `[F15]`: 22 modules moved under te_rocm/ (mxfp4 tensor+storage, fsdp2_allgather_tensor, quantization_mxfp4, the triton_kernels tree); re-export shims at the old pickle-contributing paths, a path-redirect shim package for triton_kernels (old name, new directory), __module__ pinned to old paths so pickle GLOBALs are identical on both sides; add_safe_globals gains the previously-missing MXFP4 trio. Checkpoint gate (8.5) PASS both directions, bit-identical (baselines/2026-09-01-s52-ckpt-gate.json); paired suites 898 passed / the 1 documented pre-existing failure. Found + recorded: untuned-M MXFP4 wgrad NaN and the dequantized-override NotImplementedError, both pre-existing
 
 Move `tensor/mxfp4_tensor.py`, `tensor/storage/mxfp4_tensor_storage.py`,
 `custom_recipes/quantization_mxfp4.py`, `tensor/fsdp2_allgather_tensor.py` and the 10

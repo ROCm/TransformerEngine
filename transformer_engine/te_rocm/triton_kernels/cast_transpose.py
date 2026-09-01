@@ -3,7 +3,7 @@
 
 import torch
 
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 import transformer_engine_torch as tex
 import triton
 import triton.language as tl

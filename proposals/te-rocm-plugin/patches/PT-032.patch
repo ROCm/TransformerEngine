@@ -4,7 +4,7 @@
 # expiry: TBD
 # tests: tests/pytorch/test_numerics.py, tests/pytorch/test_recipe.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (0 feature sub-entries)
 --- a/transformer_engine/pytorch/__init__.py
 +++ b/transformer_engine/pytorch/__init__.py
 @@ -1,3 +1,5 @@
@@ -38,3 +38,24 @@
  from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
  from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
  from transformer_engine.pytorch.quantized_tensor import Quantizer
+@@ -105,6 +110,8 @@
+ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+     _make_float8_blockwise_tensor_in_reduce_ex,
+ )
++from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Tensor, MXFP4Quantizer
++from transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+ 
+ try:
+     torch._dynamo.config.error_on_nested_jit_trace = False
+@@ -146,6 +153,11 @@
+             _make_mxfp8_tensor_in_reduce_ex,
+             _make_nvfp4_tensor_in_reduce_ex,
+             _make_float8_blockwise_tensor_in_reduce_ex,
++            # MXFP4 (ROCm; registered since S5.2 - reduce goes through the classmethod, so
++            # the class itself is the pickle GLOBAL)
++            MXFP4Tensor,
++            MXFP4Quantizer,
++            MXFP4TensorStorage,
+         ]
+     )
+ except (ImportError, AttributeError):

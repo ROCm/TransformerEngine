@@ -1,0 +1,23 @@
+{
+ "date": "2026-09-01",
+ "gate": "S5.2 checkpoint gate (proposal 8.5)",
+ "setup": "2x te.Linear(512,512, bf16) under MXFP4BlockScaling; 10 warm + save + 50-step reference curve; pre-move build = worktree @ 6e1278162 (S5.1) sharing the built binaries; post-move = the relocated tree",
+ "forward": {
+  "direction": "ckpt saved pre-move -> loaded post-move, 50 steps",
+  "max_rel_loss_diff": 0.0,
+  "band": 0.001,
+  "verdict": "PASS (bit-identical)"
+ },
+ "rollback": {
+  "direction": "ckpt saved post-move -> loaded on pre-move build, 50 steps",
+  "max_rel_loss_diff": 0.0,
+  "band": 0.001,
+  "verdict": "PASS (bit-identical)"
+ },
+ "mechanism": "shims at old paths + __module__ pinned to old paths, so pickle GLOBALs are identical on both sides",
+ "notes": [
+  "harness uses 3D (4,128,512) bf16 inputs: 2D (64,512) hits an untuned MXFP4 wgrad kernel config that NaNs on the FIRST backward - pre-existing (identical on the pre-move build), recorded for the AITER/CK owners",
+  "NVTE_BACKWARD_OVERRIDE=dequantized + MXFP4 raises NotImplementedError (packed-FP4 dequantize) - pre-existing",
+  "add_safe_globals previously had NO MXFP4 entries; S5.2 registers MXFP4Tensor/MXFP4Quantizer/MXFP4TensorStorage"
+ ]
+}
