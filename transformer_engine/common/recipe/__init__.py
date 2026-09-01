@@ -167,11 +167,6 @@ class Recipe:
         return issubclass(cls, MXFP8BlockScaling)
 
     @classmethod
-    def mxfp4(cls):
-        """Whether the given recipe is MXFP4 block scaling."""
-        return issubclass(cls, MXFP4BlockScaling)
-
-    @classmethod
     def delayed(cls):
         """Whether the given recipe is delayed scaling."""
         return issubclass(cls, DelayedScaling)
@@ -714,7 +709,7 @@ class CustomRecipe(Recipe):
         )
 
 @dataclass()
-class MXFP4BlockScaling(Recipe):
+class MXFP4BlockScaling(CustomRecipe):
     """
     Use the MXFP4 scaling factor strategy.
 
@@ -752,8 +747,16 @@ class MXFP4BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+    # Self-wired in __post_init__ (plugin plan S5.1): dispatch flows through upstream's own
+    # CustomRecipe -> CustomRecipeState path; the ROCm-side factory lives in
+    # te_rocm.recipes.adapter_2_18 (one adapter module per certified upstream version).
+    qfactory: Optional[Callable[..., Any]] = None
 
     def __post_init__(self) -> None:
+        if self.qfactory is None:
+            from transformer_engine.te_rocm.recipes.adapter_2_18 import make_mxfp4_qfactory
+
+            self.qfactory = make_mxfp4_qfactory(self)
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES

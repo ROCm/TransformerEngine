@@ -4,7 +4,7 @@
 # expiry: see features
 # tests: tests/pytorch/test_numerics.py, tests/pytorch/test_checkpoint.py, tests/pytorch/test_cuda_graphs.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
 --- a/transformer_engine/pytorch/module/base.py
 +++ b/transformer_engine/pytorch/module/base.py
 @@ -1,3 +1,5 @@
@@ -26,15 +26,7 @@
  
  import transformer_engine_torch as tex
  
-@@ -32,6 +36,7 @@
-     DelayedScalingRecipeState,
-     Float8CurrentScalingRecipeState,
-     Float8BlockScalingRecipeState,
-+    MXFP4BlockScalingRecipeState,
-     NVFP4BlockScalingRecipeState,
-     CustomRecipeState,
-     FP8GlobalStateManager,
-@@ -52,10 +57,14 @@
+@@ -52,10 +56,14 @@
  from ..tensor.mxfp8_tensor import MXFP8Quantizer
  from ..tensor.nvfp4_tensor import NVFP4Quantizer
  from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -49,7 +41,16 @@
      is_non_tn_fp8_gemm_supported,
      torch_get_autocast_gpu_dtype,
      get_nvtx_range_context,
-@@ -83,6 +92,8 @@
+@@ -63,7 +71,7 @@
+     nvtx_range_pop,
+ )
+ from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+-from ...common.recipe import DelayedScaling, Recipe
++from ...common.recipe import DelayedScaling, MXFP4BlockScaling, Recipe
+ from ...debug.pytorch.debug_state import TEDebugState
+ from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
+ from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
+@@ -83,6 +91,8 @@
  _ub_communicators = None
  _ub_initialized = False
  _ub_with_cublasmp = False
@@ -58,7 +59,7 @@
  _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
  layers_atomic_ring_exchange = []
  
-@@ -158,7 +169,7 @@
+@@ -158,7 +168,7 @@
  
                   {
                      <gemm_name> : {
@@ -67,7 +68,7 @@
                          "is_reduce_scatter": bool,
                          "num_sm": int,
                          "cga_size": int,
-@@ -322,22 +333,47 @@
+@@ -322,22 +332,47 @@
      dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
  
      # Default overlap methods for layers
@@ -123,7 +124,7 @@
      global layers_atomic_ring_exchange
      layers_atomic_ring_exchange = []
  
-@@ -356,10 +392,13 @@
+@@ -356,10 +391,13 @@
          default_cfg = {
              "method": method,
              "is_reduce_scatter": is_reduce_scatter,
@@ -141,7 +142,7 @@
              "aggregate": False,
              "atomic_gemm": False,
              "use_ce": True,
-@@ -387,7 +426,15 @@
+@@ -387,7 +425,15 @@
          gemm_priority: int = 0,
          pipeline_rs_overlap_first_gemm: bool = False,
      ) -> None:
@@ -158,7 +159,7 @@
              raise ValueError(
                  f"At {name}, cuBLASMp does not support `{method}` overlap method. "
                  "Please select a different method or set with_cublasmp=False."
-@@ -450,7 +497,7 @@
+@@ -450,7 +496,7 @@
              else dtype
          )
          comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
@@ -167,7 +168,7 @@
              ub_obj = tex.CommOverlapP2P(
                  shape,  # Communication buffer shape
                  buffer_dtype,  # Communication buffer data type
-@@ -467,6 +514,7 @@
+@@ -467,6 +513,7 @@
                  aggregate=aggregate,
                  gemm_priority=gemm_priority,
                  comm_priority=comm_priority,
@@ -175,7 +176,7 @@
              )
          else:
              ub_obj = tex.CommOverlap(
-@@ -487,6 +535,8 @@
+@@ -487,6 +534,8 @@
                  rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
              )
          _ub_communicators[(name, quantization_mode)] = ub_obj
@@ -184,7 +185,7 @@
  
      for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
          if user_ub_cfg is not None:
-@@ -503,12 +553,28 @@
+@@ -503,12 +552,28 @@
                              f"corresponding dgrad '{name}' uses a non-bulk overlap method "
                              f"('{user_ub_cfg[name]['method']}')"
                          )
@@ -218,7 +219,7 @@
  
          # Adjust defaults to account for the fact that cuBLASMp does not support
          # bulk or external overlaps
-@@ -532,8 +598,7 @@
+@@ -532,8 +597,7 @@
                  if name not in methods["ring_exchange"] and name not in methods["pipeline"]:
                      methods["ring_exchange"].append(name)
  
@@ -228,7 +229,7 @@
              ub_cfg = get_default_config(name)
              if user_ub_cfg is not None and name in user_ub_cfg:
                  fp8_buf = (name in layers_all_gather_overlap) or (
-@@ -566,12 +631,53 @@
+@@ -566,12 +630,53 @@
      return get_ub(name, use_fp8).is_fp8_ubuf()
  
  
@@ -282,7 +283,7 @@
      global layers_atomic_ring_exchange
      layers_atomic_ring_exchange = []
      # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
-@@ -681,7 +787,7 @@
+@@ -681,7 +786,7 @@
          comm.copy_into_buffer(local_data, local_chunk=True)
  
          # Gather scaling-inverses
@@ -291,7 +292,7 @@
              raise ValueError(
                  "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                  f"but got MXFP8 tensor with shape={tuple(local_shape)}"
-@@ -881,6 +987,8 @@
+@@ -881,6 +986,8 @@
          self.fsdp_group = None
          self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
          self.activation_dtype: Optional[torch.dtype] = None
@@ -300,16 +301,7 @@
          self.wgrad_accumulation_and_reduce_hooks = []
          self.wgrad_store = None
          self._output_quantizer_role: Optional[QuantizerRole] = None
-@@ -1061,6 +1169,8 @@
-                 recipe_state, Float8BlockScalingRecipeState
-             ):
-                 return
-+            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
-+                return
-             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
-                 return
-             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
-@@ -1439,6 +1549,9 @@
+@@ -1439,6 +1546,9 @@
  
          _original_recipe = None
  
@@ -319,7 +311,7 @@
          if fp8_parameters or fp8_enabled:
              _original_recipe = meta.get("recipe", None)
              if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
-@@ -1454,6 +1567,13 @@
+@@ -1454,6 +1564,13 @@
              meta["num_gemms"] = num_gemms
              self.init_fp8_meta_tensors(meta["recipe"])
  
@@ -327,13 +319,13 @@
 +        # regardless of whether we are currently inside an fp8_autocast region or not.
 +        # reset_parameters() would disable columnwise_usage for params constructed inside
 +        # `fp8_model_init` / `quantized_model_init`, leaving `_columnwise_data=None`).
-+        if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
++        if self.fp8_meta["recipe"].mxfp8() or isinstance(self.fp8_meta["recipe"], MXFP4BlockScaling):
 +            self.keep_fp8_weight_transpose_cache = True
 +
          if fp8_enabled:
              # Set FP8 and other FP8 metadata
              meta["num_gemms"] = num_gemms
-@@ -1742,6 +1862,9 @@
+@@ -1742,6 +1859,9 @@
                      raise RuntimeError("Weight quantizer has not been initialized")
                  quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                  quantizer.internal = False
@@ -343,7 +335,7 @@
                  if is_dtensor and isinstance(
                      quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer)
                  ):
-@@ -1755,6 +1878,14 @@
+@@ -1755,6 +1875,14 @@
                      quantizer.with_amax_reduction = True
                  # Quantize parameter
                  param = quantizer(param)
@@ -358,7 +350,7 @@
  
              # Redo parameter wrap in case we broke it above
              # NOTE: Currently this can only be broken when primary weights are in Fp8 but
-@@ -1812,6 +1943,141 @@
+@@ -1812,6 +1940,141 @@
      def forward(self):
          """Needs override."""
  

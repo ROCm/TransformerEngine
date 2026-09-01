@@ -342,7 +342,8 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         return 32
     if recipe.nvfp4():
         return 128
-    if recipe.mxfp4():
+    if isinstance(recipe, MXFP4BlockScaling):
+        # MXFP4 is a CustomRecipe subclass since S5.1; keep its 256 alignment.
         return 256
     return 16
 
@@ -1444,8 +1445,6 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
-        elif recipe.mxfp4():
-            cls = MXFP4BlockScalingRecipeState
         elif recipe.nvfp4():
             cls = NVFP4BlockScalingRecipeState
         elif recipe.custom():
@@ -1733,84 +1732,6 @@ class Float8BlockScalingRecipeState(RecipeState):
         assert self.mode in ("forward", "backward"), f"Unexpected mode {self.mode}"
         return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
-
-class MXFP4BlockScalingRecipeState(RecipeState):
-    """Configuration for MXFP4 quantization.
-
-    MXFP4 quantization does not require persistent scaling state beyond
-    the quantizer configuration (per-block scales are computed at cast time).
-
-    """
-
-    recipe: MXFP4BlockScaling
-    mode: str
-    dtype: tex.DType
-
-    def __init__(
-        self,
-        recipe: MXFP4BlockScaling,
-        *,
-        mode: str,
-        num_quantizers: int = 1,
-        device: Optional[torch.device] = None,
-        roles: Optional[List[QuantizerRole]] = None,
-    ) -> None:
-        self._validate_roles(roles, num_quantizers)
-        self.recipe = recipe
-        self.mode = mode
-        self.num_quantizers = num_quantizers
-        self.roles = roles
-        self.dtype = get_fp4_te_dtype(recipe)
-
-        if device is None:
-            device = torch.device("cuda")
-
-    def make_quantizers(self) -> list:
-        from .tensor.mxfp4_tensor import MXFP4Quantizer
-
-        use_hadamard = self.recipe.use_hadamard
-
-        if self.mode == "forward":
-
-            def _make_quantizer(idx: int):
-                is_activation = idx % 3 == 0
-                is_weight = idx % 3 == 1
-                if is_activation:
-                    shuffle_rowwise_data = False
-                    shuffle_columnwise_data = True
-                elif is_weight:
-                    shuffle_rowwise_data = True
-                    shuffle_columnwise_data = True
-                else:
-                    shuffle_rowwise_data = False
-                    shuffle_columnwise_data = False
-                return MXFP4Quantizer(
-                    fp4_dtype=self.dtype,
-                    rowwise=True,
-                    columnwise=True,
-                    shuffle_rowwise_data=shuffle_rowwise_data,
-                    shuffle_columnwise_data=shuffle_columnwise_data,
-                    with_gemm_swizzled_scales=True,
-                    use_hadamard=use_hadamard,
-                )
-
-            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
-
-        if self.mode == "backward":
-            return [
-                MXFP4Quantizer(
-                    fp4_dtype=self.dtype,
-                    rowwise=True,
-                    columnwise=True,
-                    shuffle_rowwise_data=False,
-                    shuffle_columnwise_data=False,
-                    with_gemm_swizzled_scales=True,
-                    use_hadamard=use_hadamard,
-                )
-                for _ in range(self.num_quantizers)
-            ]
-
-        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
 
 class NVFP4BlockScalingRecipeState(RecipeState):

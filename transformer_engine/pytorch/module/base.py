@@ -36,7 +36,6 @@ from ..quantization import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
-    MXFP4BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     CustomRecipeState,
     FP8GlobalStateManager,
@@ -72,7 +71,7 @@ from ..utils import (
     nvtx_range_pop,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ...common.recipe import DelayedScaling, Recipe
+from ...common.recipe import DelayedScaling, MXFP4BlockScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
@@ -1169,8 +1168,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
-            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
-                return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
@@ -1571,7 +1568,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # regardless of whether we are currently inside an fp8_autocast region or not.
         # reset_parameters() would disable columnwise_usage for params constructed inside
         # `fp8_model_init` / `quantized_model_init`, leaving `_columnwise_data=None`).
-        if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
+        if self.fp8_meta["recipe"].mxfp8() or isinstance(self.fp8_meta["recipe"], MXFP4BlockScaling):
             self.keep_fp8_weight_transpose_cache = True
 
         if fp8_enabled:

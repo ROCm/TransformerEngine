@@ -79,10 +79,6 @@
      29,
      50
     ],
-    "Recipe": [
-     107,
-     169
-    ],
     "_FormatHelper": [
      20,
      26
@@ -92,7 +88,6 @@
     "<module-level>": "00964f16083bc036c7c5f01130851785a4253b6270f1a31b77181309df40ee8d",
     "CustomRecipe": "43628c9235f9f6ff5efdfd38b7417bc10e4e7aea93c3b1844c53f0686fba7a06",
     "Format": "164115ffebf1f2d41029481fce73d439623e5cf6e84eb38a33f8b741ab0a9cef",
-    "Recipe": "481a4abd288b4102abe2f1b7d5390234cdf3bbe5de7f93b35fd9fa3c58e6d450",
     "_FormatHelper": "b5a6376492b3ec6fd88f9aa46f42f55049e5775f82e991b6a57344e9d9499260"
    },
    "target": "transformer_engine/common/recipe/__init__.py"
@@ -609,10 +604,6 @@
      1613,
      1725
     ],
-    "RecipeState": [
-     1169,
-     1384
-    ],
     "_compute_fp8_block_scaling_support": [
      178,
      185
@@ -668,7 +659,6 @@
     "FP8GlobalStateManager": "37a8f00ae802eb874e4a3e8953fce7a8ddedd11d5d6acb3cc17cbcacdabed739",
     "Float8BlockScalingRecipeState": "2d1e7465b56c53d8ba31d46f37ca8f9dcc5eaa65a1ff79b7be80660dd3a18e7c",
     "NVFP4BlockScalingRecipeState": "4b4560c05bc191934c378196db8fce7af9434720ddb19be55b22e52da9c4524f",
-    "RecipeState": "d0742d501d954555325ee086fba5897fd12d20bab8296d0ffd5ca2905e4a92eb",
     "_compute_fp8_block_scaling_support": "0ff1b83a92ebd7dde7bb0defc2b4cd70a18916d032653db6993d030af8e91c91",
     "_compute_fp8_support": "213109f6636c33f3af7bbdb79f0f9d6f9f789c3209d9b0194c0e24b9656b3873",
     "_compute_mxfp8_support": "98684314e9c34e740bedeb889b2f4310f371bbf4ebc5e870f66ce29960e0dd3b",
@@ -697,17 +687,12 @@
     "_LayerNormMLP": [
      171,
      1826
-    ],
-    "_get_act_func_supported_list": [
-     99,
-     156
     ]
    },
    "symbols": {
     "<module-level>": "3786c1527816f307f3fb0d7e4b361ec4fe414067aee5f51281dbf60ed6cc4328",
     "LayerNormMLP": "1d77976c5c37c42158cd3199b373a11897b2f0c5a769f026d178891b9fca9687",
-    "_LayerNormMLP": "3de2cedf64ac63084123a59cf66e8676a3132e88cf6cdb5bef0705dcd6ca3aab",
-    "_get_act_func_supported_list": "9ee037082ae2a11914ec3c2af9a0d7ee44f2e19a94dba8b2ed64f708e50110e0"
+    "_LayerNormMLP": "3de2cedf64ac63084123a59cf66e8676a3132e88cf6cdb5bef0705dcd6ca3aab"
    },
    "target": "transformer_engine/pytorch/module/layernorm_mlp.py"
   },

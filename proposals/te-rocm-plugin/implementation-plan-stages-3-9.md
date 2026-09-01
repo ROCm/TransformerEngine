@@ -238,7 +238,7 @@ byte-identical to before S4.
 Goal: the 622 hunk-lines of sidecar wiring (manifest `added_class.sidecar`, PyTorch) and the
 Recipe-class injections go away, and the guard bucket starts converting to capability queries.
 
-### S5.1 · CustomRecipe adapter — 5 days `[F8]`
+### S5.1 · CustomRecipe adapter — **DONE 2026-09-01** `[F8]`: `te_rocm/recipes/adapter_2_18.py` (one adapter per certified upstream version); MXFP4BlockScaling is a CustomRecipe subclass with a self-wired qfactory - dispatch flows through upstream's own custom()/CustomRecipeState path. Retired: the mxfp4() Recipe injection, the quantization.py recipe-state branch AND MXFP4BlockScalingRecipeState itself (net -66 divergence lines in PT-004); base/layernorm_mlp guards folded into custom() or isinstance. Role->shuffle mapping verified byte-equivalent to the retired state; paired tests 898 passed / 1 pre-existing gfx950 dpa_fp8 failure (documented in the P0 baseline)
 
 - `te_rocm/recipes/adapter_2_18.py`: the per-upstream-version adapter implementing upstream's
   `qfactory(role) -> Quantizer | QuantizerRequest` protocol on top of a stable internal

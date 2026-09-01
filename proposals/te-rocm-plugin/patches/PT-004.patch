@@ -4,7 +4,7 @@
 # expiry: see features
 # tests: tests/pytorch/test_recipe.py, tests/pytorch/test_custom_recipe.py, tests/pytorch/test_numerics.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
 --- a/transformer_engine/pytorch/quantization.py
 +++ b/transformer_engine/pytorch/quantization.py
 @@ -1,3 +1,5 @@
@@ -148,7 +148,7 @@
      if check_mxfp8_support()[0]:
          return MXFP8BlockScaling()
      if get_device_compute_capability() >= (12, 0):
-@@ -262,9 +326,24 @@
+@@ -262,9 +326,25 @@
  def get_align_size_for_quantization(recipe: Recipe) -> int:
      """Get the alignment size for quantization."""
      if recipe.mxfp8():
@@ -168,12 +168,13 @@
          return 32
      if recipe.nvfp4():
          return 128
-+    if recipe.mxfp4():
++    if isinstance(recipe, MXFP4BlockScaling):
++        # MXFP4 is a CustomRecipe subclass since S5.1; keep its 256 alignment.
 +        return 256
      return 16
  
  
-@@ -273,8 +352,8 @@
+@@ -273,8 +353,8 @@
      if fp8_recipe.fp8_format == Format.E4M3 or (
          fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
      ):
@@ -184,7 +185,7 @@
  
  
  def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> DType:
-@@ -356,7 +435,6 @@
+@@ -356,7 +436,6 @@
          return check_fp8_block_scaling_support()
      return check_fp8_block_scaling_support()[0]
  
@@ -192,7 +193,7 @@
  def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
      """
      Determine if support is available for the NVFP4 recipe.
-@@ -374,6 +452,21 @@
+@@ -374,6 +453,21 @@
          return check_nvfp4_support()
      return check_nvfp4_support()[0]
  
@@ -214,7 +215,7 @@
  
  @dataclass(slots=True)
  class FP8GlobalState:
-@@ -407,6 +500,30 @@
+@@ -407,6 +501,30 @@
      FP8 state at different stages of execution.
      """
  
@@ -245,7 +246,7 @@
      quantization_state = FP8GlobalState()
  
      @classmethod
-@@ -448,6 +565,11 @@
+@@ -448,6 +566,11 @@
          """Return if NVFP4 support is available."""
          return check_nvfp4_support()
  
@@ -257,7 +258,7 @@
      @staticmethod
      def get_meta_tensor_key(forward: bool = True) -> str:
          """Returns scaling key in `fp8_meta`."""
-@@ -766,7 +888,7 @@
+@@ -766,7 +889,7 @@
          # Reduce only the non-FP8 weight modules here.
          # FP8 weight modules are reduced at the end of the optimizer
          # step after the weight amax is populated.
@@ -266,97 +267,10 @@
              # delayed scaling only function, for other recipes (current scaling with any granularity),
              # this is noop for other recipes because cls.global_amax_buffer is empty list
              cls.reduce_and_update_fp8_tensors(forward=True)
-@@ -1322,6 +1444,8 @@
-             cls = Float8CurrentScalingRecipeState
-         elif recipe.float8_block_scaling():
-             cls = Float8BlockScalingRecipeState
-+        elif recipe.mxfp4():
-+            cls = MXFP4BlockScalingRecipeState
-         elif recipe.nvfp4():
-             cls = NVFP4BlockScalingRecipeState
-         elif recipe.custom():
-@@ -1610,6 +1734,85 @@
+@@ -1610,6 +1733,7 @@
          return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
  
  
-+class MXFP4BlockScalingRecipeState(RecipeState):
-+    """Configuration for MXFP4 quantization.
-+
-+    MXFP4 quantization does not require persistent scaling state beyond
-+    the quantizer configuration (per-block scales are computed at cast time).
-+
-+    """
-+
-+    recipe: MXFP4BlockScaling
-+    mode: str
-+    dtype: tex.DType
-+
-+    def __init__(
-+        self,
-+        recipe: MXFP4BlockScaling,
-+        *,
-+        mode: str,
-+        num_quantizers: int = 1,
-+        device: Optional[torch.device] = None,
-+        roles: Optional[List[QuantizerRole]] = None,
-+    ) -> None:
-+        self._validate_roles(roles, num_quantizers)
-+        self.recipe = recipe
-+        self.mode = mode
-+        self.num_quantizers = num_quantizers
-+        self.roles = roles
-+        self.dtype = get_fp4_te_dtype(recipe)
-+
-+        if device is None:
-+            device = torch.device("cuda")
-+
-+    def make_quantizers(self) -> list:
-+        from .tensor.mxfp4_tensor import MXFP4Quantizer
-+
-+        use_hadamard = self.recipe.use_hadamard
-+
-+        if self.mode == "forward":
-+
-+            def _make_quantizer(idx: int):
-+                is_activation = idx % 3 == 0
-+                is_weight = idx % 3 == 1
-+                if is_activation:
-+                    shuffle_rowwise_data = False
-+                    shuffle_columnwise_data = True
-+                elif is_weight:
-+                    shuffle_rowwise_data = True
-+                    shuffle_columnwise_data = True
-+                else:
-+                    shuffle_rowwise_data = False
-+                    shuffle_columnwise_data = False
-+                return MXFP4Quantizer(
-+                    fp4_dtype=self.dtype,
-+                    rowwise=True,
-+                    columnwise=True,
-+                    shuffle_rowwise_data=shuffle_rowwise_data,
-+                    shuffle_columnwise_data=shuffle_columnwise_data,
-+                    with_gemm_swizzled_scales=True,
-+                    use_hadamard=use_hadamard,
-+                )
-+
-+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
-+
-+        if self.mode == "backward":
-+            return [
-+                MXFP4Quantizer(
-+                    fp4_dtype=self.dtype,
-+                    rowwise=True,
-+                    columnwise=True,
-+                    shuffle_rowwise_data=False,
-+                    shuffle_columnwise_data=False,
-+                    with_gemm_swizzled_scales=True,
-+                    use_hadamard=use_hadamard,
-+                )
-+                for _ in range(self.num_quantizers)
-+            ]
-+
-+        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
-+
 +
  class NVFP4BlockScalingRecipeState(RecipeState):
      """Configuration for NVFP4 quantization.

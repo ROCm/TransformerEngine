@@ -4,7 +4,7 @@
 # expiry: see features
 # tests: tests/pytorch/test_recipe.py, tests/pytorch/test_custom_recipe.py
 # owner: TBD
-# seeded: 2026-08-30 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
+# seeded: 2026-09-01 whole-file diff of the fork vs upstream; P5 shrinks/splits this (3 feature sub-entries)
 --- a/transformer_engine/common/recipe/__init__.py
 +++ b/transformer_engine/common/recipe/__init__.py
 @@ -1,3 +1,5 @@
@@ -69,25 +69,13 @@
  
  
  @dataclass(frozen=True)
-@@ -144,6 +167,11 @@
-         return issubclass(cls, MXFP8BlockScaling)
- 
-     @classmethod
-+    def mxfp4(cls):
-+        """Whether the given recipe is MXFP4 block scaling."""
-+        return issubclass(cls, MXFP4BlockScaling)
-+
-+    @classmethod
-     def delayed(cls):
-         """Whether the given recipe is delayed scaling."""
-         return issubclass(cls, DelayedScaling)
-@@ -684,3 +712,56 @@
+@@ -684,3 +707,64 @@
              f"qfactory={self.qfactory}, "
              f"backward_override={self.backward_override}"
          )
 +
 +@dataclass()
-+class MXFP4BlockScaling(Recipe):
++class MXFP4BlockScaling(CustomRecipe):
 +    """
 +    Use the MXFP4 scaling factor strategy.
 +
@@ -125,8 +113,16 @@
 +    fp8_mha: bool = False
 +    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 +    use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
++    # Self-wired in __post_init__ (plugin plan S5.1): dispatch flows through upstream's own
++    # CustomRecipe -> CustomRecipeState path; the ROCm-side factory lives in
++    # te_rocm.recipes.adapter_2_18 (one adapter module per certified upstream version).
++    qfactory: Optional[Callable[..., Any]] = None
 +
 +    def __post_init__(self) -> None:
++        if self.qfactory is None:
++            from transformer_engine.te_rocm.recipes.adapter_2_18 import make_mxfp4_qfactory
++
++            self.qfactory = make_mxfp4_qfactory(self)
 +        assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
 +        assert (
 +            self.backward_override in _BACKWARD_OVERRIDES
