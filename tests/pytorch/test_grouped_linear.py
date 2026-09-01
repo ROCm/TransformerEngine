@@ -517,10 +517,10 @@ def test_grouped_linear_accuracy_rocm_backends(
         pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
 
     if recipe is not None and recipe.float8_block_scaling():
-        # The CUTLASS/HipKittens/CK grouped GEMM backends do not support FP8 block
-        # scaling (they abort at runtime). The blockwise path is covered by the
-        # default and Triton backends in test_grouped_linear_accuracy instead.
-        pytest.skip("CUTLASS/HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
+        # The HipKittens/CK grouped GEMM backends do not support FP8 block scaling
+        # (they abort at runtime). The blockwise path is covered by the default and
+        # Triton backends in test_grouped_linear_accuracy instead.
+        pytest.skip("HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
 
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)

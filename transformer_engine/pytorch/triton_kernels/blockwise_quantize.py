@@ -36,6 +36,9 @@ def _floor_to_pow2(scale):
 @triton.jit
 def compute_scale_and_quant(x_tile, x_tile_abs, axis, FP8_MAX, ROUND_POW2: tl.constexpr):
     x_tile_max = tl.max(x_tile_abs, axis=axis, keep_dims=True)
+    # Floor the block amax to a small epsilon so an all-zero (or tiny) block does not
+    # produce a divide-by-zero / inf scale below. 1e-4 matches Primus-Turbo's
+    # blockwise-quantize implementation.
     x_tile_max = tl.maximum(x_tile_max, 1e-4)
     x_scales_tile = FP8_MAX / x_tile_max
     if ROUND_POW2:
@@ -111,6 +114,8 @@ def quant_fp8_blockwise_for_weight_kernel(
 
     w_tile_abs = tl.abs(w_tile)
     w_tile_max = tl.max(w_tile_abs)
+    # Floor the block amax to a small epsilon so an all-zero (or tiny) block does not
+    # produce a divide-by-zero / inf scale. 1e-4 matches Primus-Turbo's implementation.
     w_tile_max = tl.maximum(w_tile_max, 1e-4)
     w_scales = FP8_MAX / w_tile_max
     if ROUND_POW2:

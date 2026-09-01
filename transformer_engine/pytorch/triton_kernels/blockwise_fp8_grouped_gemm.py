@@ -85,6 +85,11 @@ def _amd_compiler_knobs(*, is_tn: bool):
                 os.environ[env_key] = env_val
 
 
+# Number of XCDs used for round-robin PID swizzling (see ``remap_xcd_chunked``)
+# to improve L2 cache locality. This cannot be queried programmatically, so it is
+# hardcoded. NOTE: 8 is only correct for a full-config SPX-mode device (e.g. MI300X/
+# MI350X with all XCDs active). In MPX (partitioned) mode the per-partition XCD count
+# differs, so this value would need to be adjusted accordingly.
 NUM_XCDS = 8
 
 # First call per autotune key uses balanced group_offs so the cached config
