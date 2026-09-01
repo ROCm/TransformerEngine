@@ -75,6 +75,8 @@ jobs:
         run: python3 proposals/te-rocm-plugin/tools/cxx_queue.py verify
       - name: C++ patch queue - assembled tree identity vs fork common/
         run: python3 proposals/te-rocm-plugin/tools/cxx_queue.py assemble --out /tmp/overlay-cxx
+      - name: JAX FFI inventory (names + attr schemas vs the governed expectation)
+        run: python3 proposals/te-rocm-plugin/tools/jax_ffi_inventory.py
       - name: ABI-002 enum drift (pybind_helper vs public header, both branches)
         run: python3 proposals/te-rocm-plugin/tools/check_pybind_enums.py
       - name: Origin ledger is fresh (regenerating changes nothing)

@@ -328,7 +328,7 @@ new build-tier patch of ~4 lines) merges it over `transformer_engine_jax.registr
 `ffi.register_ffi_target`. Selection binds at trace; policy freezes per executable (a jitted function
 never re-selects). No synthesized module.
 
-### S7.2 · FFI inventory — 3 days
+### S7.2 · FFI inventory — **DONE 2026-09-01, static**: `tools/jax_ffi_inventory.py` parses registrations (35/35 names both sides at the pin - the raw 44-vs-35 grep counted staged sub-entries) plus per-handler `.Attr<T>` schemas; the ONLY divergence class is ROCm dropping CUDA init-stage handlers (CudnnHandleInit/CublasHandleInit/CollectiveGemmInit/GemmInitV2, 9 sites) - execute schemas match everywhere. Governed expectation in `jax-ffi-expected-diff.yaml`; blocking CI step
 
 Extend `seam_inventory.py` with a JAX mode: the 35 `te_*_ffi` names **plus** attribute schemas
 (the `pybind11::arg` kwargs per handler), lowering parameters, and layout conventions read from the
