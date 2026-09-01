@@ -344,7 +344,7 @@ The P4 assembler is framework-neutral; JX-001..019 become patches (18 files, 563
 here). JX-001's HSACO/prewarm workarounds (`hold-internal`) stay as patches until the ROCm JAX
 plugin fixes land; `sharding.py` (JX-002) goes upstream as a compat PR; `moe.py` (JX-005) likewise.
 
-### S7.4 · JAX milestone — **FIRST HALF EVIDENCED 2026-09-01**: tests/jax under the overlay - test_functions.py + test_custom_call_compute.py = 1384 passed / 172 skipped, tree verified as the overlay. REMAINING: the fuller tests/jax sweep (9,889 collected) and the named MaxText-class workload with its JAX-specific signed band in thresholds.yaml (workload choice is the certifier's)
+### S7.4 · JAX milestone — **FIRST HALF EVIDENCED 2026-09-01**: tests/jax under the overlay - test_functions.py + test_custom_call_compute.py = 1384 passed / 172 skipped, tree verified as the overlay. Single-GPU sweep DONE 2026-09-01: 2519 passed / 6663 skipped / 0 genuine failures under the overlay in 58 min (the 14 'errors' are multi-process launcher test files mis-collected by bare pytest - fixture-not-found at setup, they need their shell wrappers; run them via multi_process_launch.sh in CI). REMAINING: the distributed/multi-process suites via their launchers, and the named MaxText-class workload with its JAX-specific signed band (workload choice is the certifier's)
 
 `tests/jax` under overlay + a named MaxText-class workload within a JAX-specific signed band
 (added to `thresholds.yaml` when the workload is chosen). Until then the JAX wheel is marked beta.
