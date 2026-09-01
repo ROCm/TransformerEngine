@@ -59,6 +59,18 @@ def pytest_configure(config):
     config._microbench_store = {}
 
 
+def pytest_collect_file(parent, file_path):
+    # Collect benchmark_*.py like test files so `pytest .` finds them without a
+    # rename; skip init paths so an explicitly-passed file isn't double-collected.
+    if (
+        file_path.suffix == ".py"
+        and file_path.name.startswith("benchmark_")
+        and not parent.session.isinitpath(file_path)
+    ):
+        return pytest.Module.from_parent(parent, path=file_path)
+    return None
+
+
 class _MicroBench:
     """Handed to each test as the ``microbench`` fixture."""
 
