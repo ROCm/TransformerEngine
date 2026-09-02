@@ -868,11 +868,14 @@ class _GroupedLinear(torch.autograd.Function):
 
         grad_biases = [None] * ctx.num_gemms  # bias not supported on this path
 
-        # Grads match forward inputs: (inp, m_splits, non_tensor_args, *weights, *biases).
+        # Grads match forward inputs:
+        # (inp, m_splits, non_tensor_args, out, dgrad_out, *weights, *biases).
         return (
             dgrad.view(ctx.inp_shape) if dgrad is not None else None,
             None,  # m_splits
             None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
             *wgrad_list,
             *grad_biases,
         )
