@@ -32,28 +32,51 @@ uint64_t ag_ready_warn_ticks() {
     return ticks;
 }
 
-// Peer base pointers for the naive scale all-gather, passed by value like PeerPtrs.
+// Peer base pointers for the scale all-gather, passed by value like PeerPtrs.
 struct ScalePeers {
     const char *base[8];
 };
 
-// Naive all-gather of the MXFP8 scale region: each rank copies every peer's scale chunk out of
-// that peer's userbuffer into the matching offset of its own. Correctness probe for the UB scale
-// plumbing -- no tiling, no arrival protocol, byte-at-a-time.
+// All-gather of the MXFP8 scale region: each rank copies every peer's scale chunk out of that
+// peer's userbuffer into the matching offset of its own. Offset-preserving, so the result is
+// rank-major and identical to what all_gather_into_tensor produced.
+//
+// scale_base and chunk_bytes are always 16B multiples here -- scale_base is SB*K and chunk_bytes
+// is m_local*(K/32) with m_local a multiple of 256 -- and run_mxfp8_tn refuses the launch
+// otherwise, so the vector loop covers the whole copy and there is no scalar tail.
+template <int U, bool NT>
 __global__
-void gather_scales_naive(char *__restrict__ ub, ScalePeers peers, int my_pe, int tp_size,
-                         size_t scale_base, size_t chunk_bytes) {
+void gather_scales(char *__restrict__ ub, ScalePeers peers, int my_pe, int tp_size,
+                   size_t scale_base, size_t chunk_bytes) {
     const int peer = static_cast<int>(blockIdx.y);
     if (peer >= tp_size || peer == my_pe) return;
 
-    const size_t off = scale_base + static_cast<size_t>(peer) * chunk_bytes;
-    const char *src  = peers.base[peer] + off;
-    char       *dst  = ub + off;
+    typedef int v4i __attribute__((ext_vector_type(4)));
 
+    const size_t off = scale_base + static_cast<size_t>(peer) * chunk_bytes;
+    const v4i *src = reinterpret_cast<const v4i *>(peers.base[peer] + off);
+    v4i       *dst = reinterpret_cast<v4i *>(ub + off);
+
+    const size_t n4     = chunk_bytes / sizeof(v4i);
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
-    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < chunk_bytes;
-         i += stride) {
-        dst[i] = src[i];
+    const size_t step   = stride * U;
+    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (U > 1) {
+        for (; i + static_cast<size_t>(U - 1) * stride < n4; i += step) {
+            v4i v[U];
+#pragma unroll
+            for (int u = 0; u < U; u++) v[u] = src[i + static_cast<size_t>(u) * stride];
+#pragma unroll
+            for (int u = 0; u < U; u++) {
+                if (NT) __builtin_nontemporal_store(v[u], &dst[i + static_cast<size_t>(u) * stride]);
+                else    dst[i + static_cast<size_t>(u) * stride] = v[u];
+            }
+        }
+    }
+    for (; i < n4; i += stride) {
+        if (NT) __builtin_nontemporal_store(src[i], &dst[i]);
+        else    dst[i] = src[i];
     }
 }
 
@@ -279,9 +302,13 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     int scale_K = K / 32;
 
     // The scale region is sized in CommOverlapP2PBase::initialize; bail out rather than read
-    // garbage if its chunking ever disagrees with this kernel's view of the operand.
+    // garbage if its chunking ever disagrees with this kernel's view of the operand. The 16B
+    // alignment holds for every shape the eligibility gate admits and is what lets gather_scales
+    // run without a scalar tail, so drop to hipBLASLt rather than silently mis-copying if it ever
+    // stops holding.
     if (args.scale_chunk_bytes &&
-        args.scale_chunk_bytes != static_cast<size_t>(m_local) * static_cast<size_t>(scale_K)) {
+        (args.scale_chunk_bytes != static_cast<size_t>(m_local) * static_cast<size_t>(scale_K) ||
+         args.scale_chunk_bytes % 16 != 0 || args.scale_base_offset % 16 != 0)) {
         return false;
     }
 
@@ -355,9 +382,22 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     if (args.scale_chunk_bytes) {
         ScalePeers sp{};
         for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
-        gather_scales_naive<<<dim3(64, tp_size), 256, 0, args.stream>>>(
-            static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
-            args.scale_chunk_bytes);
+
+        constexpr int SCALE_GATHER_U = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        // Size the grid to the work so the tail blocks are not launched idle. NT stores are off:
+        // launch_pack_scales consumes this region in the very next kernel, so keeping it in cache
+        // beats streaming it past.
+        const size_t lines = args.scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
+                args.scale_chunk_bytes);
     }
 
     launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
