@@ -449,6 +449,8 @@ class FusedAttnRunner:
     stripe_size: int | None = None
     num_segments_per_seq: int | None = None
     use_old_rng: bool = True #ROCm may use new-style RNG
+    # Set by test_forward/test_backward so the backend probe reflects the requested config.
+    return_max_logit: bool = False
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -636,6 +638,7 @@ class FusedAttnRunner:
             self.head_dim_qk,
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
+            self.return_max_logit,
         ).get_fused_attn_backend()
         if is_hip_extension():
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
@@ -1018,6 +1021,7 @@ class FusedAttnRunner:
         """
         Test forward with JITted primitive and unJITted reference
         """
+        self.return_max_logit = return_max_logit
         self._setup_inputs()
 
         reference_mask = (
@@ -1129,6 +1133,7 @@ class FusedAttnRunner:
         HLO will be examined for the expected comms.
         """
 
+        self.return_max_logit = return_max_logit
         self._setup_inputs()
 
         def grad_func(

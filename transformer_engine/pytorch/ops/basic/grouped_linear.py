@@ -1263,6 +1263,13 @@ class GroupedLinear(BasicOperation):
 
         # Perform GEMMs
         use_gemm_bias = has_bias and not self._scale_bias
+        # Some FP8 recipes (e.g. blockwise) require a split accumulator for fprop; honor the
+        # recipe's choice instead of the module default (matches module/grouped_linear.py).
+        use_split_accumulator = _2X_ACC_FPROP
+        if with_quantized_compute:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, "fp8_gemm_fprop"):
+                use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
         general_grouped_gemm(
             ws,
             xs,
@@ -1272,7 +1279,7 @@ class GroupedLinear(BasicOperation):
             m_splits=split_sizes_int,
             bias=bs if use_gemm_bias else None,
             use_bias=use_gemm_bias,
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=use_split_accumulator,
             single_output=True,
         )
 
@@ -1445,12 +1452,19 @@ class GroupedLinear(BasicOperation):
                     bias_scale = bias_scale.to(dtype=torch.float32)
 
         # Forward grouped GEMM.
+        # Some FP8 recipes (e.g. blockwise) require a split accumulator for fprop; honor the
+        # recipe's choice instead of the module default (matches module/grouped_linear.py).
+        use_split_accumulator = _2X_ACC_FPROP
+        if with_quantized_compute:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, "fp8_gemm_fprop"):
+                use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
         general_grouped_gemm_for_grouped_tensor(
             grouped_weights,
             grouped_x,
             grouped_out,
             layout="TN",
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=use_split_accumulator,
             bias=grouped_bias,
             bias_scale=bias_scale,
         )

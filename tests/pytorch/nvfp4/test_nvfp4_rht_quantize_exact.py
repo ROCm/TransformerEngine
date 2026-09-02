@@ -218,6 +218,10 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
 
+    # Row-scaled (RHT) NVFP4 does not support columnwise/transpose output on ROCm.
+    if IS_HIP_EXTENSION and return_transpose:
+        pytest.skip("Row-scaled (RHT) NVFP4 columnwise output is not supported on ROCm.")
+
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -266,6 +270,10 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
 
+    # Row-scaled (RHT) NVFP4 does not support columnwise/transpose output on ROCm.
+    if IS_HIP_EXTENSION and return_transpose:
+        pytest.skip("Row-scaled (RHT) NVFP4 columnwise output is not supported on ROCm.")
+
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -281,7 +289,7 @@ if IS_HIP_EXTENSION:
     def _ref_rht(x: torch.Tensor) -> torch.Tensor:
         """Apply reference RHT using NVFP4QuantizerRef._apply_rht."""
         ref = NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+            dtype=reference_utils.Fp4Formats.E2M1,
             rowwise=True,
             columnwise=False,
             quant_tile_shape=(1, 16),
@@ -297,7 +305,7 @@ if IS_HIP_EXTENSION:
         """Quantize BF16-rounded RHT(x.T) with the given global amax."""
         x_t_rht = _ref_rht(x.t().contiguous()).to(dtype=x.dtype)
         ref_quantizer = NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+            dtype=reference_utils.Fp4Formats.E2M1,
             rowwise=True,
             columnwise=False,
             pow_2_scales=False,

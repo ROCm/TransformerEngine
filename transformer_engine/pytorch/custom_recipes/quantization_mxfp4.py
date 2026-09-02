@@ -17,7 +17,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import gemm
 from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
@@ -473,14 +473,14 @@ class MXFP4QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,  # pylint: disable=unused-argument
+        m_params: gemm.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,  # pylint: disable=unused-argument
+        gemm_type: gemm.GEMMType = gemm.GEMMType.FPROP,  # pylint: disable=unused-argument
         qresult_x: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
         qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:
@@ -495,7 +495,7 @@ class MXFP4QuantizerRef(Quantizer):
             uint8 ``(M, K/2)`` packed FP4 activations.
         qw : torch.Tensor
             uint8 ``(N, K/2)`` packed FP4 weights.
-        m_params : quantization.MMParams
+        m_params : gemm.MMParams
             Matmul parameters (unused by the reference; kept for API parity
             with the NVFP4 reference and ``custom_gemm`` dispatcher).
         out_dtype : torch.dtype
@@ -511,7 +511,7 @@ class MXFP4QuantizerRef(Quantizer):
         accumulate : bool
             If True, add the GEMM result to ``out`` (in float32) before
             casting to ``out_dtype``.
-        gemm_type : quantization.GEMMType
+        gemm_type : gemm.GEMMType
             Which GEMM this call represents (FPROP/DGRAD/WGRAD). Unused by
             the reference but accepted for API parity.
         qresult_x, qresult_w : QuantizedTensorStorage, optional
