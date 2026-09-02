@@ -255,7 +255,8 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
                              const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
                              const TensorWrapper &ubuf, const TensorWrapper &chunk, communicator *comm,
-                             int reg, int tp_id, int tp_size, uint64_t signal, cudaStream_t stream) {
+                             int reg, int tp_id, int tp_size, uint64_t signal, size_t scale_base_offset,
+                             size_t scale_chunk_bytes, cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(B.dptr() == ubuf.dptr(),
              "fused AG+GEMM reached with invalid B tensor!");
@@ -317,7 +318,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, reg, 0) - reinterpret_cast<char *>(comm->peer_ptr[0][0])),
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
-      tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
+      tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     return kittens_fused_ag_gemm_mxfp8(args);
   }
@@ -335,6 +336,7 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
     const bool launched = hk_fused_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, B_copy,
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
                                            _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
+                                           _scale_base_offset, _scale_chunk_bytes,
                                            stream_main);
     NVTE_CHECK(launched, "fused AG+GEMM failed to launch");
     _ag_signal_base += _tp_size;

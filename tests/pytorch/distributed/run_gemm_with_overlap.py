@@ -421,7 +421,7 @@ def _main(opts):
     # K = MLP intermediate size (usually 4x hidden size)
     # P = number of devices for sequence/tensor parallelism
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
-    ffn_hidden_size = 4 * hidden_size
+    ffn_hidden_size = int(os.environ.get("NVTE_FFN_MULT", "4")) * hidden_size
     if opts.bulk_overlap:
         # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)

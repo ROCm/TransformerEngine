@@ -27,6 +27,8 @@ struct KittensFusedAgGemmArgs {
     bool transa;
     int rank, nranks;
     size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;

@@ -32,6 +32,31 @@ uint64_t ag_ready_warn_ticks() {
     return ticks;
 }
 
+// Peer base pointers for the naive scale all-gather, passed by value like PeerPtrs.
+struct ScalePeers {
+    const char *base[8];
+};
+
+// Naive all-gather of the MXFP8 scale region: each rank copies every peer's scale chunk out of
+// that peer's userbuffer into the matching offset of its own. Correctness probe for the UB scale
+// plumbing -- no tiling, no arrival protocol, byte-at-a-time.
+__global__
+void gather_scales_naive(char *__restrict__ ub, ScalePeers peers, int my_pe, int tp_size,
+                         size_t scale_base, size_t chunk_bytes) {
+    const int peer = static_cast<int>(blockIdx.y);
+    if (peer >= tp_size || peer == my_pe) return;
+
+    const size_t off = scale_base + static_cast<size_t>(peer) * chunk_bytes;
+    const char *src  = peers.base[peer] + off;
+    char       *dst  = ub + off;
+
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < chunk_bytes;
+         i += stride) {
+        dst[i] = src[i];
+    }
+}
+
 __global__ __launch_bounds__(64)
 void ag_ready_kernel(void *const *__restrict__ peers, size_t offset,
                      const char *__restrict__ local, size_t stride, uint64_t value,
@@ -253,6 +278,13 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     const int k_iters = K / K_STEP;
     int scale_K = K / 32;
 
+    // The scale region is sized in CommOverlapP2PBase::initialize; bail out rather than read
+    // garbage if its chunking ever disagrees with this kernel's view of the operand.
+    if (args.scale_chunk_bytes &&
+        args.scale_chunk_bytes != static_cast<size_t>(m_local) * static_cast<size_t>(scale_K)) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(g_mu);
 
     const PlanKey key{0, M, N_TOTAL, K, tp_size, args.rank, 1};
@@ -291,8 +323,7 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
-    // pack mxfp8 scales
-    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+    // Weight scales are rank-local, so pack them now and let them overlap the gather below.
     launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
@@ -317,6 +348,19 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
             args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
+
+    // Activation scales live in the userbuffer, so they have to be gathered before they can be
+    // packed -- and only after ag_ready_kernel, which is what guarantees that the peers finished
+    // writing their own chunks.
+    if (args.scale_chunk_bytes) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
+        gather_scales_naive<<<dim3(64, tp_size), 256, 0, args.stream>>>(
+            static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
+            args.scale_chunk_bytes);
+    }
+
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
 
     get_persistent_fn(M, N_TOTAL, K)(
         M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),

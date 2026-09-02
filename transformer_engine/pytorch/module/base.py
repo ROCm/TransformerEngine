@@ -801,16 +801,23 @@ def fill_userbuffers_buffer_for_all_gather(
             else local_tensor._columnwise_scale_inv
         )
         local_scale_inv_size = list(local_scale_inv.size())
-        global_scale_inv = torch.empty(
-            [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
-            dtype=local_scale_inv.dtype,
-            device=local_scale_inv.device,
-        )
-        torch.distributed.all_gather_into_tensor(
-            global_scale_inv,
-            local_scale_inv,
-            group=process_group,
-        )
+        global_scale_inv_shape = [
+            process_group_size * local_scale_inv_size[0]
+        ] + local_scale_inv_size[1:]
+        if isinstance(comm, tex.CommOverlapP2P) and comm.has_scale_buffer():
+            # Scales live in the Userbuffers allocation; the fused kernel gathers them
+            # alongside the data, so no separate collective is needed here.
+            comm.copy_scales_into_buffer(local_scale_inv, local_chunk=True)
+            global_scale_inv = comm.get_scale_buffer(shape=global_scale_inv_shape)
+        else:
+            global_scale_inv = torch.empty(
+                global_scale_inv_shape,
+                dtype=local_scale_inv.dtype,
+                device=local_scale_inv.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                global_scale_inv, local_scale_inv, group=process_group
+            )
 
         # Construct MXFP8 tensor with Userbuffers buffer
         rowwise_data, rowwise_scale_inv = None, None

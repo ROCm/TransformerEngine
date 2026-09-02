@@ -821,18 +821,29 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
-  size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
-  int buffer_chunk_bytes = buffer_bytes / _tp_size;
+  size_t data_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
+
+  const bool mxfp8_ag_scales = _fused && buffer_dtype == DType::kByte && comm_type == CommOverlapType::AG
+                                &&  transformer_engine::getenv<bool>("NVTE_UB_MXFP8_SCALES", false);
+
+  int buffer_chunk_bytes = data_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
   if (_is_reduce_scatter) {
     // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
     // outputs for reduction at the end of the pipelining.
-    buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
+    data_bytes = data_bytes / _tp_size * (_tp_size * 2 - 1);
     _num_ubuf_chunks = _tp_size * 2 - 1;
   }
 
+  size_t alloc_bytes = data_bytes;
+  if (mxfp8_ag_scales) {
+    _scale_chunk_bytes = buffer_chunk_bytes / 32;
+    _scale_base_offset = data_bytes;
+    alloc_bytes += _scale_chunk_bytes * _tp_size;
+  }
+
   void *buffer_ptr;
-  _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
+  _ub_reg = register_user_buffer_collective(&buffer_ptr, alloc_bytes, _ub_comm, true);
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,
