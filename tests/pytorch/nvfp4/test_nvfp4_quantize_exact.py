@@ -89,6 +89,10 @@ def maybe_skip_row_scaled_unsupported_quantization(
     if not row_scaled_nvfp4:
         return
     if return_transpose:
+        if IS_HIP_EXTENSION:
+            pytest.skip(
+                "Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR)."
+            )
         if use_4over6:
             pytest.skip("Row-scaled NVFP4 transpose does not support 4over6 mode")
         if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:

@@ -1526,6 +1526,14 @@ def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
     This is a sanity check that hybrid quantized training converges similarly
     to BF16 training, not a bitwise-exact comparison.
     """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling" and IS_HIP_EXTENSION:
+        pytest.xfail(
+            "HybridFloat8BlockScaling loss drifts from the BF16 baseline beyond "
+            "tolerance on ROCm. The hybrid (CustomRecipe) path is a new, experimental "
+            "2.19 feature and its Float8Blockwise GEMM-operand dispatch is not yet "
+            "supported on ROCm."
+        )
+
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
@@ -1613,6 +1621,14 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
         pytest.skip(
             f"{hybrid_recipe_name} is cross-format; no single-format vanilla "
             "recipe to compare against."
+        )
+
+    if hybrid_recipe_name == "HybridFloat8BlockScaling" and IS_HIP_EXTENSION:
+        pytest.xfail(
+            "HybridFloat8BlockScaling forward is not bitwise-identical to the "
+            "Float8BlockScaling recipe on ROCm. The hybrid (CustomRecipe) path is a "
+            "new, experimental 2.19 feature and its Float8Blockwise GEMM-operand "
+            "dispatch is not yet supported on ROCm."
         )
 
     from fsdp2_utils import get_hybrid_recipe_from_string

@@ -68,7 +68,10 @@ _quantization_params = [
     ),
     pytest.param(
         "fp8_current_scaling",
-        marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+        marks=pytest.mark.skipif(
+            not fp8_current_scaling_grouped_available,
+            reason=reason_for_no_fp8_current_scaling_grouped,
+        ),
     ),
     pytest.param(
         "fp8_blockwise",
@@ -826,7 +829,10 @@ class TestGroupedTensor:
         [
             pytest.param(
                 "fp8_current_scaling",
-                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+                marks=pytest.mark.skipif(
+                    not fp8_current_scaling_grouped_available,
+                    reason=reason_for_no_fp8_current_scaling_grouped,
+                ),
             ),
             pytest.param(
                 "fp8_blockwise",

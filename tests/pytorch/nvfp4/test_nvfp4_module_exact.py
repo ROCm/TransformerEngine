@@ -1,9 +1,11 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.custom_recipes import reference_nvfp4
@@ -456,6 +458,8 @@ def test_nvfp4_linear_row_scaled_versus_reference(
     new transpose path through the wgrad GEMM. Compared against the dequantized
     reference quantizer by relative norm (both share the same 4-bit error).
     """
+    if IS_HIP_EXTENSION:
+        pytest.skip("Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR).")
     check_nvfp4_module_versus_reference(
         module_class=te.Linear,
         in_features=in_features,

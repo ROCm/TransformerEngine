@@ -1287,7 +1287,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 @pytest.mark.parametrize("pad_between_seqs", [True, False])
 def test_dpa_qkv_layout_thd(
-    dtype, model_configs, model, qkv_layout, pad_between_seqs=True, declarative_packed=False
+    dtype, model_configs, model, qkv_layout, pad_between_seqs, declarative_packed=False
 ):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
@@ -1352,7 +1352,9 @@ qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd_packed)
 def test_dpa_qkv_layout_thd_declarative(dtype, model_configs, model, qkv_layout):
     """Declarative packed thd inputs, see test_dpa_qkv_layout_declarative."""
-    test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=True)
+    test_dpa_qkv_layout_thd(
+        dtype, model_configs, model, qkv_layout, pad_between_seqs=True, declarative_packed=True
+    )
 
 
 def _run_dot_product_attention(

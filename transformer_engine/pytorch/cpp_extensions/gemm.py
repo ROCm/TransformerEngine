@@ -390,6 +390,16 @@ def _unwrap_tensor(
     if is_custom(tensor):
         return tensor
 
+    # ROCm: MXFP4 inputs are dispatched to the AITER a4w4 GEMM path in
+    # general_gemm. They have no cuBLAS/hipBLASLt native GEMM support and
+    # cannot be dequantized from packed FP4, so preserve the storage here
+    # instead of falling through to dequantize() (which raises).
+    if IS_HIP_EXTENSION:
+        from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+
+        if isinstance(tensor, MXFP4TensorStorage):
+            return tensor
+
     # Quantized tensor formats with native GEMM support
     if isinstance(tensor, _NATIVE_GEMM_INPUT_STORAGES):
         return tensor

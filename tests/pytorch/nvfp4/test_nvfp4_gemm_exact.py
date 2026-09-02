@@ -469,6 +469,8 @@ def test_nvfp4_bilateral_row_scaled_gemm_matches_dequantized(
     b_shape: tuple[int, int],
 ) -> None:
     """Check per-tensor GEMM plus bilateral FP32 post-scaling."""
+    if IS_HIP_EXTENSION:
+        pytest.skip("Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR).")
     torch.manual_seed(41)
     quantizer = NVFP4Quantizer(
         fp4_dtype=te.DType.kFloat4E2M1,

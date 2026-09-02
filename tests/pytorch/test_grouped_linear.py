@@ -440,6 +440,8 @@ def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias
     match a stack of independent dense ``Linear`` layers bit-for-bit, since both
     execute the exact same per-expert quantize + GEMM kernels.
     """
+    if IS_HIP_EXTENSION:
+        pytest.skip("Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR).")
     recipe_row_scaled = nvfp4_row_scaled_quantized_backward()
     config = model_configs[model]
     if dtype not in get_nvfp4_inp_supported_dtypes(recipe_row_scaled, dtype):
@@ -3051,6 +3053,15 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
 
 def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
     """Delayed wgrad reports when a grouped-tensor request used the legacy path."""
+    if IS_HIP_EXTENSION:
+        # This is a CUDA-only negative test. On ROCm the GroupedTensor path is
+        # unsupported, so GroupedLinear.__init__ force-downgrades
+        # use_grouped_tensor=True to False; self.use_grouped_tensor is therefore
+        # always False and the implicit-fallback guard this test asserts (raised
+        # under `if self.use_grouped_tensor`) is structurally unreachable, so the
+        # expected RuntimeError never fires. Matches the ROCm skip on the sibling
+        # test_grouped_linear_fused_path_cuda_graph_safe.
+        pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_module_grouped_tensor_path_supported",
         lambda *_args, **_kwargs: False,
