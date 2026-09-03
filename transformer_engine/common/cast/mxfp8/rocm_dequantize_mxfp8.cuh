@@ -24,12 +24,22 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
 static_assert(ITERATIONS >= 1);
 
-template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    dequantize_mxfp8_kernel(const IType *input_ptr,
-                            OType *output_ptr,
-                            const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
-                            const size_t scales_stride) {
+// MX pre-swizzle inverse index (matches swizzle_scaling_factors_mx in swizzle.cu):
+//   dst = (j / 4) * (padded_dim * 4) + i * 4 + (j % 4)
+// The grouped-by-4 dimension is j; the contiguous dimension is i.
+__device__ __forceinline__ size_t mx_preswizzle_scale_idx(size_t i, size_t j, size_t padded_dim) {
+  constexpr size_t GROUP = 4;  // MX_PRESWIZZLE_GROUP_SIZE
+  return (j / GROUP) * (padded_dim * GROUP) + i * GROUP + (j % GROUP);
+}
+
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED,
+          bool WITH_GEMM_SWIZZLED_SCALES>
+__device__ __forceinline__ void
+    dequantize_mxfp8_chunk(const IType *input_ptr,
+                           OType *output_ptr,
+                           const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
+                           const size_t scales_stride, const size_t mx_swizzle_padded_dim,
+                           const int block_id_Y, const int block_id_X) {
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
 
@@ -43,13 +53,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
   constexpr size_t VECTOR_WIDTH = IS_ALIGNED ? 8 : 16;
 
-  const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-  const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
+  const int chunk_offset_Y = block_id_Y * CHUNK_DIM_Y;
+  const int chunk_offset_X = block_id_X * CHUNK_DIM_X;
 
-  const int scales_rowwise_chunk_offset_Y = blockIdx.y * SCALES_ROWWISE_PER_CHUNK_Y;
-  const int scales_rowwise_chunk_offset_X = blockIdx.x * SCALES_ROWWISE_PER_CHUNK_X;
-  const int scales_colwise_chunk_offset_Y = blockIdx.y * SCALES_COLWISE_PER_CHUNK_Y;
-  const int scales_colwise_chunk_offset_X = blockIdx.x * SCALES_COLWISE_PER_CHUNK_X;
+  const int scales_rowwise_chunk_offset_Y = block_id_Y * SCALES_ROWWISE_PER_CHUNK_Y;
+  const int scales_rowwise_chunk_offset_X = block_id_X * SCALES_ROWWISE_PER_CHUNK_X;
+  const int scales_colwise_chunk_offset_Y = block_id_Y * SCALES_COLWISE_PER_CHUNK_Y;
+  const int scales_colwise_chunk_offset_X = block_id_X * SCALES_COLWISE_PER_CHUNK_X;
 
   const int tid_rowwise_Y = threadIdx.x / THREADS_PER_CHUNK_X_ROWWISE;
   const int tid_rowwise_X = threadIdx.x % THREADS_PER_CHUNK_X_ROWWISE;
@@ -88,7 +98,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     e8m0_t biased_exponent = static_cast<e8m0_t>(127);
     if (static_cast<size_t>(scale_offset_Y) < scales_rows &&
       static_cast<size_t>(scale_offset_X) < scales_cols) {
-      const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+      size_t scale_idx;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        scale_idx = USE_ROWWISE_SCALING
+                        ? mx_preswizzle_scale_idx(scale_offset_Y, scale_offset_X,
+                                                  mx_swizzle_padded_dim)
+                        : mx_preswizzle_scale_idx(scale_offset_X, scale_offset_Y,
+                                                  mx_swizzle_padded_dim);
+      } else {
+        scale_idx = static_cast<size_t>(scale_offset_Y) * scales_stride + scale_offset_X;
+      }
       biased_exponent = scales_ptr[scale_idx];
     }
     const float block_scale = ptx::exp2f(biased_exponent);
@@ -140,5 +159,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     __syncthreads();
   }
+}
+
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED,
+          bool WITH_GEMM_SWIZZLED_SCALES>
+__global__ void __launch_bounds__(THREADS_PER_CHUNK)
+    dequantize_mxfp8_kernel(const IType *input_ptr,
+                            OType *output_ptr,
+                            const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
+                            const size_t scales_stride, const size_t mx_swizzle_padded_dim) {
+  dequantize_mxfp8_chunk<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                         WITH_GEMM_SWIZZLED_SCALES>(input_ptr, output_ptr, scales_ptr, rows, cols,
+                                                    scales_stride, mx_swizzle_padded_dim,
+                                                    blockIdx.y, blockIdx.x);
 }
 
