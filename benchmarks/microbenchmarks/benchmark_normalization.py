@@ -24,13 +24,14 @@ These are memory-bound; we report GB/s (input read + output write).
 Output: benchmark_normalization.csv (written to cwd)
 """
 
+import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import ops
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     build_recipes,
-    time_func, compute_gbps, make_metric_record, run_benchmarks,
+    apply_backend_env, time_func, compute_gbps, make_metric_record,
     make_input,
 )
 
@@ -61,28 +62,47 @@ _FWD_WRITE_BYTES = {
 }
 
 
-def _generate_test_cases():
-    test_cases = []
+# Backend axis (None unsets, so "default" is the native path even if the ambient
+# env has a toggle set). "triton" flips the Triton RMSNorm/LayerNorm kernel (each
+# NormType reads only its own toggle).
+NORM_BACKENDS = {
+    "default": {"NVTE_USE_RMSNORM_TRITON": None, "NVTE_USE_LAYERNORM_TRITON": None},
+    "triton": {"NVTE_USE_RMSNORM_TRITON": "1", "NVTE_USE_LAYERNORM_TRITON": "1"},
+}
+
+_NORM_CLS = {name: cls for name, cls in NORM_TYPES}
+
+
+def generate_cases():
+    """Cross models x norm type x precision x backend x M (forward only)."""
+    cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
-        for norm_name, norm_op_cls in NORM_TYPES:
+        for norm_name in _NORM_CLS:
             for precision in RECIPES:
-                for M in M_SIZE_LIST:
-                    test_cases.append({
-                        "Case": f"{model_name}/{norm_name}",
-                        "Precision": precision,
-                        "M": M,
-                        "hidden_size": hidden,
-                        "norm_op_cls": norm_op_cls,
-                        "dtype": torch.bfloat16,
-                    })
-    return test_cases
+                for backend in NORM_BACKENDS:
+                    for M in M_SIZE_LIST:
+                        cases.append({
+                            "Case": model_name,
+                            "NormType": norm_name,
+                            "Precision": precision,
+                            "Backend": backend,
+                            "M": M,
+                            "hidden_size": hidden,
+                        })
+    return cases
 
 
-def bench_norm(Case, Precision, M, hidden_size, norm_op_cls, dtype):
+def _case_id(c):
+    return f"{c['Case']}-{c['NormType']}-{c['Precision']}-{c['Backend']}-M{c['M']}"
+
+
+def bench_norm(NormType, Precision, M, hidden_size):
     device = "cuda"
+    dtype = torch.bfloat16
 
     recipe = RECIPES[Precision]
     use_fp8 = recipe is not None
+    norm_op_cls = _NORM_CLS[NormType]
 
     # Norm followed by Quantize so the norm writes its output directly in the
     # target precision under autocast (identity when use_fp8 is False).
@@ -102,16 +122,28 @@ def bench_norm(Case, Precision, M, hidden_size, norm_op_cls, dtype):
     fwd_bytes = int(M * hidden_size * (2 + _FWD_WRITE_BYTES[Precision]))
 
     fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
-
     return [make_metric_record(
-        BENCHMARK_LABEL, fwd_ms, "GB/s", fwd_gbps, measurement=fwd_measurement,
+        BENCHMARK_LABEL, fwd_ms, "GB/s", compute_gbps(fwd_bytes, fwd_ms),
+        measurement=fwd_measurement,
     )]
 
 
-if __name__ == "__main__":
-    run_benchmarks(
-        test_cases=_generate_test_cases(),
-        bench_fn=bench_norm,
-        param_columns=["Case", "Precision", "M", "hidden_size", "dtype"],
+def pytest_generate_tests(metafunc):
+    if "case" in metafunc.fixturenames:
+        cases = generate_cases()
+        metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
+
+
+@pytest.mark.benchmark
+def test_norm(microbench, case, monkeypatch):
+    apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
+    microbench.run(
+        case,
+        lambda: bench_norm(case["NormType"], case["Precision"], case["M"], case["hidden_size"]),
     )
+
+
+if __name__ == "__main__":
+    import sys
+    # Make the file runnable directly: python benchmark_normalization.py [--csv -k ...].
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

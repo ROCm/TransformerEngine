@@ -4,22 +4,30 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Dense GEMM micro-benchmark using te.Linear across precisions.
+"""Dense GEMM micro-benchmark using te.Linear across precisions and backends.
 
-Sweeps the shared model GEMM shapes over BF16 (the high-precision baseline)
-plus every supported low-precision recipe (FP8, MXFP8, MXFP4, NVFP4) via
-te.autocast. Precisions whose hardware/runtime support is unavailable on the
-current device are skipped automatically.
+Runs under pytest (see conftest.py). Sweeps the shared model GEMM shapes over
+BF16 (the high-precision baseline) plus every supported low-precision recipe
+(FP8, MXFP8, MXFP4, NVFP4) via te.autocast, crossed with a selectable kernel
+Backend. Precisions whose hardware/runtime support is unavailable on the current
+device are skipped automatically.
 
-Output: benchmark_gemm.csv (written to cwd)
+Examples::
+
+    pytest benchmark_gemm.py --csv                 # -> benchmark_gemm.csv
+    pytest benchmark_gemm.py -k "bf16 and QKV"     # select shapes/precisions
+    pytest benchmark_gemm.py -k triton             # select the triton backend
+
+Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """
 
+import pytest
 import torch
 import transformer_engine.pytorch as te
 from utils import (
     build_recipes,
     generate_gemm_test_cases,
-    time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
+    apply_backend_env, compute_tflops, direction_records,
     make_input,
 )
 
@@ -27,17 +35,56 @@ BENCHMARK_LABEL = "GEMM"
 
 RECIPES = build_recipes()
 
+# Env recipes to force a dense-GEMM kernel backend (None unsets the var). Per the
+# C++ dispatch: bf16 defaults to hipBLASLt, forced to Triton via NVTE_USE_GEMM_TRITON;
+# mxfp8 defaults to HipKittens, forced to hipBLASLt via NVTE_ROCM_USE_HIPBLASLT_MXFP8
+# (rocm_gemm.cu). fp8 has a single backend.
+_GEMM_TRITON = "NVTE_USE_GEMM_TRITON"
+_HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 
-def generate_precision_gemm_test_cases():
-    """Cross the shared dense GEMM shapes with each supported precision."""
-    test_cases = []
-    for base_case in generate_gemm_test_cases():
+GEMM_BACKENDS = {
+    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1"},
+    "triton":     {_GEMM_TRITON: "1", _HIPBLASLT_MXFP8: None},
+    "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None},
+}
+
+# Backends with a real choice per precision (the supported-backends table).
+_BACKENDS_BY_PRECISION = {
+    "bf16": ["hipblaslt", "triton"],
+    "fp8": ["hipblaslt"],
+    "mxfp8": ["hipblaslt", "hipkittens"],
+}
+
+
+def _backends_for(precision):
+    return _BACKENDS_BY_PRECISION.get(precision, ["hipblaslt"])
+
+
+def generate_cases():
+    """Cross the shared dense GEMM shapes with each precision, backend, direction."""
+    cases = []
+    for base in generate_gemm_test_cases():
         for precision in RECIPES:
-            test_cases.append({**base_case, "Precision": precision})
-    return test_cases
+            for backend in _backends_for(precision):
+                for direction in ("fwd", "bwd"):
+                    cases.append({
+                        "Case": base["Case"],
+                        "Precision": precision,
+                        "Backend": backend,
+                        "Direction": direction,
+                        "M": base["M"],
+                        "N": base["N"],
+                        "K": base["K"],
+                        "dtype": base["dtype"],
+                    })
+    return cases
 
 
-def bench_gemm(Case, Precision, M, N, K, dtype):
+def _case_id(c):
+    return f"{c['Case']}-{c['Precision']}-{c['Backend']}-{c['Direction']}-M{c['M']}"
+
+
+def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
     device = "cuda"
 
     recipe = RECIPES[Precision]
@@ -56,39 +103,41 @@ def bench_gemm(Case, Precision, M, N, K, dtype):
     def fwd_bwd_func():
         xb = next_x()
         with te.autocast(enabled=use_fp8, recipe=recipe):
-            out = linear(xb)
-            out.backward(grad_out)
+            o = linear(xb)
+            o.backward(grad_out)
         xb.grad = None
         linear.weight.grad = None
 
-    fwd_bwd_func()
-
     fwd_flops = 2 * M * N * K
-    bwd_flops = 2 * fwd_flops  # dX + dW
+    return direction_records(
+        Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
+        fwd_func, fwd_bwd_func, fwd_flops, 2 * fwd_flops,
+    )
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
-    bwd_ms = fwd_bwd_ms - fwd_ms
 
-    fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
-    bwd_tflops = compute_tflops(bwd_flops, bwd_ms)
+def pytest_generate_tests(metafunc):
+    if "case" in metafunc.fixturenames:
+        cases = generate_cases()
+        metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
 
-    return make_forward_backward_metric_records(
-        BENCHMARK_LABEL,
-        "TFLOPS",
-        fwd_ms,
-        fwd_tflops,
-        bwd_ms,
-        bwd_tflops,
-        backward_derived=True,
-        fwd_measurement=fwd_measurement,
-        fwd_bwd_measurement=fwd_bwd_measurement,
+
+@pytest.mark.benchmark
+def test_gemm(microbench, case, monkeypatch):
+    if case["Precision"] == "mxfp4" and any(
+        dim % 32 for dim in (case["M"], case["N"], case["K"])
+    ):
+        pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
+    apply_backend_env(monkeypatch, GEMM_BACKENDS[case["Backend"]])
+    microbench.run(
+        case,
+        lambda: bench_gemm(
+            case["Case"], case["Precision"], case["Direction"],
+            case["M"], case["N"], case["K"], case["dtype"],
+        ),
     )
 
 
 if __name__ == "__main__":
-    run_benchmarks(
-        test_cases=generate_precision_gemm_test_cases(),
-        bench_fn=bench_gemm,
-        param_columns=["Case", "Precision", "M", "N", "K", "dtype"],
-    )
+    import sys
+    # Make the file runnable directly: python benchmark_gemm.py [--csv -k ...].
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
