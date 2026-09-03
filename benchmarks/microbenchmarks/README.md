@@ -97,3 +97,64 @@ python compare_results.py baseline.csv candidate.csv --bench-name GEMM
 
 The script auto-detects metric columns, computes speedups for overlapping rows,
 and reports rows that exist only in the baseline or only in the candidate.
+
+## Visualizing results
+
+`visualize.py` turns the produced CSVs into interactive
+[Plotly](https://plotly.com/python/) charts and writes a single, self-contained
+HTML file (no server needed — convenient over SSH or as a PR attachment).
+`dashboard.py` is a live [Panel](https://panel.holoviz.org/) companion for
+ad-hoc exploration. Install the extra dependencies first:
+
+```bash
+pip install -r requirements-viz.txt
+```
+
+Both consume the aggregate (`--csv`) and per-sample (`--csv-samples`) CSVs and
+auto-detect which format they were given. Parameter columns are detected
+generically, so every benchmark in this directory is supported (dense GEMM,
+FP8 GEMM, grouped GEMM, normalization, casting). When a benchmark has a
+dimension the default axes don't show — e.g. grouped GEMM's expert count `B` —
+the tool prints a `[note]` that medians are pooling across it; add `--color`,
+`--facet`, or `--pass` (or use a dashboard filter) to separate the series.
+
+### Static HTML report
+
+```bash
+# All applicable views for one CSV -> benchmark_gemm_samples.html
+python visualize.py benchmark_gemm_samples.csv
+
+# A single view, choosing the metric
+python visualize.py benchmark_gemm_samples.csv --kind scaling --value throughput
+
+# Baseline vs candidate speedup (visual complement to compare_results.py)
+python visualize.py bench_gemm_candidate.csv --baseline benchmark_gemm_samples.csv
+```
+
+Plot kinds (`--kind`, default `report` = all applicable):
+
+- `distribution`: box plus every raw sample point per group, with percentile
+  trimming (`--trim-upper` / `--trim-lower`). The honest distribution view for
+  the suite's small (~12) sample counts, where a violin/KDE would over-smooth.
+  Requires a samples CSV.
+- `scaling`: median throughput (or time) vs token count `M` per case, with a
+  shaded min–max band.
+- `bars`: grouped median-throughput bars per case with IQR error bars.
+- `comparison`: baseline-vs-candidate speedup bars, one per benchmark group
+  (needs `--baseline`).
+
+Axes default sensibly per kind and can be overridden with `--x`, `--color`,
+`--facet`, `--pass`, and `--value`. Pass `--cdn` to load plotly.js from a CDN
+instead of inlining it (much smaller file, needs internet to open).
+
+### Interactive dashboard
+
+```bash
+panel serve dashboard.py --show --args benchmark_gemm_samples.csv
+```
+
+The CSV path may also be set via the `BENCH_CSV` environment variable. The
+sidebar exposes the plot kind, metric, independent variable, hue, facet, a
+percentile-trim slider, and a per-attribute filter for every parameter column.
+Figure builders are shared with `visualize.py`, so the static and interactive
+views stay in sync.
