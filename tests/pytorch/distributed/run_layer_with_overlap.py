@@ -234,6 +234,24 @@ def _parse_args(argv=None, namespace=None):
         help="Number of iterations for benchmarking perf.",
     )
     parser.add_argument(
+        "--emit-csv",
+        type=str,
+        default=None,
+        help="Append a summary-statistics row (median/mean/stdev/min/max) to this CSV.",
+    )
+    parser.add_argument(
+        "--emit-samples",
+        type=str,
+        default=None,
+        help="Append one row per timing iteration to this CSV (like the microbenchmark --csv-samples).",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Label recorded in the emitted CSV rows (defaults to the layer type).",
+    )
+    parser.add_argument(
         "--linear-parallel-mode",
         type=str.lower,
         default="row",
@@ -629,13 +647,43 @@ def _train(opts):
                 test_graph.replay()
             else:
                 test_out = run_fwd_bwd(test_model, test_x)
+        # Per-iteration CUDA events so we can report a distribution, not just a mean.
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(opts.benchmark_iter)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(opts.benchmark_iter)]
+        torch.cuda.synchronize()
         torch.cuda.cudart().cudaProfilerStart()
-        for _ in range(opts.benchmark_iter):
+        for i in range(opts.benchmark_iter):
+            starts[i].record()
             if opts.use_cuda_graphs:
                 test_graph.replay()
             else:
                 test_out = run_fwd_bwd(test_model, test_x)
+            ends[i].record()
         torch.cuda.cudart().cudaProfilerStop()
+        torch.cuda.synchronize()
+        gpu_times = [s.elapsed_time(e) for s, e in zip(starts, ends)]
+        if (opts.emit_csv or opts.emit_samples) and WORLD_RANK == 0:
+            import overlap_bench_emit as emit
+
+            hidden = opts.num_heads * opts.head_dim
+            variant = opts.variant or opts.layer_type.__name__.lower()
+            params = {
+                "M": opts.seq_length * opts.batch_size,
+                "N": hidden,
+                "K": 4 * hidden,
+                "tp": opts.tp,
+                "dtype": opts.quantization if opts.fp8 else "bf16",
+            }
+            if opts.emit_csv:
+                emit.emit_summary(
+                    opts.emit_csv, benchmark="layer_overlap", variant=variant,
+                    params=params, times_ms=gpu_times,
+                )
+            if opts.emit_samples:
+                emit.emit_samples(
+                    opts.emit_samples, benchmark="layer_overlap", variant=variant,
+                    times_ms=gpu_times,
+                )
         if opts.use_cuda_graphs:
             del test_graph
 
