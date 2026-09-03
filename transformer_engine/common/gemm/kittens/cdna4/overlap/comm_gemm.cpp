@@ -41,8 +41,6 @@ inline FusedRsLayout fused_rs_layout(size_t shard_bytes, int tp_size) {
 }
 
 
-// 90 D3. The fill pattern here and the compare constant in the device object must not drift apart;
-// a stale build fails silently, with every slot reading as already-arrived.
 bool sentinel_pattern_agrees() {
     static_assert(static_cast<unsigned int>(RS_SENT_BF16) * 0x00010001u == RS_SENT_DW,
                   "90 D3: the 16-bit fill pattern and the 32-bit compare pattern disagree.");
@@ -470,19 +468,15 @@ struct RsPlan {
 
 std::map<PlanKey, RsPlan> g_rs_plans;
 
-int rs_comm_wg_tn(int tokens, int hidden, int k_local, int tp_size) {
-    if (tp_size != 8) return COMM_WG;
-    if (hidden == 16384 && k_local == 6656 &&
-        (tokens == 16384 || tokens == 32768 || tokens == 65536)) {
-        return 4;
-    }
-    if (hidden == 8192 && k_local == 1024 && (tokens == 32768 || tokens == 65536)) {
-        return 12;
-    }
-    if (hidden == 4096 && k_local == 512) {
-        if (tokens == 65536) return 16;
-        if (tokens == 32768) return 12;
-    }
+std::map<const void *, uint64_t> g_rs_epoch;
+
+int rs_comm_wg_tn(int tokens, int hidden, int k_local) {
+    const int tiles = (tokens / hk_rs_tn::BLOCK_ROW) * (hidden / hk_rs_tn::BLOCK_COL);
+    const int waves = tiles / hk_rs_tn::GRID_CAP;
+    if (waves < 8) return COMM_WG;
+    if (k_local >= 4096) return waves >= 16 ? 4 : COMM_WG;
+    if (k_local <= 768) return waves >= 16 ? 16 : 12;
+    if (k_local <= 1536) return waves >= 16 ? 12 : COMM_WG;
     return COMM_WG;
 }
 
@@ -530,18 +524,20 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
 
     const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
 
+    const size_t stage_off = (g_rs_epoch[args.ub]++ & 1ull) ? lay.recv_off : 0;
+
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
     if (!bases) return false;
     RsPeers peers{};
     for (int c = 0; c < tp_size; c++) {
         char *pb = static_cast<char *>((*bases)[(args.peer_first + c) % args.peer_count]);
-        peers.stage[c]  = reinterpret_cast<bf16 *>(pb);
+        peers.stage[c]  = reinterpret_cast<bf16 *>(pb + stage_off);
         peers.recv[c]   = reinterpret_cast<bf16 *>(pb + lay.recv_off);
         peers.arrive[c] = reinterpret_cast<unsigned int *>(pb + lay.arrive_off);
         peers.ready[c]  = reinterpret_cast<unsigned int *>(pb + lay.ready_off);
     }
     char *lb = static_cast<char *>(args.ub);
-    peers.stage[args.rank]  = reinterpret_cast<bf16 *>(lb);
+    peers.stage[args.rank]  = reinterpret_cast<bf16 *>(lb + stage_off);
     peers.recv[args.rank]   = reinterpret_cast<bf16 *>(lb + lay.recv_off);
     peers.arrive[args.rank] = reinterpret_cast<unsigned int *>(lb + lay.arrive_off);
     peers.ready[args.rank]  = reinterpret_cast<unsigned int *>(lb + lay.ready_off);
@@ -559,16 +555,13 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
         return false;
     }
 
-    // Arms the arrival sentinel: the only edge ordering a comm workgroup's read of a peer's stage
-    // against that peer's epilogue store. Must precede the rendezvous below.
+    // Arms the sentinel: the only edge ordering a peer's stage read against its epilogue store.
     if (!sentinel_pattern_agrees()) return false;
-    if (hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_BF16,
-                          lay.stage_bytes / sizeof(bf16), args.stream) != hipSuccess) {
+    if (hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_DW,
+                          lay.stage_bytes / sizeof(unsigned int), args.stream) != hipSuccess) {
         return false;
     }
 
-    // Mandatory here, unlike the ag paths: it is what quiesces every rank's fill before any rank
-    // reads, so without it the fill above orders nothing.
     if (!args.arrive_peers || !args.arrive_local) return false;
     ag_ready_kernel<<<1, 64, 0, args.stream>>>(
         static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
@@ -576,7 +569,7 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
         args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
 
     RsLaunchCfg cfg;
-    cfg.comm_wg   = rs_comm_wg_tn(M, N_TOTAL, K, tp_size);
+    cfg.comm_wg   = rs_comm_wg_tn(M, N_TOTAL, K);
     cfg.xcd_bucket = plan.xcd_bucket;
 
     launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.A)),
@@ -636,6 +629,7 @@ void kittens_persistent_plans_reset_cdna4() {
     }
     g_plans.clear();
     g_rs_plans.clear();
+    g_rs_epoch.clear();
     g_peers.clear();
 }
 

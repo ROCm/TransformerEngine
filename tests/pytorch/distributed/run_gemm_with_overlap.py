@@ -63,6 +63,9 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
+    parser.add_argument(
+        "--ffn-hidden-size", type=int, default=0, help="MLP intermediate size; 0 means 4x hidden."
+    )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--quantization",
@@ -425,7 +428,7 @@ def _main(opts):
     # K = MLP intermediate size (usually 4x hidden size)
     # P = number of devices for sequence/tensor parallelism
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
-    ffn_hidden_size = 4 * hidden_size
+    ffn_hidden_size = opts.ffn_hidden_size if opts.ffn_hidden_size > 0 else 4 * hidden_size
     if opts.bulk_overlap:
         # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)

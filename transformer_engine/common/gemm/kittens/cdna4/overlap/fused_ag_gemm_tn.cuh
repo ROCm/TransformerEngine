@@ -26,8 +26,6 @@ using namespace kittens;
 
 constexpr int SCHED_ROUNDS = 2;
 
-using G_group = kittens::group<NUM_WARPS>;
-
 
 // Per-PE pointer to each peer's [M,K] A buffer.
 struct PeerPtrs {
@@ -150,47 +148,7 @@ void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
     const int N_TOTAL = B.rows();
     const int k_tiles = K / K_STEP;
 
-    using ST_A = st_bf<HALF_ROW, K_STEP, st_16x32_s>;
-    using ST_B = st_bf<HALF_COL, K_STEP, st_16x32_s>;
-    using RT_A = rt_bf<REG_M, K_STEP, row_l, rt_16x32_s>;
-    using RT_B = rt_bf<REG_N, K_STEP, row_l, rt_16x32_s>;
-    using RT_C = rt_fl<REG_M, REG_N, col_l, rt_16x16_s>;
-
-    __shared__ ST_A As[2][2];
-    __shared__ ST_B Bs[2][2];
-
-    const int warp_m = warpid() / WARPS_COL;
-    const int warp_n = warpid() % WARPS_COL;
-    const int wid    = warpid() % NUM_WARPS;
-
-    using T = bf16;
-    constexpr int bpt      = ST_A::underlying_subtile_bytes_per_thread;
-    constexpr int bpm      = bpt * NUM_THREADS;
-    constexpr int copies_A = HALF_ROW * K_STEP * sizeof(T) / bpm;
-    constexpr int copies_B = HALF_COL * K_STEP * sizeof(T) / bpm;
-
-    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
-    const uintptr_t lds_warp_off = wid * elem_per_warp * sizeof(T);
-
-    uint32_t a_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + lds_warp_off));
-    uint32_t a_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][1].data[0]) + lds_warp_off));
-    uint32_t a_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][0].data[0]) + lds_warp_off));
-    uint32_t a_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][1].data[0]) + lds_warp_off));
-    uint32_t b_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + lds_warp_off));
-    uint32_t b_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][1].data[0]) + lds_warp_off));
-    uint32_t b_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][0].data[0]) + lds_warp_off));
-    uint32_t b_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][1].data[0]) + lds_warp_off));
-
-    uint32_t sw_A[copies_A], sw_B[copies_B];
-    G_group::prefill_swizzled_offsets(As[0][0], A, sw_A);
-    G_group::prefill_swizzled_offsets(Bs[0][0], B, sw_B);
-
-    const T *a_base        = (const T *)&A[{0, 0, 0, 0}];
-    const int a_row_stride = A.template stride<2>() * sizeof(T);
-    const int b_row_stride = B.template stride<2>() * sizeof(T);
-    i32x4 a_srd            = make_srsrc(a_base, (size_t)M * a_row_stride, a_row_stride);
-    const T *b_base        = (const T *)&B[{0, 0, 0, 0}];
-    i32x4 b_srd            = make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
+#include "tn_prologue.inc"
     bf16 *c_base           = (bf16 *)&C[{0, 0, 0, 0}];
 
     const int NGATH = (tp_size - 1) * gath_wg;
@@ -205,24 +163,7 @@ void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-                // Steal order: Own bucket, then the local chunk, then the other XCDs.
-                int found = -1;
-                const int b0 = (int)blockIdx.x % NUM_XCDS_AFF;
-                for (int s = 0; s <= NUM_XCDS_AFF; s++) {
-                    int bb;
-                    if      (s == 0) bb = b0;
-                    else if (s == 1) bb = my_pe;
-                    else             bb = (b0 + s - 1) & (NUM_XCDS_AFF - 1);
-                    if (buckets.cnt[bb] == 0) continue;
-                    if (__hip_atomic_load(&bucket_ctr[bb], __ATOMIC_RELAXED,
-                                          __HIP_MEMORY_SCOPE_AGENT) >= buckets.cnt[bb]) continue;
-                    const int idx = atomicAdd(&bucket_ctr[bb], 1);
-                    if (idx < buckets.cnt[bb]) {
-                        found = buckets.off[bb] + idx;
-                        break;
-                    }
-                }
-                s_tile_idx = (found < 0) ? num_tiles : found;
+#include "xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -277,185 +218,7 @@ void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
         __builtin_amdgcn_s_barrier();
 
 #pragma unroll 1
-        for (int tile = 0; tile < k_tiles - 2; tile += 2) {
-
-            auto st_b = subtile_inplace<REG_N, K_STEP>(Bs[0][0], {warp_n, 0});
-            load(b_tile_0, st_b);
-            auto st_a = subtile_inplace<REG_M, K_STEP>(As[0][0], {warp_m, 0});
-            load(a_tile, st_a);
-            G_group::load(As[1][1], A, {0, 0, block_row * 2 + 1, tile + 1}, sw_A, a_srd, a_base, a_lds_11);
-            asm volatile("s_waitcnt lgkmcnt(8)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c00, a_tile, b_tile_0, c00);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            st_b = subtile_inplace<REG_N, K_STEP>(Bs[0][1], {warp_n, 0});
-            load(b_tile_1, st_b);
-            G_group::load(Bs[0][0], B, {0, 0, block_col * 2, tile + 2}, sw_B, b_srd, b_base, b_lds_00);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c01, a_tile, b_tile_1, c01);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_a = subtile_inplace<REG_M, K_STEP>(As[0][1], {warp_m, 0});
-            load(a_tile, st_a);
-            G_group::load(As[0][0], A, {0, 0, block_row * 2, tile + 2}, sw_A, a_srd, a_base, a_lds_00);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c10, a_tile, b_tile_0, c10);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            st_b = subtile_inplace<REG_N, K_STEP>(Bs[1][0], {warp_n, 0});
-            load(b_tile_0, st_b);
-            G_group::load(Bs[0][1], B, {0, 0, block_col * 2 + 1, tile + 2}, sw_B, b_srd, b_base, b_lds_01);
-            asm volatile("s_waitcnt vmcnt(6)");
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c11, a_tile, b_tile_1, c11);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_a = subtile_inplace<REG_M, K_STEP>(As[1][0], {warp_m, 0});
-            load(a_tile, st_a);
-            G_group::load(As[0][1], A, {0, 0, block_row * 2 + 1, tile + 2}, sw_A, a_srd, a_base, a_lds_01);
-            asm volatile("s_waitcnt lgkmcnt(8)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c00, a_tile, b_tile_0, c00);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            st_b = subtile_inplace<REG_N, K_STEP>(Bs[1][1], {warp_n, 0});
-            load(b_tile_1, st_b);
-            G_group::load(Bs[1][0], B, {0, 0, block_col * 2, tile + 3}, sw_B, b_srd, b_base, b_lds_10);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c01, a_tile, b_tile_1, c01);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_a = subtile_inplace<REG_M, K_STEP>(As[1][1], {warp_m, 0});
-            load(a_tile, st_a);
-            G_group::load(As[1][0], A, {0, 0, block_row * 2, tile + 3}, sw_A, a_srd, a_base, a_lds_10);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c10, a_tile, b_tile_0, c10);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            G_group::load(Bs[1][1], B, {0, 0, block_col * 2 + 1, tile + 3}, sw_B, b_srd, b_base, b_lds_11);
-            asm volatile("s_waitcnt vmcnt(4)");
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c11, a_tile, b_tile_1, c11);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        }
-
-        // Epilogue: K-tile k_tiles-2 (stage tic)
-        {
-            int tile = k_tiles - 2;
-
-            auto st_b = subtile_inplace<REG_N, K_STEP>(Bs[tic][0], {warp_n, 0});
-            load(b_tile_0, st_b);
-            auto st_a = subtile_inplace<REG_M, K_STEP>(As[tic][0], {warp_m, 0});
-            load(a_tile, st_a);
-            G_group::load(As[toc][1], A, {0, 0, block_row * 2 + 1, tile + 1}, sw_A, a_srd, a_base, a_lds_11);
-            __builtin_amdgcn_s_barrier();
-            asm volatile("s_waitcnt lgkmcnt(0)");
-
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c00, a_tile, b_tile_0, c00);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_b = subtile_inplace<REG_N, K_STEP>(Bs[tic][1], {warp_n, 0});
-            load(b_tile_1, st_b);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c01, a_tile, b_tile_1, c01);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_a = subtile_inplace<REG_M, K_STEP>(As[tic][1], {warp_m, 0});
-            load(a_tile, st_a);
-            asm volatile("s_waitcnt vmcnt(4)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c10, a_tile, b_tile_0, c10);
-            mma_ABt(c11, a_tile, b_tile_1, c11);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            tic ^= 1; toc ^= 1;
-        }
-
-        // Epilogue: K-tile k_tiles-1 (stage tic after flip)
-        {
-            auto st_b = subtile_inplace<REG_N, K_STEP>(Bs[tic][0], {warp_n, 0});
-            load(b_tile_0, st_b);
-            auto st_a = subtile_inplace<REG_M, K_STEP>(As[tic][0], {warp_m, 0});
-            load(a_tile, st_a);
-            asm volatile("s_waitcnt vmcnt(2)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c00, a_tile, b_tile_0, c00);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_b = subtile_inplace<REG_N, K_STEP>(Bs[tic][1], {warp_n, 0});
-            load(b_tile_1, st_b);
-            asm volatile("s_waitcnt vmcnt(0)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c01, a_tile, b_tile_1, c01);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            st_a = subtile_inplace<REG_M, K_STEP>(As[tic][1], {warp_m, 0});
-            load(a_tile, st_a);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            mma_ABt(c10, a_tile, b_tile_0, c10);
-            mma_ABt(c11, a_tile, b_tile_1, c11);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        }
-
-        if (warp_m == 0) {
-            __builtin_amdgcn_s_barrier();
-        }
+#include "tn_mainloop.inc"
 
         const int rf0 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + warp_m);
         const int rf1 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m);
