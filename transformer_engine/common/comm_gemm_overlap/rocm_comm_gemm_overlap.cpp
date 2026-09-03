@@ -15,7 +15,7 @@
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
 #ifdef USE_HIPKITTENS_GEMM
-#include "../gemm/kittens/fused_ag_gemm.h"
+#include "../gemm/kittens/comm_gemm.h"
 #endif
 
 namespace transformer_engine {
@@ -310,7 +310,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
   // come from the same usage as the scales picked above: row-wise for TN, column-wise for NN.
   // TensorWrapper::dptr() is hard-wired to the row-wise buffer -- see cublaslt_gemm.cu:185 for the
   // same pairing on the non-overlapped path.
-  KittensFusedAgGemmArgs args{
+  KittensAgGemmArgs args{
       (is_fp8 && !transa) ? A.columnwise_dptr() : A.dptr(), ubuf.dptr(), D.dptr(), scale_A, scale_B,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
@@ -352,7 +352,7 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   // scale_A/scale_B and the scale region are MXFP8-only; the bulk bf16 path leaves them null.
-  KittensFusedAgGemmArgs args{
+  KittensAgGemmArgs args{
       A.dptr(), B.dptr(), D.dptr(), nullptr, nullptr,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,

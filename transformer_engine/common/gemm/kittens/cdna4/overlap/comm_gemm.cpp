@@ -4,12 +4,12 @@
 *************************************************************************/
 
 #include "hip/hip_runtime.h"
-#include "../fused_ag_gemm.h"
+#include "../../comm_gemm.h"
 #include "fused_ag_gemm_tn.cuh"
 #include "fused_ag_gemm_nn.cuh"
 #include "fused_ag_mxfp8_gemm_tn.cuh"
 #include "fused_ag_mxfp8_gemm_nn.cuh"
-#include "../kittens_kernel_common.cuh"
+#include "../../kittens_kernel_common.cuh"
 
 #include <array>
 #include <cstdio>
@@ -18,7 +18,6 @@
 #include <vector>
 
 namespace {
-
 
 uint64_t compute_warn_ticks() {
     int dev = 0, khz = 0;
@@ -42,7 +41,7 @@ struct ScalePeers {
 // rank-major and identical to what all_gather_into_tensor produced.
 //
 // scale_base and chunk_bytes are always 16B multiples here -- scale_base is SB*K and chunk_bytes
-// is m_local*(K/32) with m_local a multiple of 256 -- and run_mxfp8_tn refuses the launch
+// is m_local*(K/32) with m_local a multiple of 256 -- and run_mxfp8 refuses the launch
 // otherwise, so the vector loop covers the whole copy and there is no scalar tail.
 template <int U, bool NT>
 __global__
@@ -112,8 +111,8 @@ struct AgPlan {
     void *queue = nullptr;
     int num_tiles  = 0;
     int xcd_bucket = 0;
-    int off[hk_ag_tn::NUM_XCDS_AFF] = {};
-    int cnt[hk_ag_tn::NUM_XCDS_AFF] = {};
+    int off[hk_overlap::NUM_XCDS_AFF] = {};
+    int cnt[hk_overlap::NUM_XCDS_AFF] = {};
 };
 
 using PlanKey = std::array<int, 7>;   // core, M, N, K, tp_size, rank, S
@@ -134,7 +133,6 @@ const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
     }
     return &g_peers.emplace(peer_ub, std::move(v)).first->second;
 }
-
 
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
 // to fill the buckets. The 1024 is fixed, not derived from the grid cap.
@@ -187,7 +185,7 @@ struct Carve {
     bool fits() const { return used <= cap; }
 };
 
-bool run_tn(const KittensFusedAgGemmArgs &args) {
+bool run_tn(const KittensAgGemmArgs &args) {
     using namespace hk_ag_tn;
 
     const int M       = args.n;
@@ -307,9 +305,49 @@ void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_
         scales, ln, dim, scale_K, k_iters, tiles_per_col);
 }
 
-bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
-    using namespace hk_mxfp8_ag_tn;
-    
+// The two mxfp8 layouts run an identical host sequence. Now that both kernel namespaces take
+// TileDesc, PeerPtrs and XcdBuckets from hk_overlap, persistent_fn_t is one type across them, so
+// the layout only has to name its plan tag, how the weight scales are laid out, and its factories.
+struct Mxfp8Tn {
+    using TileDesc = hk_mxfp8_ag_tn::TileDesc;
+    static constexpr int  PLAN_TAG        = 0;
+    static constexpr bool A_SCALE_COLWISE = false;
+    static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
+        return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
+    }
+    static hk_mxfp8_ag_tn::persistent_fn_t launch_fn(int M, int N, int K) {
+        return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K);
+    }
+};
+
+// NN consumes TE's A operand (this kernel's B) column-wise -- see rocm_comm_gemm_overlap.cpp:296.
+struct Mxfp8Nn {
+    using TileDesc = hk_mxfp8_ag_nn::TileDesc;
+    static constexpr int  PLAN_TAG        = 2;
+    static constexpr bool A_SCALE_COLWISE = true;
+    static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
+        return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
+    }
+    static hk_mxfp8_ag_nn::persistent_fn_t launch_fn(int M, int N, int K) {
+        return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K);
+    }
+};
+
+template <class L>
+bool run_mxfp8(const KittensAgGemmArgs &args) {
+    using hk_overlap::BLOCK_ROW;
+    using hk_overlap::BLOCK_COL;
+    using hk_overlap::NUM_XCDS_AFF;
+    using TileDesc = typename L::TileDesc;
+    using hk_overlap::XcdBuckets;
+    using PeerPtrs = hk_overlap::PeerPtrsT<kittens::fp8e4m3>;
+    using kittens::bf16;
+    using kittens::fp8e4m3;
+
+    // Both mxfp8 kernels step K by 128; K_STEP stays with the kernels because the bf16 pair steps 64.
+    constexpr int K_STEP = hk_mxfp8_ag_tn::K_STEP;
+    static_assert(K_STEP == hk_mxfp8_ag_nn::K_STEP, "mxfp8 TN/NN must agree on K_STEP");
+
     const int M       = args.n;
     const int N_TOTAL = args.m;
     const int K       = args.k;
@@ -334,16 +372,16 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
 
     std::lock_guard<std::mutex> lock(g_mu);
 
-    const PlanKey key{0, M, N_TOTAL, K, tp_size, args.rank, 1};
+    const PlanKey key{L::PLAN_TAG, M, N_TOTAL, K, tp_size, args.rank, 1};
     auto it = g_plans.find(key);
     if (it == g_plans.end()) {
         AgPlan plan;
-        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        auto queue      = L::work_queue(M, N_TOTAL, K, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
         plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
         if (plan.xcd_bucket) {
             XcdBuckets bk{};
-            queue = bucketize_by_xcd(queue, bk);
+            queue = hk_overlap::bucketize_by_xcd(queue, bk);
             for (int b = 0; b < NUM_XCDS_AFF; b++) {
                 plan.off[b] = bk.off[b];
                 plan.cnt[b] = bk.cnt[b];
@@ -371,7 +409,7 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
     if (!ws.fits()) return false;
 
     // Weight scales are rank-local, so pack them now and let them overlap the gather below.
-    launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
+    launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
     if (!bases) return false;
@@ -398,7 +436,8 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
 
     // Activation scales live in the userbuffer, so they have to be gathered before they can be
     // packed -- and only after ag_ready_kernel, which is what guarantees that the peers finished
-    // writing their own chunks.
+    // writing their own chunks. The region layout does not depend on TN/NN: scale_B is row-wise
+    // in both, which is why this part is shared verbatim.
     if (args.scale_chunk_bytes) {
         ScalePeers sp{};
         for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
@@ -422,7 +461,7 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
 
     launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
 
-    get_persistent_fn(M, N_TOTAL, K)(
+    L::launch_fn(M, N_TOTAL, K)(
         M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
         static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
@@ -434,14 +473,14 @@ bool run_mxfp8_tn(const KittensFusedAgGemmArgs &args) {
 struct NnSetup {
     const AgPlan *plan;
     hk_ag_nn::PeerPtrs peers;
-    hk_ag_nn::XcdBuckets buckets;
+    hk_overlap::XcdBuckets buckets;
     int *tile_counter;
     int *bucket_ctr;
     unsigned int *arrive;
     float *cw;
 };
 
-bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, void *peer_local, NnSetup &out) {
+bool prepare_nn(const KittensAgGemmArgs &args, int S, void *peer_local, NnSetup &out) {
     using namespace hk_ag_nn;
 
     const int M       = args.n;
@@ -506,7 +545,7 @@ bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, void *peer_local, NnS
     return true;
 }
 
-int split_k_nn(const KittensFusedAgGemmArgs &args) {
+int split_k_nn(const KittensAgGemmArgs &args) {
     using namespace hk_ag_nn;
     const int M       = args.n;
     const int N_TOTAL = args.m;
@@ -516,7 +555,7 @@ int split_k_nn(const KittensFusedAgGemmArgs &args) {
     return S;
 }
 
-bool run_nn(const KittensFusedAgGemmArgs &args) {
+bool run_nn(const KittensAgGemmArgs &args) {
     using namespace hk_ag_nn;
 
     const int M       = args.n;
@@ -544,7 +583,7 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
-bool run_bulk_nn(const KittensFusedAgGemmArgs &args) {
+bool run_bulk_nn(const KittensAgGemmArgs &args) {
     using namespace hk_ag_nn;
 
     const int M          = args.n;
@@ -573,7 +612,7 @@ bool run_bulk_nn(const KittensFusedAgGemmArgs &args) {
 }
 
 // Shape and pointer requirements shared by all entry points
-bool guards_ok(const KittensFusedAgGemmArgs &args) {
+bool guards_ok(const KittensAgGemmArgs &args) {
     const int M       = args.n;
     const int N_TOTAL = args.m;
     const int K       = args.k;
@@ -589,7 +628,7 @@ bool guards_ok(const KittensFusedAgGemmArgs &args) {
 
 }  // namespace
 
-void kittens_fused_ag_gemm_reset_cdna4() {
+void kittens_persistent_plans_reset_cdna4() {
     std::lock_guard<std::mutex> lock(g_mu);
     for (auto &kv : g_plans) {
         if (kv.second.queue) static_cast<void>(hipFree(kv.second.queue));
@@ -598,7 +637,7 @@ void kittens_fused_ag_gemm_reset_cdna4() {
     g_peers.clear();
 }
 
-bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
+bool kittens_fused_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args) {
     const int M       = args.n;
     const int K       = args.k;
     const int tp_size = args.nranks;
@@ -609,129 +648,7 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     return args.transa ? run_tn(args) : run_nn(args);
 }
 
-bool run_mxfp8_nn(const KittensFusedAgGemmArgs &args) {
-    using namespace hk_mxfp8_ag_nn;
-    
-    const int M       = args.n;
-    const int N_TOTAL = args.m;
-    const int K       = args.k;
-    const int tp_size = args.nranks;
-    const int m_local = M / tp_size;
-    const int tiles_m = M / BLOCK_ROW;
-    const int tiles_n = N_TOTAL / BLOCK_COL;
-
-    const int k_iters = K / K_STEP;
-    int scale_K = K / 32;
-
-    // The scale region is sized in CommOverlapP2PBase::initialize; bail out rather than read
-    // garbage if its chunking ever disagrees with this kernel's view of the operand. The 16B
-    // alignment holds for every shape the eligibility gate admits, so drop to hipBLASLt rather
-    // than silently mis-copying if it ever stops holding.
-    if (args.scale_chunk_bytes &&
-        (args.scale_chunk_bytes != static_cast<size_t>(m_local) * static_cast<size_t>(scale_K) ||
-         args.scale_chunk_bytes % 16 != 0 || args.scale_base_offset % 16 != 0)) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(g_mu);
-
-    const PlanKey key{2, M, N_TOTAL, K, tp_size, args.rank, 1};
-    auto it = g_plans.find(key);
-    if (it == g_plans.end()) {
-        AgPlan plan;
-        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank);
-        plan.num_tiles  = static_cast<int>(queue.size());
-        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
-        if (plan.xcd_bucket) {
-            XcdBuckets bk{};
-            queue = bucketize_by_xcd(queue, bk);
-            for (int b = 0; b < NUM_XCDS_AFF; b++) {
-                plan.off[b] = bk.off[b];
-                plan.cnt[b] = bk.cnt[b];
-            }
-        }
-        if (!upload_plan(plan, queue)) return false;
-        it = g_plans.emplace(key, plan).first;
-    }
-    const AgPlan &plan = it->second;
-
-    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
-    // caller's budget we return false and fall back to hipBLASLt.
-    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
-    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
-
-    const size_t arrive_bytes = static_cast<size_t>(tiles_m) * sizeof(unsigned int);
-    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
-    int *tile_counter = static_cast<int *>(ws.take(sizeof(int)));
-    int *bucket_ctr   = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
-    unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
-
-    const size_t counter_bytes = ws.used;
-    uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
-    uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
-    if (!ws.fits()) return false;
-
-    // Weight scales are rank-local, so pack them now and let them overlap the gather below.
-    // NN consumes TE's A operand (this kernel's B) column-wise -- see rocm_comm_gemm_overlap.cpp:296.
-    launch_pack_scales<true, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
-
-    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
-    if (!bases) return false;
-    PeerPtrs peers{};
-    for (int c = 0; c < tp_size; c++) {
-        peers.base[c] = static_cast<fp8e4m3 *>((*bases)[(args.peer_first + c) % args.peer_count]);
-    }
-    peers.base[args.rank] = static_cast<fp8e4m3 *>(args.ub);
-
-    XcdBuckets buckets{};
-    for (int b = 0; b < NUM_XCDS_AFF; b++) {
-        buckets.off[b] = plan.off[b];
-        buckets.cnt[b] = plan.cnt[b];
-    }
-
-    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
-
-    if (args.arrive_peers && args.arrive_local) {
-        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
-            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
-            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
-            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
-    }
-
-    // Activation scales live in the userbuffer, so they have to be gathered before they can be
-    // packed -- and only after ag_ready_kernel, which is what guarantees that the peers finished
-    // writing their own chunks. The region layout does not depend on TN/NN: scale_B is row-wise
-    // in both, so this mirrors run_mxfp8_tn exactly.
-    if (args.scale_chunk_bytes) {
-        ScalePeers sp{};
-        for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
-
-        constexpr int SCALE_GATHER_U = 4;
-        constexpr int SCALE_GATHER_THREADS = 256;
-        const size_t lines = args.scale_chunk_bytes / 16;
-        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
-        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
-        if (grid_x < 1) grid_x = 1;
-        if (grid_x > 256) grid_x = 256;
-
-        gather_scales<SCALE_GATHER_U, false>
-            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
-                static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
-                args.scale_chunk_bytes);
-    }
-
-    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
-
-    get_persistent_fn(M, N_TOTAL, K)(
-        M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
-        static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
-        packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
-        tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes,
-        plan.xcd_bucket, buckets, bucket_ctr, args.stream);
-    return hipGetLastError() == hipSuccess;
-}
-
-bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args) {
+bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args) {
     const int M       = args.n;
     const int K       = args.k;
     const int tp_size = args.nranks;
@@ -741,10 +658,10 @@ bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensFusedAgGemmArgs &args) {
     // mis-sized region declines instead of silently gathering a fraction of itself.
     if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint8_t)) return false;
 
-    return args.transa ? run_mxfp8_tn(args) : run_mxfp8_nn(args);
+    return args.transa ? run_mxfp8<Mxfp8Tn>(args) : run_mxfp8<Mxfp8Nn>(args);
 }
 
-bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
+bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args) {
     const int M       = args.n;
     const int N_TOTAL = args.m;
     const int tp_size = args.nranks;

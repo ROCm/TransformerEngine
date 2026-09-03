@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-struct KittensFusedAgGemmArgs {
+struct KittensAgGemmArgs {
     const void *A;
     void *ub;
     void *D;
@@ -38,10 +38,10 @@ struct KittensFusedAgGemmArgs {
 bool kittens_fused_ag_gemm_supported(int sm_arch);
 
 // Drops the cached work-queue plans and peer base pointers
-void kittens_fused_ag_gemm_reset();
+void kittens_comm_gemm_reset();
 
-bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
+bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args);
 
-bool kittens_fused_ag_gemm_mxfp8(const KittensFusedAgGemmArgs &args);
+bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
 
-bool kittens_bulk_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
+bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args);

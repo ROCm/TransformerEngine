@@ -9,7 +9,7 @@
 #include "pybind.h"
 
 #ifdef USE_HIPKITTENS_GEMM
-#include "common/gemm/kittens/fused_ag_gemm.h"
+#include "common/gemm/kittens/comm_gemm.h"
 #endif
 
 #include <pybind11/cast.h>
@@ -735,7 +735,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "reset_fused_ag_gemm_cache",
       []() {
 #ifdef USE_HIPKITTENS_GEMM
-        kittens_fused_ag_gemm_reset();
+        kittens_comm_gemm_reset();
 #endif
       },
       "Drop cached fused AG+GEMM peer base pointers");
