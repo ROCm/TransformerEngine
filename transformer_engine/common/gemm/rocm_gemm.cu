@@ -31,6 +31,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#include "rocm_fp4_e2m1_table.h"
 
 #ifdef USE_HIPKITTENS_GEMM
 #include "kittens/kittens_common.h"
@@ -335,10 +336,7 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
 }
 
 // FP4 e2m1 lookup table
-__device__ constexpr float kFP4E2M1Table[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-   -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f
-};
+__device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 
 // Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
 // Only applies block scales: output = fp4_value * block_scale.
@@ -472,6 +470,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   const bool b_blockwise = is_fp8_block_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
+  if (is_mxfp4_scaling(A.scaling_mode)) {
+    NVTE_CHECK(A.with_gemm_swizzled_scales == B.with_gemm_swizzled_scales,
+               "Inputs A and B to MXFP4 GEMM need to have the same scale layout "
+               "(both plain or both pre-swizzled)!");
+  }
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;
@@ -500,7 +503,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(A.scaling_mode)) {
-    // MXFP8
+    // MXFP8, MXFP4
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_A_transposed) {
@@ -509,10 +512,20 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
     }
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
-    ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.lda = is_A_transposed ? k : m;
+    if (is_mxfp4_scaling(A.scaling_mode)) {
+      // MXFP4 (two FP4 values per byte): the column-wise buffer must be presented in TN-internal
+      // form (OP_T, lda=k) so hipBLASLt's UE8M0 (VEC32_UE8M0) block-scale indexing aligns with
+      // TE's column-wise scale layout (cf. the NVFP4 branch below). Consuming it with the caller's
+      // OP_N/lda=m transposes the scale indexing and yields wrong results. MXFP8 (one byte per
+      // element) keeps its original presentation, which is already correct.
+      ret.transA = CUBLAS_OP_T;
+      ret.lda = k;
+    } else {
+      ret.transA = transA;
+      ret.lda = is_A_transposed ? k : m;
+    }
   } else if (is_nvfp_scaling(A.scaling_mode)) {
     // NVFP4 is always run in TN layout (native block-scaled GEMM on gfx1250, or the
     // FP4->BF16 dequant fallback elsewhere), but the source data may come from either
@@ -553,7 +566,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(B.scaling_mode)) {
-    // MXFP8
+    // MXFP8, MXFP4
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_B_transposed) {
@@ -562,10 +575,17 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
     }
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
-    ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
-    ret.ldb = is_B_transposed ? n : k;
+    if (is_mxfp4_scaling(B.scaling_mode)) {
+      // MXFP4: present B in TN-internal form (OP_N, ldb=k); see the A branch. MXFP8 keeps its
+      // original presentation.
+      ret.transB = CUBLAS_OP_N;
+      ret.ldb = k;
+    } else {
+      ret.transB = transB;
+      ret.ldb = is_B_transposed ? n : k;
+    }
   } else if (is_nvfp_scaling(B.scaling_mode)) {
     // NVFP4 is always run in TN layout (native block-scaled GEMM on gfx1250, or the
     // FP4->BF16 dequant fallback elsewhere), but the source data may come from either
@@ -954,6 +974,7 @@ static std::unordered_map<hipDataType, std::string_view> type_name_map = {
   {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
   {HIP_R_8F_E4M3, "float8e4m3"},
   {HIP_R_8F_E5M2, "float8e5m2"},
+  {HIP_R_4F_E2M1, "float4e2m1"},
 };
 static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
@@ -1447,13 +1468,18 @@ void hipblaslt_gemm(const Tensor *inputA,
   // native path folds it into a HOST scalar alpha (setup_nvfp4_gemm_native) so the GEMM computes
   // c0*(A*B) + beta*C directly, while the BF16 dequant fallback folds it into a device alpha vector
   // (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST).
-  const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  //
+  // Only NVFP4 uses this dequant fallback. MXFP4 (also an FP4 data dtype) has a native
+  // hipBLASLt path, so gate on the scaling mode rather than the FP4 data dtype (which
+  // would match both).
+  const bool use_nvfp4 =
+      is_nvfp_scaling(inputA->scaling_mode) || is_nvfp_scaling(inputB->scaling_mode);
   // Native NVFP4 GEMM on gfx1250: hipBLASLt consumes the FP8 (E4M3) block scales directly, but it
   // reads them in a K-tiled layout (setup_nvfp4_gemm_native re-lays TE's row-major scales into it).
   // Every other architecture, and hipBLASLt versions without the VEC16_UE4M3 scale mode, use the
   // BF16 dequant fallback instead.
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-  const bool use_nvfp4_native = use_fp4 && cuda::sm_arch() == 125;
+  const bool use_nvfp4_native = use_nvfp4 && cuda::sm_arch() == 125;
 #else
   const bool use_nvfp4_native = false;
 #endif
@@ -1471,7 +1497,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                             &nvfp4_scaleA_swz, &nvfp4_scaleB_swz, stream);
     alpha_ptr = static_cast<const void*>(&nvfp4_c0);
     beta_ptr = static_cast<const void*>(&beta);
-  } else if (use_fp4) {
+  } else if (use_nvfp4) {
     dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
                             m, n, k, alpha, workspace, workspaceSize,
                             &alpha_ptr, stream);
@@ -1512,6 +1538,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *pre_gelu_out = outputPreGelu->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+  const bool use_mxfp4 = is_mxfp4_scaling(inputA->scaling_mode);
 
   const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
@@ -1600,7 +1627,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 #else
     constexpr int scaling_mode = 0;
 #endif
-  if (use_fp8) {
+  if (use_fp8 || use_mxfp4) {
     // Split accumulator.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
     /*
@@ -1614,7 +1641,18 @@ void hipblaslt_gemm(const Tensor *inputA,
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
     } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
+      // Block scaling: MXFP8 and MXFP4 both use UE8M0 block-32 scales.
+      // MXFP4 can additionally use hipBLASLt's pre-swizzled UE8M0 scale mode
+      // (BLK32_UE8M0_32_8_EXT).
+      const bool mxfp4_swizzled = use_mxfp4 && inputA->with_gemm_swizzled_scales;
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+      scaling_mode = mxfp4_swizzled ? HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT
+                                    : HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+#else
+      NVTE_CHECK(!mxfp4_swizzled,
+                 "MXFP4 pre-swizzled scale mode (1001) requires hipBLASLt >= 1.3.");
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+#endif
       NVTE_CHECK(!is_fp8_dtype(outputD->data.dtype), "FP8 output is not supported with block scaling mode.");
 #endif
     } else {
@@ -1724,18 +1762,18 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // Only the BF16 dequant fallback uses the device alpha vector; the native NVFP4 path applies
   // its per-tensor correction after the GEMM, so it keeps the default host pointer mode.
-  if (use_fp4 && !use_nvfp4_native) {
+  if (use_nvfp4 && !use_nvfp4_native) {
     int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE,
         &pointer_mode, sizeof(pointer_mode)));
   }
 
-  GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
-    use_fp8 ? bias_type : (hipDataType)-1,
-    (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
+  GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type,
+    (use_fp8 || use_mxfp4) ? bias_type : (hipDataType)-1,
+    ((use_fp8 || use_mxfp4) && gelu) ? aux_type : (hipDataType)-1,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
-    use_fp4 && !use_nvfp4_native);
+    use_nvfp4 && !use_nvfp4_native);
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
@@ -2179,6 +2217,33 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_CHECK((n % 16) == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
 #ifndef USE_HIPKITTENS_GEMM
     NVTE_CHECK(inputBias->data.dptr == nullptr, "hipBLASlt MXFP8 GEMM does not support bias.");
+#endif
+  }
+  // MXFP4 GEMM capability gate. hipBLASLt shipped the MXFP4 kernels in >=1.3.
+  if (inputA->scaling_mode == NVTE_MXFP4_1D_SCALING ||
+      inputB->scaling_mode == NVTE_MXFP4_1D_SCALING) {
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+    NVTE_CHECK(cuda::sm_arch() == 95, "MXFP4 GEMM is only supported on gfx950");
+    NVTE_CHECK(!(is_transa ? inputA->mxfp4_shuffle_rowwise_data
+                           : inputA->mxfp4_shuffle_columnwise_data),
+               "hipBLASLt MXFP4 GEMM requires plain (un-shuffled) A data");
+    NVTE_CHECK(!(is_transb ? inputB->mxfp4_shuffle_columnwise_data
+                           : inputB->mxfp4_shuffle_rowwise_data),
+               "hipBLASLt MXFP4 GEMM requires plain (un-shuffled) B data");
+    NVTE_CHECK((k % 256) == 0,
+               "hipBLASLt MXFP4 GEMM requires K to be a multiple of 256 (got K=", k, ")");
+    NVTE_CHECK((m % 32) == 0, "hipBLASLt MXFP4 GEMM requires M to be a multiple of 32 (got M=", m, ")");
+    NVTE_CHECK((n % 32) == 0, "hipBLASLt MXFP4 GEMM requires N to be a multiple of 32 (got N=", n, ")");
+    NVTE_CHECK(outputD->data.dtype == DType::kBFloat16 || outputD->data.dtype == DType::kFloat32,
+               "hipBLASLt MXFP4 GEMM supports only BF16 or FP32 output");
+    NVTE_CHECK(inputBias->data.dptr == nullptr,
+               "hipBLASLt MXFP4 GEMM does not support fused bias");
+    NVTE_CHECK(outputPreGelu->data.dptr == nullptr,
+               "hipBLASLt MXFP4 GEMM does not support fused GELU");
+    NVTE_CHECK(*reinterpret_cast<const float *>(beta_ptr) == 0.0f,
+               "hipBLASLt MXFP4 GEMM does not support accumulate (beta != 0)");
+#else
+    NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
 #endif
   }
 

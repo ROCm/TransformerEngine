@@ -1770,12 +1770,26 @@ class MXFP4BlockScalingRecipeState(RecipeState):
 
         use_hadamard = self.recipe.use_hadamard
 
+        # The hipBLASLt MXFP4 GEMM path consumes plain (un-shuffled) FP4 data. Its UE8M0
+        # scales are plain (VEC32_UE8M0) by default, but can optionally be pre-swizzled into
+        # the 32x8 tile order that hipBLASLt's BLK32_UE8M0_32_8_EXT (mode 1001) reads in place
+        # -- opt in via the recipe's use_swizzled_scales flag. The AITER a4w4 backend always
+        # needs the 16x16 weight shuffle and swizzled scales.
+        use_hipblaslt = bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")))
+        use_swizzled = use_hipblaslt and self.recipe.use_swizzled_scales
+        # AITER path swizzles scales; hipBLASLt path swizzles only when the recipe opts in.
+        # FP4 data shuffle stays off on the hipBLASLt path regardless
+        swizzled_scales = use_swizzled if use_hipblaslt else True
+
         if self.mode == "forward":
 
             def _make_quantizer(idx: int):
                 is_activation = idx % 3 == 0
                 is_weight = idx % 3 == 1
-                if is_activation:
+                if use_hipblaslt:
+                    shuffle_rowwise_data = False
+                    shuffle_columnwise_data = False
+                elif is_activation:
                     shuffle_rowwise_data = False
                     shuffle_columnwise_data = True
                 elif is_weight:
@@ -1790,7 +1804,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=shuffle_rowwise_data,
                     shuffle_columnwise_data=shuffle_columnwise_data,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
 
@@ -1804,7 +1818,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=False,
                     shuffle_columnwise_data=False,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
                 for _ in range(self.num_quantizers)
