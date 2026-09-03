@@ -79,6 +79,10 @@ struct CKAttnCommonArgs {
   void* philox_seed_ptr = nullptr;
   void* philox_offset_ptr = nullptr;
 
+  // Softmax sink (learnable / off-by-one)
+  const void* sink_ptr = nullptr;
+  bool has_sink = false;
+
   // O layout (o_ptr lives in derived because fwd writes it / bwd reads it)
   uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;
 
@@ -133,6 +137,9 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // dBias (batch mode only)
   void* dbias_expanded_ptr = nullptr;
   void* dbias_ptr = nullptr;
+
+  // Softmax sink gradient
+  void* d_sink_ptr = nullptr;
 
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
