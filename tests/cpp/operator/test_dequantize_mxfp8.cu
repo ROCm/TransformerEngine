@@ -391,14 +391,26 @@ void performTest_x1_swizzled(const size_t rows,
     const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
     const size_t unpadded_blocks_X_colwise = cols;
 
-    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
-                                                                 scale_tensor_alignment_Y_rowwise);
-    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
-                                                                 scale_tensor_alignment_X_rowwise);
-    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
-                                                                 scale_tensor_alignment_Y_colwise);
-    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
-                                                                 scale_tensor_alignment_X_colwise);
+    size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                           scale_tensor_alignment_Y_rowwise);
+    size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                           scale_tensor_alignment_X_rowwise);
+    size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                           scale_tensor_alignment_Y_colwise);
+    size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                           scale_tensor_alignment_X_colwise);
+
+#ifdef __HIP_PLATFORM_AMD__
+    // gfx1250 pads MXFP8 scales to a multiple of 4 in both dims. The GEMM-swizzle producer reads
+    // the compact scales with this padded stride, so the reference/fill must use the same layout.
+    if (getDeviceComputeCapability() == 125) {
+        const size_t align = mxfp8_gfx1250_scale_tensor_alignment;
+        blocks_Y_rowwise = round_up_to_nearest_multiple(blocks_Y_rowwise, align);
+        blocks_X_rowwise = round_up_to_nearest_multiple(blocks_X_rowwise, align);
+        blocks_Y_colwise = round_up_to_nearest_multiple(blocks_Y_colwise, align);
+        blocks_X_colwise = round_up_to_nearest_multiple(blocks_X_colwise, align);
+    }
+#endif
 
     const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
     const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
