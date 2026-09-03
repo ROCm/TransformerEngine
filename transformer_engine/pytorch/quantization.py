@@ -57,6 +57,7 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
+_MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -177,7 +178,7 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5), (12, 5)):
+        if gpu_arch in ((9, 5),): #TODO: enable for gfx1250 when GEMM is available
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
@@ -203,9 +204,9 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
-            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
-        return True, ""
+        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
@@ -213,6 +214,14 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
 
+def _compute_mxfp4_support() -> Tuple[bool, str]:
+    """Return if mxfp4 support is available"""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch in ((9, 5),): # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
+    return False, "Only ROCm supports MXFP4"
 
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
@@ -250,15 +259,13 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     return _FP8_BLOCK_SCALING_SUPPORT
 
 
-@functools.lru_cache(maxsize=None)
+@torch.compiler.assume_constant_result
 def check_mxfp4_support() -> Tuple[bool, str]:
-    """Return if mxfp4 support is available"""
-    if IS_HIP_EXTENSION:
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):  # TODO: enable for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
-    return False, "Only ROCm gfx950 supports MXFP4"
+    """Return if MXFP4 support is available."""
+    global _MXFP4_SUPPORT
+    if _MXFP4_SUPPORT is None:
+        _MXFP4_SUPPORT = _compute_mxfp4_support()
+    return _MXFP4_SUPPORT
 
 
 def check_recipe_support(recipe: Recipe) -> None:

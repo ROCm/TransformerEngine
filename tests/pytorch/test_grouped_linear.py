@@ -1241,6 +1241,7 @@ def _apply_grouped_bias_ref(
     return out
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 @pytest.mark.parametrize(
     "z, m, n, k",
     [
@@ -1255,8 +1256,6 @@ def _apply_grouped_bias_ref(
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("use_bias_scale", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
-    if IS_HIP_EXTENSION:
-        pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
     if torch.cuda.get_device_capability() < (9, 0):
         pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
     if torch.cuda.get_device_capability() < (10, 0):
@@ -1405,6 +1404,7 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
             torch.testing.assert_close(o, o_ref, **tols)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("quant_type", ["bf16", "mxfp8"])
@@ -1566,6 +1566,7 @@ def _per_tensor_quantize_mxfp8(
     return [quantizer(t) for t in tensors]
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 @pytest.mark.parametrize(
     "shape",
     [
