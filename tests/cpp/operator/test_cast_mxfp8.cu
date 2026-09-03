@@ -658,11 +658,13 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
         // Forward activations
         auto OP = &identity;
         switch (Act_type) {
+            case ActivationType::Identity: OP = &identity; break;
             case ActivationType::GeLU: OP = &gelu; break;
             case ActivationType::SiLU: OP = &silu; break;
             case ActivationType::ReLU: OP = &relu; break;
             case ActivationType::QGeLU: OP = &qgelu; break;
             case ActivationType::SReLU: OP = &srelu; break;
+            default: GTEST_FAIL() << "Unsupported activation type"; break;
         }
 
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
@@ -681,11 +683,13 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
     } else {
         auto OP = &identity;
         switch (Act_type) {
+            case ActivationType::Identity: OP = &identity; break;
             case ActivationType::GeLU: OP = &dgelu; break;
             case ActivationType::SiLU: OP = &dsilu; break;
             case ActivationType::ReLU: OP = &drelu; break;
             case ActivationType::QGeLU: OP = &dqgelu; break;
             case ActivationType::SReLU: OP = &dsrelu; break;
+            default: GTEST_FAIL() << "Unsupported activation type"; break;
         }
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
             TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,

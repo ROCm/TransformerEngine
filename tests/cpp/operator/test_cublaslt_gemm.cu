@@ -515,6 +515,47 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
+void checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop, bool &use_mxfp8, bool &use_hipkittens_mxfp8) {
+  use_mxfp8 = (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  if (!use_mxfp8) {
+    use_hipkittens_mxfp8 = false;
+    return;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && prop.minor >= 5) && !(prop.major >= 12)) {
+    GTEST_SKIP() << "MXFP8 requires gfx950 or newer";
+  }
+#endif
+  if (params.m % 16 || params.n % 16) {
+    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+  }
+
+#ifdef __HIP_PLATFORM_AMD__
+  const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#else
+  const size_t required_k_multiple = 128;
+#endif
+  if (params.k % required_k_multiple) {
+    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
+  }
+
+  use_hipkittens_mxfp8 = !params.force_hipblaslt;
+  if (!use_hipkittens_mxfp8) {
+    return;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
+    GTEST_SKIP() << "HipKittens requires gfx942 or gfx950";
+  }
+  if (params.m % 256 || params.n % 256 || params.k < 256) {
+    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
+  }
+#else
+  GTEST_SKIP() << "HipKittens requires ROCm";
+#endif
+}
+
+
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(const TestParams& params) {
   DType atype = TypeInfo<A_Type>::dtype;
@@ -524,29 +565,18 @@ void performTest(const TestParams& params) {
   DType dtype = TypeInfo<D_Type>::dtype;
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
-  const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
 
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
+
+  bool use_mxfp8 = false;
+  bool use_hipkittens_mxfp8 = false;
+  checkMxFP8Support(params, prop, use_mxfp8, use_hipkittens_mxfp8);
 
   if (use_mxfp8)
   {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
-    }
-    if (params.m % 16 || params.n % 16) {
-      GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-    }
-    size_t required_k_multiple = 128;
-  #ifdef __HIP_PLATFORM_AMD__
-    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-  #endif
-    if (params.k % required_k_multiple) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-    }
-    if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
-      GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
     }
   }
 
@@ -579,10 +609,6 @@ void performTest(const TestParams& params) {
     const bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
-    }
-    const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-    if (use_mxfp8 && !mxfp8_supported) {
-      GTEST_SKIP() << "MXFP8 is not supported in current config";
     }
     if (!use_hipkittens_mxfp8 && params.use_bias) {
       GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
@@ -759,27 +785,10 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-  }
-  size_t required_k_multiple = 128;
-#ifdef __HIP_PLATFORM_AMD__
-  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-#endif
-  if (params.k % required_k_multiple) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-  }
-
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
-  if (!mxfp8_supported) {
-    GTEST_SKIP() << "MXFP8 is not supported in current config";
-  }
+  bool _unused = false;
+  checkMxFP8Support(params, prop, _unused, _unused);
   if (params.use_bias || params.use_gelu) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
-  }
-  if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
-    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
   // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
@@ -940,7 +949,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
@@ -949,7 +958,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, FP8GEMMTestSuite,

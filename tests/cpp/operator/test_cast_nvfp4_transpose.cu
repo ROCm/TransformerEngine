@@ -1453,11 +1453,13 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Forward activations
     auto OP = &identity;
     switch (Act_type) {
+        case ActivationType::Identity: OP = &identity; break;
         case ActivationType::GeLU: OP = &gelu; break;
         case ActivationType::SiLU: OP = &silu; break;
         case ActivationType::ReLU: OP = &relu; break;
         case ActivationType::QGeLU: OP = &qgelu; break;
         case ActivationType::SReLU: OP = &srelu; break;
+        default: GTEST_FAIL() << "Unsupported activation type"; break;
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
