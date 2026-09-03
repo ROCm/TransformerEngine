@@ -19,6 +19,7 @@ from functools import partial, reduce
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
@@ -193,8 +194,18 @@ def _parse_args(argv=None, namespace=None):
     )
     opts = parser.parse_args(argv, namespace)
 
+    if opts.fused and not IS_HIP_EXTENSION:
+        warnings.warn("The fused AG+GEMM backend is ROCm only.")
+        opts.fused = False
+
     if opts.bulk_overlap:
-        if opts.p2p:
+        if opts.fused and opts.comm_type != tex.CommOverlapType.AG:
+            warnings.warn("The fused bulk overlap is all-gather only.")
+            opts.fused = False
+        if opts.fused:
+            # `fused_overlap_bulk_ag` is a CommOverlapP2P entry point
+            opts.p2p = True
+        elif opts.p2p:
             warnings.warn("Point-2-point comms are not supported with bulk overlap.")
             opts.p2p = False
         if opts.atomic:
@@ -426,6 +437,8 @@ def _main(opts):
         # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)
         local_inp_shape = (outer_size, hidden_size)
+        if opts.fused:
+            local_inp_shape = (outer_size, ffn_hidden_size)
         # Bulk overlap comm tensor is distributed for AG overlap only
         if opts.comm_type == tex.CommOverlapType.AG:
             bulk_inp_shape = (outer_size // tp_size, hidden_size)
@@ -723,17 +736,21 @@ def _main(opts):
             extra_output=rs_out2,
         )
 
+    # The fused bulk all-gather GEMM is the NN one shaped above; otherwise honour --layout,
+    # whose default of TN matches the pre-merge behaviour.
+    gemm_layout = "NN" if (opts.bulk_overlap and opts.fused) else opts.layout
+
     def _gemm():
         return tex.general_gemm(
             kernel_t,
             gemm_inp,
             out_dtype=torch.bfloat16,
+            layout=gemm_layout,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
-            layout=opts.layout,
         )
 
     # Trigger GEMM

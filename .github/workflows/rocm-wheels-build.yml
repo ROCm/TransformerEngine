@@ -216,7 +216,7 @@ jobs:
 
       - name: Upload wheels as GitHub Actions artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: te-rocm-wheels
           path: |
@@ -227,7 +227,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: te-rocm-build-logs
           path: ${{ runner.temp }}/wheelhouse/logs/

@@ -32,6 +32,7 @@ struct KittensFusedAgGemmArgs {
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
+    void *gather_dst;     // Bulk all-gather only
 };
 
 bool kittens_fused_ag_gemm_supported(int sm_arch);
@@ -42,3 +43,5 @@ void kittens_fused_ag_gemm_reset();
 bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
 
 bool kittens_fused_ag_gemm_mxfp8(const KittensFusedAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
