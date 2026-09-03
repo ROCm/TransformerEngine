@@ -238,9 +238,6 @@ class CommOverlapBase : public CommOverlapCore {
   bool _rs_overlap_first_gemm;
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
-#ifdef __HIP_PLATFORM_AMD__
-  uint64_t _rs_signal_base = 0;
-#endif
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
@@ -275,8 +272,6 @@ class CommOverlapBase : public CommOverlapCore {
                     bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
                     cudaStream_t stream_main) override;
 
-#ifdef __HIP_PLATFORM_AMD__
-#endif
 
   void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                               bool transb, TensorWrapper &D, TensorWrapper &bias,

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.cpp_extensions as tex
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import get_device_compute_capability
@@ -30,11 +31,7 @@ TEST_ROOT = Path(__file__).parent.resolve()
 
 
 def _fused_shape_ok(nprocs: int) -> bool:
-    """The minimum both backends need: a 256-aligned per-rank chunk and a 256-aligned N.
-
-    The reduce-scatter backend is stricter still -- its combine is specialised on 8 ranks -- but
-    that is asserted per test rather than hidden in collection, so a tp=4 decline stays visible.
-    """
+    """The minimum both backends need: a 256-aligned per-rank chunk and a 256-aligned N."""
     return (SEQ_LENGTH * BATCH_SIZE) % (256 * nprocs) == 0 and (NUM_HEADS * HEAD_DIM) % 256 == 0
 
 
@@ -111,6 +108,12 @@ def _reported_names(stdout, prefix):
     return None
 
 
+def _output_hashes(stdout):
+    """The per-rank digests the harness printed, in rank order."""
+    prefix = "OUTPUT HASH: "
+    return [ln.split(prefix, 1)[1].strip() for ln in stdout.decode().splitlines() if prefix in ln]
+
+
 def _assert_numerics_passed(result):
     stdout, stderr = result.stdout.decode(), result.stderr.decode()
     assert result.returncode == 0, f"non-zero exit\n{stderr}"
@@ -148,11 +151,7 @@ def test_fused_ag_overlap_is_deterministic(nprocs):
     second = _run_fused_ag(nprocs)
     _assert_numerics_passed(second)
 
-    def _hashes(out):
-        prefix = "OUTPUT HASH: "
-        return [ln.split(prefix, 1)[1].strip() for ln in out.decode().splitlines() if prefix in ln]
-
-    first_hashes, second_hashes = _hashes(first.stdout), _hashes(second.stdout)
+    first_hashes, second_hashes = _output_hashes(first.stdout), _output_hashes(second.stdout)
     assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
     assert first_hashes == second_hashes, "two identical runs produced different outputs"
 
@@ -181,10 +180,6 @@ def test_fused_layer_bulk_dgrad_bf16(nprocs):
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_layer_bulk_wgrad_bf16(nprocs):
-    """The backward reduce-scatter hidden behind the wgrad GEMM, on the fused method.
-
-    wgrad is in the default fused layer set on gfx950, so this needs no extra configuration.
-    """
     result = _run_fused_layer(nprocs, [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"])
     _assert_numerics_passed(result)
     fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
@@ -196,7 +191,7 @@ def test_fused_layer_bulk_wgrad_bf16(nprocs):
 
 
 def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
-    """Run the layer harness on a ROW-parallel Linear, which is the fused reduce-scatter's path."""
+    """Run the layer harness on a row-parallel Linear, which is the fused reduce-scatter's path."""
     test_cmd = (
         _fused_launch_cmd(nprocs)
         + [
@@ -223,11 +218,7 @@ def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_rs_overlap_bf16(nprocs):
-    """bf16 at an aligned shape: the fused reduce-scatter runs and the result is correct.
-
-    The combine is specialised on 8 ranks, so below that the backend must decline and fall back
-    rather than fail -- both outcomes are correct, and which one applies is asserted on nprocs.
-    """
+    """bf16 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
     result = _run_fused_rs_layer(
         nprocs, [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
     )
@@ -236,23 +227,13 @@ def test_fused_rs_overlap_bf16(nprocs):
     assert "failed to launch" not in stderr, stderr
     disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
     assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
-    if nprocs == 8:
-        assert "proj_fprop" not in disabled, disabled
-    else:
-        assert "proj_fprop" in disabled, f"tp={nprocs} must decline the fused RS, got {disabled}"
+    assert "proj_fprop" not in disabled, disabled
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 @pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
 def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is outside the backend, and setup must decline rather than reach the kernel.
-
-    The AG sibling asserts a non-zero exit because its region carries the operand dtype straight
-    into the kernel guard. The RS path is gated earlier -- _fused_rs_ub_supported rejects any
-    non-bf16 region at setup -- so the layer is disabled and the run stays correct. Either way the
-    kernel must never see a non-bf16 operand, which is what the stderr assertion pins.
-    """
     if quantization.startswith("fp8") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
@@ -308,6 +289,9 @@ def test_fused_rs_overlap_is_deterministic(nprocs):
     first, second = (_run_fused_rs_layer(nprocs, args) for _ in range(2))
     _assert_numerics_passed(first)
     _assert_numerics_passed(second)
+    first_hashes, second_hashes = _output_hashes(first.stdout), _output_hashes(second.stdout)
+    assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
+    assert first_hashes == second_hashes, "two identical runs produced different outputs"
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

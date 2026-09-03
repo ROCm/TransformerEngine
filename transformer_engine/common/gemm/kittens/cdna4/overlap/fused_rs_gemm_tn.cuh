@@ -33,10 +33,9 @@ constexpr int RS_MAX_TP = 8;
 #define COMM_WG 8
 #endif
 
-// Sentinel selectors, declared here so the epilogue clamp below can see them. 
-// Poison and clamp are quiet negative NaNs so neither can collide with a hardware NaN.
-#define RS_SENT_BF16 0xFFAAu
+// Arrival poison, a comm workgroup still reading it knows the producing GEMM has not stored there yet
 #define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
+__device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
 
 struct RsPeers {
     unsigned int *arrive[RS_MAX_TP];

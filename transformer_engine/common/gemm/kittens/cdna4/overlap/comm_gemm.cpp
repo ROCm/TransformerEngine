@@ -41,6 +41,22 @@ inline FusedRsLayout fused_rs_layout(size_t shard_bytes, int tp_size) {
 }
 
 
+// 90 D3. The fill pattern here and the compare constant in the device object must not drift apart;
+// a stale build fails silently, with every slot reading as already-arrived.
+bool sentinel_pattern_agrees() {
+    static_assert(static_cast<unsigned int>(RS_SENT_BF16) * 0x00010001u == RS_SENT_DW,
+                  "90 D3: the 16-bit fill pattern and the 32-bit compare pattern disagree.");
+    static bool checked = false;
+    static bool agrees  = false;
+    if (!checked) {
+        unsigned int device_dw = 0;
+        agrees = hipMemcpyFromSymbol(&device_dw, HIP_SYMBOL(hk_rs_tn::rs_sent_dw_device),
+                                     sizeof(device_dw)) == hipSuccess && device_dw == RS_SENT_DW;
+        checked = true;
+    }
+    return agrees;
+}
+
 uint64_t compute_warn_ticks() {
     int dev = 0, khz = 0;
     if (hipGetDevice(&dev) != hipSuccess) return 0;
@@ -543,12 +559,21 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
         return false;
     }
 
-    if (args.arrive_peers && args.arrive_local) {
-        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
-            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
-            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
-            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    // Arms the arrival sentinel: the only edge ordering a comm workgroup's read of a peer's stage
+    // against that peer's epilogue store. Must precede the rendezvous below.
+    if (!sentinel_pattern_agrees()) return false;
+    if (hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_BF16,
+                          lay.stage_bytes / sizeof(bf16), args.stream) != hipSuccess) {
+        return false;
     }
+
+    // Mandatory here, unlike the ag paths: it is what quiesces every rank's fill before any rank
+    // reads, so without it the fill above orders nothing.
+    if (!args.arrive_peers || !args.arrive_local) return false;
+    ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+        static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+        static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+        args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
 
     RsLaunchCfg cfg;
     cfg.comm_wg   = rs_comm_wg_tn(M, N_TOTAL, K, tp_size);

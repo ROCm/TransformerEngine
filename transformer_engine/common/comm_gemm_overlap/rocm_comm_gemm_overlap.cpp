@@ -470,7 +470,7 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
     bool eligible = false;
     const bool launched = hk_fused_rs_gemm(A, transa, B, transb, bias, pre_gelu_out, rs_output,
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
-                                           _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
+                                           _ub_reg, _tp_id, _tp_size, _rs_signal_base + _tp_size,
                                            stream_main, &eligible);
     if (!eligible) {
       rocm_split_overlap_rs(A, transa, B, transb, D, bias, pre_gelu_out, workspace, grad,
@@ -478,7 +478,7 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
       return;
     }
     NVTE_CHECK(launched, "fused GEMM+RS failed to launch on an eligible shape");
-    _ag_signal_base += _tp_size;
+    _rs_signal_base += _tp_size;
     return;
   }
 #endif
