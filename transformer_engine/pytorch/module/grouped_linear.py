@@ -456,6 +456,430 @@ class _GroupedLinear(torch.autograd.Function):
 
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
+    @staticmethod
+    def _packed_3d_view(tensors):
+        """[G, N, K] view of consecutive contiguous 2D buffers, or None."""
+        g0 = tensors[0]
+        if g0 is None or g0.ndim != 2 or not g0.is_contiguous():
+            return None
+        n, k = g0.shape
+        step = g0.numel() * g0.element_size()
+        nbytes_needed = g0.storage_offset() * g0.element_size() + len(tensors) * step
+        if g0.untyped_storage().size() < nbytes_needed:
+            return None
+        for i, g in enumerate(tensors):
+            if (
+                g is None
+                or g.dtype != g0.dtype
+                or g.device != g0.device
+                or tuple(g.shape) != (n, k)
+                or not g.is_contiguous()
+                or g.untyped_storage().data_ptr() != g0.untyped_storage().data_ptr()
+                or g.data_ptr() != g0.data_ptr() + i * step
+            ):
+                return None
+        return g0.as_strided((len(tensors), n, k), (n * k, k, 1))
+
+    @staticmethod
+    def _expert_weights_as_3d(weights, dtype):
+        """[G, N, K] expert weights without stacking when storage is already packed.
+
+        ``single_grouped_weight`` keeps experts as consecutive slices of one
+        ``GroupedTensor.rowwise_data`` buffer; those slices are a zero-copy view.
+        Discrete ``weight0..weightN`` still need a stack.
+        """
+        packed = _GroupedLinear._packed_3d_view(weights)
+        if packed is not None:
+            if packed.dtype != dtype:
+                packed = packed.to(dtype)
+            return packed if packed.is_contiguous() else packed.contiguous()
+        return torch.stack([wt.to(dtype).contiguous() for wt in weights], 0).contiguous()
+
+    @staticmethod
+    def _grouped_weight_blockwise_qtensor(weights, activation_dtype, dt, pow2_w):
+        """Packed 2D ``[G*N, K]`` grouped-weight ``Float8BlockwiseQTensor`` from a list
+        of per-expert blockwise ``Float8BlockwiseQTensor`` (``fp8_model_params``).
+
+        When the per-expert ``_rowwise_data`` / ``_rowwise_scale_inv`` are consecutive
+        slices of one contiguous buffer (``single_grouped_weight``), the packed
+        ``[G*N, K]`` data and ``[G*(N/128), K/128]`` scales are reconstructed as a
+        zero-copy view. Discrete params fall back to a ``torch.stack`` copy.
+        """
+        from ..triton_kernels.blockwise_fp8_grouped_gemm import _stack_weight_qtensors
+        from ..triton_kernels.blockwise_quantize import (
+            wrap_fp8_blockwise_grouped_weight_qtensor,
+        )
+        from ..triton_kernels.common import te_dtype_to_torch_dtype
+
+        # Zero-copy [G, N, K] / [G, bn, bk] views when the per-expert payloads are
+        # consecutive slices of one buffer; the wrap builder flattens them to 2D.
+        b_fp8 = _GroupedLinear._packed_3d_view([w._rowwise_data for w in weights])
+        b_scale = _GroupedLinear._packed_3d_view([w._rowwise_scale_inv for w in weights])
+        if b_fp8 is None or b_scale is None:
+            b_fp8, b_scale = _stack_weight_qtensors(weights, te_dtype_to_torch_dtype(dt))
+        return wrap_fp8_blockwise_grouped_weight_qtensor(
+            b_fp8, b_scale, activation_dtype, dt, pow2=pow2_w
+        )
+
+    @staticmethod
+    def _handle_fused_wgrad(weight, main_grad):
+        """Megatron DDP hook: mark wgrad as consumed and return a dummy (or None)."""
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+            shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
+            return get_dummy_wgrad(
+                shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
+            )
+        return None
+
+    @staticmethod
+    def _is_blockwise_fp8_triton_grouped_gemm_supported(
+        *,
+        fp8,
+        recipe,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ) -> bool:
+        """ROCm Triton blockwise FP8 grouped GEMM: HIP, env, Float8BlockScaling 1x128/128x128."""
+        return (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") == "1"
+            and fp8
+            and recipe is not None
+            and recipe.float8_block_scaling()
+            and (
+                recipe.x_block_scaling_dim,
+                recipe.w_block_scaling_dim,
+                recipe.grad_block_scaling_dim,
+            )
+            == (1, 2, 1)
+            # The forward/dgrad kernel applies one scalar B scale per N-tile
+            # (BLOCK_SIZE_N == 128 == scale-block-N), so an N that is not a
+            # multiple of 128 would apply the wrong scale to the tail tile.
+            # Forward's N is out_features, dgrad's N is in_features.
+            and in_features % 128 == 0
+            and out_features % 128 == 0
+            and not (
+                use_bias
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
+
+    @staticmethod
+    def _forward_blockwise_fp8_triton(
+        ctx,
+        *,
+        inp,
+        m_splits,
+        m_splits_tensor,
+        weights,
+        weight_quantizers,
+        activation_dtype,
+        is_grad_enabled,
+        fuse_wgrad_accumulation,
+        is_first_microbatch,
+        wgrad_store,
+        weight_workspaces=None,
+        cache_weight=False,
+        pow2_x=True,
+        pow2_w=True,
+        pow2_grad=True,
+    ):
+        """Blockwise FP8 grouped GEMM forward (ROCm Triton).
+
+        Selected from :meth:`forward` under the ``Float8BlockScaling`` recipe when
+        :meth:`_is_blockwise_fp8_triton_grouped_gemm_supported` is true. Activations are
+        quantized rowwise (1x128 along K) and weights 128x128, both wrapped as
+        :class:`Float8BlockwiseQTensor`. When the weights are already blockwise-quantized
+        params (``fp8_model_params``) their stored rowwise data + scales are reused
+        directly instead of re-quantizing. The backward wgrad (see
+        :meth:`_backward_blockwise_fp8_triton`) uses a segment-padded columnwise operand
+        quantized from the original high-precision input.
+        """
+        from ..triton_kernels.blockwise_quantize import (
+            quantize_fp8_blockwise_act_operands,
+            quantize_fp8_blockwise_grouped_weight_qtensor,
+        )
+        from ..triton_kernels.blockwise_fp8_grouped_gemm import (
+            grouped_gemm_fp8_blockwise_triton_kernel,
+        )
+        from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+
+        num_gemms = len(m_splits)
+
+        # Resolve the FP8 dtype from the weight quantizer as a TE ``DType`` (the
+        # QTensor's native dtype). The Triton builders map it to the arch-correct
+        # torch FP8 dtype only at the kernel/``.view`` boundary.
+        if weight_quantizers and weight_quantizers[0] is not None:
+            dt = tex.DType(int(weight_quantizers[0].dtype))
+        else:
+            dt = tex.DType.kFloat8E4M3
+        in_features = weights[0].size(-1)
+        out_features = weights[0].size(0)
+        device = inp.device
+
+        inp_shape = inp.shape
+        a = inp.reshape(-1, in_features).to(activation_dtype).contiguous()
+
+        # Prefer the caller-provided GPU splits tensor (avoids a blocking H2D of
+        # pageable m_splits). Fall back to m_splits when it is not passed.
+        split_src = m_splits_tensor if m_splits_tensor is not None else m_splits
+        group_lens = split_src.to(device=device, dtype=torch.int64)
+        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
+        group_offs[1:] = torch.cumsum(group_lens, 0)
+
+        # Quantize the activation rowwise (1x128 along K) as a Float8BlockwiseQTensor.
+        # When gradients are needed the same pass also emits the segment-padded
+        # columnwise operand for the variable-K wgrad into ``qa``'s columnwise slots.
+        qa = quantize_fp8_blockwise_act_operands(
+            a,
+            dt,
+            128,
+            group_lens,
+            group_offs,
+            rowwise=True,
+            columnwise=is_grad_enabled,
+            pow2=pow2_x,
+        )
+
+        # Weight operand: a packed 2D [G*N, K] Float8BlockwiseQTensor. When the
+        # params are already blockwise-quantized (fp8_model_params) reuse their
+        # stored rowwise data + scales; otherwise quantize the high-precision
+        # weights once over the packed 3D view (zero-copy when
+        # ``single_grouped_weight``), no stack.
+        new_workspaces = [None] * num_gemms
+        if isinstance(weights[0], Float8BlockwiseQTensor):
+            # fp8_model_params: reuse the stored rowwise data + scales directly (no
+            # re-quantization).
+            qw = _GroupedLinear._grouped_weight_blockwise_qtensor(
+                weights, activation_dtype, dt, pow2_w
+            )
+        else:
+            # High-precision weights: quantize the whole packed weight into a single
+            # Float8BlockwiseQTensor and cache it across microbatches. On a cache hit
+            # (``is_first_microbatch=False``) reuse the stored packed weight untouched so
+            # its identity is preserved; only a fresh quantization is staged for write-back.
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            cached_qw = weight_workspaces[0] if weight_workspaces else None
+            if not update_ws:
+                expected_wshape = (num_gemms * out_features, in_features)
+                if not (
+                    isinstance(cached_qw, Float8BlockwiseQTensor)
+                    and tuple(cached_qw.shape) == expected_wshape
+                ):
+                    raise RuntimeError(
+                        "Cached blockwise weight workspace is incompatible with the "
+                        "current weights; expected a Float8BlockwiseQTensor of shape "
+                        f"{expected_wshape}."
+                    )
+                qw = cached_qw
+            else:
+                w = _GroupedLinear._expert_weights_as_3d(weights, activation_dtype)
+                qw = quantize_fp8_blockwise_grouped_weight_qtensor(w, dt, pow2=pow2_w)
+                if cache_weight:
+                    new_workspaces[0] = qw
+
+        # Forward GEMM: out[seg] = A[seg] @ W[g]^T  (trans_b=True).
+        out = grouped_gemm_fp8_blockwise_triton_kernel(
+            qa, qw, group_offs, trans_b=True, out_dtype=activation_dtype
+        )
+
+        if is_grad_enabled:
+            ctx.use_blockwise_fp8_triton = True
+            # The segment-padded columnwise activation for the variable-K wgrad rides
+            # in ``qa``'s columnwise slots (produced by the fused pass above). Save
+            # those raw fields plus the packed weight QTensor's 2D fields; both
+            # rewrapped into Float8BlockwiseQTensors in backward.
+            ctx.save_for_backward(
+                qa._columnwise_data,
+                qa._columnwise_scale_inv,
+                qw._rowwise_data,
+                qw._rowwise_scale_inv,
+                group_lens,
+                group_offs,
+                qa._vk_group_offs,
+            )
+            ctx.dt = dt
+            ctx.pow2_x = pow2_x
+            ctx.pow2_w = pow2_w
+            ctx.pow2_grad = pow2_grad
+            ctx.activation_dtype = activation_dtype
+            ctx.num_gemms = num_gemms
+            ctx.inp_shape = inp_shape
+            ctx.out_features = out_features
+            ctx.requires_dgrad = inp.requires_grad
+            ctx.weight_requires_grad = weights[0].requires_grad
+            ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.is_first_microbatch = is_first_microbatch
+            ctx.wgrad_store = wgrad_store
+            if fuse_wgrad_accumulation and ctx.weight_requires_grad:
+                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                ctx.origin_weights_overwrite_main_grad = getattr(
+                    weights[0], "overwrite_main_grad", False
+                )
+                if hasattr(weights[0], "__fsdp_param__"):
+                    ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                else:
+                    ctx.main_grad_funcs = [
+                        lambda j=i: weights[j].main_grad for i in range(num_gemms)
+                    ]
+
+        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
+
+    @staticmethod
+    def _backward_blockwise_fp8_triton(ctx, grad_output):
+        """Backward path paired with :meth:`_forward_blockwise_fp8_triton`."""
+        from ..triton_kernels.blockwise_quantize import (
+            quantize_fp8_blockwise_act_operands,
+            wrap_fp8_blockwise_grouped_weight_qtensor,
+            wrap_fp8_blockwise_segment_m_qtensor,
+        )
+        from ..triton_kernels.blockwise_fp8_grouped_gemm import (
+            grouped_gemm_fp8_blockwise_triton_kernel,
+            grouped_gemm_fp8_blockwise_variable_k_triton_kernel,
+        )
+
+        a_col, a_scol, b_fp8, b_scale, group_lens, group_offs, vk_offs = ctx.saved_tensors
+        dt = ctx.dt
+        g_out = grad_output.reshape(-1, ctx.out_features).contiguous()
+
+        # Grad-output operands in one QTensor (``qdgrad``): rowwise for dgrad and/or
+        # segment-padded columnwise (variable-K) for wgrad. When both grads are
+        # needed they share a single fused pass over g_out; otherwise only the
+        # requested operand is produced.
+        qdgrad = quantize_fp8_blockwise_act_operands(
+            g_out,
+            dt,
+            128,
+            group_lens,
+            group_offs,
+            rowwise=ctx.requires_dgrad,
+            columnwise=ctx.weight_requires_grad,
+            pow2=ctx.pow2_grad,
+        )
+
+        # dgrad: dX[seg] = dY[seg] @ W[g]  (trans_b=False) -> [M_total, K].
+        dgrad = None
+        if ctx.requires_dgrad:
+            # Rewrap the saved packed weight fields as a 2D [G*N, K] QTensor.
+            qw = wrap_fp8_blockwise_grouped_weight_qtensor(
+                b_fp8, b_scale, ctx.activation_dtype, dt, pow2=ctx.pow2_w
+            )
+            dgrad = grouped_gemm_fp8_blockwise_triton_kernel(
+                qdgrad,
+                qw,
+                group_offs,
+                trans_b=False,
+                out_dtype=ctx.activation_dtype,
+            )
+
+        # wgrad: dW[g] = dY[g]^T @ X[g]  (variable-K) -> [G, N, K].
+        wgrad_list = [None] * ctx.num_gemms
+        if ctx.weight_requires_grad:
+            # qdgrad carries the segment-padded columnwise grad output (wgrad operand).
+            # Rewrap the saved activation columnwise fields as a columnwise-only QTensor.
+            a_operand = wrap_fp8_blockwise_segment_m_qtensor(
+                a_col, a_scol, vk_offs, ctx.activation_dtype, dt, pow2=ctx.pow2_x
+            )
+            fuse = getattr(ctx, "fuse_wgrad_accumulation", False)
+            origin_weights = [None] * ctx.num_gemms
+            main_grads = [None] * ctx.num_gemms
+            accumulate = False
+            packed_out = None
+            if fuse:
+                origin_weight_refs = ctx.origin_weight_refs
+                ctx.origin_weight_refs = None
+                origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
+                assert all(
+                    w is not None for w in origin_weights
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+                for origin_weight, main_grad in zip(origin_weights, main_grads):
+                    if main_grad is not None:
+                        origin_weight.main_grad = main_grad
+                if ctx.is_first_microbatch is not None:
+                    accumulate = not ctx.is_first_microbatch
+                else:
+                    accumulate = True
+                if getattr(ctx, "origin_weights_overwrite_main_grad", False):
+                    accumulate = False
+                packed_out = _GroupedLinear._packed_3d_view(main_grads)
+                wgrad_list = main_grads
+                out_dtype = (
+                    main_grads[0].dtype if main_grads[0] is not None else ctx.activation_dtype
+                )
+            else:
+                out_dtype = ctx.activation_dtype
+                wgrad_3d = torch.empty(
+                    (ctx.num_gemms, ctx.out_features, a_col.shape[1]),
+                    dtype=out_dtype,
+                    device=a_col.device,
+                )
+                packed_out = wgrad_3d
+                wgrad_list = [wgrad_3d[g] for g in range(ctx.num_gemms)]
+
+            def grouped_gemm_wgrad(*_unused):
+                dW = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
+                    qdgrad,
+                    a_operand,
+                    out_dtype=out_dtype,
+                    out=packed_out,
+                    accumulate=accumulate and packed_out is not None and fuse,
+                )
+                if fuse and packed_out is None:
+                    for g, mg in enumerate(main_grads):
+                        if mg is None:
+                            continue
+                        if accumulate:
+                            mg.add_(dW[g])
+                        else:
+                            mg.copy_(dW[g])
+                # Signature matches WeightGradStore / GroupedLinear.backward_dw.
+                return None, [None] * ctx.num_gemms, None
+
+            wgrad_store = getattr(ctx, "wgrad_store", None)
+            if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
+                # tensor_list[2] is the wgrad buffers backward_dw assigns to .grad.
+                wgrad_store.put(
+                    [qdgrad._columnwise_data, a_operand._columnwise_data, wgrad_list],
+                    grouped_gemm_wgrad,
+                )
+            else:
+                grouped_gemm_wgrad()
+
+            if fuse:
+                wgrad_list = [
+                    _GroupedLinear._handle_fused_wgrad(weight, main_grad)
+                    for weight, main_grad in zip(origin_weights, main_grads)
+                ]
+
+        grad_biases = [None] * ctx.num_gemms  # bias not supported on this path
+
+        # Grads match forward inputs:
+        # (inp, m_splits, non_tensor_args, out, dgrad_out, *weights, *biases).
+        return (
+            dgrad.view(ctx.inp_shape) if dgrad is not None else None,
+            None,  # m_splits
+            None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
+            *wgrad_list,
+            *grad_biases,
+        )
+
     # pylint: disable=keyword-arg-before-vararg
     @staticmethod
     def forward(
@@ -507,13 +931,55 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input = False
 
         # Check if Triton kernel should be used
-        use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+        use_grouped_gemm_triton = (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1"
+            and not fp8
+            and not fuse_wgrad_accumulation
+        )
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
+
+        # Blockwise FP8 grouped GEMM (ROCm Triton) opt-in. Runs its own quantization +
+        # grouped GEMM and returns early, bypassing the default quantizer setup below.
+        blockwise_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        if _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+            fp8=fp8,
+            recipe=blockwise_recipe,
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=weights[0].size(-1),
+            out_features=weights[0].size(0),
+        ):
+            return _GroupedLinear._forward_blockwise_fp8_triton(
+                ctx,
+                inp=inp,
+                m_splits=m_splits,
+                m_splits_tensor=m_splits_tensor,
+                weights=weights,
+                weight_quantizers=weight_quantizers,
+                activation_dtype=activation_dtype,
+                is_grad_enabled=is_grad_enabled,
+                fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                is_first_microbatch=is_first_microbatch,
+                wgrad_store=wgrad_store,
+                weight_workspaces=weight_workspaces,
+                cache_weight=cache_weight,
+                # Match the recipe's scale rounding (pow2 by default) so the Triton
+                # path quantizes identically to the default Float8BlockScaling path.
+                pow2_x=blockwise_recipe.fp8_quant_fwd_inp.power_2_scale,
+                pow2_w=blockwise_recipe.fp8_quant_fwd_weight.power_2_scale,
+                pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
+            )
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -616,12 +1082,19 @@ class _GroupedLinear(torch.autograd.Function):
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
             fused_padding_kwargs = {}
-            if actual_m_splits is not None and IS_HIP_EXTENSION \
-                    and inp_view.shape[0] == sum(actual_m_splits):
+            if (
+                actual_m_splits is not None
+                and IS_HIP_EXTENSION
+                and inp_view.shape[0] == sum(actual_m_splits)
+            ):
                 fused_padding_kwargs["valid_split_sections"] = actual_m_splits
             inputmats = tex.split_quantize(
-                inp_view, m_splits, input_quantizers,
-                disable_bulk_allocation=cpu_offloading, **fused_padding_kwargs)
+                inp_view,
+                m_splits,
+                input_quantizers,
+                disable_bulk_allocation=cpu_offloading,
+                **fused_padding_kwargs,
+            )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -697,12 +1170,17 @@ class _GroupedLinear(torch.autograd.Function):
             **kwargs,
         )
 
-
         output_unpadded = False
-        if unpad_output and actual_m_splits is not None and IS_HIP_EXTENSION and actual_m_splits != m_splits:
+        if (
+            unpad_output
+            and actual_m_splits is not None
+            and IS_HIP_EXTENSION
+            and actual_m_splits != m_splits
+        ):
             out_unpadded = torch.empty(
                 [sum(actual_m_splits), out.shape[-1]],
-                dtype=out.dtype, device=out.device,
+                dtype=out.dtype,
+                device=out.device,
             )
             tex.fused_multi_row_unpadding(out, out_unpadded, m_splits, actual_m_splits)
             out = out_unpadded
@@ -1021,6 +1499,8 @@ class _GroupedLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
+            if getattr(ctx, "use_blockwise_fp8_triton", False):
+                return _GroupedLinear._backward_blockwise_fp8_triton(ctx, grad_output)
             if ctx.use_grouped_tensor_path:
                 return _GroupedLinear._backward_grouped_tensor(ctx, grad_output)
 
@@ -1028,7 +1508,7 @@ class _GroupedLinear(torch.autograd.Function):
             N = ctx.num_gemms
             num_inputs = ctx.num_input_tensors
             inputmats = saved_tensors[:num_inputs]
-            weights = saved_tensors[num_inputs: num_inputs + N]
+            weights = saved_tensors[num_inputs : num_inputs + N]
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
 
@@ -1080,13 +1560,19 @@ class _GroupedLinear(torch.autograd.Function):
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
                         grad_output = tex.split_quantize(
-                            grad_output_view, ctx.m_splits,
-                            ctx.grad_output_quantizers, **bwd_fused_kwargs)
+                            grad_output_view,
+                            ctx.m_splits,
+                            ctx.grad_output_quantizers,
+                            **bwd_fused_kwargs,
+                        )
                 else:
                     # Multi-tensor quantize
                     grad_output = tex.split_quantize(
-                        grad_output_view, ctx.m_splits,
-                        ctx.grad_output_quantizers, **bwd_fused_kwargs)
+                        grad_output_view,
+                        ctx.m_splits,
+                        ctx.grad_output_quantizers,
+                        **bwd_fused_kwargs,
+                    )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -1102,9 +1588,9 @@ class _GroupedLinear(torch.autograd.Function):
                 # wgrad GEMM.
                 if not ctx.use_grouped_gemm_triton:
                     grad_output = torch.split(
-                    cast_if_needed(grad_output_view, ctx.activation_dtype),
-                    ctx.m_splits,
-                )
+                        cast_if_needed(grad_output_view, ctx.activation_dtype),
+                        ctx.m_splits,
+                    )
                 else:
                     grad_output = [cast_if_needed(grad_output_view, ctx.activation_dtype)]
 
@@ -1178,14 +1664,21 @@ class _GroupedLinear(torch.autograd.Function):
                     **kwargs,
                 )
 
-                if ctx.actual_m_splits is not None and ctx.actual_m_splits != ctx.m_splits \
-                        and not ctx.output_unpadded:
+                if (
+                    ctx.actual_m_splits is not None
+                    and ctx.actual_m_splits != ctx.m_splits
+                    and not ctx.output_unpadded
+                ):
                     dgrad_unpadded = torch.empty(
                         (sum(ctx.actual_m_splits), dgrad.shape[-1]),
-                        dtype=dgrad.dtype, device=dgrad.device,
+                        dtype=dgrad.dtype,
+                        device=dgrad.device,
                     )
                     tex.fused_multi_row_unpadding(
-                        dgrad, dgrad_unpadded, ctx.m_splits, ctx.actual_m_splits,
+                        dgrad,
+                        dgrad_unpadded,
+                        ctx.m_splits,
+                        ctx.actual_m_splits,
                     )
                     dgrad = dgrad_unpadded
 
@@ -1212,7 +1705,7 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad_list = torch.empty(
                             (ctx.num_gemms, weights[0].size(0), weights[0].size(1)),
                             dtype=ctx.activation_dtype,
-                            device=ctx.device
+                            device=ctx.device,
                         )
 
                 if ctx.save_original_input:
@@ -1231,12 +1724,15 @@ class _GroupedLinear(torch.autograd.Function):
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
                         save_fused_kwargs = {}
-                        if ctx.actual_m_splits is not None and IS_HIP_EXTENSION \
-                                and inp_view.shape[0] == sum(ctx.actual_m_splits):
+                        if (
+                            ctx.actual_m_splits is not None
+                            and IS_HIP_EXTENSION
+                            and inp_view.shape[0] == sum(ctx.actual_m_splits)
+                        ):
                             save_fused_kwargs["valid_split_sections"] = ctx.actual_m_splits
                         inputmats = tex.split_quantize(
-                            inp_view, ctx.m_splits, ctx.input_quantizers,
-                            **save_fused_kwargs)
+                            inp_view, ctx.m_splits, ctx.input_quantizers, **save_fused_kwargs
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,
@@ -2094,6 +2590,34 @@ class GroupedLinear(TransformerEngineBaseModule):
             if weight_tensors is None:
                 # TODO(ksivaman): Remove this after GEMM integration.
                 weight_tensors = grouped_weight.split_into_quantized_tensors()
+            # ROCm + CUDA fix: Split views don't carry the grad state that the autograd Function reads
+            # off ``weights[i]``, so mirror it from the grouped Parameter (needed on
+            # every backend; transitional until ``_get_weight_tensors`` returns the
+            # Parameter directly).
+            want_grad = grouped_weight.requires_grad
+            main_grad = getattr(grouped_weight, "main_grad", None)
+            per_expert_main_grad = None
+            if main_grad is not None:
+                # Must be an aliasing view (not a copy) so per-expert wgrad accumulates
+                # in place; requires a contiguous [num_gemms, out_features, in_features].
+                try:
+                    per_expert_main_grad = main_grad.view(
+                        self.num_gemms, self.out_features, self.in_features
+                    )
+                except RuntimeError as e:
+                    raise RuntimeError(
+                        "single_grouped_weight with fuse_wgrad_accumulation requires main_grad to "
+                        "be a contiguous [num_gemms * out_features, in_features] buffer so per-expert"
+                        f" wgrad can accumulate in place (got shape {tuple(main_grad.shape)})."
+                    ) from e
+            for i, w in enumerate(weight_tensors):
+                # ``requires_grad_`` only works on leaves.
+                if w.requires_grad != want_grad and w.is_leaf:
+                    w.requires_grad_(want_grad)
+                if per_expert_main_grad is not None:
+                    w.main_grad = per_expert_main_grad[i]
+                if hasattr(grouped_weight, "overwrite_main_grad"):
+                    w.overwrite_main_grad = grouped_weight.overwrite_main_grad
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
@@ -2114,6 +2638,13 @@ class GroupedLinear(TransformerEngineBaseModule):
             parts = grouped_bias.quantized_tensors
             if parts is None:
                 parts = grouped_bias.split_into_quantized_tensors()
+            # Mirror ``requires_grad`` onto the per-expert views (bias never uses
+            # ``main_grad``: fuse-accumulation is weights-only). ``requires_grad_``
+            # only works on leaves, so guard to avoid a RuntimeError on a non-leaf view.
+            want_grad = grouped_bias.requires_grad
+            for p in parts:
+                if p.requires_grad != want_grad and p.is_leaf:
+                    p.requires_grad_(want_grad)
             return [p.reshape(-1) for p in parts]
         return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
