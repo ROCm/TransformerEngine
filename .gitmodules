@@ -30,6 +30,6 @@
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
 	url = https://github.com/ROCm/ck-jit.git
-[submodule "3rdparty/nccl"]
-	path = 3rdparty/nccl
-	url = https://github.com/NVIDIA/nccl.git
+[submodule "3rdparty/nccl-extensions"]
+	path = 3rdparty/nccl-extensions
+	url = https://github.com/NVIDIA/nccl-extensions.git
