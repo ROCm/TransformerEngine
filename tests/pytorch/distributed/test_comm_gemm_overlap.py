@@ -462,6 +462,9 @@ FUSED_PROC_COUNTS = [
     if n <= min(torch.cuda.device_count(), FUSED_MAX_GPUS_TO_USE) and _fused_shape_ok(n)
 ]
 
+# Both GEMM layouts the fused AG backend implements; the harness shapes the weight per layout.
+FUSED_LAYOUTS = ("TN", "NN")
+
 fused_available = (
     IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and len(FUSED_PROC_COUNTS) > 0
 )
@@ -477,7 +480,7 @@ def _fused_launch_cmd(nprocs: int):
     return ["torchrun", f"--nproc_per_node={nprocs}"]
 
 
-def _run_fused_ag(nprocs, bulk=False, quantization="none"):
+def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
     """Run the AG overlap harness with the fused backend, returning the completed process."""
     test_cmd = _fused_launch_cmd(nprocs) + [
         str(TEST_ROOT / "run_gemm_with_overlap.py"),
@@ -490,7 +493,12 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none"):
         "--comm-type=AG",
         "--fused",
     ]
-    test_cmd += ["--bulk-overlap"] if bulk else ["--p2p", f"--quantization={quantization}"]
+    # The bulk harness pins its GEMM to NN regardless, so --layout only applies to the p2p path.
+    test_cmd += (
+        ["--bulk-overlap"]
+        if bulk
+        else ["--p2p", f"--quantization={quantization}", f"--layout={layout}"]
+    )
     return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
 ELIGIBLE_OUT_FEATURES_PER_RANK = 1536
@@ -538,19 +546,21 @@ def _assert_numerics_passed(result):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_bf16(nprocs):
+def test_fused_ag_overlap_bf16(nprocs, layout):
     """bf16 at an aligned shape: the fused backend runs and the result is correct."""
-    _assert_numerics_passed(_run_fused_ag(nprocs))
+    _assert_numerics_passed(_run_fused_ag(nprocs, layout=layout))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_mxfp8(nprocs):
+def test_fused_ag_overlap_mxfp8(nprocs, layout):
     """mxfp8 at an aligned shape: the fused backend runs and the result is correct."""
     if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    _assert_numerics_passed(_run_fused_ag(nprocs, quantization="mxfp8"))
+    _assert_numerics_passed(_run_fused_ag(nprocs, quantization="mxfp8", layout=layout))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
