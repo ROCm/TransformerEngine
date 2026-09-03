@@ -101,12 +101,12 @@ run_test_config_mgpu() {
     run_default_fa 2 test_distributed_layernorm_mlp.py -k "not (${_layernorm_mlp_jax_gemm_k})"
     _saved_xla_flags="$XLA_FLAGS"
     export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
-    run_default_fa 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
+    run_default_fa_lbl "no_triton_gemm" 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
     export XLA_FLAGS="$_saved_xla_flags"
     run_default_fa 3 test_distributed_permutation.py
     run_default_fa 3 test_distributed_softmax.py
 
-    run_default_fa 3 test_sanity_import.py
+    run_default_fa_lbl "mgpu" 3 test_sanity_import.py
 }
 
 # Single config mode, run it synchronously and return result
@@ -119,11 +119,15 @@ fi
 
 #Master script mode: prepares testing prerequisites
 start_message
-install_prerequisites
-pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
-#check_test_jobs_requested
-#test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
-ck_jit_prebuild build || exit $?
+
+if check_setup_needed; then
+    install_prerequisites
+    pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
+    #check_test_jobs_requested
+    #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue

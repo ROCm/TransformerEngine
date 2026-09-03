@@ -38,17 +38,6 @@ run_default_fa_lbl() {
     fi
 }
 
-check_mxfp8_supported() {
-    #Guard MXFP8-only test filters, which collect no tests on unsupported archs
-    _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "MXFP8 is not supported on this device, skipping MXFP8-only tests" >&2
-        return 1
-    fi
-}
-
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -56,10 +45,22 @@ run_test_config(){
     export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        mkdir -p ${TEST_DIR}/checkpoint
-        python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
-        NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
-        rm -rf ${TEST_DIR}/checkpoint
+        #The checkpoint artifact is generated outside pytest_run, so it is not
+        #covered by TEST_FILTER. Gate it on the same tag the test itself uses,
+        #otherwise every filtered invocation regenerates the artifact -- and
+        #concurrent ones race on the shared checkpoint directory.
+        _ckpt_variant=`get_test_variant_tag $_fus_attn ""`
+        _ckpt_tag=`get_test_name_tag test_checkpoint.py $_ckpt_variant`
+        if [ -n "$TE_CI_LIST_ITEMS" ]; then
+            #Only emit the work item; do not generate the artifact. Save, test
+            #and cleanup stay one unit when the item is dispatched.
+            run 1 test_checkpoint.py
+        elif check_test_filter "$_ckpt_tag"; then
+            mkdir -p ${TEST_DIR}/checkpoint
+            python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
+            NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
+            rm -rf ${TEST_DIR}/checkpoint
+        fi
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
@@ -82,7 +83,7 @@ run_test_config(){
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
+    check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
@@ -130,7 +131,7 @@ run_test_config_mgpu(){
     #this test is not really mGPU but time sensitive so run it here because sGPU tests
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
-    run_default_fa 3 test_sanity_import.py
+    run_default_fa_lbl "mgpu" 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
@@ -146,6 +147,10 @@ run_test_config_mgpu(){
 
 run_benchmark() {
     check_test_filter benchmark || return
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
+        echo "TE_CI_ITEM benchmark"
+        return
+    fi
     echo "\n============= Running benchmarks attention script ============="
     BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
     
@@ -169,22 +174,18 @@ if [ -n "$SINGLE_CONFIG" ]; then
     exit $?
 fi
 
-check_flash_attn_installed() {
-    _result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "Flash attention is not installed" >&2
-        return 1
-    fi
-}
-
 #Master script mode: prepare testing prerequisites first
 start_message
-install_prerequisites
-pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
-#check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
-ck_jit_prebuild build || exit $?
+#Prerequisites and the CK JIT cache are container-wide state, so a scheduler
+#that dispatches many TEST_FILTER-ed invocations does them once up front with
+#TE_CI_SETUP_ONLY and then passes TE_CI_SKIP_SETUP on every item.
+if check_setup_needed; then
+    install_prerequisites
+    pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
+    #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
@@ -208,7 +209,7 @@ for _fus_attn in auto flash ck aotriton unfused; do
     fi
 
     if [ $_fus_attn = flash ]; then
-        check_flash_attn_installed || continue
+        check_supported flash_attn || continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
