@@ -349,12 +349,12 @@ def initialize_ub(
             "qkv_wgrad",
             "fc1_wgrad",
         ]
-        # gfx950 runs the fused backend or nothing by default.
+        # gfx950 runs the fused backend by default.
         _fused_default = get_device_compute_capability() == (9, 5)
         methods = {
             "ring_exchange": [] if _fused_default else list(_rocm_layers),
             "pipeline": [],
-            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            # Bulk regions are rejected on ROCm.
             "bulk": [],
             "fused": list(_rocm_layers) if _fused_default else [],
         }
@@ -432,10 +432,10 @@ def initialize_ub(
         if method == "fused" and get_device_compute_capability() != (9, 5):
             raise ValueError(f"At {name}, `fused` overlap method requires a gfx950 device.")
         if method == "fused" and is_reduce_scatter:
-            # TODO: Add RS support.
-            _ub_disabled_names.add(name)
-            return
-        if method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
+            if not _fused_rs_ub_supported(shape, tp_size, dtype):
+                _ub_disabled_names.add(name)
+                return
+        elif method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
             _ub_disabled_names.add(name)
             return
         if with_cublasmp and method in ("bulk", "external", "fused"):
@@ -661,6 +661,17 @@ def _fused_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dt
     return (shape[0] // tp_size) % 256 == 0
 
 
+def _fused_rs_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dtype) -> bool:
+    """Whether the fused reduce-scatter backend can serve a region of this shape."""
+    if tp_size not in (4, 8):
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if shape[0] % (tp_size * 256) != 0:
+        return False
+    return shape[1] % 256 == 0
+
+
 def fused_ag_gemm_eligible(
     name: str,
     inp: torch.Tensor,
@@ -698,6 +709,25 @@ def fused_bulk_ag_eligible(
     eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
+        eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    _ub_fused_bulk_decisions[name] = eligible
+    return eligible
+
+
+def fused_bulk_rs_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+) -> bool:
+    """Whether this call may use the bulk reduce-scatter overlap."""
+    if not IS_HIP_EXTENSION:
+        return True
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    if eligible:
+        m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
     _ub_fused_bulk_decisions[name] = eligible
     return eligible

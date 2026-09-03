@@ -11,6 +11,7 @@ import sys
 import socket
 import subprocess
 import argparse
+import hashlib
 import warnings
 import pprint
 import yaml
@@ -319,6 +320,18 @@ def _parse_args(argv=None, namespace=None):
     return args
 
 
+def _digest(tensors):
+    """A bit-exact, order-sensitive fingerprint of a tensor list."""
+    digest = hashlib.sha256()
+    for tensor in tensors:
+        if tensor is None:
+            digest.update(b"<none>")
+            continue
+        raw = tensor.detach().contiguous().cpu().flatten().view(torch.uint8)
+        digest.update(raw.numpy().tobytes())
+    return digest.hexdigest()
+
+
 def _compare_tensors(name, test, ref, rtol, atol):
     # Make sure tensors aren't zero and we don't pass trivially
     if test.count_nonzero() == 0:
@@ -574,6 +587,10 @@ def _train(opts):
         if test_param.requires_grad and "layer_norm" not in test_name:
             test_grads.append(test_param.grad)
             names.append(test_name + ".grad")
+
+    all_digests = [None] * opts.tp
+    dist.all_gather_object(all_digests, _digest(test_grads), group=nccl_world)
+    dist_print("OUTPUT HASH: " + " ".join(all_digests))
 
     torch.set_rng_state(torch_rng_state)
     torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
