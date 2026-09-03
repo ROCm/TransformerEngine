@@ -570,6 +570,16 @@ bool run_mxfp8_nn(const KittensFusedAgGemmArgs &args) {
     const int k_iters = K / K_STEP;
     int scale_K = K / 32;
 
+    // The scale region is sized in CommOverlapP2PBase::initialize; bail out rather than read
+    // garbage if its chunking ever disagrees with this kernel's view of the operand. The 16B
+    // alignment holds for every shape the eligibility gate admits, so drop to hipBLASLt rather
+    // than silently mis-copying if it ever stops holding.
+    if (args.scale_chunk_bytes &&
+        (args.scale_chunk_bytes != static_cast<size_t>(m_local) * static_cast<size_t>(scale_K) ||
+         args.scale_chunk_bytes % 16 != 0 || args.scale_base_offset % 16 != 0)) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(g_mu);
 
     const PlanKey key{2, M, N_TOTAL, K, tp_size, args.rank, 1};
@@ -608,8 +618,7 @@ bool run_mxfp8_nn(const KittensFusedAgGemmArgs &args) {
     uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
-    // pack mxfp8 scales
-    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+    // Weight scales are rank-local, so pack them now and let them overlap the gather below.
     // NN consumes TE's A operand (this kernel's B) column-wise -- see rocm_comm_gemm_overlap.cpp:296.
     launch_pack_scales<true, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
@@ -635,6 +644,30 @@ bool run_mxfp8_nn(const KittensFusedAgGemmArgs &args) {
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
             args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
+
+    // Activation scales live in the userbuffer, so they have to be gathered before they can be
+    // packed -- and only after ag_ready_kernel, which is what guarantees that the peers finished
+    // writing their own chunks. The region layout does not depend on TN/NN: scale_B is row-wise
+    // in both, so this mirrors run_mxfp8_tn exactly.
+    if (args.scale_chunk_bytes) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
+
+        constexpr int SCALE_GATHER_U = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        const size_t lines = args.scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
+                args.scale_chunk_bytes);
+    }
+
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
 
     get_persistent_fn(M, N_TOTAL, K)(
         M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),

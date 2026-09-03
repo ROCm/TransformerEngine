@@ -646,7 +646,8 @@ def fused_ag_gemm_eligible(
     # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
     if fp8 and not mxfp8:
         return False
-    # MXFP8 is TN-only in the fused kernel, so the NN dgrad direction falls back.
+    # The NN layout the dgrad direction needs is implemented, but the fused backend has not
+    # been validated through the dgrad path yet, so it still falls back.
     if mxfp8 and is_dgrad:
         return False
     if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
