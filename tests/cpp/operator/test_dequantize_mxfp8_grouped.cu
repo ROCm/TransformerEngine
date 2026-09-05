@@ -80,18 +80,6 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
           round_up_to_nearest_multiple(unpadded_scales_X, scale_tensor_alignment_X_colwise);
     }
 
-#ifdef __HIP_PLATFORM_AMD__
-    // gfx1250 pads MXFP8 scales to a multiple of 4 in both dims; match what the common-code
-    // scale-shape check (CheckScaleTensorShape) expects for the per-tensor member tensors.
-    if (getDeviceComputeCapability() == 125) {
-      const size_t align = mxfp8_gfx1250_scale_tensor_alignment;
-      per_tensor_scales_first_dim[t] =
-          round_up_to_nearest_multiple(per_tensor_scales_first_dim[t], align);
-      per_tensor_scales_last_dim[t] =
-          round_up_to_nearest_multiple(per_tensor_scales_last_dim[t], align);
-    }
-#endif
-
     const size_t tensor_scales = per_tensor_scales_first_dim[t] * per_tensor_scales_last_dim[t];
     total_scales += tensor_scales;
     per_tensor_scales_offset[t + 1] = total_scales;
@@ -321,6 +309,15 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     std::vector<size_t> single_shape = {M, K};
     std::vector<size_t> scale_shape_vec = {per_tensor_scales_first_dim[t],
                                            per_tensor_scales_last_dim[t]};
+#ifdef __HIP_PLATFORM_AMD__
+    // gfx1250's single-tensor dequantize shape check expects scales padded to a multiple of 4;
+    // the compact buffer is unchanged (the kernel reads the compact stride from cols).
+    if (getDeviceComputeCapability() == 125) {
+      const size_t align = mxfp8_gfx1250_scale_tensor_alignment;
+      scale_shape_vec = {round_up_to_nearest_multiple(scale_shape_vec[0], align),
+                         round_up_to_nearest_multiple(scale_shape_vec[1], align)};
+    }
+#endif
 
     TensorWrapper input_w(NVTE_MXFP8_1D_SCALING);
     if (rowwise) {
