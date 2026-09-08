@@ -123,6 +123,24 @@ def _parse_args(argv=None, namespace=None):
         help="Benchmark the comm+GEMM overlap as an average of many iterations.",
     )
     parser.add_argument(
+        "--emit-csv",
+        type=str,
+        default=None,
+        help="Append a summary-statistics row (median/mean/stdev/min/max, TFLOPS) to this CSV.",
+    )
+    parser.add_argument(
+        "--emit-samples",
+        type=str,
+        default=None,
+        help="Append one row per timing iteration to this CSV (like the microbenchmark --csv-samples).",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Label recorded in the emitted CSV rows (defaults to the overlap description).",
+    )
+    parser.add_argument(
         "--clock-speed",
         type=int,
         default=-1,
@@ -802,6 +820,29 @@ def _main(opts):
         + f"({opts.warmup_iters} warmup + {opts.timing_iters} timing runs)"
     )
     dist_print(timing_info, section=True, info=True, group=tp_group)
+
+    if (opts.emit_csv or opts.emit_samples) and tp_rank == 0:
+        import overlap_bench_emit as emit
+
+        variant = opts.variant or gemm_name
+        params = {
+            "M": outer_size,
+            "N": hidden_size,
+            "K": ffn_hidden_size,
+            "tp": tp_size,
+            "dtype": "bf16" if opts.quantization == "none" else opts.quantization,
+        }
+        # Nominal full-GEMM flop count (2*M*N*K); good enough for a throughput column.
+        flops = 2.0 * outer_size * hidden_size * ffn_hidden_size
+        if opts.emit_csv:
+            emit.emit_summary(
+                opts.emit_csv, benchmark="gemm_overlap", variant=variant,
+                params=params, times_ms=gpu_times, flops=flops,
+            )
+        if opts.emit_samples:
+            emit.emit_samples(
+                opts.emit_samples, benchmark="gemm_overlap", variant=variant, times_ms=gpu_times,
+            )
 
     # Compare against standard GEMM
     numerics_failed = False
