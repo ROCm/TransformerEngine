@@ -13,6 +13,12 @@
 #include "transformer_engine/transformer_engine.h"
 
 #ifdef USE_ROCM
+#include <ATen/cuda/CUDAContext.h>
+
+#include <map>
+#include <mutex>
+#include <utility>
+
 #include "common/common.h"
 #endif
 
@@ -367,10 +373,23 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
     return at::empty(0, at::CUDA(at::kFloat));
   }
 
-  const auto N = input_tensor.numel();
-  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
+  // Persistent: a per-call tensor is reclaimed while its kernels are still enqueued, which
+  // graph capture turns into an aliased read. One buffer per (device, stream).
+  // Leaked deliberately: these hold device memory and must not be destroyed at static teardown.
+  static std::mutex &amax_ws_mutex = *new std::mutex;
+  static auto &amax_ws_cache = *new std::map<std::pair<int, cudaStream_t>, at::Tensor>;
 
-  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
+  const int device_id = at::cuda::current_device();
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  std::lock_guard<std::mutex> lock(amax_ws_mutex);
+  auto& ws = amax_ws_cache[std::make_pair(device_id, stream)];
+  if (!ws.defined()) {
+    // Any N past the block cap yields the cap itself; avoid SIZE_MAX so DIVUP cannot overflow.
+    ws = at::empty(nvte_amax_workspace_num_blocks(static_cast<size_t>(1) << 40),
+                   at::CUDA(at::kFloat));
+  }
+  return ws;
 }
 
 #endif

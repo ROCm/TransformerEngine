@@ -191,7 +191,7 @@ def _compute_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5),):  # gfx950; TODO: enable for gfx1250 when ready
+        if gpu_arch in ((9, 5), (12, 5)):
             return True, ""
         return False, "Device arch gfx950 or newer is required for NVFP4 execution."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -203,15 +203,16 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
+            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return True, ""
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
         False,
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
+
 
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
@@ -278,6 +279,22 @@ def check_recipe_support(recipe: Recipe) -> None:
         recipe_supported, unsupported_reason = check_mxfp4_support()
     if not recipe_supported:
         raise RuntimeError(unsupported_reason)
+
+    # The Triton GEMM backend does not support mixed FP8 types due to a Triton
+    # compiler bug (triton-lang/triton#9567, not yet in pytorch-triton-rocm as of
+    # PyTorch 2.11). The HYBRID recipe uses e4m3 for forward and e5m2 for backward,
+    # producing mixed-type GEMMs during the backward pass. Only Format.E4M3 (which
+    # uses e4m3 for both forward and backward) is compatible with the Triton backend.
+    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    if use_gemm_triton and recipe is not None and hasattr(recipe, "fp8_format"):
+        if recipe.fp8_format == Format.HYBRID:
+            raise ValueError(
+                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                "Format.HYBRID because the backward pass produces mixed FP8 type GEMMs "
+                "(e5m2 x e4m3), which trigger a Triton compiler bug "
+                "(triton-lang/triton#9567). Use Format.E4M3 instead, or disable the "
+                "Triton backend (unset NVTE_USE_GEMM_TRITON)."
+            )
 
 
 def get_default_fp8_recipe() -> Recipe:

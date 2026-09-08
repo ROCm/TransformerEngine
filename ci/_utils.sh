@@ -2,6 +2,32 @@
 #
 # See LICENSE for license information.
 
+# ROCM_PATH resolution
+resolve_rocm_path() {
+    if [ -n "${ROCM_PATH:-}" ]; then
+        echo "$ROCM_PATH"
+        return 0
+    fi
+    if command -v rocm-sdk >/dev/null 2>&1; then
+        local _root
+        _root="$(rocm-sdk path --root)"
+        if [ -n "$_root" ] && [ -f "${_root}/bin/hipcc" ]; then
+            echo "$_root"
+            return 0
+        fi
+    fi
+    if [ -d "/opt/rocm/core" ]; then
+        echo /opt/rocm/core
+        return 0
+    fi
+    if [ -d "/opt/rocm" ]; then
+        echo /opt/rocm
+        return 0
+    fi
+    echo "Could not find ROCm installation" >&2
+    exit 1
+}
+
 REALPATH=realpath
 realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo
@@ -277,25 +303,21 @@ get_ctest_junitxml() {
 
 check_test_filter() {
     test -z "$TEST_FILTER" && return 0
+    set -f # disable globbing so patterns in masks are used as-is 
     for _tf in $TEST_FILTER; do
         case "$1" in
-        $_tf) return 0
+        $_tf) set +f; return 0
         esac
     done
+    set +f
     return 1
 }
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    if [ -n "$ROCM_PATH" ]; then
-        _rocm_path="$ROCM_PATH"
-    elif [ -d "/opt/rocm/core" ]; then
-        _rocm_path="/opt/rocm/core"
-    else
-        _rocm_path="/opt/rocm"
-    fi
-    _rocm_path=`$REALPATH "$_rocm_path"`
-    test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
+    export ROCM_PATH=$(resolve_rocm_path)
+    _rocm_path=`$REALPATH "$ROCM_PATH" 2>/dev/null || echo "$ROCM_PATH"`
+    echo "ROCM PATH: $_rocm_path"
     python3 --version
 }
 

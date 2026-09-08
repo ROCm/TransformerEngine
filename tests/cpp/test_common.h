@@ -422,6 +422,8 @@ constexpr size_t scale_tensor_alignment_X_rowwise = 1;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
 constexpr size_t scale_tensor_alignment_X_colwise = 1;
 constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+// gfx1250 MX pre-swizzle pads MXFP8 scales to a multiple of 4 in both dims
+constexpr size_t mxfp8_gfx1250_scale_tensor_alignment = 4;
 
 // For nvfp4:
 constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;

@@ -17,6 +17,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -890,7 +891,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path, weights_only=False))
+        loaded_state_dict = torch.load(path, weights_only=False)
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        try:
+            block.load_state_dict(loaded_state_dict)
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
         torch.set_rng_state(_cpu_rng_state)
         torch.cuda.set_rng_state(_cuda_rng_state)
 
@@ -2126,8 +2135,25 @@ def test_gpt_cuda_graph(dtype, bs, model):
         for param1, param2 in zip(block.parameters(), graphed_block.parameters()):
             param2.copy_(param1)
 
-    out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
-    graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    # WAR (ROCm): torch>=2.12 (pytorch/pytorch#179053) makes hipBLASLt handles
+    # per-(device, stream). The graph-capture stream's handle is created lazily
+    # during capture, and hipblasLtCreate performs an internal hipMalloc that is
+    # illegal mid-capture, failing with HIP error 900 ("operation not permitted
+    # when stream is capturing"). The capture_begin pre-init
+    # (pytorch/pytorch#180692) only covers the calling thread, not the autograd
+    # backward thread, so torch's own bmm in the captured backward still trips it.
+    # Route torch's matmul/bmm off hipBLASLt for this test until PyTorch
+    # extends the pre-init to cover it.
+    _prev_blas_library = None
+    if IS_HIP_EXTENSION:
+        _prev_blas_library = torch.backends.cuda.preferred_blas_library()
+        torch.backends.cuda.preferred_blas_library("cublas")
+    try:
+        out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
+        graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    finally:
+        if _prev_blas_library is not None:
+            torch.backends.cuda.preferred_blas_library(_prev_blas_library)
     params = list(block.parameters())
     graphed_params = list(graphed_block.parameters())
 
