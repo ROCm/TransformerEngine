@@ -99,6 +99,9 @@ __device__ __forceinline__ void
     if (static_cast<size_t>(scale_offset_Y) < scales_rows &&
       static_cast<size_t>(scale_offset_X) < scales_cols) {
       size_t scale_idx;
+      // MX pre-swizzle is the only GEMM-swizzled scale layout emitted on ROCm, and only on
+      // gfx1250; dequantize() rejects this path on other archs (which use the generic 128x4
+      // GEMM swizzle), so this branch is reached only when the buffer is MX pre-swizzled.
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
         scale_idx = USE_ROWWISE_SCALING
                         ? mx_preswizzle_scale_idx(scale_offset_Y, scale_offset_X,
