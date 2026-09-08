@@ -76,6 +76,129 @@ void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const Pee
     }
 }
 
+// Packs one 256-row tile of A scales from a peer's buffer into the lane-native layout the GEMM
+// reads. Same transform as pack_scales_kernel (mxfp8_gemm.cpp) for COLWISE=false; called by the
+// gatherer block that is already fetching that tile, so the raw scales never reach global memory.
+// A gather tile is BLOCK_ROW=256 rows, which is also pack_scales_kernel's TILE_WORDS, so the
+// tile <-> cblk mapping is 1:1.
+//
+// Each block handles the contiguous k-range [sub*kpb, +kpb) and writes tile_id = ki*tiles_per_col
+// + cblk, so blocks never touch the same output.
+// Packs one 256-row tile of A scales into the lane-native layout the GEMM reads, straight from
+// the peer's buffer so the raw scales never reach global memory.
+//
+// Per k-iter the tile's scales are 256 rows x 4 bytes (K_STEP=128 elements / 32 per scale block),
+// i.e. one dword per row. Four waves each take 64 of those rows and emit 64 dwords, one per lane.
+// The block runs two k-iters at once so all NUM_WARPS=8 waves are busy.
+//
+// Blocks split the k range: block `sub` takes a contiguous [k0,k1) out of gath_wg. Contiguous
+// rather than strided so each block's reads stay in one span per row. Blocks write disjoint
+// tile_ids, so the only sync is around the staging buffer.
+__device__ __forceinline__
+void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
+                           int cblk, int tiles_per_col, int k_iters, int scale_K,
+                           uint32_t *__restrict__ smem_tile, int sub, int gath_wg) {
+    constexpr int ROWS     = 256;              // rows per tile == BLOCK_ROW
+    constexpr int PER_WAVE = 64;               // rows one wave packs == lanes it fills
+    constexpr int WAVES    = ROWS / PER_WAVE;  // 4 waves per k-iter
+    constexpr int KPP      = NUM_WARPS / WAVES;// k-iters in flight: 8/4 = 2
+
+    const int lane  = (int)threadIdx.x % 64;
+    const int wave  = (int)threadIdx.x / 64;
+    const int kslot = wave / WAVES;            // which of the KPP k-iters
+    const int wgrp  = wave % WAVES;            // which 64-row chunk
+
+    const int kpb = (k_iters + gath_wg - 1) / gath_wg;  // k-iters per block
+    const int k0  = sub * kpb;
+    const int k1  = (k0 + kpb > k_iters) ? k_iters : k0 + kpb;
+    if (k0 >= k_iters) return;
+
+    // One dword per thread: KPP*ROWS == NUM_WARPS*PER_WAVE == NUM_THREADS, since a wave packs
+    // PER_WAVE rows with one lane each. So the stage below is straight-line, not a loop.
+    static_assert(KPP * ROWS == NUM_THREADS, "staging no longer covers the block exactly");
+    const int slot = (int)threadIdx.x / ROWS;   // which of the KPP k-iters this thread stages
+    const int srow = (int)threadIdx.x % ROWS;   // which row
+
+    for (int kb = k0; kb < k1; kb += KPP) {
+        uint32_t p = 0;
+        if (kb + slot < k1) {
+            __builtin_memcpy(&p, &src_rows[(size_t)srow * scale_K + (kb + slot) * 4], 4);
+        }
+        smem_tile[threadIdx.x] = p;
+        __syncthreads();
+        if (kslot < KPP && kb + kslot < k1) {
+            const size_t tile_id = (size_t)(kb + kslot) * tiles_per_col + cblk;
+            ln[(tile_id * WAVES + wgrp) * 64 + lane] = kittens::pack_scales(
+                (const kittens::fp8e8m0 *)(smem_tile + kslot * ROWS), wgrp * PER_WAVE);
+        }
+        __syncthreads();
+    }
+}
+
+template <int U, bool NT>
+__device__ __forceinline__
+void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
+                                  char *gather_dst, const PeerPtrs &peers, size_t chunk_bytes,
+                                  unsigned int *arrive, size_t scale_base, size_t scale_chunk_bytes,
+                                  int scale_K, uint32_t *packed_sa, int tiles_per_col,
+                                  int k_iters, uint32_t *smem_tile) {
+    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
+    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
+
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
+
+    __syncthreads();
+
+    // Scales for this tile, read straight from the peer. Same ordering guarantee as the data copy
+    // above: ag_ready_kernel has already established that peers finished writing their chunks.
+    //
+    // Split by k-iteration, one contiguous range per block. tile_id = ki*tiles_per_col + cblk, so
+    // blocks write disjoint packed_sa entries and need no coordination. Trip counts differ across
+    // blocks when gath_wg does not divide k_iters; that is fine, __syncthreads() is per block and
+    // every thread within a block runs the same count.
+    {
+        const char *peer_scales = (const char *)peers.base[peer] + scale_base
+                                + (size_t)peer * scale_chunk_bytes
+                                + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
+        pack_tile_scales_from((const uint8_t *)peer_scales, packed_sa,
+                                        peer * tiles_per_chunk + tn, tiles_per_col,
+                                        k_iters, scale_K, smem_tile, sub, gath_wg);
+    }
+    __syncthreads();
+
+    // Fence AFTER the pack so it covers the packed_sa stores as well as the data copy: a consumer
+    // that sees the arrival count reach gath_wg must see both.
+    if (NT) {
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    } else {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+    __syncthreads();
+}
+
+template <int U, bool NT>
+__device__ __forceinline__
+void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *gb,
+                            const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive,
+                            size_t scale_base, size_t scale_chunk_bytes, int scale_K,
+                            uint32_t *packed_sa, int tiles_per_col, int k_iters,
+                            uint32_t *smem_tile) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile_plus_scales<U, NT>(
+            peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
+            scale_base, scale_chunk_bytes, scale_K, packed_sa, tiles_per_col, k_iters, smem_tile);
+    }
+}
+
 template <typename U, typename RT>
 __device__ __forceinline__
 void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
@@ -134,7 +257,9 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const gl<fp8e8m0, -1, 1, 16, 64> scale_B_gl, const TileDesc *__restrict__ work_queue,
     int num_tiles, int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive,
     int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
-    int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr) {
+    int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr,
+    uint32_t *__restrict__ packed_sa_raw, size_t scale_base, size_t scale_chunk_bytes,
+    int scale_K, int interleave_scales) {
 
     const int M       = A.rows();
     const int K       = A.cols();
@@ -184,7 +309,19 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {
         char *gb = (char *)&A[{0, 0, 0, 0}];
-        gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        if (interleave_scales) {
+            // scale_A_smem is 2 KiB and untouched until this block joins the compute queue, which
+            // it cannot do until the gather below is finished -- so stage the pack in it rather
+            // than growing the kernel's LDS footprint.
+            static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
+                          "scale_A_smem too small to stage KPP=2 scale tiles");
+            gather_all_plus_scales<1, true>(
+                my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
+                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_tiles,
+                reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
+        } else {
+            gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        }
     }
 
     const bool static_sched = (num_tiles <= SCHED_ROUNDS * (int)gridDim.x);
@@ -491,7 +628,8 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
                               TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
                               int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
-                              XcdBuckets buckets, int *d_bucket_ctr, hipStream_t stream) {
+                              XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
+                              size_t scale_chunk_bytes, int interleave_scales, hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
@@ -518,12 +656,13 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
     persistent_ag_mxfp8_gemm<<<grid, NUM_THREADS, 0, stream>>>(
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
-        xcd_bucket, buckets, d_bucket_ctr);
+        xcd_bucket, buckets, d_bucket_ctr,
+        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales);
 }
 
 using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int, int *, PeerPtrs,
                                  unsigned int *, int, int, int, int, size_t, int,
-                                 XcdBuckets, int *, hipStream_t);
+                                 XcdBuckets, int *, size_t, size_t, int, hipStream_t);
 
 static persistent_fn_t get_persistent_fn(int M, int N, int K) {
     (void)M; (void)N; (void)K;

@@ -823,8 +823,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
   size_t data_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
 
-  const bool mxfp8_ag_scales = _fused && buffer_dtype == DType::kByte && comm_type == CommOverlapType::AG
-                                &&  transformer_engine::getenv<bool>("NVTE_UB_MXFP8_SCALES", false);
+  // The E8M0 scales are carried inside the Userbuffers allocation unconditionally. Without it
+  // base.py falls back to a standalone all_gather_into_tensor for the scales inside the fused
+  // arm's timed window -- a median 12.7% of fused time, up to 40.1% on the smallest shapes.
+  const bool mxfp8_ag_scales = _fused && buffer_dtype == DType::kByte
+                                && comm_type == CommOverlapType::AG;
 
   int buffer_chunk_bytes = data_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;

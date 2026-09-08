@@ -134,7 +134,10 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const gl<fp8e8m0, -1, 1, 16, 64> scale_B_gl, const TileDesc *__restrict__ work_queue,
     int num_tiles, int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive,
     int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
-    int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr) {
+    int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr,
+    [[maybe_unused]] uint32_t *__restrict__ packed_sa_raw, [[maybe_unused]] size_t scale_base,
+    [[maybe_unused]] size_t scale_chunk_bytes, [[maybe_unused]] int scale_K,
+    [[maybe_unused]] int interleave_scales) {
 
     const int M       = A.rows();
     const int K       = A.cols();
@@ -496,7 +499,8 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
                               TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
                               int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
-                              XcdBuckets buckets, int *d_bucket_ctr, hipStream_t stream) {
+                              XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
+                              size_t scale_chunk_bytes, int interleave_scales, hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
@@ -524,12 +528,13 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
     persistent_ag_mxfp8_gemm<<<grid, NUM_THREADS, 0, stream>>>(
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
-        xcd_bucket, buckets, d_bucket_ctr);
+        xcd_bucket, buckets, d_bucket_ctr,
+        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales);
 }
 
 using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int, int *, PeerPtrs,
                                  unsigned int *, int, int, int, int, size_t, int,
-                                 XcdBuckets, int *, hipStream_t);
+                                 XcdBuckets, int *, size_t, size_t, int, hipStream_t);
 
 static persistent_fn_t get_persistent_fn(int M, int N, int K) {
     (void)M; (void)N; (void)K;

@@ -37,8 +37,7 @@ struct ScalePeers {
 };
 
 // All-gather of the MXFP8 scale region: each rank copies every peer's scale chunk out of that
-// peer's userbuffer into the matching offset of its own. Offset-preserving, so the result is
-// rank-major and identical to what all_gather_into_tensor produced.
+// peer's userbuffer into the matching offset of its own.
 //
 // scale_base and chunk_bytes are always 16B multiples here -- scale_base is SB*K and chunk_bytes
 // is m_local*(K/32) with m_local a multiple of 256 -- and run_mxfp8 refuses the launch
@@ -115,7 +114,11 @@ struct AgPlan {
     int cnt[hk_overlap::NUM_XCDS_AFF] = {};
 };
 
-using PlanKey = std::array<int, 7>;   // core, M, N, K, tp_size, rank, S
+// core, M, N, K, tp_size, rank, S. `core` namespaces the cache by kernel family, TN then NN
+// within each precision: 0/1 bf16 TN/NN, 2/3 mxfp8 TN/NN. An AgPlan is a schedule over output
+// tiles, so it depends on the output geometry and the TP split only -- build_work_queue takes K
+// and discards it.
+using PlanKey = std::array<int, 7>;
 
 std::map<PlanKey, AgPlan> g_plans;
 std::map<const void *, std::vector<void *>> g_peers;
@@ -133,6 +136,54 @@ const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
     }
     return &g_peers.emplace(peer_ub, std::move(v)).first->second;
 }
+
+// Packs ONLY the local chunk's scale rows. Used by the interleaved path, where every peer chunk is
+// packed inside the fused kernel by the gatherer block that fetches it; the local chunk has no
+// gatherer (nothing to fetch -- it is already ours) so it still needs a pack, but over m_local
+// rows rather than M. Mirrors pack_scales_kernel (mxfp8_gemm.cpp) for COLWISE=false, STEP/NG as
+// given, with the output tile index offset to this rank's slice.
+template <int STEP, int NG>
+__global__ void pack_local_scales_kernel(const uint8_t *__restrict__ scales,
+                                         uint32_t *__restrict__ ln, int cblk_off, int tiles_local,
+                                         int tiles_per_col, int scale_K, int k_iters) {
+    constexpr int TILE_WORDS = 256;
+    constexpr int PAD_WORDS  = (NG - 1) * STEP + 64;
+    __shared__ uint32_t tile[PAD_WORDS];
+
+    const int id = blockIdx.x;
+    if (id >= k_iters * tiles_local) return;
+    const int ki      = id / tiles_local;
+    const int lblk    = id % tiles_local;
+    const int kb_base = ki * 4;
+    const int row0    = lblk * TILE_WORDS;
+
+    for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
+        uint32_t p = 0;
+        if (i < TILE_WORDS) {
+            __builtin_memcpy(&p, &scales[(size_t)(row0 + i) * scale_K + kb_base], 4);
+        }
+        tile[i] = p;
+    }
+    __syncthreads();
+    const int lane = threadIdx.x % 64, grp = threadIdx.x / 64;
+    const size_t tile_id = (size_t)ki * tiles_per_col + (cblk_off + lblk);
+    ln[(tile_id * NG + grp) * 64 + lane] =
+        kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
+}
+
+// Gather+pack the activation scales inside the gatherer blocks (interleaved) instead of in the
+// up-front gather_scales + full-M launch_pack_scales pair? Measured, 24-shape A/B on MI350X
+// (gfx950, TP=8, best-of-2, bench_ag_mxfp8.py): K separates the regimes and out_local does not.
+//
+//     K=16384   8/8 shapes faster interleaved   -1.1 .. -7.7 %
+//     K= 8192   1/8                             -3.1 .. +7.9 %
+//     K= 4096   0/8                             +0.9 .. +21.8 %
+//
+// The gatherer reads one contiguous k-range per scale row, which is worth 8x the cache lines at
+// K=16384 but only 2x at K=4096 -- below which the per-tile pack inside the arrival gate costs
+// more than the removed prologue saves. Geomean speedup vs AG+HK: 1.2176x off, 1.1818x on,
+// 1.2282x gated.
+int interleave_scales_enabled(int K) { return K >= 16384 ? 1 : 0; }
 
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
 // to fill the buckets. The 1024 is fixed, not derived from the grid cap.
@@ -310,7 +361,7 @@ void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_
 // the layout only has to name its plan tag, how the weight scales are laid out, and its factories.
 struct Mxfp8Tn {
     using TileDesc = hk_mxfp8_ag_tn::TileDesc;
-    static constexpr int  PLAN_TAG        = 0;
+    static constexpr int  PLAN_TAG        = 2;
     static constexpr bool A_SCALE_COLWISE = false;
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
@@ -323,7 +374,7 @@ struct Mxfp8Tn {
 // NN consumes TE's A operand (this kernel's B) column-wise -- see rocm_comm_gemm_overlap.cpp:296.
 struct Mxfp8Nn {
     using TileDesc = hk_mxfp8_ag_nn::TileDesc;
-    static constexpr int  PLAN_TAG        = 2;
+    static constexpr int  PLAN_TAG        = 3;
     static constexpr bool A_SCALE_COLWISE = true;
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
@@ -408,7 +459,8 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
-    // Weight scales are rank-local, so pack them now and let them overlap the gather below.
+    // Weight scales are rank-local: no dependency on ag_ready_kernel or any peer's chunk, so this
+    // can be enqueued before the gather rather than after it.
     launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
@@ -438,7 +490,12 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     // packed -- and only after ag_ready_kernel, which is what guarantees that the peers finished
     // writing their own chunks. The region layout does not depend on TN/NN: scale_B is row-wise
     // in both, which is why this part is shared verbatim.
-    if (args.scale_chunk_bytes) {
+    // Interleaving needs the peers' raw scales reachable in their userbuffers, which is exactly
+    // what scale_chunk_bytes != 0 means. That is now always true for a fused MXFP8 AG buffer
+    // (comm_gemm_overlap.cpp), so the guard is defensive rather than a configuration switch.
+    const int interleave = args.scale_chunk_bytes ? interleave_scales_enabled(K) : 0;
+
+    if (args.scale_chunk_bytes && !interleave) {
         ScalePeers sp{};
         for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
 
@@ -459,14 +516,24 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
                 args.scale_chunk_bytes);
     }
 
-    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+    if (interleave) {
+        // Peer rows are packed by their gatherer blocks inside the kernel; only ours is left.
+        const int tiles_per_chunk = m_local / BLOCK_ROW;
+        pack_local_scales_kernel<64, 4>
+            <<<k_iters * tiles_per_chunk, 4 * 64, 0, args.stream>>>(
+                (const uint8_t *)args.scale_B + (size_t)args.rank * args.scale_chunk_bytes,
+                packed_sa, args.rank * tiles_per_chunk, tiles_per_chunk, tiles_m, scale_K, k_iters);
+    } else {
+        launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+    }
 
     L::launch_fn(M, N_TOTAL, K)(
         M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
         static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
         tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes,
-        plan.xcd_bucket, buckets, bucket_ctr, args.stream);
+        plan.xcd_bucket, buckets, bucket_ctr,
+        args.scale_base_offset, args.scale_chunk_bytes, interleave, args.stream);
     return hipGetLastError() == hipSuccess;
 }
 
