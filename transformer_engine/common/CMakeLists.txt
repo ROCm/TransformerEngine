@@ -112,15 +112,12 @@ endif()
 set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
@@ -128,7 +125,8 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
 else()
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_HIP_STANDARD 20)
   #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
   project(transformer_engine LANGUAGES HIP CXX)
 
@@ -241,6 +239,7 @@ list(APPEND transformer_engine_cpp_sources
      fused_attn/fused_attn.cpp #CUDA-only
      gemm/config.cpp
      normalization/common.cpp
+     normalization/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
@@ -323,6 +322,9 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu_dbias.cu
      activation/relu_grouped.cu
      activation/relu_grouped_dbias.cu
+     activation/scaled_activation.cu
+     activation/scaled_srelu.cu
+     activation/scaled_swiglu.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
@@ -746,18 +748,53 @@ function(make_string_header STRING STRING_NAME)
                    "string_headers/${STRING_NAME}.h"
                    @ONLY)
 endfunction()
+
+# On ROCm the hipified variant of the file is embedded when hipify produced one.
+# RTC source strings must be the HIP flavour, otherwise hipRTC is handed CUDA
+# code. hipify only writes an output when the content actually changes, so the
+# .hip/_hip.* file may legitimately not exist; fall back to the original in that
+# case. TE_Hipify() has already run at this point (configure time).
 function(make_string_header_from_file file_ STRING_NAME)
-    file(READ "${file_}" STRING)
+    set(_src "${file_}")
+    if(USE_ROCM)
+        get_filename_component(_dir "${file_}" DIRECTORY)
+        get_filename_component(_stem "${file_}" NAME_WE)
+        get_filename_component(_ext "${file_}" EXT)
+        if(_ext STREQUAL ".cu")
+            set(_hip_name "${_stem}.hip")
+        elseif(_ext STREQUAL ".cuh")
+            set(_hip_name "${_stem}_hip.cuh")
+        elseif(_ext STREQUAL ".h")
+            set(_hip_name "${_stem}_hip.h")
+        else()
+            set(_hip_name "")
+        endif()
+        if(_hip_name)
+            if(_dir STREQUAL "")
+                set(_cand "${_hip_name}")
+            else()
+                set(_cand "${_dir}/${_hip_name}")
+            endif()
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_cand}")
+                set(_src "${_cand}")
+            endif()
+        endif()
+    endif()
+    file(READ "${_src}" STRING)
     configure_file(util/string_header.h.in
                    "string_headers/${STRING_NAME}.h"
                    @ONLY)
 endfunction()
 
-if(USE_CUDA)
 # Header files with C++ strings
+if(USE_CUDA)
 list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
 make_string_header("${cuda_include_path}"
                    string_path_cuda_include)
+else()
+make_string_header_from_file(amd_detail/hip_float8.h
+                             string_code_amd_detail_hip_float8_h)
+endif()
 make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
                              string_code_transpose_rtc_cast_transpose_fusion_cu)
 make_string_header_from_file(transpose/rtc/cast_transpose.cu
@@ -768,24 +805,52 @@ make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
-else()
-  make_string_header_from_file(utils_hip.cuh
-                              string_code_utils_cuh)
-  make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
-                              string_code_transpose_rtc_cast_transpose_fusion_cu)
-  make_string_header_from_file(transpose/rtc/cast_transpose.hip
-                              string_code_transpose_rtc_cast_transpose_cu)
-  make_string_header_from_file(transpose/rtc/transpose.hip
-                              string_code_transpose_rtc_transpose_cu)
-  make_string_header_from_file(transpose/rtc/swap_first_dims.hip
-                              string_code_transpose_rtc_swap_first_dims_cu)
-  make_string_header_from_file(amd_detail/hip_float8.h
-                              string_code_amd_detail_hip_float8_h)
-endif()
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+                             string_code_fused_softmax_scaled_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
+
+# Norm NVRTC bundled headers + RTC source files
+make_string_header_from_file(normalization/kernel_params.h
+                             string_code_normalization_kernel_params_h)
+make_string_header_from_file(normalization/kernel_traits.h
+                             string_code_normalization_kernel_traits_h)
+make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_fwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_bwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
+make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+       "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
+
+option(NVTE_BUILD_LEGACY_STATIC_NORM
+       "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
 
 # Compiler options
 if(USE_CUDA)
@@ -813,6 +878,9 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/scaled_activation.cu
+                                          activation/scaled_srelu.cu
+                                          activation/scaled_swiglu.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
@@ -848,11 +916,13 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
-  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -Wno-unused-value -Wno-deprecated-anon-enum-enum-conversion")
+  set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
-  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted")
+  # -Wno-unknown-warning-option is to suppress warning about -Wlifetime-safety-lifetimebound-violation
+  # pragma in CK headers which is not supported by the compiler used to build TE.
+  set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-value -Wno-unknown-warning-option")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
   # Hide non-necessary symbols in shared object.
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
