@@ -34,7 +34,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
     int device;
     NVTE_CHECK_CUDA(hipGetDevice(&device));
     NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, device));
-    NVTE_CHECK((prop.major == 9 && prop.minor == 5) || prop.major >= 12,
+    NVTE_CHECK((prop.major == 9 && prop.minor == 5) || (prop.major == 12 && prop.minor >= 5),
                "MXFP4 quantization requires gfx950 and newer (detected gfx",
                prop.major, prop.minor, "x)");
   }

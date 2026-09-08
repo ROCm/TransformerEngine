@@ -194,9 +194,9 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
 // Populate the AITER mha_fwd_args from TE's CKAttnFwdArgs. Shared by ck_attn_fwd
 // (real launch) and ck_attn_fwd_uses_v3 (v3 availability probe) so the probe can
 // never disagree with the launch. v3_api_check is left false here; callers flip it.
-// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
-// by ck_attn_fwd after this returns; it does not affect v3 kernel selection.
-aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args, hipStream_t stream = nullptr){
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) and sink_ptr
+// are applied by ck_attn_fwd after this returns; they do not affect v3 kernel selection.
+aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -305,47 +305,35 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args, hipStream_t s
   fmha_args.num_splits = args.num_splits;
   fmha_args.splitkv_workspace_ptr = args.splitkv_workspace_ptr;
 
-#if FA_WITH_SINK
-  if(args.h <= kSinkBufMaxHeads && QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
-    fmha_args.sink_ptr = get_gfx1250_sink_buf(device_for_stream(stream));
-  }
-#endif
   return fmha_args;
 }
 
+//Split-KV and Sink dispatchers do not honor v3_api_check
+//so we cannot rely on the AITER backend to tell us whether v3 is available.
+//Currently this method is not used so just opt it out.
+#if !(FA_WITH_SINK || FA_WITH_NATIVE_SPLITKV)
 // Probe whether AITER's v3 (asm) forward path will run for this config, without
 // launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
 // v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
-#if 1
-  //Split-KV and Sink dispatchers do not honor v3_api_check
-  // so we cannot rely on the AITER backend to tell us whether v3 is available.
-  throw std::runtime_error(
-    "FWD path V3 API checking is not robust on the backend.");
-#else
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
   fmha_args.v3_api_check = true;
   // No kernel is launched in check mode, so the stream/log flags are irrelevant.
   ck_tile::stream_config stream_config{nullptr, false, false};
   return QOLA_NS(mha_fwd)(fmha_args, stream_config) == 1;
-#endif
 }
+#endif
 
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   auto* log_file = get_ck_log_stream();
   // print kernel name on verbose mode
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
-  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args, stream);
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
 
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(args.is_group_mode() && std::string(env_p) == "1"){
@@ -355,6 +343,11 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, args.cu_seqlen_q_padded_ptr, args.lse_ptr, stream);
     }
   }
+#if FA_WITH_SINK
+  if(args.h <= kSinkBufMaxHeads && QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
+    fmha_args.sink_ptr = get_gfx1250_sink_buf(device_for_stream(stream));
+  }
+#endif
 
   // print ck traits and fmha_args when needed
   if(log_file){

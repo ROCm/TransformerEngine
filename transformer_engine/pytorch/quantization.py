@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import abc
-import functools
 import dataclasses
 import warnings
 import os
@@ -206,7 +205,7 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
         gpu_arch = get_device_compute_capability()
         if gpu_arch in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when GEMM is available
             return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return False, "Device arch gfx94x or gfx95x is required for FP8 block scaling execution."
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
@@ -214,14 +213,16 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
 
+
 def _compute_mxfp4_support() -> Tuple[bool, str]:
     """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5),): # TODO: enable for gfx1250 when GEMM is available
+        if gpu_arch in ((9, 5),):  # TODO: enable for gfx1250 when GEMM is available
             return True, ""
-        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
+        return False, "Device arch gfx95x is required for MXFP4 execution."
     return False, "Only ROCm supports MXFP4"
+
 
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:

@@ -515,19 +515,17 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
-void checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop, bool &use_mxfp8, bool &use_hipkittens_mxfp8) {
-  use_mxfp8 = (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
-  if (!use_mxfp8) {
-    use_hipkittens_mxfp8 = false;
-    return;
+std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop) {
+  if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+    return std::nullopt;
   }
 #ifdef __HIP_PLATFORM_AMD__
-  if (!(prop.major == 9 && prop.minor >= 5) && !(prop.major >= 12)) {
-    GTEST_SKIP() << "MXFP8 requires gfx950 or newer";
+  if (!(prop.major == 9 && prop.minor >= 5) && !(prop.major == 12 && prop.minor >= 5)) {
+    return "MXFP8 requires gfx950 or newer";
   }
 #endif
   if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+    return "MXFP8 requires M & N to be multiples of 16";
   }
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -536,22 +534,22 @@ void checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop, boo
   const size_t required_k_multiple = 128;
 #endif
   if (params.k % required_k_multiple) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
+    return "MXFP8 requires K to be a multiple of " + std::to_string(required_k_multiple);
   }
 
-  use_hipkittens_mxfp8 = !params.force_hipblaslt;
-  if (!use_hipkittens_mxfp8) {
-    return;
+  if (params.force_hipblaslt) {
+    return std::nullopt;
   }
 #ifdef __HIP_PLATFORM_AMD__
   if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
-    GTEST_SKIP() << "HipKittens requires gfx942 or gfx950";
+    return "HipKittens requires gfx942 or gfx950";
   }
   if (params.m % 256 || params.n % 256 || params.k < 256) {
-    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
+    return "HipKittens requires M and N 256-aligned, K >= 256";
   }
+  return std::nullopt;
 #else
-  GTEST_SKIP() << "HipKittens requires ROCm";
+  return "HipKittens requires ROCm";
 #endif
 }
 
@@ -569,14 +567,16 @@ void performTest(const TestParams& params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  bool use_mxfp8 = false;
-  bool use_hipkittens_mxfp8 = false;
-  checkMxFP8Support(params, prop, use_mxfp8, use_hipkittens_mxfp8);
-
+  const bool use_mxfp8 = (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
   if (use_mxfp8)
   {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
+    }
+    if (auto reason = checkMxFP8Support(params, prop))
+    {
+      GTEST_SKIP() << *reason;
     }
   }
 
@@ -785,8 +785,10 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  bool _unused = false;
-  checkMxFP8Support(params, prop, _unused, _unused);
+  if (auto reason = checkMxFP8Support(params, prop))
+  {
+    GTEST_SKIP() << *reason;
+  }
   if (params.use_bias || params.use_gelu) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
   }

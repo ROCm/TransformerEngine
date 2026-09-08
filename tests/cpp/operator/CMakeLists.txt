@@ -67,8 +67,12 @@ if(USE_ROCM)
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
   set_target_properties(test_operator PROPERTIES SOURCES "${test_hip_sources}")
-  target_include_directories(test_operator BEFORE PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include)
+  TE_GetHipifiedSources("test_ck_grouped_mxfp8.cu" ${CMAKE_CURRENT_SOURCE_DIR} ck_mxfp8_hip_source)
+  # -Wno-unknown-warning-option suppresses warning about -Wlifetime-safety-lifetimebound-violation
+  # pragma in CK headers which is not supported by the compiler used to build TE.
+  set_source_files_properties(${ck_mxfp8_hip_source} PROPERTIES
+      INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include"
+      COMPILE_OPTIONS "-Wno-unknown-warning-option")
 
 endif()
 
