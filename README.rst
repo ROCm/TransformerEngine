@@ -3,7 +3,7 @@
     Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
     Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-    See LICENSE for license information.Please also add one subsection in readme to tell our customers who to use small_seq attn
+    See LICENSE for license information.
 
 |License|
 
