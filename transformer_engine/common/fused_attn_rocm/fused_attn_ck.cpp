@@ -530,7 +530,7 @@ void fused_attn_ck_fwd_impl(
   WorkspacePlanner planner(workspace);
 
   if(ck_small_seq_env_enabled) {
-    if(cuda::sm_arch() == 94) {
+    if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
       if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
                                      h, hg)) {
         if(is_ragged) {
@@ -708,7 +708,8 @@ void fused_attn_ck_fwd_impl(
   }
 
   // ---------------------------------------------------------------------------
-  // CK small-seq forward (NVTE_FUSED_ATTN_CK_SMALLSEQ).
+  // CK small-seq forward (NVTE_FUSED_ATTN_CK_SMALLSEQ). Entered only when
+  // ck_small_seq_enabled (env, gfx942/950, and is_small_seq_supported_static).
   //
   // BSHD (is_BSHD): uniform s_q in [2, 17], ck_attn_smallseq_fwd_bshd on Q/K/V/O;
   //   LSE [h,tokens] -> pad_remap_lse -> devPtrSoftmaxAux [b,h,s].
@@ -875,7 +876,7 @@ void fused_attn_ck_bwd_impl(
   WorkspacePlanner planner(workspace);
 
   if(ck_small_seq_env_enabled) {
-    if(cuda::sm_arch() == 94) {
+    if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
       if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
                                      h, hg)) {
         if(is_ragged) {

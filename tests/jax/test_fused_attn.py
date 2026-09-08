@@ -2190,20 +2190,13 @@ def test_backward_bitwise_reproducible(
 # ROCm CK small-seq tests.
 @pytest.fixture
 def ck_smallseq_env(monkeypatch):
-    """ROCm test env for small-sequence CK attention tests.
-
-    On gfx942 only: enable NVTE_FUSED_ATTN_CK_SMALLSEQ and require
-    XLA command buffers disabled. 
-    
-    On gfx950, normal CK/aiter kernels are used.
-    """
+    """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
     if not is_hip_extension():
         pytest.skip("CK unfused small-seq tests only on ROCm")
     # This test uses the dedicated small-seq CK path (NVTE_FUSED_ATTN_CK_SMALLSEQ),
     # which requires XLA GPU graph capture (command buffers) disabled via an empty
     # --xla_gpu_enable_command_buffer=
-    if get_device_compute_capability(0) == 94:
-        # gfx942-only MFMA small-seq path; requires command buffers disabled.
+    if get_device_compute_capability(0) == 94 or get_device_compute_capability(0)==95:
         if "xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
             pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_enable_command_buffer='")
         monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
@@ -2213,11 +2206,8 @@ def ck_smallseq_env(monkeypatch):
 @pytest.mark.usefixtures("ck_smallseq_env")
 class TestFusedAttnCkSmallseq:
     """
-    Small-sequence CK attention (1<=s_q<=16, 2<=s_kv<=16 THD self/cross and BSHD).
-
-    On gfx942 with NVTE_FUSED_ATTN_CK_SMALLSEQ, exercises the dedicated MFMA
-    small-seq path. On gfx950 and newer, the same shapes run through normal CK/aiter
-    kernels, which now cover these cases at comparable performance.
+    ROCm CK small-seq (NVTE_FUSED_ATTN_CK_SMALLSEQ).
+    THD: 1<=s_q<=17 and 2<=s_kv<=17 (self/cross). BSHD: 2<=s_q==s_kv<=17.
     """
 
     @staticmethod
