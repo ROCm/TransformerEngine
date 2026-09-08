@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -55,7 +56,21 @@ def _columnwise_swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor) -> to
     return x
 
 
+def _is_gfx1250() -> bool:
+    try:
+        from transformer_engine.pytorch import get_device_compute_capability
+
+        return get_device_compute_capability() == (12, 5)
+    except Exception:
+        return False
+
+
 def swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor, columnwise: bool) -> torch.Tensor:
+    # On gfx1250 the MXFP8 quantize keeps scale data compact even with optimize_for_gemm=True
+    # (the tensor is flagged gemm-swizzled, but the GEMM applies the swizzle itself), so the fused
+    # output equals the compact scales and the reference swizzle is the identity.
+    if _is_gfx1250():
+        return scale
     if not columnwise:
         return _rowwise_swizzle_mxfp8_scale(input_M, input_N, scale)
     else:
