@@ -52,6 +52,7 @@ from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
+from ..grouped_gemm_autotune import autotuned_grouped_gemm
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
@@ -681,7 +682,9 @@ class _GroupedLinear(torch.autograd.Function):
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
         else:
-            general_grouped_gemm_func = general_grouped_gemm
+            # Drop-in that autotunes hipBLASLt vs CK when NVTE_AUTOTUNE_KERNELS=1,
+            # else delegates to general_grouped_gemm unchanged.
+            general_grouped_gemm_func = autotuned_grouped_gemm
             kwargs = {}
         general_grouped_gemm_func(
             weights_fp8,
@@ -1162,7 +1165,7 @@ class _GroupedLinear(torch.autograd.Function):
                     general_grouped_gemm_func = general_grouped_gemm_triton
                     kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
                 else:
-                    general_grouped_gemm_func = general_grouped_gemm
+                    general_grouped_gemm_func = autotuned_grouped_gemm
                     kwargs = {}
                 general_grouped_gemm_func(
                     weights_for_dgrad,
@@ -1266,7 +1269,7 @@ class _GroupedLinear(torch.autograd.Function):
                     general_grouped_gemm_func = general_grouped_gemm_triton
                     kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
                 else:
-                    general_grouped_gemm_func = general_grouped_gemm
+                    general_grouped_gemm_func = autotuned_grouped_gemm
                     kwargs = {}
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
