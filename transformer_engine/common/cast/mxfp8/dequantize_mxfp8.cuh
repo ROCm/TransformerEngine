@@ -309,8 +309,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
 
 #ifdef __HIP_PLATFORM_AMD__
-  // The ROCm kernel only decodes the gfx1250 MX pre-swizzle scale layout; other ROCm
-  // architectures emit the generic 128x4 GEMM swizzle, which this kernel cannot read.
+  // This kernel only decodes the gfx1250 MX pre-swizzle layout; reject swizzled scales elsewhere.
   NVTE_CHECK(!with_gemm_swizzled_scales || cuda::sm_arch() == 125,
              "Dequantizing GEMM-swizzled MXFP8 scales is only supported on gfx1250.");
 #endif

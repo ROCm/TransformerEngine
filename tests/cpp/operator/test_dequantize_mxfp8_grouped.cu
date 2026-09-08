@@ -307,17 +307,11 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 
     // Build single-tensor NVTETensor using TensorWrapper directly
     std::vector<size_t> single_shape = {M, K};
-    std::vector<size_t> scale_shape_vec = {per_tensor_scales_first_dim[t],
-                                           per_tensor_scales_last_dim[t]};
-#ifdef __HIP_PLATFORM_AMD__
-    // gfx1250's single-tensor dequantize shape check expects scales padded to a multiple of 4;
-    // the compact buffer is unchanged (the kernel reads the compact stride from cols).
-    if (getDeviceComputeCapability() == 125) {
-      const size_t align = mxfp8_gfx1250_scale_tensor_alignment;
-      scale_shape_vec = {round_up_to_nearest_multiple(scale_shape_vec[0], align),
-                         round_up_to_nearest_multiple(scale_shape_vec[1], align)};
-    }
-#endif
+    // gfx1250's single-tensor dequantize shape check expects the declared scale shape padded to a
+    // multiple of 4; the compact buffer is unchanged (mxfp8_scale_alignment is 1 on other archs).
+    std::vector<size_t> scale_shape_vec = {
+        round_up_to_nearest_multiple(per_tensor_scales_first_dim[t], mxfp8_scale_alignment(1)),
+        round_up_to_nearest_multiple(per_tensor_scales_last_dim[t], mxfp8_scale_alignment(1))};
 
     TensorWrapper input_w(NVTE_MXFP8_1D_SCALING);
     if (rowwise) {

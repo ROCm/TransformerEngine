@@ -66,9 +66,7 @@ def _is_gfx1250() -> bool:
 
 
 def swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor, columnwise: bool) -> torch.Tensor:
-    # On gfx1250 the MXFP8 quantize keeps scale data compact even with optimize_for_gemm=True
-    # (the tensor is flagged gemm-swizzled, but the GEMM applies the swizzle itself), so the fused
-    # output equals the compact scales and the reference swizzle is the identity.
+    # gfx1250 keeps MXFP8 scales compact even with optimize_for_gemm (the GEMM swizzles them).
     if _is_gfx1250():
         return scale
     if not columnwise:
