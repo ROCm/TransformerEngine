@@ -657,17 +657,6 @@ int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
-// Effective MXFP8 scale-tensor alignment: gfx1250's MX pre-swizzle pads scales to a multiple of 4
-// in both dims; every other device keeps the caller's base alignment.
-inline size_t mxfp8_scale_alignment(size_t base_alignment) {
-#ifdef __HIP_PLATFORM_AMD__
-  if (getDeviceComputeCapability() == 125) {
-    return mxfp8_gfx1250_scale_tensor_alignment;
-  }
-#endif
-  return base_alignment;
-}
-
 // Custom deleter for RAII
 struct GroupedTensorDeleter {
   void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
