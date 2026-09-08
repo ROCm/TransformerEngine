@@ -25,6 +25,12 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -87,6 +93,7 @@ _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
 _ub_fused_names = set()
+_ub_fused_bulk_decisions = {}
 _ub_disabled_names = set()
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
@@ -428,6 +435,9 @@ def initialize_ub(
             # TODO: Add RS support.
             _ub_disabled_names.add(name)
             return
+        if method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
+            _ub_disabled_names.add(name)
+            return
         if with_cublasmp and method in ("bulk", "external", "fused"):
             raise ValueError(
                 f"At {name}, cuBLASMp does not support `{method}` overlap method. "
@@ -625,6 +635,32 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     return get_ub(name, use_fp8).is_fp8_ubuf()
 
 
+def _fused_gemm_shape_ok(m: int, k: int, n_chunk: int, tp_size: int) -> bool:
+    """The fused comm+GEMM kernels' shape contract."""
+    if tp_size not in (4, 8):
+        return False
+    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
+
+
+def _fused_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, is_dgrad: bool) -> tuple:
+    """(m, k, n_chunk) of the GEMM behind a fused overlap, in the kernel's operand convention."""
+    out_features, in_features = weight.shape
+    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
+    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
+    return m, k, n_chunk
+
+
+def _fused_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dtype) -> bool:
+    """Whether the fused backend can serve a Userbuffers region of this shape."""
+    if tp_size not in (4, 8):
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if shape[0] % tp_size != 0:
+        return False
+    return (shape[0] // tp_size) % 256 == 0
+
+
 def fused_ag_gemm_eligible(
     name: str,
     inp: torch.Tensor,
@@ -642,14 +678,29 @@ def fused_ag_gemm_eligible(
     # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
     if fp8 or gelu or bias is not None:
         return False
-    if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+    if dtype != torch.bfloat16:
         return False
-    if tp_size not in (4, 8):
-        return False
-    out_features, in_features = weight.shape
-    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
-    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
-    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
+    m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad)
+    return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+
+
+def fused_bulk_ag_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+) -> bool:
+    """Whether this call may use the bulk all-gather overlap."""
+    if not IS_HIP_EXTENSION:
+        return True
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    if eligible:
+        m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
+        eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    _ub_fused_bulk_decisions[name] = eligible
+    return eligible
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -669,6 +720,7 @@ def destroy_ub():
     _ub_with_cublasmp = False
     _ub_initialized = False
     _ub_fused_names.clear()
+    _ub_fused_bulk_decisions.clear()
     _ub_disabled_names.clear()
     if IS_HIP_EXTENSION:
         tex.reset_fused_ag_gemm_cache()
@@ -1391,9 +1443,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
+        state["recipe"] = recipe
         if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
@@ -1423,16 +1479,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 

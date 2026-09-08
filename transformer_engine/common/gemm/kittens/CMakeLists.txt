@@ -12,19 +12,16 @@ foreach(_arch IN LISTS KITTENS_SUPPORTED_ARCHS)
     endif()
 endforeach()
 
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-std=c++20" HAS_CXX20)
-
 if(NOT _kittens_enabled_archs)
     message(STATUS "HipKittens GEMM disabled (none of ${KITTENS_SUPPORTED_ARCHS} in CMAKE_HIP_ARCHITECTURES)")
-    set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
-elseif(NOT HAS_CXX20)
-    message(WARNING "HipKittens GEMMs require C++20")
     set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
 else()
     set(HIPKITTENS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
 
     set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_HIP_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_HIP_STANDARD_REQUIRED ON)
     project(kittens_gemm LANGUAGES HIP CXX)
     find_package(hip)
 
@@ -72,7 +69,7 @@ else()
         target_include_directories(${_target} PRIVATE
             ${HIP_INCLUDE_DIRS} "${HIPKITTENS_INCLUDE_DIR}")
         target_compile_options(${_target} PRIVATE
-            -DKITTENS_${_tag_upper} -fno-gpu-rdc -O3 ${A_FLAGS})
+            -DKITTENS_${_tag_upper} -fno-gpu-rdc -O3 -Wno-unused-value ${A_FLAGS})
         target_link_libraries(${_target} PRIVATE hip::host hip::device)
 
         set(_kittens_arch_objs ${_kittens_arch_objs} $<TARGET_OBJECTS:${_target}> PARENT_SCOPE)
