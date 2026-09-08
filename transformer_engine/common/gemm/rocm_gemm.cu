@@ -470,11 +470,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   const bool b_blockwise = is_fp8_block_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
-  if (is_mxfp4_scaling(A.scaling_mode)) {
-    NVTE_CHECK(A.with_gemm_swizzled_scales == B.with_gemm_swizzled_scales,
-               "Inputs A and B to MXFP4 GEMM need to have the same scale layout "
-               "(both plain or both pre-swizzled)!");
-  }
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;
@@ -2230,6 +2225,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_CHECK(!(is_transb ? inputB->mxfp4_shuffle_columnwise_data
                            : inputB->mxfp4_shuffle_rowwise_data),
                "hipBLASLt MXFP4 GEMM requires plain (un-shuffled) B data");
+    NVTE_CHECK(inputA->with_gemm_swizzled_scales == inputB->with_gemm_swizzled_scales,
+               "Inputs A and B to MXFP4 GEMM need to have the same scale layout "
+               "(both plain or both pre-swizzled)!");
     NVTE_CHECK((k % 256) == 0,
                "hipBLASLt MXFP4 GEMM requires K to be a multiple of 256 (got K=", k, ")");
     NVTE_CHECK((m % 32) == 0, "hipBLASLt MXFP4 GEMM requires M to be a multiple of 32 (got M=", m, ")");
