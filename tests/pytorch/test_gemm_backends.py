@@ -6,14 +6,18 @@
 
 Both backends are exercised through the same public entry point that TE
 ``Linear`` / ``LayerNormLinear`` use (``general_gemm()``), selected at runtime
-by the ``NVTE_GEMM_BACKEND`` env var:
+by the ``NVTE_GEMM_BACKEND`` env var. Each ``*_call_gemm`` helper flips that var
+per call (see ``_set_backend``), so a single collection can drive both backends.
 
-- ``NVTE_GEMM_BACKEND=TRITON`` runs the ``test_triton_*`` tests.
-- ``NVTE_GEMM_BACKEND=FLYDSL`` runs the ``test_flydsl_*`` tests.
+Each family self-gates on backend *availability*, not on a preset env var:
 
-Each family self-gates: with a single collection, only the tests matching the
-active backend run, so ``ci/pytorch.sh`` invokes this one file twice (once per
-backend). Everything else collects-and-skips.
+- The ``test_triton_*`` family runs when ``pytorch-triton-rocm`` is importable
+  (the Triton GEMM path has no arch gate, so it runs on gfx942 and gfx950).
+- The ``test_flydsl_*`` family runs when the version-gated ``flydsl`` package is
+  importable and the device is gfx950 (the only arch the FlyDSL path supports).
+
+so ``ci/pytorch.sh`` invokes this file once and every supported backend runs;
+unsupported families collect-and-skip.
 
 Triton coverage: fp32 / fp16 / bf16 / same-format FP8 / mixed FP8 (skipped for a
 compiler bug) / MXFP8 across TN / NN / NT, plus bias / bias-grad epilogues and a
@@ -36,6 +40,7 @@ launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
 rather than reusing the odd-sized Triton edge-mask cases.
 """
 
+import importlib.util
 import os
 import warnings
 
@@ -47,12 +52,11 @@ from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.utils import get_gemm_backend
 import transformer_engine_torch as tex
 
 
 # --- Backend selection --------------------------------------------------------
-
-_GEMM_BACKEND = os.environ.get("NVTE_GEMM_BACKEND")
 
 
 def _device_capability():
@@ -69,26 +73,47 @@ def _device_capability():
 
 _CAP = _device_capability()
 
-# The Triton family runs only under NVTE_GEMM_BACKEND=TRITON; the FlyDSL family
-# only under NVTE_GEMM_BACKEND=FLYDSL (and, like the C++ dispatch in
-# cpp_extensions/gemm.py, only on gfx950). Outside the selected backend the
-# tests would either exercise the wrong path or compare native-vs-native, so
-# skip rather than pass vacuously.
+# Each family self-gates on backend *availability* so a single collection runs
+# every backend the current stack supports; the ``*_call_gemm`` helpers flip
+# NVTE_GEMM_BACKEND per call to pick the path under test.
+#
+# Triton has no arch gate in the C++ dispatch (cpp_extensions/gemm.py), so it
+# runs wherever pytorch-triton-rocm is importable (gfx942 and gfx950). Probe with
+# find_spec so the FlyDSL shard and CPU-only runners never force the import.
+_triton_available = importlib.util.find_spec("triton") is not None
 requires_triton_backend = pytest.mark.skipif(
-    _GEMM_BACKEND != "TRITON",
-    reason="Triton GEMM tests require NVTE_GEMM_BACKEND=TRITON",
+    not _triton_available,
+    reason="Triton GEMM tests require pytorch-triton-rocm to be installed",
 )
 
-_flydsl_backend_selected = _GEMM_BACKEND == "FLYDSL" and _CAP == (9, 5)
+# FlyDSL is gfx950-only (matching the C++ dispatch) and version-gated at import
+# time (_MIN_FLYDSL/_MAX_FLYDSL in flydsl_kernels.gemm). find_spec only proves
+# the top-level package exists; the version window is enforced when the dispatch
+# imports the submodule.
+_flydsl_available = _CAP == (9, 5) and importlib.util.find_spec("flydsl") is not None
 requires_flydsl_backend = pytest.mark.skipif(
-    not _flydsl_backend_selected,
-    reason="FlyDSL GEMM tests require NVTE_GEMM_BACKEND=FLYDSL on gfx950",
+    not _flydsl_available,
+    reason="FlyDSL GEMM tests require the flydsl package on gfx950",
 )
 
-# flydsl is only installed when the FlyDSL backend is built in; import it lazily
-# so the Triton shard (and CPU-only runners) never force the dependency.
-if _flydsl_backend_selected:
+if _flydsl_available:
     pytest.importorskip("flydsl", reason="FlyDSL package is not installed")
+
+# gfx942's Triton fp32 matmul has a stable numerical divergence from
+# torch.matmul (gfx950 runs cleanly). The regular/bias-forward Triton tests use
+# TRITON_REGULAR_DTYPES below, whose fp32 entry is skipped on gfx942. This
+# mirrors the gfx942 guard that tests/pytorch/conftest.py applies to the other
+# NVTE_GEMM_BACKEND=TRITON files; it lives in-file here because this file is no
+# longer invoked with that env var preset, so the collection-time hook does not
+# fire for it.
+_is_gfx942 = _CAP is not None and _CAP[0] == 9 and _CAP[1] < 5
+_skip_gfx942_fp32 = pytest.mark.skipif(
+    _is_gfx942,
+    reason=(
+        "gfx942 Triton fp32 GEMM has a stable numerical divergence from "
+        "torch.matmul (gfx950 passes cleanly)."
+    ),
+)
 
 # --- Feature detection --------------------------------------------------------
 
@@ -182,6 +207,14 @@ FLYDSL_FP8_FORMAT_IDS = [
 
 REGULAR_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
+# Same regular dtypes for the Triton regular/bias-forward tests, but the fp32
+# variant carries the gfx942 skip (see _skip_gfx942_fp32 above).
+TRITON_REGULAR_DTYPES = [
+    pytest.param(torch.float32, id="fp32", marks=_skip_gfx942_fp32),
+    pytest.param(torch.float16, id="fp16"),
+    pytest.param(torch.bfloat16, id="bf16"),
+]
+
 
 # --- Fixtures -----------------------------------------------------------------
 
@@ -244,17 +277,22 @@ def compute_pytorch_reference(A_ref, B_ref, layout):
     raise ValueError(f"Unsupported layout: {layout}")
 
 
-def _set_backend(active):
-    """Point NVTE_GEMM_BACKEND at the backend under test or the native default.
+def _set_backend(active, backend):
+    """Point NVTE_GEMM_BACKEND at ``backend`` under test or the native default.
 
-    ``active`` True selects the current backend (already validated by the
-    module-level gate); False selects the native C++ reference by unsetting the
-    var, matching the ``use_*=False`` reference path in the original suites.
+    ``backend`` is the raw env value (``"TRITON"`` / ``"FLYDSL"``). ``active``
+    True selects it; False selects the native C++ reference by unsetting the var,
+    matching the ``use_*=False`` reference path in the original suites. The
+    selection is confirmed through ``get_gemm_backend()`` -- the canonical
+    resolver the dispatch reads -- so a typo or stale env can never silently
+    exercise the wrong path.
     """
     if active:
-        os.environ["NVTE_GEMM_BACKEND"] = _GEMM_BACKEND
+        os.environ["NVTE_GEMM_BACKEND"] = backend
+        assert get_gemm_backend() == backend.lower()
     else:
         os.environ.pop("NVTE_GEMM_BACKEND", None)
+        assert get_gemm_backend() == "default"
 
 
 def create_regular_tensors(M, K, N, layout, dtype=torch.float32):
@@ -313,7 +351,7 @@ def create_mxfp8_tensors(
 
 def triton_call_gemm(A, B, layout, out_dtype, use_triton=True):
     """Call general_gemm() with the Triton backend or the native C++ reference."""
-    _set_backend(use_triton)
+    _set_backend(use_triton, "TRITON")
     output, _, _, _ = general_gemm(
         A=A,
         B=B,
@@ -330,7 +368,7 @@ def triton_call_gemm_with_bias(A, B, layout, out_dtype, bias, grad, use_triton=T
     epilogue and bias_grad contains the reduced bias gradient; otherwise it uses
     the BIAS epilogue and bias is fused into the output.
     """
-    _set_backend(use_triton)
+    _set_backend(use_triton, "TRITON")
     output, bias_grad, _, _ = general_gemm(
         A=A,
         B=B,
@@ -348,7 +386,7 @@ def triton_call_gemm_with_bias(A, B, layout, out_dtype, bias, grad, use_triton=T
 @requires_triton_backend
 @pytest.mark.parametrize("M, K, N", TRITON_REGULAR_FP8_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("dtype", TRITON_REGULAR_DTYPES)
 def test_triton_vs_pytorch_regular(M, K, N, layout, dtype):
     """Test Triton GEMM vs torch.matmul for regular tensors."""
     torch.manual_seed(42)
@@ -512,7 +550,7 @@ def test_triton_mxfp8_alpha_beta_accumulate(M, K, N, layout, alpha, beta, accumu
         expected = expected + beta * d_init.float()
 
     d = d_init.clone()
-    _set_backend(True)
+    _set_backend(True, "TRITON")
     out, _, _, _ = general_gemm(
         A=A_mxfp8,
         B=B_mxfp8,
@@ -578,7 +616,7 @@ def test_triton_mxfp8_bias(M, K, N, layout):
 @requires_triton_backend
 @pytest.mark.parametrize("M, K, N", TRITON_REGULAR_FP8_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("dtype", TRITON_REGULAR_DTYPES)
 def test_triton_vs_cpp_regular(M, K, N, layout, dtype):
     """Test Triton GEMM vs C++ generic_gemm for regular tensors."""
     torch.manual_seed(42)
@@ -677,7 +715,7 @@ TRITON_BIAS_SHAPES = [(128, 256, 512), (229, 541, 541), (71, 71, 3571)]
 
 @requires_triton_backend
 @pytest.mark.parametrize("M, K, N", TRITON_BIAS_SHAPES)
-@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("dtype", TRITON_REGULAR_DTYPES)
 def test_triton_vs_cpp_bias_forward(M, K, N, dtype):
     """Forward with BIAS epilogue: Triton must match C++ when bias is fused."""
     torch.manual_seed(42)
@@ -849,7 +887,7 @@ def _assert_flydsl_ran(use_flydsl, fell_back):
 
 def flydsl_call_gemm(A, B, layout, out_dtype, use_flydsl=True):
     """Call ``general_gemm`` through either FlyDSL or the native C++ path."""
-    _set_backend(use_flydsl)
+    _set_backend(use_flydsl, "FLYDSL")
 
     (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
         lambda: general_gemm(
@@ -878,7 +916,7 @@ def flydsl_call_gemm_with_bias(A, B, layout, out_dtype, bias, use_flydsl=True):
     Bias is a 1-D vector along the output feature axis (the last dim of the
     returned ``(*, out_features)`` tensor) and is added to the matmul result.
     """
-    _set_backend(use_flydsl)
+    _set_backend(use_flydsl, "FLYDSL")
 
     (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
         lambda: general_gemm(
@@ -907,7 +945,7 @@ def flydsl_call_gemm_with_gelu(A, B, layout, out_dtype, bias=None, use_flydsl=Tr
     and ``gelu_input`` is the saved pre-activation (``A@B[+bias]``) that the
     backward pass consumes.
     """
-    _set_backend(use_flydsl)
+    _set_backend(use_flydsl, "FLYDSL")
 
     (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
         lambda: general_gemm(
@@ -1022,7 +1060,7 @@ def test_flydsl_mxfp8_unsupported_shape_falls_back():
     scale packing and K-tile count valid, isolating the M-tiling rejection.
     """
     os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
-    _set_backend(True)
+    _set_backend(True, "FLYDSL")
     torch.manual_seed(42)
 
     M, K, N = 128, 512, 256
