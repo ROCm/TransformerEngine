@@ -203,15 +203,16 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
+            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return True, ""
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
         False,
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
+
 
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:

@@ -41,8 +41,8 @@ static_assert(KITTENS_FLOAT16  == static_cast<int>(transformer_engine::DType::kF
 static_assert(KITTENS_BFLOAT16 == static_cast<int>(transformer_engine::DType::kBFloat16), "KittensDType out of sync with NVTEDType");
 static_assert(KITTENS_FP8E4M3  == static_cast<int>(transformer_engine::DType::kFloat8E4M3), "KittensDType out of sync with NVTEDType");
 static_assert(KITTENS_FP8E5M2  == static_cast<int>(transformer_engine::DType::kFloat8E5M2), "KittensDType out of sync with NVTEDType");
-static_assert(KITTENS_BLOCK_SCALING_1D == NVTE_BLOCK_SCALING_1D, "KittensScalingMode out of sync with NVTEScalingMode");
-static_assert(KITTENS_BLOCK_SCALING_2D == NVTE_BLOCK_SCALING_2D, "KittensScalingMode out of sync with NVTEScalingMode");
+static_assert(static_cast<int>(KITTENS_BLOCK_SCALING_1D) == static_cast<int>(NVTE_BLOCK_SCALING_1D), "KittensScalingMode out of sync with NVTEScalingMode");
+static_assert(static_cast<int>(KITTENS_BLOCK_SCALING_2D) == static_cast<int>(NVTE_BLOCK_SCALING_2D), "KittensScalingMode out of sync with NVTEScalingMode");
 #endif
 
 namespace transformer_engine {

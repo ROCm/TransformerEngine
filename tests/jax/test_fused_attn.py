@@ -363,6 +363,9 @@ def customcall_fused_dpa(
     ).astype(query.dtype)
 
 
+@pytest.mark.skipif(
+    is_hip_extension(), reason="score_mod fused attention is not supported on ROCm."
+)
 def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
     """fused_attn rejects score_mod with masks before cuDNN frontend graph building."""
     q = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)

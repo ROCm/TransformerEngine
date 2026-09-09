@@ -17,6 +17,11 @@
 
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
+#ifndef __HIP_PLATFORM_AMD__
+// Grouped FP8 block-scaling dequantize pulls in the block-scaling quantize
+// header, which uses Hopper TMA (CUtensorMap), CUDA-only.
+#include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
+#endif
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
@@ -77,6 +82,15 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }
 #endif  //#ifndef __HIP_PLATFORM_AMD__
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+#ifndef __HIP_PLATFORM_AMD__
+      fp8_blockwise::group_dequantize(&input, output, stream);
+#else
+      NVTE_ERROR("Grouped FP8 block-scaling dequantization is not supported on ROCm.");
+#endif
       break;
     }
     default:

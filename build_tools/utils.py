@@ -344,6 +344,26 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def cudnn_frontend_include_path() -> Path:
+    """Return the C++ include directory from nvidia-cudnn-frontend."""
+    package = "nvidia-cudnn-frontend"
+    try:
+        include_dir = Path(distribution(package).locate_file("include")).resolve()
+    except PackageNotFoundError as e:
+        raise RuntimeError(
+            f"{package} is required to build Transformer Engine. "
+            f"Install it with `pip install {package}`."
+        ) from e
+
+    header = include_dir / "cudnn_frontend.h"
+    if not header.is_file():
+        raise RuntimeError(
+            f"The {package} installation does not contain the expected header {header}."
+        )
+    return include_dir
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
     archs = os.getenv("NVTE_CUDA_ARCHS")
     if archs is None:

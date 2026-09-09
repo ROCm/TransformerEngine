@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -20,6 +22,7 @@ from transformer_engine_jax import nvte_get_qkv_format
 from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
+from .util import is_hip_extension
 
 
 class AttnBiasType(Enum):
@@ -1569,6 +1572,12 @@ def fused_attn(
         if score_mod_only_args:
             raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
+        # score_mod fused attention is a cuDNN-frontend (CUDA-only) feature; ROCm
+        # has no cuDNN frontend. Reject it here, before any graph construction, so
+        # the user gets a clean "not supported" error instead of an ImportError
+        # escaping from a graph-building helper mid-trace.
+        if is_hip_extension():
+            raise NotImplementedError("score_mod fused attention is not supported on ROCm.")
         tex.validate_fused_attn_score_mod(
             qkv,
             bias,

@@ -28,6 +28,21 @@ if IS_HIP_EXTENSION:
     )
     import os
 
+def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
+    """Set the amax reduction group on a quantizer; no-op if it doesn't support it.
+
+    Unwraps ``DebugQuantizer`` to its ``parent_quantizer``, which is the one that
+    actually performs the quantization (and thus the amax reduction).
+    """
+    if quantizer is None:
+        return
+    # DebugQuantizer delegates quantization to parent_quantizer
+    target = getattr(quantizer, "parent_quantizer", quantizer)
+    if target is not None and hasattr(target, "with_amax_reduction"):
+        target.with_amax_reduction = amax_reduction_group is not None
+        target.amax_reduction_group = amax_reduction_group
+
+
 def _get_normalization_func(normalization: str, forward: bool):
     use_rmsnorm_triton = bool( int(os.environ.get('NVTE_USE_RMSNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
     use_layernorm_triton = bool( int(os.environ.get('NVTE_USE_LAYERNORM_TRITON', '0')) ) and IS_HIP_EXTENSION
