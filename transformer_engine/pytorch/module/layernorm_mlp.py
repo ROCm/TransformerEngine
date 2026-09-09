@@ -415,6 +415,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_overlap_ag = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
             "fc1_dgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_bulk_dgrad = False
 

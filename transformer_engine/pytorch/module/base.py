@@ -676,15 +676,11 @@ def fused_ag_gemm_eligible(
     """Whether the fused AG+GEMM backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
     if gelu or bias is not None:
         return False
     # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
     if fp8 and not mxfp8:
-        return False
-    # The NN layout the dgrad direction needs is implemented, but the fused backend has not
-    # been validated through the dgrad path yet, so it still falls back.
-    if mxfp8 and is_dgrad:
         return False
     if dtype != torch.bfloat16:
         return False
@@ -699,11 +695,13 @@ def fused_bulk_ag_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether this call may use the bulk all-gather overlap."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    eligible = _ub_is_fused(name) and (not fp8 or mxfp8) and dtype == torch.bfloat16
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)

@@ -2018,6 +2018,7 @@ class Linear(TransformerEngineBaseModule):
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_bulk_dgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
