@@ -610,14 +610,20 @@ void performTest(const TestParams& params) {
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-    if (!use_hipkittens_mxfp8 && params.use_bias) {
-      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
-    }
     if (params.use_gelu && !fp8_gelu_fusion_config && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
+    }
+  }
+  //hipBLASLt specific MXFP8 limitations
+  if (use_mxfp8 && !use_hipkittens_mxfp8) {
+    if (isFp8Type(dtype)) {
+      GTEST_SKIP() << "MXFP8 GEMM with float8 output is not supported by hipBLASLt";
+    }
+    if (params.use_bias) {
+      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
     }
   }
 

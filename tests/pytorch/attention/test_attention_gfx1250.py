@@ -10,12 +10,10 @@ FWD V3 notes (fmha_fwd_gfx1250_batched / fmha_fwd_with_sink_asm):
   - Both D64 and D128 require a non-null sink_addr (fixed kernarg layout).
     TE supplies a static [256] fp32 buffer initialized to -1e30f so that
     exp(-1e30f) ≈ 0.0f adds no effective weight for non-fully-masked rows.
-  - D64  (ENABLE_SINK=1): kernel reads and uses the sink values as a logit
-    floor. Top-left causal; sq ≤ sk (rectangular) safe because even with
-    sink≈0 the real attention weights dominate.
+  - D64  (ENABLE_SINK=1): kernel reads and uses the sink values as a logit floor.
+    Bottom-right causal; rectangular (sq ≤ sk) supported.
   - D128 (ENABLE_SINK=0): kernel ignores the sink values entirely.
-    Causal (top-left or bottom-right); sq == sk only — rectangular shapes
-    risk NaN on fully-masked KV tiles because the sink floor is disabled.
+    Bottom-right causal; rectangular (sq ≤ sk) supported.
   - No SWA (window_size_left must be -1).
 
 Each test forces CK V3 and compares against a pure-PyTorch scaled dot product
@@ -339,7 +337,8 @@ def test_gfx1250_fwd_v3_d64(model):
 # ---------------------------------------------------------------------------
 # FWD V3 D128 configs (smoke_test_fwd_sink.sh — run_d128)
 #
-# Kernel: fmha_fwd_with_sink_asm, ENABLE_SINK=0 (sink_ptr ignored/nullptr).
+# Kernel: fmha_fwd_with_sink_asm, ENABLE_SINK=0 (sink_ptr required; TE fills
+#         with -1e30f so exp(-1e30f) ≈ 0.0f — kernel ignores the value).
 # D128 uses bottom-right causal (kernel is_causal=1, same path as D64).
 # h=8, h_k∈{1,2,4}, b∈{1,2}.  FWD-only.
 #

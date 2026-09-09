@@ -35,7 +35,7 @@ def is_fp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX9.4+ and GFX12+ machines support fp8, that excludes GFX10 and GFX11
+        # only GFX9.4+ GPUs support fp8, excluding GFX10 and GFX11
         return 100 > gpu_arch >= 94 or gpu_arch >= 120
     return gpu_arch >= 90
 
@@ -45,17 +45,17 @@ def is_mxfp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX9.5 and GFX12+ machines support fp8, that excludes GFX10 and GFX11
-        return 100 > gpu_arch >= 95 or gpu_arch >= 120
+        # only GFX9.5 and GFX12.5+ GPUs support mxfp8
+        return gpu_arch == 95 or gpu_arch >= 125
     return gpu_arch >= 100
 
 
 @lru_cache
 def is_nvfp4_supported():
-    """Return if FP8 has hardware supported"""
+    """Return if FP4 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX12.5 machines support nvfp4
+        # only GFX12.5 and newer GPUs support nvfp4
         return gpu_arch >= 125
     return gpu_arch >= 100
 
