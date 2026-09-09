@@ -144,46 +144,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
     const int k_tiles = K / K_STEP;
-    const int tiles_M = M / BLOCK_ROW;
-    const int tiles_N = N_TOTAL / BLOCK_COL;
-
-    using ST_A     = st_fp8e4m3<HALF_ROW, K_STEP, st_16x128_s>;
-    using ST_B     = st_fp8e4m3<HALF_COL, K_STEP, st_16x128_s>;
-    using RT_A     = rt_fp8e4m3<REG_M, K_STEP>;
-    using RT_B     = rt_fp8e4m3<REG_N, K_STEP>;
-    using RT_C     = rt_fl<REG_M, REG_N, col_l, rt_16x16_s>;
-
-    __shared__ ST_A As[2][2];
-    __shared__ ST_B Bs[2][2];
-
-    // B needs 8 scale groups = 2 tiles
-    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
-
-    const int warp_m = kittens::warpid() / WARPS_COL;
-    const int warp_n = kittens::warpid() % WARPS_COL;
-    const int wid    = kittens::warpid() % NUM_WARPS;
-
-    using T = kittens::fp8e4m3;
-
-    constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
-    constexpr int bpm = bpt * NUM_THREADS;
-    constexpr int copies_A = HALF_ROW * K_STEP * sizeof(T) / bpm;
-    constexpr int copies_B = HALF_COL * K_STEP * sizeof(T) / bpm;
-    uint32_t sw_A[copies_A], sw_B[copies_B];
-    G_group::prefill_swizzled_offsets(As[0][0], A, sw_A);
-    G_group::prefill_swizzled_offsets(Bs[0][0], B, sw_B);
-
-    const T *b_base = (const T *)&B[{0, 0, 0, 0}];
-    const int b_row_stride = B.template stride<2>() * sizeof(T);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
-    bf16 *c_base = (bf16 *)&C[{0, 0, 0, 0}];
-
-    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
-    uint32_t b_lds[2][2];
-    for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
-        b_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-            reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
-    }
+#include "mxfp8_tn_prologue.inc"
 
     const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {
@@ -209,24 +170,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-                // Steal order: Own bucket, then the local chunk, then the other XCDs.
-                int found = -1;
-                const int b0 = (int)blockIdx.x % NUM_XCDS_AFF;
-                for (int s = 0; s <= NUM_XCDS_AFF; s++) {
-                    int bb;
-                    if      (s == 0) bb = b0;
-                    else if (s == 1) bb = my_pe;
-                    else             bb = (b0 + s - 1) & (NUM_XCDS_AFF - 1);
-                    if (buckets.cnt[bb] == 0) continue;
-                    if (__hip_atomic_load(&bucket_ctr[bb], __ATOMIC_RELAXED,
-                                          __HIP_MEMORY_SCOPE_AGENT) >= buckets.cnt[bb]) continue;
-                    const int idx = atomicAdd(&bucket_ctr[bb], 1);
-                    if (idx < buckets.cnt[bb]) {
-                        found = buckets.off[bb] + idx;
-                        break;
-                    }
-                }
-                s_tile_idx = (found < 0) ? num_tiles : found;
+                #include "xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -288,63 +232,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-#pragma unroll 2
-        for (int k = 0; k < k_tiles - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
-            if (k + 1 < k_tiles) {
-                G_group::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-                G_group::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * tiles_N + block_col),     0, 0, 0});
-                G_group::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * tiles_N + block_col) + 1, 0, 0, 0});
-            }
-            auto bs0 = kittens::subtile_inplace<REG_N, K_STEP>(Bs[tic][0], {warp_n, 0});
-            kittens::load(b0, bs0);
-            auto as0 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][0], {warp_m, 0});
-            kittens::load(a, as0);
-            G_group::load(As[toc][1], A, {0, 0, a_half1, k + 1}, sw_A);
-            asm volatile("s_waitcnt lgkmcnt(8)"); // wait for scale + data LDS stores; As[toc][1] can overlap
-            __builtin_amdgcn_s_barrier();
-
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            auto bs1 = kittens::subtile_inplace<REG_N, K_STEP>(Bs[tic][1], {warp_n, 0});
-            kittens::load(b1, bs1);
-            G_group::load(As[tic][0], A, {0, 0, a_half0, k + 2}, sw_A);
-            asm volatile("s_waitcnt lgkmcnt(0)"); // drain LDS: need bs1 in registers for mma_B
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            auto as1 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][1], {warp_m, 0});
-            kittens::load(a, as1);
-            G_group::load(Bs[tic][0], B, {0, 0, b_half0, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
-            asm volatile("s_waitcnt lgkmcnt(0)"); // drain LDS: need as1 in registers for mma_C
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            G_group::load(Bs[tic][1], B, {0, 0, b_half1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
-            asm volatile("s_waitcnt vmcnt(6)"); // wait for toc data loads; next-iter prefetches in flight
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        }
+        #include "mxfp8_tn_mainloop.inc"
 
         { // Epilogue k = k_tiles - 2
             int k = k_tiles - 2;
