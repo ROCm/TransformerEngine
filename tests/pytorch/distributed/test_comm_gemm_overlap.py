@@ -495,7 +495,7 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
     ]
     # The bulk harness pins its GEMM to NN regardless, so --layout only applies to the p2p path.
     test_cmd += (
-        ["--bulk-overlap"]
+        ["--bulk-overlap", f"--quantization={quantization}"]
         if bulk
         else ["--p2p", f"--quantization={quantization}", f"--layout={layout}"]
     )
@@ -596,6 +596,19 @@ def test_fused_ag_overlap_is_deterministic(nprocs):
 def test_fused_bulk_ag_overlap_bf16(nprocs):
     """The bulk all-gather that rides in an unrelated GEMM's grid."""
     _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True))
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_bulk_ag_overlap_mxfp8(nprocs):
+    """Bulk all-gather riding in an unrelated MXFP8 GEMM's grid.
+
+    The GEMM operands are MXFP8 while the gathered tensor is independent of them -- bulk overlap
+    exists precisely to hide a collective behind a GEMM it has no data dependency on.
+    """
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True, quantization="mxfp8"))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

@@ -50,3 +50,5 @@ bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args);
 bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
 
 bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_mxfp8(const KittensAgGemmArgs &args);

@@ -212,8 +212,7 @@ def _parse_args(argv=None, namespace=None):
             warnings.warn("Atomic GEMM is not supported with bulk overlap.")
             opts.atomic = False
         if opts.quantization != "none":
-            warnings.warn("Bulk overlap is supported in FP8 but only tested in BF16.")
-            opts.quantization = "none"
+            warnings.warn("Bulk overlap with quantized compute is less exercised than BF16.")
     elif opts.comm_type == tex.CommOverlapType.AG:
         if opts.atomic:
             setattr(opts, "atomic_rs_p2p", opts.p2p)
@@ -365,11 +364,9 @@ def _main(opts):
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
     buffer_dtype = torch.bfloat16
-    if (
-        opts.quantization != "none"
-        and not opts.bulk_overlap
-        and opts.comm_type == tex.CommOverlapType.AG
-    ):
+    if opts.quantization != "none" and opts.comm_type == tex.CommOverlapType.AG:
+        # Bulk included: the userbuffer is byte-typed whenever the GEMM is quantized, otherwise
+        # B (which aliases the ubuf) reaches the backend as bf16 and --quantization is inert.
         buffer_dtype = torch.uint8
     if opts.p2p:
         ub_obj = tex.CommOverlapP2P(
@@ -616,7 +613,7 @@ def _main(opts):
         fp8_dtype = te.DType.kFloat8E4M3
         inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         ker_quantizer = MXFP8Quantizer(fp8_dtype)
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+        if opts.bulk_overlap:   # AG too: an FP8 userbuffer cannot gather an unquantized tensor
             bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         elif ub_obj2 is not None:
             inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
@@ -676,7 +673,9 @@ def _main(opts):
                 bulk_inp_quantizer,
                 tp_group,
             )
-            gemm_inp = inp
+            # The bulk GEMM is unrelated to the gathered tensor, but it still honours the requested
+            # quantization -- otherwise --quantization is silently inert on the bulk path.
+            gemm_inp = inp_fp8 if with_quantized_compute else inp
         elif not opts.use_cublasmp:
             ag_out, _ = fill_userbuffers_buffer_for_all_gather(
                 ub_obj,
@@ -705,6 +704,10 @@ def _main(opts):
             (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
         )
 
+    # The fused bulk AG backend is NN only (rocm_comm_gemm_overlap.cpp asserts !transa), so both
+    # GEMM closures must agree on it -- not just the bf16 one.
+    gemm_layout = "NN" if (opts.bulk_overlap and opts.fused) else opts.layout
+
     # Wrap GEMM ops in condensed functions to make CUDA Graphs easier to use
     def _fp8_gemm():
         return tex.general_gemm(
@@ -717,7 +720,7 @@ def _main(opts):
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
-            layout=opts.layout,
+            layout=gemm_layout,
         )
 
     def _fp8_gemm2(gemm1_out):
@@ -738,7 +741,6 @@ def _main(opts):
 
     # The fused bulk all-gather GEMM is the NN one shaped above; otherwise honour --layout,
     # whose default of TN matches the pre-merge behaviour.
-    gemm_layout = "NN" if (opts.bulk_overlap and opts.fused) else opts.layout
 
     def _gemm():
         return tex.general_gemm(
@@ -831,6 +833,10 @@ def _main(opts):
 
                 if bulk_inp_quantizer is None:
                     test_out = ub_obj.get_buffer(False)
+                elif isinstance(bulk_inp_quantizer, MXFP8Quantizer):
+                    # MXFP8 carries per-block scales, so there is no single fp8_scale to wrap a
+                    # Float8Tensor around; compare the dequantized gather instead.
+                    test_out = ag_out.dequantize(dtype=torch.bfloat16)
                 else:
                     test_out = Float8Tensor(
                         shape=test_out.shape,
