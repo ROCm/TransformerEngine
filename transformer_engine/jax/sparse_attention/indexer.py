@@ -1,12 +1,23 @@
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
-"""Indexer op (forward only), bf16 inputs.
+"""Indexer op, bf16 inputs with an fp8 score matmul.
 
 The op runs a hybrid backend: einsum projections (C_q, H_q, H_k, W_o) —
 which lower to hipBLASLt bf16 GEMMs — followed by a fused Triton kernel that
 does score+relu+H-reduction in registers. This avoids materializing the
 (B, oH, T, H, S) pre-relu score tensor in HBM.
+
+The score matmul itself runs in e4m3 by default (``fp8=True``), matching the
+DeepSeek lightning indexer. Because these entry points own the projections,
+they also own the quantization: H_q and H_k are quantized along ``d_i`` here
+and handed to the Triton op together with their row scales.
+
+The Triton ops themselves never quantize. A caller that already holds
+quantized index-q / index-k — from an fp8 GEMM epilogue, a TE quantizer, or a
+previous step — should skip this module and call
+``triton_extensions.indexer.score_reduce_triton`` / ``score_topk_triton``
+directly, passing the fp8 tensors and their scales; no requantization needed.
 
 Functional entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w)``.
 User-facing Flax module: :class:`LightningIndexer`, which owns the projection
@@ -45,7 +56,26 @@ def _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w):
     return H_q, H_k, W_o
 
 
-def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
+def _maybe_quantize(H_q, H_k, fp8):
+    """Quantize the score-matmul operands, or pass them through in bf16.
+
+    Returns ``(H_q, H_k, Sq, Ks)`` with ``Sq`` / ``Ks`` set to ``None`` (unit
+    scales) on the bf16 path. Quantization is skipped when ``d_i`` is too small
+    for an e4m3 MFMA tile, where padding K would cost more than fp8 saves.
+    """
+    from transformer_engine.jax.triton_extensions.indexer import (
+        fp8_dot_supported,
+        quantize_e4m3,
+    )
+
+    if not (fp8 and fp8_dot_supported(H_q.shape[-1])):
+        return H_q, H_k, None, None
+    H_q_q, Sq = quantize_e4m3(H_q)
+    H_k_q, Ks = quantize_e4m3(H_k)
+    return H_q_q, H_k_q, Sq, Ks
+
+
+def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None, fp8=True):
     """Einsum projections + Triton score-relu-reduce.
 
     Runs the four projections (which lower to hipBLASLt bf16 GEMMs), then
@@ -56,12 +86,13 @@ def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton
 
     H_q, H_k, W_o = _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w)
-    return score_reduce_triton(H_q, H_k, W_o,
+    H_q, H_k, Sq, Ks = _maybe_quantize(H_q, H_k, fp8)
+    return score_reduce_triton(H_q, H_k, W_o, Sq=Sq, Ks=Ks,
                                out_dtype=out_dtype if out_dtype else Q.dtype)
 
 
-@functools.partial(jax.jit, static_argnames=("k",))
-def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k):
+@functools.partial(jax.jit, static_argnames=("k", "fp8"))
+def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k, fp8=True):
     """Lightning-indexer + top-k (fused).
 
     Same projections as ``indexer()`` (reference math), then a single Triton
@@ -73,6 +104,7 @@ def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k):
         Q, K, W_uq, W_dq, W_k, weights: same as ``indexer()``.
         k: number of top scores to return per (B, oH, T_t) row.
            Must be a power of 2 and <= S.
+        fp8: run the score matmul in e4m3 (default).
 
     Returns:
         Topk_idx: (..., T_t, k) int32 — top-k indices into the S axis,
@@ -80,12 +112,13 @@ def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k):
     """
     from transformer_engine.jax.triton_extensions.indexer import score_topk_triton
     H_q, H_k, W_o = _indexer_projections(Q, K, W_uq, W_dq, W_k, weights)
-    return score_topk_triton(H_q, H_k, W_o, k=k)
+    H_q, H_k, Sq, Ks = _maybe_quantize(H_q, H_k, fp8)
+    return score_topk_triton(H_q, H_k, W_o, k=k, Sq=Sq, Ks=Ks)
 
 
-@functools.partial(jax.jit, static_argnames=("out_dtype",))
-def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None):
-    """Low-rank lightning-indexer (bf16), hybrid Triton backend.
+@functools.partial(jax.jit, static_argnames=("out_dtype", "fp8"))
+def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None, fp8=True):
+    """Low-rank lightning-indexer (bf16 I/O, fp8 score matmul).
 
     Args:
         Q:       (..., T, d)            hidden state (per token)
@@ -96,11 +129,15 @@ def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None):
         weights: (d, H)                 learnable output-weight projection
                                         (W_o = Q @ weights inside the impl)
         out_dtype: output dtype override (defaults to Q.dtype).
+        fp8: run the score matmul in e4m3 (default). Quantization happens
+             inside the Triton op, so inputs and gradients stay bf16.
 
     Returns:
         O of shape (..., T, S).
     """
-    return _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights, out_dtype=out_dtype)
+    return _indexer_impl_hybrid(
+        Q, K, W_uq, W_dq, W_k, weights, out_dtype=out_dtype, fp8=fp8
+    )
 
 
 class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
@@ -129,6 +166,9 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
         Output dtype override; defaults to ``Q.dtype``. Unused when ``topk`` is set.
     dtype : Optional[jnp.dtype]
         Parameter dtype. Defaults to the input dtype.
+    fp8 : bool, default ``True``
+        Run the score matmul in e4m3. Quantization is internal to the Triton
+        op, so parameters, activations and gradients remain ``dtype``.
     """
 
     num_heads: int
@@ -137,6 +177,7 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
     topk: Optional[int] = None
     out_dtype: Optional[jnp.dtype] = None
     dtype: Optional[jnp.dtype] = None
+    fp8: bool = True
 
     @nn.compact
     def __call__(self, Q: jax.Array, K: jax.Array) -> jax.Array:
@@ -160,5 +201,7 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
         W_w = self.param("W_w", init, (d, self.num_heads), param_dtype)
 
         if self.topk is not None:
-            return indexer_topk(Q, K, W_uq, W_dq, W_k, W_w, k=self.topk)
-        return indexer(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=self.out_dtype)
+            return indexer_topk(Q, K, W_uq, W_dq, W_k, W_w, k=self.topk, fp8=self.fp8)
+        return indexer(
+            Q, K, W_uq, W_dq, W_k, W_w, out_dtype=self.out_dtype, fp8=self.fp8
+        )

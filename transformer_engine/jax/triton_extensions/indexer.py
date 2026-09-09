@@ -14,6 +14,33 @@ H-reduction:
 The kernel keeps each per-head score tile in registers, avoiding the
 (B, oH, T, H, S) HBM round-trip that an einsum-only implementation pays
 on the pre-relu score tensor.
+
+FP8 score matmul
+----------------
+These ops never quantize. ``Hq`` / ``Hk`` are consumed in whatever precision
+they arrive in -- e4m3 or bf16 -- alongside the per-row scales ``Sq`` / ``Ks``,
+so a caller holding already-quantized index-q / index-k can hand them straight
+in without a dequantize/requantize round trip. ``tl.dot`` specializes on the
+operand dtype, so one kernel serves both precisions; omitting the scales means
+"already unit-scaled" and passes all-ones.
+
+The expected quantization (see :func:`quantize_e4m3`, which callers may use but
+are not required to) is per-row along the contracted ``d_i`` axis: ``Sq`` per
+(b, oH, t, h) and ``Ks`` per (b, oH, s), i.e. the row scale of each matmul
+operand. Because ReLU is positive-homogeneous and both scales are strictly
+positive, dequantization commutes with it and factors out of the H-reduction:
+
+    O[t, s] = sum_h relu(sq[t,h] * ks[s] * (q_hat . k_hat)) * W_o[t,h]
+            = ks[s] * sum_h relu(q_hat . k_hat) * (W_o[t,h] * sq[t,h])
+
+So ``Sq`` folds into the per-head weight and ``Ks`` is a single per-column
+post-multiply -- no separate dequantization pass over the operands.
+
+Gradients follow the operand dtype: with e4m3 ``Hq`` / ``Hk`` the cotangents
+come back as e4m3 too. They are the chain-rule cotangents w.r.t. the *quantized*
+operands (``dHq_true * sq``), which renormalizes them into the operand's own
+range rather than leaving a raw unscaled fp8 gradient. ``Sq`` / ``Ks`` are
+quantization metadata and are treated as constants (zero cotangent).
 """
 
 import functools
@@ -28,6 +55,8 @@ from jax import core
 from jax.extend import core as extend_core
 from jax.interpreters import mlir, xla
 
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type
+
 from .utils import triton_call_lowering
 
 
@@ -40,6 +69,81 @@ def _autotune_disabled():
     costs many minutes and only picks the fastest config, not a more correct
     one. Read at lowering time so a test fixture can toggle it per process."""
     return os.environ.get("NVTE_INDEXER_DISABLE_AUTOTUNE", "0") == "1"
+
+
+# --- FP8 operand quantization ------------------------------------------------
+#
+# e4m3 is the score-matmul operand format. On gfx942 the hardware format is the
+# "fnuz" variant (exponent bias 8); everywhere else it is OCP e4m3. Both are
+# already mapped to Triton type strings in ``utils.get_triton_dtype``, so the
+# kernels below are dtype-polymorphic and need no per-variant handling.
+
+
+def fp8_dtype():
+    """e4m3 dtype matching the current device's hardware format."""
+    return jnp.dtype(get_jnp_float8_e4m3_type())
+
+
+def is_fp8(dtype):
+    """Whether ``dtype`` is one of the 8-bit float formats."""
+    dtype = jnp.dtype(dtype)
+    return jnp.issubdtype(dtype, jnp.floating) and dtype.itemsize == 1
+
+
+def fp8_dot_supported(d_i):
+    """Whether the score matmul is worth running in fp8 for this inner dim.
+
+    The narrowest e4m3 MFMA/WGMMA tile contracts 32 elements, so a ``d_i``
+    below that would have Triton pad the K axis with zeros -- costing more than
+    the fp8 speedup buys. Callers should stay in bf16 there.
+    """
+    return d_i >= 32
+
+
+def quantize_e4m3(x, *, axis=-1):
+    """Symmetric per-row e4m3 quantization along ``axis``.
+
+    Offered for callers that hold unquantized operands; the score ops do not
+    call it themselves. Returns ``(x_q, scale)`` such that
+    ``x ~= x_q * expand_dims(scale, axis)``. ``scale`` is fp32 and strictly
+    positive, which is what lets it commute with the ReLU downstream (see the
+    module docstring).
+
+    Differentiable as a straight-through estimator: the scale is held constant
+    (``stop_gradient``), so a cotangent w.r.t. ``x_q`` flows back to ``x`` as
+    ``g / scale`` without the spurious term the amax reduction would otherwise
+    contribute, and the e4m3 rounding is not modelled.
+    """
+    dtype = fp8_dtype()
+    fp8_max = float(jnp.finfo(dtype).max)
+    x_f32 = x.astype(jnp.float32)
+    amax = jnp.max(jnp.abs(x_f32), axis=axis)
+    # An all-zero row has no scale worth choosing; 1.0 keeps it strictly
+    # positive (so the ReLU factoring stays valid) and round-trips to zero.
+    scale = jax.lax.stop_gradient(jnp.where(amax > 0, amax / fp8_max, 1.0))
+    x_q = jnp.clip(x_f32 / jnp.expand_dims(scale, axis), -fp8_max, fp8_max)
+    return x_q.astype(dtype), scale
+
+
+def _validate_scales(Hq, Hk, Sq, Ks):
+    """Fill in unit scales for any omitted, and check the supplied ones.
+
+    The scales index the non-contracted axes of their operand: ``Sq`` is
+    ``Hq.shape[:-1]`` and ``Ks`` is ``Hk.shape[:-1]``.
+    """
+    if Sq is None:
+        Sq = jnp.ones(Hq.shape[:-1], jnp.float32)
+    elif Sq.shape != Hq.shape[:-1]:
+        raise ValueError(
+            f"Sq shape {Sq.shape} does not match Hq rows {Hq.shape[:-1]}"
+        )
+    if Ks is None:
+        Ks = jnp.ones(Hk.shape[:-1], jnp.float32)
+    elif Ks.shape != Hk.shape[:-1]:
+        raise ValueError(
+            f"Ks shape {Ks.shape} does not match Hk rows {Hk.shape[:-1]}"
+        )
+    return Sq.astype(jnp.float32), Ks.astype(jnp.float32)
 
 
 def _score_reduce_autotune_configs():
@@ -73,6 +177,8 @@ def _score_reduce_kernel(
     Hq_ptr,       # (B, oH, T_t, H, d_i) — produced by einsum("...tc,hci->...thi")
     Hk_ptr,       # (B, oH, T_s, d_i)
     W_o_ptr,      # (B, oH, T_t, H)
+    Sq_ptr,       # (B, oH, T_t, H)  fp32 — Hq row scales (all-ones when bf16)
+    Ks_ptr,       # (B, oH, T_s)     fp32 — Hk row scales (all-ones when bf16)
     O_ptr,        # (B, oH, T_t, T_s)
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -111,12 +217,16 @@ def _score_reduce_kernel(
     hq_base = b * (oH * T_t * H * d_i) + h_outer * (T_t * H * d_i)
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
     wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
+    ks_base = b * (oH * T_s) + h_outer * T_s
     o_base = b * (oH * T_t * T_s) + h_outer * (T_t * T_s)
 
     # Load the (BLOCK_S, d_i) Hk slab once — it is loop-invariant over H.
     hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
     Hk_tile = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
     Hk_T = tl.trans(Hk_tile)  # (d_i, BLOCK_S)
+
+    # Hk row scales — also loop-invariant over H, applied once after the loop.
+    ks = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
 
     acc = tl.zeros((BLOCK_T, BLOCK_S), dtype=tl.float32)
 
@@ -126,11 +236,16 @@ def _score_reduce_kernel(
         Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
 
         wo_ptrs = W_o_ptr + wo_base + rt * H + h
-        w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0)
+        w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
+        # Fold the Hq row scale into the output weight: relu is
+        # positive-homogeneous, so sq can be pulled out through it.
+        sq_h = tl.load(Sq_ptr + wo_base + rt * H + h, mask=rt_mask, other=0.0)
 
         score = tl.dot(Hq_h, Hk_T)
         score = tl.maximum(score, 0.0)
-        acc += score * w_h[:, None].to(tl.float32)
+        acc += score * (w_h * sq_h)[:, None]
+
+    acc = acc * ks[None, :]
 
     o_ptrs = O_ptr + o_base + rt[:, None] * T_s + rs[None, :]
     tl.store(o_ptrs, acc.to(O_ptr.dtype.element_ty),
@@ -142,8 +257,8 @@ _score_reduce_p.multiple_results = True
 
 
 @_score_reduce_p.def_abstract_eval
-def _score_reduce_abstract(Hq, Hk, W_o, *, out_dtype):
-    del W_o
+def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, *, out_dtype):
+    del W_o, Sq, Ks
     # Hq layout: (B, oH, T_t, H, d_i)
     B, oH, T_t, _H, _d_i = Hq.shape
     T_s = Hk.shape[2]
@@ -153,7 +268,7 @@ def _score_reduce_abstract(Hq, Hk, W_o, *, out_dtype):
 _score_reduce_p.def_impl(functools.partial(xla.apply_primitive, _score_reduce_p))
 
 
-def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
+def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, *, out_dtype):
     del out_dtype
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
@@ -174,7 +289,7 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
         return triton_call_lowering(
             ctx,
             _score_reduce_kernel,
-            Hq, Hk, W_o,
+            Hq, Hk, W_o, Sq, Ks,
             grid=grid_fn,
             constexprs={
                 "B": B,
@@ -239,10 +354,12 @@ def _score_dscores_chunk_autotune_configs():
                  key=["T", "T_s", "H_CHUNK", "d_i"])
 @triton.jit
 def _score_dscores_chunk_kernel(
-    Hq_chunk_ptr,        # input  (B, oH, T,   H_CHUNK, d_i) bf16
-    Hk_ptr,              # input  (B, oH, T_s, d_i)         bf16
+    Hq_chunk_ptr,        # input  (B, oH, T,   H_CHUNK, d_i) bf16 or e4m3
+    Hk_ptr,              # input  (B, oH, T_s, d_i)         bf16 or e4m3
     W_o_chunk_ptr,       # input  (B, oH, T,   H_CHUNK)     bf16
     dO_ptr,              # input  (B, oH, T,   T_s)         fp32
+    Sq_chunk_ptr,        # input  (B, oH, T,   H_CHUNK)     fp32 — Hq row scales
+    Ks_ptr,              # input  (B, oH, T_s)              fp32 — Hk row scales
     dscores_chunk_ptr,   # output (B, oH, T,   H_CHUNK, T_s) bf16
     dWo_chunk_ptr,       # output (B, oH, T,   H_CHUNK)     bf16
     B: tl.constexpr,
@@ -276,6 +393,7 @@ def _score_dscores_chunk_kernel(
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
     wo_base = b * (oH * T * H_CHUNK) + h_outer * (T * H_CHUNK)
     do_base = b * (oH * T * T_s) + h_outer * (T * T_s)
+    ks_base = b * (oH * T_s) + h_outer * T_s
     ds_base = b * (oH * T * H_CHUNK * T_s) + h_outer * (T * H_CHUNK * T_s)
 
     # Per-head dW_o accumulators packed as (BLOCK_T, H_CHUNK), reduced over s.
@@ -290,6 +408,8 @@ def _score_dscores_chunk_kernel(
         hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
         Hk_chunk = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
         Hk_T = tl.trans(Hk_chunk)  # (d_i, BLOCK_S)
+
+        ks_chunk = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
 
         do_ptrs = dO_ptr + do_base + rt[:, None] * T_s + rs[None, :]
         dO_chunk = tl.load(
@@ -307,13 +427,20 @@ def _score_dscores_chunk_kernel(
                 W_o_chunk_ptr + wo_base + rt * H_CHUNK + h,
                 mask=rt_mask, other=0.0,
             ).to(tl.float32)
+            sq_h = tl.load(
+                Sq_chunk_ptr + wo_base + rt * H_CHUNK + h,
+                mask=rt_mask, other=0.0,
+            )
 
+            # Scores here are the *quantized* dot q_hat.k_hat; the true score is
+            # sq_h * ks * scores. Both scales are positive, so the relu mask is
+            # the same either way and only the magnitude below needs rescaling.
             scores = tl.dot(Hq_h, Hk_T)  # (BLOCK_T, BLOCK_S)
             relu_mask = scores > 0
-            h_relu = tl.where(relu_mask, scores, 0.0)
+            h_relu = tl.where(relu_mask, scores, 0.0) * ks_chunk[None, :]
 
             # dW_o[..., h] += sum_s (h_relu * dO); accumulate into column h.
-            dwo_h = tl.sum(h_relu * dO_chunk, axis=1)  # (BLOCK_T,)
+            dwo_h = tl.sum(h_relu * dO_chunk, axis=1) * sq_h  # (BLOCK_T,)
             dWo_acc += tl.where(rhc[None, :] == h, dwo_h[:, None], 0.0)
 
             # dscores[..., h, s] = relu_mask * (dO * W_o)
@@ -338,13 +465,15 @@ _score_dscores_chunk_p.multiple_results = True
 
 
 @_score_dscores_chunk_p.def_abstract_eval
-def _score_dscores_chunk_abstract(Hq_chunk, Hk, W_o_chunk, dO):
-    del Hk, W_o_chunk
+def _score_dscores_chunk_abstract(Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks):
+    del Hk, Sq_chunk, Ks
     B, oH, T, H_CHUNK, _ = Hq_chunk.shape
     T_s = dO.shape[-1]
+    # Both outputs are cotangents, so they follow W_o's (bf16) dtype -- Hq_chunk
+    # is e4m3 on the fp8 path and would silently narrow them.
     return [
-        core.ShapedArray((B, oH, T, H_CHUNK, T_s), Hq_chunk.dtype),  # dscores
-        core.ShapedArray((B, oH, T, H_CHUNK), Hq_chunk.dtype),       # dW_o
+        core.ShapedArray((B, oH, T, H_CHUNK, T_s), W_o_chunk.dtype),  # dscores
+        core.ShapedArray((B, oH, T, H_CHUNK), W_o_chunk.dtype),       # dW_o
     ]
 
 
@@ -353,7 +482,7 @@ _score_dscores_chunk_p.def_impl(
 )
 
 
-def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO):
+def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks):
     Hq_aval = ctx.avals_in[0]
     dO_aval = ctx.avals_in[3]
     B, oH, T, H_CHUNK, d_i = Hq_aval.shape
@@ -372,7 +501,7 @@ def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO):
         return triton_call_lowering(
             ctx,
             _score_dscores_chunk_kernel,
-            Hq_chunk, Hk, W_o_chunk, dO,
+            Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks,
             grid=grid_fn,
             constexprs={
                 "B": B, "oH": oH, "T": T, "T_s": T_s,
@@ -390,14 +519,14 @@ mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, pl
 # --- Public score_reduce_triton with custom_vjp ------------------------------
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
-def _score_reduce_with_vjp(Hq, Hk, W_o, out_dtype):
-    return _score_reduce_p.bind(Hq, Hk, W_o, out_dtype=out_dtype)[0]
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5,))
+def _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, out_dtype):
+    return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, out_dtype=out_dtype)[0]
 
 
-def _score_reduce_fwd(Hq, Hk, W_o, out_dtype):
-    out = _score_reduce_p.bind(Hq, Hk, W_o, out_dtype=out_dtype)[0]
-    return out, (Hq, Hk, W_o)
+def _score_reduce_fwd(Hq, Hk, W_o, Sq, Ks, out_dtype):
+    out = _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, out_dtype=out_dtype)[0]
+    return out, (Hq, Hk, W_o, Sq, Ks)
 
 
 _BWD_H_CHUNK = 8  # peak (B, oH, T, H_CHUNK, T_s) tile -- bounds materialization
@@ -405,8 +534,21 @@ _BWD_H_CHUNK = 8  # peak (B, oH, T, H_CHUNK, T_s) tile -- bounds materialization
 
 def _score_reduce_bwd(out_dtype, residuals, dO):
     del out_dtype
-    Hq, Hk, W_o = residuals
+    Hq, Hk, W_o, Sq, Ks = residuals
     B, oH, T, H, d_i = Hq.shape
+    # The score recompute inside the Triton kernel consumes Hq / Hk in their
+    # stored precision (with Sq / Ks), but the two dscores reductions below are
+    # hipBLASLt GEMMs and need dequantized operands. W_o is the bf16 anchor for
+    # that intermediate precision -- Hq / Hk may be e4m3.
+    compute_dtype = W_o.dtype
+    fp8_operands = is_fp8(Hq.dtype)
+
+    def _dequant(x, scale):
+        if not fp8_operands:
+            return x
+        return (x.astype(jnp.float32) * scale[..., None]).astype(compute_dtype)
+
+    Hk_deq = _dequant(Hk, Ks)
 
     # Hybrid scheme with bounded materialization:
     #   For each h-chunk of size H_CHUNK (driven by lax.scan, NOT Python
@@ -430,37 +572,57 @@ def _score_reduce_bwd(out_dtype, residuals, dO):
 
     Hq_r = Hq.reshape(B, oH, T, n_chunks, H_CHUNK, d_i)
     Wo_r = W_o.reshape(B, oH, T, n_chunks, H_CHUNK)
+    Sq_r = Sq.reshape(B, oH, T, n_chunks, H_CHUNK)
     # Move chunk axis to leading for scan over axis 0.
     Hq_s = jnp.moveaxis(Hq_r, -3, 0)   # (n_chunks, B, oH, T, H_CHUNK, d_i)
     Wo_s = jnp.moveaxis(Wo_r, -2, 0)   # (n_chunks, B, oH, T, H_CHUNK)
+    Sq_s = jnp.moveaxis(Sq_r, -2, 0)   # (n_chunks, B, oH, T, H_CHUNK)
 
     def step(dHk_acc, chunk):
-        Hq_c, Wo_c = chunk
+        Hq_c, Wo_c, Sq_c = chunk
         # Triton: dscores_chunk + dWo_chunk; no full (B,oH,T,H,T_s) tensor
         # ever exists in HBM.
-        dscores_c, dWo_c = _score_dscores_chunk_p.bind(Hq_c, Hk, Wo_c, dO)
-        dHq_c = jnp.einsum("...ths,...si->...thi", dscores_c, Hk)
-        dHk_c = jnp.einsum("...ths,...thi->...si", dscores_c, Hq_c)
+        dscores_c, dWo_c = _score_dscores_chunk_p.bind(Hq_c, Hk, Wo_c, dO, Sq_c, Ks)
+        # Dequantize only the current chunk, so peak stays at H_CHUNK/H of Hq.
+        Hq_c_deq = _dequant(Hq_c, Sq_c)
+        dHq_c = jnp.einsum("...ths,...si->...thi", dscores_c, Hk_deq)
+        dHk_c = jnp.einsum("...ths,...thi->...si", dscores_c, Hq_c_deq)
         new_dHk_acc = dHk_acc + dHk_c.astype(jnp.float32)
         return new_dHk_acc, (dHq_c, dWo_c)
 
     init = jnp.zeros(Hk.shape, dtype=jnp.float32)
     dHk_acc, (dHq_chunks, dWo_chunks) = jax.lax.scan(
-        step, init, (Hq_s, Wo_s),
+        step, init, (Hq_s, Wo_s, Sq_s),
     )
     # dHq_chunks: (n_chunks, B, oH, T, H_CHUNK, d_i)
     # dWo_chunks: (n_chunks, B, oH, T, H_CHUNK)
     dHq = jnp.moveaxis(dHq_chunks, 0, -3).reshape(B, oH, T, H, d_i)
     dWo = jnp.moveaxis(dWo_chunks, 0, -2).reshape(B, oH, T, H)
-    dHk = dHk_acc.astype(Hk.dtype)
+    dHk = dHk_acc
 
-    return dHq.astype(Hq.dtype), dHk, dWo.astype(W_o.dtype)
+    # The einsums above produce cotangents w.r.t. the *dequantized* operands.
+    # Chain through Hq = Hq_q * sq to get the cotangent w.r.t. the operand we
+    # were actually handed. When the operands are e4m3 this also renormalizes
+    # the gradient into their range, instead of storing a raw unscaled fp8
+    # value. With unit scales it is an exact no-op.
+    dHq = (dHq.astype(jnp.float32) * Sq[..., None]).astype(Hq.dtype)
+    dHk = (dHk.astype(jnp.float32) * Ks[..., None]).astype(Hk.dtype)
+
+    # Sq / Ks are quantization metadata, held constant by every scaling recipe
+    # (and by quantize_e4m3's stop_gradient), so they take a zero cotangent.
+    return (
+        dHq,
+        dHk,
+        dWo.astype(W_o.dtype),
+        jnp.zeros_like(Sq),
+        jnp.zeros_like(Ks),
+    )
 
 
 _score_reduce_with_vjp.defvjp(_score_reduce_fwd, _score_reduce_bwd)
 
 
-def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
+def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, out_dtype=None):
     """Triton fused score-matmul + relu + per-(t, h) weighted H-reduction.
 
     Replaces the pattern:
@@ -476,10 +638,12 @@ def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
     backward, never materialized).
 
     Args:
-        Hq:  (B, oH, T_t, H, d_i)
-        Hk:  (B, oH, T_s, d_i)
+        Hq:  (B, oH, T_t, H, d_i) — e4m3 or bf16, consumed as given.
+        Hk:  (B, oH, T_s, d_i)    — same dtype as Hq.
         W_o: (B, oH, T_t, H)
-        out_dtype: defaults to Hq.dtype.
+        Sq:  (B, oH, T_t, H) fp32 row scales for Hq, or None for unit scales.
+        Ks:  (B, oH, T_s) fp32 row scales for Hk, or None for unit scales.
+        out_dtype: defaults to W_o.dtype.
 
     Returns:
         O: (B, oH, T_t, T_s)
@@ -511,11 +675,18 @@ def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
             f"W_o shape {W_o.shape} does not match expected "
             f"(B={B}, oH={oH}, T_t={T_t}, H={H})"
         )
+    # Both operands feed one tl.dot, which specializes on a single input dtype.
+    if Hq.dtype != Hk.dtype:
+        raise ValueError(
+            f"Hq and Hk must share a dtype; got {Hq.dtype} and {Hk.dtype}"
+        )
+    Sq, Ks = _validate_scales(Hq, Hk, Sq, Ks)
 
     if out_dtype is None:
-        out_dtype = Hq.dtype
+        # Not Hq.dtype: that would make an e4m3 operand yield an e4m3 output.
+        out_dtype = W_o.dtype
 
-    return _score_reduce_with_vjp(Hq, Hk, W_o, jnp.dtype(out_dtype))
+    return _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, jnp.dtype(out_dtype))
 
 
 # --- Streaming top-k variant ----------------------------------------------------
@@ -590,9 +761,11 @@ def _prune_topk_configs(configs, named_args, **kwargs):
 )
 @triton.jit
 def _score_topk_kernel(
-    Hq_ptr,        # (B, oH, T_t, H, d_i) bf16
-    Hk_ptr,        # (B, oH, T_s, d_i) bf16
+    Hq_ptr,        # (B, oH, T_t, H, d_i) bf16 or e4m3
+    Hk_ptr,        # (B, oH, T_s, d_i) bf16 or e4m3
     W_o_ptr,       # (B, oH, T_t, H) bf16
+    Sq_ptr,        # (B, oH, T_t, H) fp32 — Hq row scales
+    Ks_ptr,        # (B, oH, T_s)    fp32 — Hk row scales
     Topk_idx_ptr,  # (B, oH, T_t, K) int32 OUTPUT
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -651,13 +824,20 @@ def _score_topk_kernel(
         other=0.0,
     )
 
-    # Load w_o[b, h_outer, rt, :] -> [BLOCK_T, H]
+    # Load w_o[b, h_outer, rt, :] -> [BLOCK_T, H], with the Hq row scale folded
+    # in (relu is positive-homogeneous, so sq pulls out through it).
     wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
     w_o = tl.load(
         W_o_ptr + wo_base + rt_64[:, None] * H + rh[None, :],
         mask=rt_mask[:, None],
         other=0.0,
     ).to(tl.float32)
+    sq = tl.load(
+        Sq_ptr + wo_base + rt_64[:, None] * H + rh[None, :],
+        mask=rt_mask[:, None],
+        other=0.0,
+    )
+    w_o = w_o * sq
 
     # Flatten Hq for one big matmul per Hk_chunk: [BLOCK_T * H, d_i] -> trans
     Hq_flat = tl.reshape(Hq_token, (BLOCK_T * H, d_i))
@@ -665,6 +845,7 @@ def _score_topk_kernel(
     w_o_flat = tl.reshape(w_o, (BLOCK_T * H,))
 
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
+    ks_base = b * (oH * T_s) + h_outer * T_s
 
     TOP_BUF: tl.constexpr = 2 * K
     INNER: tl.constexpr = K // BLOCK_S        # chunks per sort
@@ -711,6 +892,10 @@ def _score_topk_kernel(
             weighted = logits * w_o_flat[None, :]
             weighted_3d = tl.reshape(weighted, (BLOCK_S, BLOCK_T, H))
             chunk_scores = tl.sum(weighted_3d, axis=2)  # [BLOCK_S, BLOCK_T]
+            # Hk row scale — per-s, so it rescales whole score columns and does
+            # affect the ranking; must be applied before the radix flip below.
+            ks_chunk = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
+            chunk_scores = chunk_scores * ks_chunk[:, None]
             chunk_scores_T = tl.trans(chunk_scores)      # [BLOCK_T, BLOCK_S]
 
             # Radix-flip: fp32 bit pattern -> sortable uint32 across full sign
@@ -806,7 +991,7 @@ def _prune_single_topk_configs(configs, named_args, **kwargs):
 )
 @triton.jit
 def _score_topk_single_kernel(
-    Hq_ptr, Hk_ptr, W_o_ptr, Topk_idx_ptr,
+    Hq_ptr, Hk_ptr, W_o_ptr, Sq_ptr, Ks_ptr, Topk_idx_ptr,
     B: tl.constexpr, oH: tl.constexpr, T_t: tl.constexpr, T_s: tl.constexpr,
     H: tl.constexpr, d_i: tl.constexpr, K: tl.constexpr, S_PAD: tl.constexpr,
     BLOCK_S: tl.constexpr, BLOCK_T: tl.constexpr,
@@ -839,10 +1024,14 @@ def _score_topk_single_kernel(
     wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
     w_o = tl.load(W_o_ptr + wo_base + rt_64[:, None] * H + rh[None, :],
                   mask=rt_mask[:, None], other=0.0).to(tl.float32)
+    sq = tl.load(Sq_ptr + wo_base + rt_64[:, None] * H + rh[None, :],
+                 mask=rt_mask[:, None], other=0.0)
+    w_o = w_o * sq
     Hq_flat = tl.reshape(Hq_token, (BLOCK_T * H, d_i))
     Hq_T = tl.trans(Hq_flat)
     w_o_flat = tl.reshape(w_o, (BLOCK_T * H,))
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
+    ks_base = b * (oH * T_s) + h_outer * T_s
 
     N_CHUNK: tl.constexpr = S_PAD // BLOCK_S
     BIG: tl.constexpr = BLOCK_T * S_PAD
@@ -862,6 +1051,8 @@ def _score_topk_single_kernel(
         weighted = logits * w_o_flat[None, :]
         weighted_3d = tl.reshape(weighted, (BLOCK_S, BLOCK_T, H))
         chunk_scores = tl.sum(weighted_3d, axis=2)
+        ks_chunk = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
+        chunk_scores = chunk_scores * ks_chunk[:, None]
         chunk_scores_T = tl.trans(chunk_scores)
         bits = chunk_scores_T.to(tl.uint32, bitcast=True)
         sign = bits >> 31
@@ -903,8 +1094,8 @@ def _next_pow2(n):
 
 
 @_score_topk_p.def_abstract_eval
-def _score_topk_abstract(Hq, Hk, W_o, *, k):
-    del Hk, W_o
+def _score_topk_abstract(Hq, Hk, W_o, Sq, Ks, *, k):
+    del Hk, W_o, Sq, Ks
     B, oH, T_t, _H, _d_i = Hq.shape
     return [core.ShapedArray((B, oH, T_t, k), jnp.int32)]
 
@@ -912,7 +1103,7 @@ def _score_topk_abstract(Hq, Hk, W_o, *, k):
 _score_topk_p.def_impl(functools.partial(xla.apply_primitive, _score_topk_p))
 
 
-def _score_topk_lowering(ctx, Hq, Hk, W_o, *, k):
+def _score_topk_lowering(ctx, Hq, Hk, W_o, Sq, Ks, *, k):
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
     B, oH, T_t, H, d_i = Hq_aval.shape
@@ -953,7 +1144,7 @@ def _score_topk_lowering(ctx, Hq, Hk, W_o, *, k):
         return triton_call_lowering(
             ctx,
             autotuned_kernel,
-            Hq, Hk, W_o,
+            Hq, Hk, W_o, Sq, Ks,
             grid=grid_fn,
             constexprs=constexprs,
         )
@@ -965,7 +1156,7 @@ mlir.register_lowering(_score_topk_p, _score_topk_lowering, platform="rocm")
 mlir.register_lowering(_score_topk_p, _score_topk_lowering, platform="cuda")
 
 
-def score_topk_triton(Hq, Hk, W_o, *, k):
+def score_topk_triton(Hq, Hk, W_o, *, k, Sq=None, Ks=None):
     """Fused score-relu-reduce + streaming top-k.
 
     Computes the same scores as ``score_reduce_triton`` but never materializes the
@@ -978,6 +1169,9 @@ def score_topk_triton(Hq, Hk, W_o, *, k):
         W_o: (B, oH, T_t, H)
         k:   number of top scores to return per (b, oH, T_t) row. Must be a
              power of 2 and <= T_s.
+        Sq, Ks: per-row operand scales, or None for unit scales; see
+             ``score_reduce_triton``. ``Ks`` rescales whole score columns and
+             so does affect the ranking — it is applied before selection.
 
     Returns:
         Topk_idx: (B, oH, T_t, k) int32 — top-k indices into T_s axis, in
@@ -1010,5 +1204,10 @@ def score_topk_triton(Hq, Hk, W_o, *, k):
         raise ValueError(f"k must be a positive power of 2; got {k}")
     if k > T_s:
         raise ValueError(f"k={k} must be <= T_s={T_s}")
+    if Hq.dtype != Hk.dtype:
+        raise ValueError(
+            f"Hq and Hk must share a dtype; got {Hq.dtype} and {Hk.dtype}"
+        )
+    Sq, Ks = _validate_scales(Hq, Hk, Sq, Ks)
 
-    return _score_topk_p.bind(Hq, Hk, W_o, k=k)[0]
+    return _score_topk_p.bind(Hq, Hk, W_o, Sq, Ks, k=k)[0]
