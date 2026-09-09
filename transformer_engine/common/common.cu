@@ -28,7 +28,6 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
-#ifndef __HIP_PLATFORM_AMD__
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -50,7 +49,6 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       NVTE_ERROR("Invalid type");
   }
 }
-#endif
 
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {

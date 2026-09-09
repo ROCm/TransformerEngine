@@ -25,16 +25,19 @@
 #include "../util/vectorized_pointwise.h"
 #include "./config.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hipblaslt/hipblaslt-ext.hpp>
+#include <hipblaslt/hipblaslt.h>
+// Grouped GEMM via hipblaslt_ext::GroupedGemm requires hipBLASLt 1.3.0+.
+#if (HIPBLASLT_VERSION_MAJOR > 1) || \
+    (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+#define TE_HIPBLASLT_GROUPED_GEMM_SUPPORTED 1
+#else
+#define TE_HIPBLASLT_GROUPED_GEMM_SUPPORTED 0
+#endif
+#endif
+
 #ifndef __HIP_PLATFORM_AMD__
-
-namespace {
-
-inline void CreateCublasHandle(cublasLtHandle_t *handle) {
-  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
-}
-
-}  // namespace
-
 // MXFP8 support for grouped GEMM requires cuBLAS 13.3+
 #define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130300
 
@@ -53,8 +56,24 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 
 // BF16 support for grouped GEMM requires cuBLAS 13.3+
 #define CUBLAS_GROUPED_GEMM_VERSION 130300
+#endif  // !__HIP_PLATFORM_AMD__
 
-#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
+#if (defined(__HIP_PLATFORM_AMD__) && TE_HIPBLASLT_GROUPED_GEMM_SUPPORTED) || \
+    (defined(CUBLAS_VERSION) && CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION)
+
+namespace {
+
+#ifndef __HIP_PLATFORM_AMD__
+inline void CreateCublasHandle(cublasLtHandle_t *handle) {
+  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
+}
+#else
+inline void CreateHipblasLtHandle(hipblasLtHandle_t *handle) {
+  NVTE_CHECK_HIPBLASLT(hipblasLtCreate(handle));
+}
+#endif
+
+}  // namespace
 
 namespace {
 
@@ -173,6 +192,10 @@ struct GroupedGemmSetupWorkspace {
   int *d_cols = nullptr;  // N (last dim) - also used for C
   // NVFP4: per-group computed alpha values (alpha * amax_A * amax_B * factor_inv)
   float *nvfp4_computed_alpha = nullptr;
+#ifdef __HIP_PLATFORM_AMD__
+  // Device buffer for hipBLASLt grouped GEMM UserArguments (one entry per group).
+  hipblaslt_ext::UserArguments *user_args = nullptr;
+#endif
   // End-of-layout offset in bytes (unaligned). required_setup_size rounds this up.
   size_t total_bytes = 0;
 
@@ -223,6 +246,11 @@ struct GroupedGemmSetupWorkspace {
     place(ws.d_rows, int_size);
     place(ws.d_cols, int_size);
     place(ws.nvfp4_computed_alpha, float_size);
+#ifdef __HIP_PLATFORM_AMD__
+    // hipBLASLt requires the UserArguments buffer to be 16-byte aligned.
+    align_ptr();
+    place(ws.user_args, num_tensors * sizeof(hipblaslt_ext::UserArguments));
+#endif
 
     ws.total_bytes = offset;
     return ws;
@@ -236,7 +264,13 @@ struct GroupedGemmSetupWorkspace {
   }
 };
 
-inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100 && sm <= 110; }
+inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) {
+#ifdef __HIP_PLATFORM_AMD__
+  return sm == 94 || sm == 95 || sm == 125;
+#else
+  return sm >= 100 && sm <= 110;
+#endif
+}
 
 inline size_t validate_grouped_gemm_inputs(
     size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
@@ -341,6 +375,10 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 inline void check_grouped_gemm_requirements(const char *api_name) {
   const int current_device = transformer_engine::cuda::current_device();
   const int sm = transformer_engine::cuda::sm_arch(current_device);
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(sm == 94 || sm == 95 || sm == 125, api_name,
+             " requires gfx942, gfx950, or gfx1250, but device compute capability is ", sm, ".");
+#else
   const int cublas_ver = transformer_engine::cuda::cublas_version();
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
   NVTE_CHECK(sm >= 90 && sm <= 110, api_name,
@@ -356,6 +394,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   NVTE_CHECK(sm >= 100 && sm <= 110, api_name, " requires Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
+#endif
 #endif
 }
 
@@ -389,13 +428,16 @@ inline void validate_nvfp4_grouped_gemm_support(const GroupedOperandSelection &A
   const bool nvfp4 = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) ||
                      transformer_engine::is_nvfp_scaling(B_sel.scaling_mode);
   if (!nvfp4) return;
-
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(false, "Grouped GEMM: NVFP4 is not supported on ROCm.");
+#else
   NVTE_CHECK(transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) &&
                  transformer_engine::is_nvfp_scaling(B_sel.scaling_mode),
              "Grouped GEMM: A and B must both use NVFP4 scaling or both not.");
   NVTE_CHECK(use_per_group_alpha_beta,
              "Grouped GEMM: NVFP4 requires per-group alpha/beta support because each group "
              "has its own amax-derived global scale.");
+#endif
 }
 
 // FP8 block scaling grouped GEMM is only supported on Hopper (SM90).
@@ -435,10 +477,14 @@ inline void validate_grouped_gemm_scaling_modes(NVTEScalingMode a_mode, NVTEScal
              ": incompatible A/B scaling modes.");
   if (transformer_engine::is_fp8_block_scaling(a_mode) ||
       transformer_engine::is_fp8_block_scaling(b_mode)) {
+#ifdef __HIP_PLATFORM_AMD__
+    NVTE_CHECK(false, api_name, ": FP8 block scaling grouped GEMM is not supported on ROCm.");
+#else
     NVTE_CHECK(sm >= 90 && sm < 100, api_name,
                ": FP8 block scaling grouped GEMM is only supported on Hopper (SM90-SM99), "
                "not SM",
                sm, ".");
+#endif
   }
 }
 
@@ -818,6 +864,8 @@ inline void *validate_and_get_workspace_ptr(transformer_engine::Tensor *ws, size
   return ws->data.dptr;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
+
 inline void init_matrix_layouts(
     cublasLtMatrixLayoutOpaque_t &descA, cublasLtMatrixLayoutOpaque_t &descB,
     cublasLtMatrixLayoutOpaque_t &descC, cublasLtMatrixLayoutOpaque_t &descD,
@@ -1007,6 +1055,8 @@ inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
   return heuristicResult.algo;
 }
 
+#endif  // !__HIP_PLATFORM_AMD__
+
 struct GroupedGemmWorkspace {
   GroupedGemmSetupWorkspace setup_workspace;
   void *cublas_workspace_ptr = nullptr;
@@ -1031,12 +1081,231 @@ inline GroupedGemmWorkspace setup_grouped_gemm_workspace(transformer_engine::Ten
   return {std::move(setup_workspace), cublas_workspace_ptr, num_tensors};
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+
+__device__ __forceinline__ void store_user_arg_scalar(int8_t *dst, float value) {
+  *reinterpret_cast<float *>(dst) = value;
+}
+
+// Fill hipBLASLt UserArguments on device from the setup-kernel workspace. Skips empty groups
+// (d_rows/d_cols <= 0) using the same compaction order as the host setProblem path.
+__global__ void populate_hipblaslt_user_args_kernel(hipblaslt_ext::UserArguments *user_args,
+                                                    void *const *A_ptrs, void *const *B_ptrs,
+                                                    void *const *D_ptrs, const int *a_rows,
+                                                    const int *a_cols, const int *b_rows,
+                                                    const int *b_cols, const int *d_rows,
+                                                    const int *d_cols, float *const *alpha_ptrs,
+                                                    float *const *beta_ptrs, size_t num_tensors,
+                                                    bool trans_A, bool trans_B) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) {
+    return;
+  }
+  size_t out_idx = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const int m = d_rows[i];
+    const int n = d_cols[i];
+    if (m <= 0 || n <= 0) {
+      continue;
+    }
+
+    hipblaslt_ext::UserArguments ua{};
+    ua.m = static_cast<uint32_t>(m);
+    ua.n = static_cast<uint32_t>(n);
+    ua.batch = 1;
+    const int kA = trans_A ? a_rows[i] : a_cols[i];
+    ua.k = static_cast<uint32_t>(kA);
+
+    ua.a = A_ptrs[i];
+    ua.b = B_ptrs[i];
+    ua.c = D_ptrs[i];
+    ua.d = D_ptrs[i];
+    ua.strideA1 = static_cast<uint32_t>(a_rows[i]);
+    ua.strideB1 = static_cast<uint32_t>(b_rows[i]);
+    ua.strideC1 = static_cast<uint32_t>(m);
+    ua.strideD1 = static_cast<uint32_t>(m);
+
+    store_user_arg_scalar(ua.alpha, *alpha_ptrs[i]);
+    store_user_arg_scalar(ua.beta, *beta_ptrs[i]);
+
+    user_args[out_idx++] = ua;
+  }
+}
+
+inline void rocm_execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspace,
+                                      const GroupedOperandSelection &A_sel,
+                                      const GroupedOperandSelection &B_sel,
+                                      transformer_engine::DType d_dtype, size_t num_tensors,
+                                      const GroupedGemmConfig &config,
+                                      transformer_engine::Tensor *wspace_cublas,
+                                      cudaStream_t stream) {
+  using namespace transformer_engine;
+  using namespace hipblaslt_ext;
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxGroups),
+             "ROCm grouped GEMM supports up to ", kMaxGroups, " groups.");
+
+  NVTE_CHECK(A_sel.scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
+                 B_sel.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
+             "ROCm V2 grouped GEMM via hipBLASLt currently supports unscaled FP16 only.");
+  NVTE_CHECK(is_fp16_dtype(A_sel.dtype) && is_fp16_dtype(B_sel.dtype) && is_fp16_dtype(d_dtype),
+             "ROCm V2 grouped GEMM via hipBLASLt supports FP16 only, got A=",
+             to_string(A_sel.dtype), ", B=", to_string(B_sel.dtype), ", D=", to_string(d_dtype),
+             ".");
+
+  const size_t n = num_tensors;
+  std::vector<void *> h_A(n), h_B(n), h_D(n);
+  std::vector<float *> h_alpha_ptrs(n), h_beta_ptrs(n);
+  std::vector<int> h_a_rows(n), h_a_cols(n), h_b_rows(n), h_b_cols(n), h_d_rows(n), h_d_cols(n);
+
+  auto dtoh = [&](const void *src, void *dst, size_t bytes) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream));
+  };
+  dtoh(setup_workspace.A_ptrs, h_A.data(), n * sizeof(void *));
+  dtoh(setup_workspace.B_ptrs, h_B.data(), n * sizeof(void *));
+  dtoh(setup_workspace.D_ptrs, h_D.data(), n * sizeof(void *));
+  dtoh(setup_workspace.alpha_ptrs, h_alpha_ptrs.data(), n * sizeof(float *));
+  dtoh(setup_workspace.beta_ptrs, h_beta_ptrs.data(), n * sizeof(float *));
+  dtoh(setup_workspace.a_rows, h_a_rows.data(), n * sizeof(int));
+  dtoh(setup_workspace.a_cols, h_a_cols.data(), n * sizeof(int));
+  dtoh(setup_workspace.b_rows, h_b_rows.data(), n * sizeof(int));
+  dtoh(setup_workspace.b_cols, h_b_cols.data(), n * sizeof(int));
+  dtoh(setup_workspace.d_rows, h_d_rows.data(), n * sizeof(int));
+  dtoh(setup_workspace.d_cols, h_d_cols.data(), n * sizeof(int));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  std::vector<size_t> active;
+  active.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    if (h_d_rows[i] > 0 && h_d_cols[i] > 0) {
+      active.push_back(i);
+    }
+  }
+  if (active.empty()) {
+    return;
+  }
+
+  const hipDataType a_type = get_cuda_dtype(A_sel.dtype);
+  const hipDataType b_type = get_cuda_dtype(B_sel.dtype);
+  const hipDataType d_type = get_cuda_dtype(d_dtype);
+  const hipblasOperation_t op_A = A_sel.trans ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+  const hipblasOperation_t op_B = B_sel.trans ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+
+  using HipblasHandleManager =
+      transformer_engine::detail::HandleManager<hipblasLtHandle_t, CreateHipblasLtHandle>;
+  hipblasLtHandle_t handle = HipblasHandleManager::Instance().GetHandle();
+
+  std::vector<hipblasLtMatmulHeuristicResult_t> heuristic_results;
+  NVTE_CHECK_HIPBLASLT(hipblaslt_ext::getAllAlgos(
+      handle, GemmType::HIPBLASLT_GROUPED_GEMM, op_A, op_B, a_type, b_type, d_type, d_type,
+      HIPBLAS_COMPUTE_32F, heuristic_results));
+  NVTE_CHECK(!heuristic_results.empty(),
+             "No hipBLASLt grouped GEMM algorithms were found for the requested problem type.");
+
+  GroupedGemm grouped_gemm(handle, op_A, op_B, a_type, b_type, d_type, d_type, HIPBLAS_COMPUTE_32F);
+  size_t max_workspace_bytes = kGroupedGemmCublasWorkspaceSize;
+  if (wspace_cublas != nullptr) {
+    max_workspace_bytes =
+        get_buffer_size_bytes(wspace_cublas->data.numel(), wspace_cublas->data.dtype);
+  }
+  grouped_gemm.setMaxWorkspaceBytes(max_workspace_bytes);
+
+  const size_t g = active.size();
+  std::vector<int64_t> m(g), n_dim(g), k(g), batch_count(g, 1);
+  std::vector<int64_t> lda(g), ldb(g), ldc(g), ldd(g);
+  std::vector<int64_t> strideA(g, 0), strideB(g, 0), strideC(g, 0), strideD(g, 0);
+  std::vector<float> h_alpha_vals(g), h_beta_vals(g);
+  std::vector<GemmEpilogue> epilogue(g);
+  std::vector<GemmInputs> inputs(g);
+  GemmProblemType problem_type(op_A, op_B, a_type, b_type, d_type, d_type, HIPBLAS_COMPUTE_32F);
+
+  for (size_t j = 0; j < g; ++j) {
+    const size_t i = active[j];
+    m[j] = h_d_rows[i];
+    n_dim[j] = h_d_cols[i];
+    const int64_t kA = A_sel.trans ? h_a_rows[i] : h_a_cols[i];
+    const int64_t kB = B_sel.trans ? h_b_cols[i] : h_b_rows[i];
+    NVTE_CHECK(kA == kB, "Grouped GEMM K mismatch for group ", i, ": ", kA, " vs ", kB);
+    k[j] = kA;
+    lda[j] = h_a_rows[i];
+    ldb[j] = h_b_rows[i];
+    ldc[j] = h_d_rows[i];
+    ldd[j] = h_d_rows[i];
+    NVTE_CHECK_CUDA(cudaMemcpy(&h_alpha_vals[j], h_alpha_ptrs[i], sizeof(float),
+                               cudaMemcpyDeviceToHost));
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(&h_beta_vals[j], h_beta_ptrs[i], sizeof(float), cudaMemcpyDeviceToHost));
+    epilogue[j].setMode(HIPBLASLT_EPILOGUE_DEFAULT);
+    inputs[j].setA(h_A[i]);
+    inputs[j].setB(h_B[i]);
+    inputs[j].setC(h_D[i]);
+    inputs[j].setD(h_D[i]);
+    inputs[j].setAlpha(&h_alpha_vals[j]);
+    inputs[j].setBeta(&h_beta_vals[j]);
+  }
+
+  NVTE_CHECK_HIPBLASLT(grouped_gemm.setProblem(m, n_dim, k, batch_count, lda, ldb, ldc, ldd, strideA,
+                                               strideB, strideC, strideD, epilogue, inputs,
+                                               problem_type));
+
+  size_t chosen_algo = heuristic_results.size();
+  size_t chosen_workspace = 0;
+  for (size_t algo_idx = 0; algo_idx < heuristic_results.size(); ++algo_idx) {
+    hipblasLtMatmulAlgo_t algo = heuristic_results[algo_idx].algo;
+    size_t workspace_required = 0;
+    if (grouped_gemm.isAlgoSupported(algo, workspace_required) != HIPBLAS_STATUS_SUCCESS) {
+      continue;
+    }
+    if (workspace_required <= max_workspace_bytes) {
+      chosen_algo = algo_idx;
+      chosen_workspace = workspace_required;
+      break;
+    }
+  }
+  if (chosen_algo >= heuristic_results.size()) {
+    NVTE_CHECK_HIPBLASLT(grouped_gemm.setProblem(m, n_dim, k, batch_count, epilogue, inputs));
+    for (size_t algo_idx = 0; algo_idx < heuristic_results.size(); ++algo_idx) {
+      hipblasLtMatmulAlgo_t algo = heuristic_results[algo_idx].algo;
+      size_t workspace_required = 0;
+      if (grouped_gemm.isAlgoSupported(algo, workspace_required) != HIPBLAS_STATUS_SUCCESS) {
+        continue;
+      }
+      if (workspace_required <= max_workspace_bytes) {
+        chosen_algo = algo_idx;
+        chosen_workspace = workspace_required;
+        break;
+      }
+    }
+  }
+  NVTE_CHECK(chosen_algo < heuristic_results.size(),
+             "No suitable hipBLASLt grouped GEMM algorithm was found.");
+  (void)chosen_workspace;
+
+  NVTE_CHECK(setup_workspace.user_args != nullptr,
+             "ROCm grouped GEMM setup workspace is missing the UserArguments buffer.");
+  populate_hipblaslt_user_args_kernel<<<1, 1, 0, stream>>>(
+      setup_workspace.user_args, setup_workspace.A_ptrs, setup_workspace.B_ptrs,
+      setup_workspace.D_ptrs, setup_workspace.a_rows, setup_workspace.a_cols, setup_workspace.b_rows,
+      setup_workspace.b_cols, setup_workspace.d_rows, setup_workspace.d_cols,
+      setup_workspace.alpha_ptrs, setup_workspace.beta_ptrs, n, A_sel.trans, B_sel.trans);
+
+  void *workspace_ptr = wspace_cublas != nullptr ? wspace_cublas->data.dptr : nullptr;
+  NVTE_CHECK_HIPBLASLT(
+      grouped_gemm.initialize(heuristic_results[chosen_algo].algo, workspace_ptr, true, stream));
+  NVTE_CHECK_HIPBLASLT(grouped_gemm.run(setup_workspace.user_args, stream));
+  (void)config;
+}
+#endif  // __HIP_PLATFORM_AMD__
+
 inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspace,
                                  const GroupedOperandSelection &A_sel,
                                  const GroupedOperandSelection &B_sel,
                                  transformer_engine::DType d_dtype, size_t num_tensors,
-                                 const GroupedGemmConfig &config, void *cublas_workspace_ptr,
-                                 cudaStream_t stream) {
+                                 const GroupedGemmConfig &config,
+                                 transformer_engine::Tensor *wspace_cublas, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  rocm_execute_grouped_gemm(setup_workspace, A_sel, B_sel, d_dtype, num_tensors, config,
+                            wspace_cublas, stream);
+#else
+  void *cublas_workspace_ptr = wspace_cublas != nullptr ? wspace_cublas->data.dptr : nullptr;
   using cublasHandleManager =
       transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
@@ -1081,8 +1350,6 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(
       handle, matmulDesc, descA, descB, descC, descD, config.avg_m, config.avg_n, config.avg_k);
 
-  // Hopper uses a single scalar alpha/beta for the whole grouped GEMM;
-  // Blackwell+ uses per-matrix alpha/beta arrays.
   void *alpha_arg = config.use_per_group_alpha_beta
                         ? static_cast<void *>(setup_workspace.alpha_ptrs)
                         : config.alpha_dptr;
@@ -1093,6 +1360,7 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                    setup_workspace.B_ptrs, &descB, beta_arg, setup_workspace.C_ptrs,
                                    &descC, setup_workspace.D_ptrs, &descD, &algo,
                                    cublas_workspace_ptr, kGroupedGemmCublasWorkspaceSize, stream));
+#endif
 }
 
 // Device helper: compute the element offset for tensor `idx` given shape metadata.
@@ -1246,7 +1514,11 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
                                      : static_cast<int>(d_meta.uniform_first);
     }
     for (int offset = 16; offset > 0; offset >>= 1) {
+#ifdef __HIP_PLATFORM_AMD__
+      local_sum += __shfl_down_sync(0xffffffffULL, local_sum, offset);
+#else
       local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+#endif
     }
     if (tid == 0) s_valid_rows = local_sum;
   }
@@ -1657,7 +1929,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
       config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
-                       gemm_config, workspace.cublas_workspace_ptr, stream);
+                       gemm_config, wspace_cublas, stream);
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1806,7 +2078,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
-                       gemm_config, workspace.cublas_workspace_ptr, stream);
+                       gemm_config, wspace_cublas, stream);
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1898,7 +2170,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
       config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors, gemm_config,
-                       workspace.cublas_workspace_ptr, stream);
+                       wspace_cublas, stream);
 }
 
 namespace {
@@ -2016,7 +2288,67 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   launch_grouped_bias_add(outputD, bias_tensor, scale_ptr, true, stream);
 }
 
-#else  // CUBLAS_VERSION < CUBLAS_GROUPED_GEMM_VERSION
+#elif defined(__HIP_PLATFORM_AMD__)
+
+void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
+                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
+                       const NVTETensor beta, NVTETensor workspace_setup,
+                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
+                       cudaStream_t stream) {
+  NVTE_ERROR("nvte_grouped_gemm requires hipBLASLt 1.3.0+, but compile-time hipBLASLt version is ",
+             HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".",
+             HIPBLASLT_VERSION_PATCH, ".");
+}
+
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+  NVTE_ERROR(
+      "nvte_grouped_gemm_with_discrete_inputA requires hipBLASLt 1.3.0+, but compile-time "
+      "hipBLASLt version is ",
+      HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".", HIPBLASLT_VERSION_PATCH, ".");
+}
+
+void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
+                                         const NVTEGroupedTensor B, int transb,
+                                         const NVTETensor *C_list, size_t num_c_tensors,
+                                         NVTETensor *D_list, size_t num_d_tensors,
+                                         const NVTETensor alpha, const NVTETensor beta,
+                                         NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                         NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+  NVTE_ERROR(
+      "nvte_grouped_gemm_with_discrete_out requires hipBLASLt 1.3.0+, but compile-time "
+      "hipBLASLt version is ",
+      HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".", HIPBLASLT_VERSION_PATCH, ".");
+}
+
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream) {
+  NVTE_ERROR("nvte_grouped_bias_add requires hipBLASLt 1.3.0+, but compile-time hipBLASLt version is ",
+             HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".",
+             HIPBLASLT_VERSION_PATCH, ".");
+}
+
+void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                                  const NVTETensor scale, cudaStream_t stream) {
+  NVTE_ERROR(
+      "nvte_grouped_scaled_bias_add requires hipBLASLt 1.3.0+, but compile-time hipBLASLt "
+      "version is ",
+      HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".", HIPBLASLT_VERSION_PATCH, ".");
+}
+
+size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  NVTE_ERROR(
+      "nvte_get_grouped_gemm_setup_workspace_size requires hipBLASLt 1.3.0+, but compile-time "
+      "hipBLASLt version is ",
+      HIPBLASLT_VERSION_MAJOR, ".", HIPBLASLT_VERSION_MINOR, ".", HIPBLASLT_VERSION_PATCH, ".");
+  return 0;
+}
+
+#else  // !__HIP_PLATFORM_AMD__
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
@@ -2074,48 +2406,8 @@ size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return 0;
 }
 
-#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
+#endif  // (HIP && TE_HIPBLASLT_GROUPED_GEMM_SUPPORTED) || CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
 
-#else //__HIP_PLATFORM_AMD__
-
-void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
-                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
-                       const NVTETensor beta, NVTETensor workspace_setup,
-                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
-                       cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm is not supported on ROCm yet");
-}
-
-void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
-                                            int transa, const NVTEGroupedTensor B, int transb,
-                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
-                                            const NVTETensor alpha, const NVTETensor beta,
-                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                                            NVTEGroupedMatmulConfig config, cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm_with_discrete_inputA is not supported on ROCm yet");
-}
-
-void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
-                                         const NVTEGroupedTensor B, int transb,
-                                         const NVTETensor *C_list, size_t num_c_tensors,
-                                         NVTETensor *D_list, size_t num_d_tensors,
-                                         const NVTETensor alpha, const NVTETensor beta,
-                                         NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                                         NVTEGroupedMatmulConfig config, cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm_with_discrete_out is not supported on ROCm yet");
-}
-
-void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
-                           cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_bias_add is not supported on ROCm yet");
-}
-
-size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
-  NVTE_ERROR("nvte_get_grouped_gemm_setup_workspace_size is not supported on ROCm yet");
-  return 0;
-}
-
-#endif // __HIP_PLATFORM_AMD__
 namespace {
 
 __global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, size_t n) {

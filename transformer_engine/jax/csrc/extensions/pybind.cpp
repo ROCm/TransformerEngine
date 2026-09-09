@@ -178,12 +178,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 #ifndef USE_ROCM
   m.def("nvte_built_with_cublasmp", &::nvte_built_with_cublasmp);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("is_collective_gemm_with_cublasmp", &IsCollectiveGemmWithCublasmp);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
-  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 #ifdef NVTE_WITH_NCCL_EP
   m.def("set_ep_bootstrap_params", &SetEpBootstrapParams, pybind11::arg("unique_id_bytes"),
         pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
