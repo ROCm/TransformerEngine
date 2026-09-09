@@ -7,9 +7,12 @@
 """Shared utilities for microbenchmarks: model configs, timing, throughput, runner."""
 
 import argparse
+import functools
 import importlib.util
 import itertools
 import math
+import mmap
+from pathlib import Path
 from types import SimpleNamespace
 import torch
 import torch.utils.benchmark as benchmark
@@ -752,6 +755,48 @@ def apply_backend_env(monkeypatch, env):
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
+
+
+@functools.lru_cache(maxsize=1)
+def _te_install_root():
+    import transformer_engine as _te
+    return Path(_te.__file__).resolve().parent
+
+
+@functools.lru_cache(maxsize=1)
+def _te_py_source():
+    chunks = []
+    for p in _te_install_root().rglob("*.py"):
+        try:
+            chunks.append(p.read_text(errors="ignore"))
+        except OSError:
+            pass
+    return "\n".join(chunks)
+
+
+@functools.lru_cache(maxsize=None)
+def te_honors_env(varname):
+    """True if the installed TE build reads *varname* (python dispatch or compiled .so).
+
+    Lets a benchmark skip a forced backend on builds that predate its dispatch,
+    instead of silently measuring the default (which shows up as a phantom
+    regression in a long-running history sweep).
+    """
+    try:
+        root = _te_install_root()
+    except Exception:
+        return False
+    if varname in _te_py_source():
+        return True
+    needle = varname.encode()
+    for so in root.rglob("*.so"):
+        try:
+            with open(so, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                if mm.find(needle) != -1:
+                    return True
+        except (OSError, ValueError):
+            pass
+    return False
 
 
 class _FamilyResults:

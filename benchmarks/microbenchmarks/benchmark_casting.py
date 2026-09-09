@@ -40,7 +40,7 @@ from transformer_engine.pytorch.quantization import (
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     apply_backend_env, time_func, compute_gbps, make_metric_record,
-    make_input, rotating,
+    make_input, rotating, te_honors_env,
 )
 
 TE_FP8_E4M3 = tex.DType.kFloat8E4M3
@@ -215,6 +215,11 @@ def pytest_generate_tests(metafunc):
 
 @pytest.mark.benchmark
 def test_cast(microbench, case, monkeypatch):
+    if case["Backend"] == "triton":
+        var = ("NVTE_USE_CAST_TRANSPOSE_TRITON" if case["Direction"] == "quantize"
+               else "NVTE_USE_DEQUANTIZE_TRITON")
+        if not te_honors_env(var):
+            pytest.skip("Triton cast backend not available in this TE build")
     apply_backend_env(monkeypatch, CAST_BACKENDS[case["Backend"]])
     microbench.run(
         case,

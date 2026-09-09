@@ -24,6 +24,7 @@ from utils import (
     compute_tflops,
     direction_records,
     make_input,
+    te_honors_env,
 )
 
 BENCHMARK_LABEL = "Grouped GEMM"
@@ -215,6 +216,11 @@ def test_grouped_gemm(microbench, case, monkeypatch):
         pytest.skip(f"{backend} grouped GEMM needs num_groups > 1")
     if backend == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
         pytest.skip("HipKittens grouped GEMM needs 256-aligned expert dims")
+    # Skip a forced backend when the build doesn't honor the toggles it enables,
+    # so old builds show no data instead of silently measuring hipBLASLt.
+    required = [k for k, v in GROUPED_BACKENDS[backend].items() if v is not None]
+    if required and not all(te_honors_env(k) for k in required):
+        pytest.skip(f"{backend} grouped GEMM backend not available in this TE build")
     apply_backend_env(monkeypatch, GROUPED_BACKENDS[backend])
     microbench.run(
         case,

@@ -21,6 +21,8 @@ Examples::
 Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """
 
+import functools
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -28,7 +30,7 @@ from utils import (
     build_recipes,
     generate_gemm_test_cases,
     apply_backend_env, compute_tflops, direction_records,
-    make_input,
+    make_input, te_honors_env,
 )
 
 BENCHMARK_LABEL = "GEMM"
@@ -58,6 +60,13 @@ _BACKENDS_BY_PRECISION = {
 
 def _backends_for(precision):
     return _BACKENDS_BY_PRECISION.get(precision, ["hipblaslt"])
+
+
+@functools.lru_cache(maxsize=1)
+def _triton_gemm_supported():
+    # The triton GEMM backend + its NVTE_USE_GEMM_TRITON dispatch landed together
+    # in PR #667; older TE builds silently ignore the env and run hipBLASLt.
+    return te_honors_env("NVTE_USE_GEMM_TRITON")
 
 
 def generate_cases():
@@ -127,6 +136,10 @@ def test_gemm(microbench, case, monkeypatch):
         dim % 32 for dim in (case["M"], case["N"], case["K"])
     ):
         pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
+    if case["Backend"] == "triton" and not _triton_gemm_supported():
+        pytest.skip("Triton GEMM backend not available in this TE build")
+    if case["Backend"] == "hipkittens" and not te_honors_env(_HIPBLASLT_MXFP8):
+        pytest.skip("HipKittens GEMM backend not available in this TE build")
     apply_backend_env(monkeypatch, GEMM_BACKENDS[case["Backend"]])
     microbench.run(
         case,

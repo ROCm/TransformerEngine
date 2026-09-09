@@ -15,6 +15,13 @@ family with, e.g.::
     pytest benchmark_gemm.py -k triton             # select the triton backend
 """
 
+import os
+
+# MXFP8 is gated off by default on ROCm (NVTE_ROCM_ENABLE_MXFP8=0). Enable it here,
+# before any benchmark module imports Transformer Engine, because check_mxfp8_support()
+# caches its result on the first call (at build_recipes() import time).
+os.environ.setdefault("NVTE_ROCM_ENABLE_MXFP8", "1")
+
 from pathlib import Path
 
 import pytest

@@ -32,7 +32,7 @@ from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     build_recipes,
     apply_backend_env, time_func, compute_gbps, make_metric_record,
-    make_input,
+    make_input, te_honors_env,
 )
 
 NORM_TYPES = [
@@ -136,6 +136,11 @@ def pytest_generate_tests(metafunc):
 
 @pytest.mark.benchmark
 def test_norm(microbench, case, monkeypatch):
+    if case["Backend"] == "triton":
+        var = ("NVTE_USE_RMSNORM_TRITON" if case["NormType"] == "RMSNorm"
+               else "NVTE_USE_LAYERNORM_TRITON")
+        if not te_honors_env(var):
+            pytest.skip("Triton norm backend not available in this TE build")
     apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
     microbench.run(
         case,
