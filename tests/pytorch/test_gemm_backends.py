@@ -79,7 +79,7 @@ _CAP = _device_capability()
 #
 # Triton has no arch gate in the C++ dispatch (cpp_extensions/gemm.py), so it
 # runs wherever pytorch-triton-rocm is importable (gfx942 and gfx950). Probe with
-# find_spec so the FlyDSL shard and CPU-only runners never force the import.
+# find_spec so stacks without triton (and CPU-only runners) never force the import.
 _triton_available = importlib.util.find_spec("triton") is not None
 requires_triton_backend = pytest.mark.skipif(
     not _triton_available,
@@ -101,11 +101,7 @@ if _flydsl_available:
 
 # gfx942's Triton fp32 matmul has a stable numerical divergence from
 # torch.matmul (gfx950 runs cleanly). The regular/bias-forward Triton tests use
-# TRITON_REGULAR_DTYPES below, whose fp32 entry is skipped on gfx942. This
-# mirrors the gfx942 guard that tests/pytorch/conftest.py applies to the other
-# NVTE_GEMM_BACKEND=TRITON files; it lives in-file here because this file is no
-# longer invoked with that env var preset, so the collection-time hook does not
-# fire for it.
+# TRITON_REGULAR_DTYPES below, whose fp32 entry carries this skip on gfx942.
 _is_gfx942 = _CAP is not None and _CAP[0] == 9 and _CAP[1] < 5
 _skip_gfx942_fp32 = pytest.mark.skipif(
     _is_gfx942,
@@ -281,9 +277,8 @@ def _set_backend(active, backend):
     """Point NVTE_GEMM_BACKEND at ``backend`` under test or the native default.
 
     ``backend`` is the raw env value (``"TRITON"`` / ``"FLYDSL"``). ``active``
-    True selects it; False selects the native C++ reference by unsetting the var,
-    matching the ``use_*=False`` reference path in the original suites. The
-    selection is confirmed through ``get_gemm_backend()`` -- the canonical
+    True selects it; False selects the native C++ reference by unsetting the var.
+    The selection is confirmed through ``get_gemm_backend()`` -- the canonical
     resolver the dispatch reads -- so a typo or stale env can never silently
     exercise the wrong path.
     """

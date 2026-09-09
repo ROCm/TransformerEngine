@@ -69,11 +69,9 @@ def _always(item) -> bool:
 # should be skipped (allows finer-grained control than "any fp32 param" for tests
 # with multiple dtype-like parameters).
 _KNOWN_BAD_FP32_ON_GFX942 = {
-    # NOTE: test_gemm_backends.py is no longer invoked with
-    # NVTE_GEMM_BACKEND=TRITON preset (it self-gates on backend availability and
-    # runs both families in one invocation), so this collection-time hook does
-    # not fire for it. Its gfx942 fp32 Triton skips live in-file instead
-    # (_skip_gfx942_fp32 in test_gemm_backends.py).
+    # test_gemm_backends.py does not appear here: it self-gates on backend
+    # availability (no NVTE_GEMM_BACKEND preset), so this hook's env check below
+    # skips it. It applies the same gfx942 fp32 skip in-file (_skip_gfx942_fp32).
     # tests/pytorch/triton_kernels/test_gemm_kernel.py -- low-level kernel
     # (parametrizes on separate in_dtype / out_dtype strings)
     "test_correctness": _correctness_kernel_is_pure_fp32,
