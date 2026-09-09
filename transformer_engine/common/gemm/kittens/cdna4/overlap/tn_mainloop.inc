@@ -1,3 +1,7 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
         for (int tile = 0; tile < k_tiles - 2; tile += 2) {
 
             auto st_b = subtile_inplace<REG_N, K_STEP>(Bs[0][0], {warp_n, 0});

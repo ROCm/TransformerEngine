@@ -1,3 +1,7 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
 // Steal order: own bucket, then the local chunk, then the other XCDs.
 int found = -1;
 const int b0 = (int)blockIdx.x % NUM_XCDS_AFF;
