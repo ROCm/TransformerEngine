@@ -38,15 +38,8 @@ constexpr int RS_MAX_TP = 8;
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
 
 struct RsPeers {
-    unsigned int *arrive[RS_MAX_TP];
-    bf16 *recv[RS_MAX_TP];
-    unsigned int *ready[RS_MAX_TP];
     bf16 *stage[RS_MAX_TP];
 };
-
-
-#define LC_PUBLISH_TILE(p) __hip_atomic_fetch_add((p), 1u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM)
-#define RS_TRACE_ARG
 
 struct CdWalk {
     int q, tn, dq, dr;
@@ -145,14 +138,14 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
     const size_t lines = band_elems / 8;
     typedef int v4i __attribute__((ext_vector_type(4)));
 
-    {
-        const size_t lines_g = lines * (size_t)bands;
-        const size_t per_g   = (lines_g + (size_t)ncomm - 1) / (size_t)ncomm;
-        const size_t g0      = (size_t)w * per_g;
-        if (g0 >= lines_g) return;
-        const size_t g1   = (g0 + per_g < lines_g) ? (g0 + per_g) : lines_g;
-        const size_t soff = (size_t)my_pe * bands * band_elems;
-        v4i *dst          = (v4i *)out;
+    const size_t per_g = (lines + (size_t)ncomm - 1) / (size_t)ncomm;
+    const size_t g0    = (size_t)w * per_g;
+    if (g0 >= lines) return;
+    const size_t g1    = (g0 + per_g < lines) ? (g0 + per_g) : lines;
+
+    for (int b0 = 0; b0 < bands; b0++) {
+        const size_t soff = ((size_t)my_pe * bands + b0) * band_elems;
+        v4i *dst          = (v4i *)(out + (size_t)b0 * band_elems);
 
         for (size_t l = g0 + threadIdx.x; l < g1; ) {
             v4i acc;
@@ -191,10 +184,9 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
                              bf16 *__restrict__ local_stage, bf16 *__restrict__ out,
                              const TileDesc *__restrict__ work_queue, int num_tiles,
                              int *__restrict__ tile_counter, const RsPeers peers,
-                             unsigned int *__restrict__ done, int my_pe, int comm_wg, int ncomm,
-                               int bands, int tiles_N,
-                             int xcd_bucket, const XcdBuckets buckets,
-                             int *__restrict__ bucket_ctr RS_TRACE_ARG) {
+                             int my_pe, int ncomm,
+                             int bands, int tiles_N,
+                             int wb_group) {
     const int M       = A.rows();
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
@@ -202,13 +194,11 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
     (void)M;
 
     const size_t band_elems = (size_t)BLOCK_ROW * N_TOTAL;
-    const size_t band_bytes = band_elems * sizeof(bf16);
 
 #include "tn_prologue.inc"
 
     if ((int)blockIdx.x < ncomm) {
         // The comm workgroups are the reduce-scatter: they read all eight sources and write `out` once.
-        (void)comm_wg; (void)band_bytes;
         pull_reduce_all_sent<TP, true>(my_pe, ncomm, bands, local_stage, peers, out, band_elems);
     }
 
@@ -216,21 +206,18 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
     const int hy_vid = (int)blockIdx.x - ncomm;
     const int hy_R   = (hy_ncw > 0) ? (num_tiles / hy_ncw) : 0;
     const int hy_S   = hy_R * hy_ncw;
-    int hy_left      = (hy_vid >= 0 && !xcd_bucket) ? hy_R : 0;
+    int hy_left      = (hy_vid >= 0) ? hy_R : 0;
     int hy_tick      = hy_vid;
+    int wb_tick      = 0;
     CdWalk hy_cd     = cd_walk_init((hy_vid >= 0) ? hy_vid : 0, (hy_ncw > 0) ? hy_ncw : 1, tiles_N);
     while (true) {
         __shared__ int s_tile_idx;
         const bool hy_static = (hy_left > 0);
         if (threadIdx.x == 0) {
-            if (xcd_bucket) {
-#include "xcd_steal.inc"
+            if (hy_static) {
+                s_tile_idx = hy_tick;
             } else {
-                if (hy_static) {
-                    s_tile_idx = hy_tick;
-                } else {
-                    s_tile_idx = hy_S + atomicAdd(tile_counter, 1);
-                }
+                s_tile_idx = hy_S + atomicAdd(tile_counter, 1);
             }
         }
         __syncthreads();
@@ -296,11 +283,22 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
         store_c_tile<bf16>(sbase, c10, rf1, cf0, N_TOTAL, lane_epi);
         store_c_tile<bf16>(sbase, c11, rf1, cf1, N_TOTAL, lane_epi);
 
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
         __syncthreads();
-        if (threadIdx.x == 0) LC_PUBLISH_TILE(&done[(size_t)owner * bands + lrow]);
+        wb_tick += 1;
+        if (wb_tick >= wb_group) {
+            wb_tick = 0;
+            if (threadIdx.x == 0) {
+                __builtin_amdgcn_fence(__ATOMIC_RELEASE, "");
+            }
+        }
         __syncthreads();
+
     }   // end persistent loop
 
+    if (wb_tick != 0 && threadIdx.x == 0) {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "");
+    }
 }
 
 static std::vector<TileDesc> build_rs_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
@@ -333,17 +331,15 @@ static std::vector<TileDesc> build_rs_work_queue(int M, int N_total, int K, int 
 }
 
 struct RsLaunchCfg {
-    int comm_wg    = COMM_WG;
-    int xcd_bucket = 0;
+    int comm_wg  = COMM_WG;
+    int wb_group = 1;
 };
 
 static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b,
                                  bf16 *d_local_stage, bf16 *d_out, TileDesc *d_queue, int num_tiles,
-                                 int *d_tile_counter, RsPeers peers, unsigned int *d_done,
+                                 int *d_tile_counter, RsPeers peers,
                                  int my_pe, int tp_size, const RsLaunchCfg &cfg,
-                                 XcdBuckets buckets, int *d_bucket_ctr, hipStream_t stream,
-                                 unsigned long long *d_trace = nullptr) {
-    (void)d_trace;
+                                 hipStream_t stream) {
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N_TOTAL / BLOCK_COL;
     const int bands   = (M / tp_size) / BLOCK_ROW;
@@ -358,8 +354,8 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b
     if (grid < ncomm + 1) grid = ncomm + 1;
 #define RS_LAUNCH(TPV)                                                                         \
     persistent_rs_bf16_gemm<TPV><<<grid, NUM_THREADS, 0, stream>>>(                            \
-        A_gl, B_gl, d_local_stage, d_out, d_queue, num_tiles, d_tile_counter, peers, d_done,   \
-        my_pe, cfg.comm_wg, ncomm, bands, tiles_N, cfg.xcd_bucket, buckets, d_bucket_ctr)
+        A_gl, B_gl, d_local_stage, d_out, d_queue, num_tiles, d_tile_counter, peers,           \
+        my_pe, ncomm, bands, tiles_N, cfg.wb_group)
 
     switch (tp_size) {
         case 8: RS_LAUNCH(8); break;

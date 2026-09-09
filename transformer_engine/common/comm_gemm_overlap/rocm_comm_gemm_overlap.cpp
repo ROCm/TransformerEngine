@@ -288,7 +288,7 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
                              const TensorWrapper &pre_gelu_out, TensorWrapper &rs_output,
                              TensorWrapper &workspace, bool accumulate, const TensorWrapper &ubuf,
                              const TensorWrapper &chunk, communicator *comm, int reg, int tp_id,
-                             int tp_size, uint64_t signal, cudaStream_t stream, bool *eligible) {
+                             int tp_size, uint64_t signal, cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(!accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0,
              "fused GEMM+RS reached with an unsupported epilogue");
@@ -300,6 +300,10 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
   const size_t k       = (transa) ? A.size(1) : A.size(0);
   const size_t n_chunk = chunk.size(0);
   const size_t tokens  = n_chunk * tp_size;
+  NVTE_CHECK(kittens_fused_rs_gemm_shape_ok(static_cast<int>(tokens), static_cast<int>(m),
+                                            static_cast<int>(k), tp_size),
+             "fused GEMM+RS reached with an ineligible shape (tokens=", tokens, " m=", m, " k=", k,
+             " tp_size=", tp_size, ")");
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
@@ -311,8 +315,7 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(tokens), static_cast<int>(k),
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
-  *eligible = kittens_fused_rs_gemm_eligible(args);
-  return *eligible && kittens_fused_rs_gemm_bf16(args);
+  return kittens_fused_rs_gemm_bf16(args);
 }
 
 // Bulk sibling of hk_fused_ag_gemm. AG is not associated with the GEMM.
@@ -467,17 +470,12 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                 TensorWrapper &rs_output, cudaStream_t stream_main) {
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_rs_gemm_supported(cuda::sm_arch())) {
-    bool eligible = false;
     const bool launched = hk_fused_rs_gemm(A, transa, B, transb, bias, pre_gelu_out, rs_output,
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
                                            _ub_reg, _tp_id, _tp_size, _rs_signal_base + _tp_size,
-                                           stream_main, &eligible);
-    if (!eligible) {
-      rocm_split_overlap_rs(A, transa, B, transb, D, bias, pre_gelu_out, workspace, grad,
-                            accumulate, use_split_accumulator, rs_output, stream_main);
-      return;
-    }
-    NVTE_CHECK(launched, "fused GEMM+RS failed to launch on an eligible shape");
+                                           stream_main);
+    NVTE_CHECK(launched,
+               "fused GEMM+RS failed to launch; set NVTE_RS_DIAG=1 for the guard breakdown");
     _rs_signal_base += _tp_size;
     return;
   }

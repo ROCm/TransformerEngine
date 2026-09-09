@@ -828,10 +828,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
+  int num_ubuf_view_chunks = _tp_size;
   if (_is_reduce_scatter) {
 #ifdef USE_HIPKITTENS_GEMM
     if (_fused) {
-      // Fused RS adds an additional 4K-aligned control block over pipeline.
+      // Fused RS holds two stage halves, alternating on epoch parity.
       _num_ubuf_chunks = _tp_size * 2;
       buffer_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
     } else
@@ -841,6 +842,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       // outputs for reduction at the end of the pipelining.
       buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
       _num_ubuf_chunks = _tp_size * 2 - 1;
+      num_ubuf_view_chunks = _num_ubuf_chunks;
     }
   }
 
@@ -849,7 +851,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,
-      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_view_chunks, buffer_shape[1]},
       buffer_dtype);
 
   // Create tensor chunks for easy management

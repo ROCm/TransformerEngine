@@ -22,6 +22,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
+    fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
     _ub_is_fused,
@@ -2019,6 +2020,16 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
             ):
                 ub_overlap_ag_dgrad = False
+            if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
+                self.ub_name + "_fprop", weight_tensor, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_overlap_rs_fprop = False
+            if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
+                self.ub_name + "_dgrad", weight_tensor, None,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+            ):
+                ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8,
