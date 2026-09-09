@@ -384,11 +384,11 @@ struct Mxfp8Nn {
     using TileDesc = hk_mxfp8_ag_nn::TileDesc;
     static constexpr int  PLAN_TAG        = 3;
     static constexpr bool A_SCALE_COLWISE = true;
-    // NN takes interleave_scales as [[maybe_unused]] -- it does NOT gather or pack the peers'
-    // scale rows in-kernel. Enabling the interleaved host path here skips gather_scales and packs
-    // only our own rank, leaving 7/8 of packed_sa garbage: measured max_err 0.373-0.387 vs 0.0147
-    // with it off, on every K>=16384 shape. Keep false until the NN kernel implements it.
-    static constexpr bool SUPPORTS_INTERLEAVE = false;
+    // NN now runs the same shared gather_all_plus_scales as TN (overlap_common.cuh), so it
+    // upholds the interleaved host path's contract: the gatherer blocks pack the peers' scale
+    // rows. Before that it declared the flag and ignored it, leaving 7/8 of packed_sa garbage
+    // (max_err 0.373-0.387 vs 0.0147) on every K>=16384 shape.
+    static constexpr bool SUPPORTS_INTERLEAVE = true;
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
     }

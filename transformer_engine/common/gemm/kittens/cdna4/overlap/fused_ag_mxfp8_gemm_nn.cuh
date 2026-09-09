@@ -141,6 +141,8 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     int num_tiles, int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive,
     int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
     int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr,
+    // Used by the interleaved gather+pack below when BULK is false. The attribute is for the
+    // BULK=true instantiation, which discards that branch -- it does NOT mean "ignored".
     [[maybe_unused]] uint32_t *__restrict__ packed_sa_raw, [[maybe_unused]] size_t scale_base,
     [[maybe_unused]] size_t scale_chunk_bytes, [[maybe_unused]] int scale_K,
     [[maybe_unused]] int interleave_scales,
@@ -206,7 +208,24 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         // In bulk mode chunk_bytes describes the gathered region's shard, not the A operand's.
         char *gb = (char *)&A[{0, 0, 0, 0}];
         if constexpr (BULK) gb = gather_dst;
-        gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        if constexpr (BULK) {
+            // The gathered tensor is not a GEMM operand here, so its scales are moved verbatim by
+            // gather_scales and there is nothing to pack. run_bulk_mxfp8 never enables interleave;
+            // this guard keeps the kernel correct if that ever changes.
+            gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        } else if (interleave_scales) {
+            // scale_A_smem is untouched until this block joins the compute queue, which it cannot
+            // do before the gather below finishes -- so stage the pack there rather than growing
+            // the kernel's LDS footprint. Same reasoning, same staging size as the TN path.
+            static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
+                          "scale_A_smem too small to stage KPP=2 scale tiles");
+            gather_all_plus_scales<1, true>(
+                my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
+                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_tiles,
+                reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
+        } else {
+            gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        }
     }
 
     const bool static_sched = (num_tiles <= SCHED_ROUNDS * (int)gridDim.x);

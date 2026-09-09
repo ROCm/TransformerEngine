@@ -112,4 +112,140 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Interleaved scale gather+pack, shared by the MXFP8 TN and NN fused AG+GEMM kernels.
+//
+// These live here rather than in one kernel header because the host side (comm_gemm.cpp,
+// run_mxfp8) hands BOTH layouts the same contract when interleaving is on: it skips
+// gather_scales and packs only the local rank, on the promise that the gatherer blocks pack
+// the peers' rows. A layout that has the flag but not the implementation silently produces
+// garbage -- which is exactly what NN did before these were shared.
+//
+// The activation scales are row-wise in both layouts and packed_sa has the same layout in
+// both (comm_gemm.cpp uses the same launch_pack_scales<false,...> / pack_local_scales_kernel
+// for TN and NN), so this code is genuinely layout-independent.
+// ---------------------------------------------------------------------------------------
+// Packs one 256-row tile of A scales from a peer's buffer into the lane-native layout the GEMM
+// reads. Same transform as pack_scales_kernel (mxfp8_gemm.cpp) for COLWISE=false; called by the
+// gatherer block that is already fetching that tile, so the raw scales never reach global memory.
+// A gather tile is BLOCK_ROW=256 rows, which is also pack_scales_kernel's TILE_WORDS, so the
+// tile <-> cblk mapping is 1:1.
+//
+// Each block handles the contiguous k-range [sub*kpb, +kpb) and writes tile_id = ki*tiles_per_col
+// + cblk, so blocks never touch the same output.
+// Packs one 256-row tile of A scales into the lane-native layout the GEMM reads, straight from
+// the peer's buffer so the raw scales never reach global memory.
+//
+// Per k-iter the tile's scales are 256 rows x 4 bytes (K_STEP=128 elements / 32 per scale block),
+// i.e. one dword per row. Four waves each take 64 of those rows and emit 64 dwords, one per lane.
+// The block runs two k-iters at once so all NUM_WARPS=8 waves are busy.
+//
+// Blocks split the k range: block `sub` takes a contiguous [k0,k1) out of gath_wg. Contiguous
+// rather than strided so each block's reads stay in one span per row. Blocks write disjoint
+// tile_ids, so the only sync is around the staging buffer.
+__device__ __forceinline__
+void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
+                           int cblk, int tiles_per_col, int k_iters, int scale_K,
+                           uint32_t *__restrict__ smem_tile, int sub, int gath_wg) {
+    constexpr int ROWS     = 256;              // rows per tile == BLOCK_ROW
+    constexpr int PER_WAVE = 64;               // rows one wave packs == lanes it fills
+    constexpr int WAVES    = ROWS / PER_WAVE;  // 4 waves per k-iter
+    constexpr int KPP      = NUM_WARPS / WAVES;// k-iters in flight: 8/4 = 2
+
+    const int lane  = (int)threadIdx.x % 64;
+    const int wave  = (int)threadIdx.x / 64;
+    const int kslot = wave / WAVES;            // which of the KPP k-iters
+    const int wgrp  = wave % WAVES;            // which 64-row chunk
+
+    const int kpb = (k_iters + gath_wg - 1) / gath_wg;  // k-iters per block
+    const int k0  = sub * kpb;
+    const int k1  = (k0 + kpb > k_iters) ? k_iters : k0 + kpb;
+    if (k0 >= k_iters) return;
+
+    // One dword per thread: KPP*ROWS == NUM_WARPS*PER_WAVE == NUM_THREADS, since a wave packs
+    // PER_WAVE rows with one lane each. So the stage below is straight-line, not a loop.
+    static_assert(KPP * ROWS == NUM_THREADS, "staging no longer covers the block exactly");
+    const int slot = (int)threadIdx.x / ROWS;   // which of the KPP k-iters this thread stages
+    const int srow = (int)threadIdx.x % ROWS;   // which row
+
+    for (int kb = k0; kb < k1; kb += KPP) {
+        uint32_t p = 0;
+        if (kb + slot < k1) {
+            __builtin_memcpy(&p, &src_rows[(size_t)srow * scale_K + (kb + slot) * 4], 4);
+        }
+        smem_tile[threadIdx.x] = p;
+        __syncthreads();
+        if (kslot < KPP && kb + kslot < k1) {
+            const size_t tile_id = (size_t)(kb + kslot) * tiles_per_col + cblk;
+            ln[(tile_id * WAVES + wgrp) * 64 + lane] = kittens::pack_scales(
+                (const kittens::fp8e8m0 *)(smem_tile + kslot * ROWS), wgrp * PER_WAVE);
+        }
+        __syncthreads();
+    }
+}
+
+template <int U, bool NT>
+__device__ __forceinline__
+void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
+                                  char *gather_dst, const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes,
+                                  unsigned int *arrive, size_t scale_base, size_t scale_chunk_bytes,
+                                  int scale_K, uint32_t *packed_sa, int tiles_per_col,
+                                  int k_iters, uint32_t *smem_tile) {
+    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
+    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
+
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
+
+    __syncthreads();
+
+    // Scales for this tile, read straight from the peer. Same ordering guarantee as the data copy
+    // above: ag_ready_kernel has already established that peers finished writing their chunks.
+    //
+    // Split by k-iteration, one contiguous range per block. tile_id = ki*tiles_per_col + cblk, so
+    // blocks write disjoint packed_sa entries and need no coordination. Trip counts differ across
+    // blocks when gath_wg does not divide k_iters; that is fine, __syncthreads() is per block and
+    // every thread within a block runs the same count.
+    {
+        const char *peer_scales = (const char *)peers.base[peer] + scale_base
+                                + (size_t)peer * scale_chunk_bytes
+                                + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
+        pack_tile_scales_from((const uint8_t *)peer_scales, packed_sa,
+                                        peer * tiles_per_chunk + tn, tiles_per_col,
+                                        k_iters, scale_K, smem_tile, sub, gath_wg);
+    }
+    __syncthreads();
+
+    // Fence AFTER the pack so it covers the packed_sa stores as well as the data copy: a consumer
+    // that sees the arrival count reach gath_wg must see both.
+    if (NT) {
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    } else {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+    __syncthreads();
+}
+
+template <int U, bool NT>
+__device__ __forceinline__
+void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *gb,
+                            const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes, unsigned int *arrive,
+                            size_t scale_base, size_t scale_chunk_bytes, int scale_K,
+                            uint32_t *packed_sa, int tiles_per_col, int k_iters,
+                            uint32_t *smem_tile) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile_plus_scales<U, NT>(
+            peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
+            scale_base, scale_chunk_bytes, scale_K, packed_sa, tiles_per_col, k_iters, smem_tile);
+    }
+}
+
 }  // namespace hk_overlap
