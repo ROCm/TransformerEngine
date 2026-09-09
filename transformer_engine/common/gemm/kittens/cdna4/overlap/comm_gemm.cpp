@@ -366,8 +366,8 @@ struct Mxfp8Tn {
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
     }
-    static hk_mxfp8_ag_tn::persistent_fn_t launch_fn(int M, int N, int K) {
-        return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K);
+    static hk_mxfp8_ag_tn::persistent_fn_t launch_fn(int M, int N, int K, int a_code, int b_code) {
+        return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K, a_code, b_code);
     }
 };
 
@@ -379,8 +379,8 @@ struct Mxfp8Nn {
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
     }
-    static hk_mxfp8_ag_nn::persistent_fn_t launch_fn(int M, int N, int K) {
-        return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K);
+    static hk_mxfp8_ag_nn::persistent_fn_t launch_fn(int M, int N, int K, int a_code, int b_code) {
+        return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K, a_code, b_code);
     }
 };
 
@@ -527,7 +527,10 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
         launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
     }
 
-    L::launch_fn(M, N_TOTAL, K)(
+    auto launch = L::launch_fn(M, N_TOTAL, K, args.a_fp8_code, args.b_fp8_code);
+    if (!launch) return false;   // unexpected operand format pair
+
+    launch(
         M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
         static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,

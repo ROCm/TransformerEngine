@@ -33,6 +33,11 @@ struct KittensAgGemmArgs {
     size_t workspace_size;
     hipStream_t stream;
     void *gather_dst;     // Bulk all-gather only
+    // MFMA operand format codes, as mxfp8_gemm.cpp's fp8_code(): 0 = e4m3, 1 = e5m2. They select
+    // CBSZ/BLGP independently per operand, which HYBRID recipes need (E4M3 fwd, E5M2 bwd).
+    // A is the gathered activation operand (ub), B is the weight (args.A). Ignored by bf16 entries.
+    int a_fp8_code;
+    int b_fp8_code;
 };
 
 bool kittens_fused_ag_gemm_supported(int sm_arch);

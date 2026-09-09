@@ -264,8 +264,13 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
              "fused AG+GEMM reached with an unsupported epilogue");
   bool is_bf16 = A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16;
-  //TODO: Extend to E5M2 and mixed types
-  bool is_fp8 = A.dtype() == DType::kFloat8E4M3 && B.dtype() == DType::kFloat8E4M3 && D.dtype() == DType::kBFloat16;
+  // Either FP8 format, independently per operand: HYBRID recipes quantize the backward tensors
+  // e5m2 while the forward ones stay e4m3, so dgrad/wgrad legitimately mix. The format reaches the
+  // MFMA through the CBSZ/BLGP codes filled in below.
+  auto is_fp8_dt = [](DType dt) {
+    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
+  };
+  bool is_fp8 = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype()) && D.dtype() == DType::kBFloat16;
   NVTE_CHECK(is_bf16 || is_fp8,
              "fused AG+GEMM reached with unsupported operand types");
 
@@ -320,6 +325,11 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. Note the operand names invert here --
+    // the kernel's A operand is the gathered activation, which is B on this side (B.dptr() ==
+    // ubuf.dptr(), checked above), and its B operand is the weight, which is A.
+    args.a_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    args.b_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_fused_ag_gemm_mxfp8(args);
   }
   return kittens_fused_ag_gemm_bf16(args);

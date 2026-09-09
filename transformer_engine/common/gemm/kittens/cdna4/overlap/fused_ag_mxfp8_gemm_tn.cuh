@@ -28,9 +28,10 @@ struct TileDesc {
 
 constexpr int K_STEP = 128;
 
-// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2. e4m3 inputs only.
-constexpr int CBSZ = 0;
-constexpr int BLGP = 0;
+// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
+// backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
+// is templated on them and get_persistent_fn() dispatches, as dispatch_gemm() does in
+// mxfp8_gemm.cpp. CBSZ is the A operand (gathered activations), BLGP the B operand (weights).
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -251,6 +252,7 @@ __device__ __forceinline__ void gemm_epilogue(
     store_c_tile<bf16>(c_base, cD, rf1, cf1, N_TOTAL, lane_epi);
 }
 
+template <int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m3, 1, 1, -1, -1> B,
     const gl<bf16, 1, 1, -1, -1> C, const gl<fp8e8m0, -1, 1, 16, 64> scale_A_gl,
@@ -625,6 +627,7 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
     return queue;
 }
 
+template <int CBSZ, int BLGP>
 static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
                               TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
                               int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
@@ -653,7 +656,7 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
     if (grid_cap > 0 && grid > grid_cap) grid = grid_cap;
     if (grid < NGATH) grid = NGATH;
 
-    persistent_ag_mxfp8_gemm<<<grid, NUM_THREADS, 0, stream>>>(
+    persistent_ag_mxfp8_gemm<CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
         xcd_bucket, buckets, d_bucket_ctr,
@@ -664,9 +667,14 @@ using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, ui
                                  unsigned int *, int, int, int, int, size_t, int,
                                  XcdBuckets, int *, size_t, size_t, int, hipStream_t);
 
-static persistent_fn_t get_persistent_fn(int M, int N, int K) {
+// 4-way dispatch on the operand formats, mirroring dispatch_gemm() in mxfp8_gemm.cpp.
+static persistent_fn_t get_persistent_fn(int M, int N, int K, int a_fp8_code, int b_fp8_code) {
     (void)M; (void)N; (void)K;
-    return launch_persistent;
+    if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent<0, 0>;
+    if (a_fp8_code == 0 && b_fp8_code == 1) return launch_persistent<0, 1>;
+    if (a_fp8_code == 1 && b_fp8_code == 0) return launch_persistent<1, 0>;
+    if (a_fp8_code == 1 && b_fp8_code == 1) return launch_persistent<1, 1>;
+    return nullptr;
 }
 
 } // namespace hk_mxfp8_ag_tn
