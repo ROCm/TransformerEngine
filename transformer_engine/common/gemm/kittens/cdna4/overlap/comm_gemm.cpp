@@ -183,7 +183,12 @@ __global__ void pack_local_scales_kernel(const uint8_t *__restrict__ scales,
 // K=16384 but only 2x at K=4096 -- below which the per-tile pack inside the arrival gate costs
 // more than the removed prologue saves. Geomean speedup vs AG+HK: 1.2176x off, 1.1818x on,
 // 1.2282x gated.
-int interleave_scales_enabled(int K) { return K >= 16384 ? 1 : 0; }
+int interleave_scales_enabled(int K) {
+    // HK_INTERLEAVE_SCALES=0/1 forces the path off/on, for A/B and for bisecting a numerics
+    // failure against the K>=16384 threshold. Unset keeps the tuned heuristic.
+    if (const char *e = getenv("HK_INTERLEAVE_SCALES")) return atoi(e) ? 1 : 0;
+    return K >= 16384 ? 1 : 0;
+}
 
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
 // to fill the buckets. The 1024 is fixed, not derived from the grid cap.
@@ -363,6 +368,9 @@ struct Mxfp8Tn {
     using TileDesc = hk_mxfp8_ag_tn::TileDesc;
     static constexpr int  PLAN_TAG        = 2;
     static constexpr bool A_SCALE_COLWISE = false;
+    // The kernel gathers AND packs the peers' scale rows itself (gather_all_plus_scales /
+    // pack_tile_scales_from), which is the contract the interleaved host path depends on.
+    static constexpr bool SUPPORTS_INTERLEAVE = true;
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
     }
@@ -376,6 +384,11 @@ struct Mxfp8Nn {
     using TileDesc = hk_mxfp8_ag_nn::TileDesc;
     static constexpr int  PLAN_TAG        = 3;
     static constexpr bool A_SCALE_COLWISE = true;
+    // NN takes interleave_scales as [[maybe_unused]] -- it does NOT gather or pack the peers'
+    // scale rows in-kernel. Enabling the interleaved host path here skips gather_scales and packs
+    // only our own rank, leaving 7/8 of packed_sa garbage: measured max_err 0.373-0.387 vs 0.0147
+    // with it off, on every K>=16384 shape. Keep false until the NN kernel implements it.
+    static constexpr bool SUPPORTS_INTERLEAVE = false;
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
     }
@@ -493,7 +506,8 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     // Interleaving needs the peers' raw scales reachable in their userbuffers, which is exactly
     // what scale_chunk_bytes != 0 means. That is now always true for a fused MXFP8 AG buffer
     // (comm_gemm_overlap.cpp), so the guard is defensive rather than a configuration switch.
-    const int interleave = args.scale_chunk_bytes ? interleave_scales_enabled(K) : 0;
+    const int interleave =
+        (L::SUPPORTS_INTERLEAVE && args.scale_chunk_bytes) ? interleave_scales_enabled(K) : 0;
 
     if (args.scale_chunk_bytes && !interleave) {
         ScalePeers sp{};
