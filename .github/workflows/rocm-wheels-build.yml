@@ -70,6 +70,10 @@ env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
+permissions:
+  actions: write
+  contents: read
+
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
@@ -214,6 +218,41 @@ jobs:
             find "$LOG_DIR" -type f | sort
           fi
 
+      - name: Delete previous wheel artifacts for this branch
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          echo "Cleaning up old te-rocm-wheels artifacts for branch: $BRANCH"
+
+          # Collect artifact IDs to delete
+          if ! IDS=$(gh api --paginate "repos/${{ github.repository }}/actions/artifacts?name=te-rocm-wheels" \
+            --jq ".artifacts[] | select(.expired == false and .workflow_run.head_branch == \"$BRANCH\") | .id"); then
+            echo "::warning::Failed to list artifacts (possible permissions issue). Skipping cleanup."
+            exit 0
+          fi
+
+          if [ -z "$IDS" ]; then
+            echo "No previous artifacts found for this branch."
+          else
+            echo "Deleting artifacts:"
+            FAILED=0
+            for id in $IDS; do
+              gh api "repos/${{ github.repository }}/actions/artifacts/$id" \
+                --jq '"\(.id)\t\(.size_in_bytes / 1024 / 1024 | round)MB\t\(.created_at)"' || true
+              if ! gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"; then
+                echo "::warning::Failed to delete artifact $id (possible permissions issue)."
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            if [ "$FAILED" -gt 0 ]; then
+              echo "::warning::Failed to delete $FAILED artifact(s). Ensure the workflow has 'actions: write' permission."
+            else
+              echo "Cleanup complete."
+            fi
+          fi
+
       - name: Upload wheels as GitHub Actions artifacts
         if: success()
         uses: actions/upload-artifact@v7
@@ -222,7 +261,7 @@ jobs:
           path: |
             ${{ runner.temp }}/wheelhouse/*.whl
             ${{ runner.temp }}/wheelhouse/*.tar.gz
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
 
       - name: Upload build logs on failure

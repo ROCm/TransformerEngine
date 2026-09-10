@@ -9,6 +9,7 @@ on:
     types: [ labeled, synchronize, reopened ]
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
