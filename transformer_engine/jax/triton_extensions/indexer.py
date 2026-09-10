@@ -35,10 +35,6 @@ def _score_reduce_autotune_configs():
     # The kernel is dominated by Hq reads (one (BLOCK_T, d_i) load per H
     # iteration). Bigger BLOCK_T ⇒ fewer T tiles ⇒ less total Hq traffic.
     # Bigger BLOCK_S ⇒ more Hk reuse but bigger per-CTA footprint.
-    #
-    # BLOCK_T=512 was tried and consistently failed to launch on MI355X
-    # (resource exhaustion — VGPR/LDS budget for 64-iter H-loop with that
-    # large an accumulator). Capped at 256.
     cfgs = [
         triton.Config({"BLOCK_T": 32,  "BLOCK_S": 128}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_T": 32,  "BLOCK_S": 256}, num_warps=4, num_stages=2),
