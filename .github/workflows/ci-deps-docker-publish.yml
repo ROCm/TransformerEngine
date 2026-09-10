@@ -16,13 +16,6 @@ name: Publish CI deps Docker image
 on:
   workflow_dispatch:
     inputs:
-      gpu_arch:
-        description: "GPU architecture"
-        required: true
-        type: choice
-        options:
-          - gfx942
-          - gfx950
       image_tag:
         description: "Tag to push to the registry"
         required: true
@@ -67,14 +60,12 @@ jobs:
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
-          GPU_ARCH: ${{ inputs.gpu_arch }}
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
           docker build \
             -f .github/scripts/Dockerfile.ci.deps \
-            --build-arg "GPU_ARCH=${GPU_ARCH}" \
             -t "${FULL_IMAGE}:${IMAGE_TAG}" \
             .
           docker push "${FULL_IMAGE}:${IMAGE_TAG}"
