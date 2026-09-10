@@ -26,7 +26,7 @@ batched-fp8 multidim case. Each Triton test compares against two references:
      surface -- catches divergence from the production path.
 
 Complementary file: ``triton_kernels/test_gemm_kernel.py`` -- low-level
-``te_gemm_triton()`` kernel-direct correctness (unchanged, stays put).
+``te_gemm_triton()`` kernel-direct correctness.
 
 FlyDSL coverage mirrors the Triton surface for the currently supported FlyDSL
 config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
