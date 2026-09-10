@@ -8,21 +8,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/transformer_engine/lib")
 
-#Corresponding runtime check is in nvte_get_fused_attn_backend()
-list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
-if(NOT _gfx1250_idx EQUAL -1)
-  message(WARNING
-    "Removing unsupported gfx1250 from CMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
-  list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
-  list(LENGTH CMAKE_HIP_ARCHITECTURES _hip_arch_count)
-  if(_hip_arch_count EQUAL 0)
-    message(FATAL_ERROR
-            "No supported architectures remain for the ck_fused_attn build. "
-            "Re-run the build with FUSED_ATTN_CK backend disabled.")
-  endif()
-  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
-endif()
-
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
 if (DEFINED ENV{NVTE_QOLA_DIR} AND NOT $ENV{NVTE_QOLA_DIR} STREQUAL "")
   set(__QOLA_DIR $ENV{NVTE_QOLA_DIR})
@@ -228,7 +213,7 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 #pragma in CK headers which is not supported by the compiler used to build TE.
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -Wno-unused-value -Wno-unknown-warning-option)
+    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -DFA_WITH_SINK=1 -Wno-unused-value -Wno-unknown-warning-option)
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
@@ -249,6 +234,7 @@ target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
+# In CK_JIT mode the AITER libs are emitted directly into AITER_MHA_INSTALL_DIR
 if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
   install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${AITER_MHA_INSTALL_DIR})
 endif()
