@@ -356,7 +356,14 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
-    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    # "TT" is only supported for MXFP4 (hipBLASLt ships F4F4 kernels for all four layouts); other
+    # backends (FP8/BF16/MXFP8) keep the historical TN/NN/NT restriction. For MXFP4+AITER the
+    # mxfp4_gemm branch below still rejects TT, so a TT request without hipBLASLt errors there.
+    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+
+    is_mxfp4 = isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage)
+    allowed_layouts = ("TN", "NN", "NT", "TT") if is_mxfp4 else ("TN", "NN", "NT")
+    assert layout in allowed_layouts, f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
@@ -427,21 +434,21 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: route to AITER a4w4 ASM kernels
-    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
-
+    # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
+    # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        result = mxfp4_gemm(
-            A,
-            B,
-            layout=layout,
-            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
-            bias=bias,
-            out=out,
-            grad=grad,
-            accumulate=accumulate,
-        )
-        return result, None, None, None
+        if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
+            result = mxfp4_gemm(
+                A,
+                B,
+                layout=layout,
+                out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+                bias=bias,
+                out=out,
+                grad=grad,
+                accumulate=accumulate,
+            )
+            return result, None, None, None
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # FP8 block-scaling requires split accumulator
@@ -492,7 +499,20 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
+    # ROCm-only backend: the Triton kernels use gfx942/gfx950-specific MFMA
+    # instructions and autotune configs, so refuse to enable on non-HIP builds.
+    # NVFP4 is not supported by the Triton path; when the Triton backend is
+    # opted into, te_generic_gemm_triton raises ValueError for NVFP4 inputs
+    # (surfaced as a pytest.skip via tests/pytorch/conftest.py).
+    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    if use_gemm_triton:
+        # Lazy: only pull in Triton when the backend is opted into. Keeps
+        # `triton` off the module-import path when NVTE_USE_GEMM_TRITON is
+        # unset (the default), so stacks without pytorch-triton-rocm can
+        # still use the C++ hipBLASLt path.
+        from ..triton_kernels.gemm import te_generic_gemm_triton
+        out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+    elif not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         if _is_nvfp4_row_scaled_tensor(A):

@@ -1,5 +1,5 @@
 {
   "docker_images": {
-    "default": "registry-sc-harbor.amd.com/framework/te-ci:therock_7.13.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.10.2_fa_2.8.1_aiter_77455e3ecf"
+    "default": "registry-sc-harbor.amd.com/framework/te-ci:therock_7.14.0_ubuntu24.04_py3.12_pytorch_2.12.0_triton_3.7.1_git0263a6a6_jax_0.11.0_fa_2.8.3_aiter_77455e3ecf"
   }
 }

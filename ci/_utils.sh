@@ -303,18 +303,20 @@ get_ctest_junitxml() {
 
 check_test_filter() {
     test -z "$TEST_FILTER" && return 0
+    set -f # disable globbing so patterns in masks are used as-is 
     for _tf in $TEST_FILTER; do
         case "$1" in
-        $_tf) return 0
+        $_tf) set +f; return 0
         esac
     done
+    set +f
     return 1
 }
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    _rocm_path=$(resolve_rocm_path)
-    _rocm_path=`$REALPATH "$_rocm_path" 2>/dev/null || echo "$_rocm_path"`
+    export ROCM_PATH=$(resolve_rocm_path)
+    _rocm_path=`$REALPATH "$ROCM_PATH" 2>/dev/null || echo "$ROCM_PATH"`
     echo "ROCM PATH: $_rocm_path"
     python3 --version
 }

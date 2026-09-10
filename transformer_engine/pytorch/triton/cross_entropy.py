@@ -59,6 +59,9 @@ def cross_entropy_forward(
     if target.stride(-1) != 1:
         target = target.contiguous()
 
+    # Store the input gradient in FP32 so it is not quantized before backward.
+    grad_input = torch.empty_like(_input, dtype=torch.float32)
+
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
 
     online_softmax_kernel[(n_rows,)](
@@ -91,6 +94,8 @@ def cross_entropy_forward(
     cross_entropy_kernel[(n_rows,)](
         X_ptr=_input,
         X_stride=_input.stride(-2),
+        grad_input_ptr=grad_input,
+        grad_input_stride=grad_input.stride(-2),
         Y_ptr=target,
         Y_stride=target.stride(-1),
         loss_ptr=loss_1d,
@@ -113,11 +118,11 @@ def cross_entropy_forward(
         torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
     )
 
-    return loss, _input
+    return loss, grad_input
 
 
 def cross_entropy_backward(
-    _input: torch.Tensor, grad_output: torch.Tensor, is_cg_capturable: bool = False
+    grad_input: torch.Tensor, grad_output: torch.Tensor, is_cg_capturable: bool = False
 ):
     """Backward implementation of cross entropy loss kernel"""
 
@@ -128,7 +133,7 @@ def cross_entropy_backward(
     ):
         pass
     else:
-        B, SQ, V = _input.shape
+        B, SQ, V = grad_input.shape
         n_rows = B * SQ
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
@@ -138,8 +143,8 @@ def cross_entropy_backward(
             grad_output = grad_output.contiguous()
 
         element_mul_kernel[(n_rows,)](
-            _input,
-            _input.stride(-2),
+            grad_input,
+            grad_input.stride(-2),
             grad_output.contiguous(),
             1 if grad_output.numel() > 1 else 0,
             V,
@@ -147,4 +152,4 @@ def cross_entropy_backward(
             num_warps=NUM_WARPS,
         )
 
-    return _input
+    return grad_input

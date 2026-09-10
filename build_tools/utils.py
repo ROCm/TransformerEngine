@@ -326,7 +326,7 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
-    # Use pip wheels to include all headers.        
+    # Use pip wheels to include all headers.
     try:
         import nvidia
     except ModuleNotFoundError as e:
@@ -341,6 +341,26 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         for subdir in cuda_root.iterdir()
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
+
+
+@functools.lru_cache(maxsize=None)
+def cudnn_frontend_include_path() -> Path:
+    """Return the C++ include directory from nvidia-cudnn-frontend."""
+    package = "nvidia-cudnn-frontend"
+    try:
+        include_dir = Path(distribution(package).locate_file("include")).resolve()
+    except PackageNotFoundError as e:
+        raise RuntimeError(
+            f"{package} is required to build Transformer Engine. "
+            f"Install it with `pip install {package}`."
+        ) from e
+
+    header = include_dir / "cudnn_frontend.h"
+    if not header.is_file():
+        raise RuntimeError(
+            f"The {package} installation does not contain the expected header {header}."
+        )
+    return include_dir
 
 
 @functools.lru_cache(maxsize=None)
@@ -557,6 +577,7 @@ def uninstall_te_wheel_packages():
             "transformer_engine_torch",
             "transformer_engine_jax",
             "transformer_engine_rocm7",
+            "transformer_engine_rocm10",
             "transformer_engine_rocm_jax",
             "transformer_engine_rocm_torch",
         ]

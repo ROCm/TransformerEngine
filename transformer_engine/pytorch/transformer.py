@@ -341,7 +341,9 @@ class TransformerLayer(torch.nn.Module):
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
         ub_overlap_rs_dgrad: bool = False,
-        ub_bulk_dgrad: bool = not IS_HIP_EXTENSION,
+        # True on every platform: ROCm narrows this per-call in fused_bulk_ag_eligible(), which
+        # declines unless the layer was registered on the "fused" method -- gfx950 only.
+        ub_bulk_dgrad: bool = True,
         ub_bulk_wgrad: bool = not IS_HIP_EXTENSION,
         bias: bool = True,
         activation: str = "gelu",

@@ -22,7 +22,9 @@
 #include <utility>
 
 #include "common/util/cuda_driver.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_nvml.h"
+#endif
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 #include "common/util/system.h"
@@ -93,6 +95,7 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                            \
   } while (0);
 
+#ifndef __HIP_PLATFORM_AMD__
 bool has_mnnvl_fabric(int device_id) {
 #if !defined(nvmlGpuFabricInfo_v2)
   if (getenv("NVTE_UBDEBUG")) {
@@ -142,6 +145,7 @@ bool has_mnnvl_fabric(int device_id) {
   return mnnvl_fabric_support;
 #endif
 }
+#endif
 
 int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
                                  int numlocal, int mynode, int numnodes,
