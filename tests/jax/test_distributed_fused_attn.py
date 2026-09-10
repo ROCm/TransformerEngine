@@ -710,6 +710,9 @@ class TestDistributedContextParallelSelfAttn:
     # they can be surfaced to framework tests.
     @staticmethod
     def skip_if_d256_cp_unsupported(qkv_layout):
+        if is_hip_extension():
+            pytest.skip("D=256 CP fused attention is not supported on ROCm.")
+
         compute_capability = get_device_compute_capability(0)
         if not 100 <= compute_capability < 110:
             pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
