@@ -380,7 +380,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
         "Fused backward of RMSNorm + add");
   m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
-        "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
+        "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"),
+        py::arg("outputs") = py::none());
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
         py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false

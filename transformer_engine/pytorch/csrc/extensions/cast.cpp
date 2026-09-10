@@ -755,11 +755,22 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
 }  // namespace
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
-                                              std::vector<py::handle> quantizer_list) {
+                                              std::vector<py::handle> quantizer_list,
+                                              const py::object &outputs) {
   // Check number of tensors
   const size_t num_tensors = tensor_list.size();
   NVTE_CHECK(quantizer_list.size() == num_tensors, "Expected ", num_tensors,
              " quantizers, but got ", quantizer_list.size());
+
+  const bool use_provided_outputs = !outputs.is_none();
+  py::sequence outputs_seq;
+  if (use_provided_outputs) {
+    NVTE_CHECK(py::isinstance<py::list>(outputs) || py::isinstance<py::tuple>(outputs),
+               "multi_tensor_quantize: outputs must be None, a list, or a tuple.");
+    outputs_seq = py::reinterpret_borrow<py::sequence>(outputs);
+    NVTE_CHECK(static_cast<size_t>(outputs_seq.size()) == num_tensors, "multi_tensor_quantize: ",
+               "len(outputs) is ", outputs_seq.size(), " but expected ", num_tensors, ".");
+  }
 
   // Convert quantizers to C++ objects
   std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
@@ -780,9 +791,17 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
     const auto input_shape = input_cpp.shape();
     const auto input_dtype = GetTransformerEngineDType(input_py.scalar_type());
 
-    // Construct output tensor
-    std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
-    auto [output_cpp, output_py] = quantizer_cpp_list[i]->create_tensor(output_shape, input_dtype);
+    TensorWrapper output_cpp;
+    py::object output_py;
+    if (use_provided_outputs) {
+      py::object output_obj = outputs_seq[static_cast<ssize_t>(i)];
+      std::tie(output_cpp, output_py) =
+          quantizer_cpp_list[i]->convert_and_update_tensor(std::move(output_obj));
+    } else {
+      std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
+      std::tie(output_cpp, output_py) =
+          quantizer_cpp_list[i]->create_tensor(output_shape, input_dtype);
+    }
     output_cpp_list.emplace_back(std::move(output_cpp));
     output_py_list.emplace_back(std::move(output_py));
   }
