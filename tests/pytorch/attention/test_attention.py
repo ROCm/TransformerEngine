@@ -208,6 +208,7 @@ def test_dot_product_mem_calc(monkeypatch):
         pad_between_seqs,
         is_training,
     )
+    torch.cuda.synchronize()
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")

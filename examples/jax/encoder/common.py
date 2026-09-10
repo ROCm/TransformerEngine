@@ -55,7 +55,7 @@ def is_nvfp4_supported():
     """Return if FP4 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX12.5 and newer GPUs support nvfp4
+        # only GFX12.5 and newer GPUs nativelly support nvfp4
         return gpu_arch >= 125
     return gpu_arch >= 100
 
