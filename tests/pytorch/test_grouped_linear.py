@@ -2317,6 +2317,9 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 
 
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION, reason="Fused grouped FP8 block scaling is not supported on ROCm."
+)
 @pytest.mark.skipif(not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling)
 @pytest.mark.skipif(
     not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0),
