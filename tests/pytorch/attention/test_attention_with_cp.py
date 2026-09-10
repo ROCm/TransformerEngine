@@ -11,7 +11,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import pathlib
 import logging
 import copy
@@ -35,7 +34,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import Fla
 from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
@@ -175,8 +174,8 @@ class PoolWorker:
 
     # One retry on pool-infrastructure failures (worker died / timed out / broken
     # pipe). Test-assertion failures from the worker carry the full per-rank
-    # traceback in resp["error"] and propagate without retry. Every retry leaves
-    # a [POOL-RETRY] line in stderr so pytest's <system-err> capture surfaces
+    # traceback in resp["error"] and normally propagate without retry. Every retry
+    # leaves a [POOL-RETRY] line in stderr so pytest's <system-err> capture surfaces
     # flake patterns in JUnit XML for offline analysis.
     _MAX_RETRIES = 1
 
@@ -186,17 +185,27 @@ class PoolWorker:
             try:
                 return self._submit_once(kwargs, timeout)
             except AssertionError as e:
-                msg_head = str(e).splitlines()[0]
+                msg = str(e)
+                msg_head = msg.splitlines()[0]
                 infrastructure_flake = (
                     "pool worker died" in msg_head
                     or "timed out" in msg_head
                     or "before request could be sent" in msg_head
                 )
-                if not infrastructure_flake or attempt == self._MAX_RETRIES:
+                # Heterogeneous CP cases can leave a retained worker in a state where
+                # FP8 THD emits NaNs even though the same case passes in a fresh worker.
+                # Retry only that signature once; a NaN from the fresh worker still fails.
+                fp8_thd_nan = (
+                    kwargs.get("dtype") == "fp8"
+                    and kwargs.get("qkv_format") == "thd"
+                    and "has nan values" in msg.lower()
+                )
+                retryable = infrastructure_flake or fp8_thd_nan
+                if not retryable or attempt == self._MAX_RETRIES:
                     if first_err is not None:
                         sys.stderr.write(
                             f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
-                            "both attempts died; first error was: "
+                            "both attempts failed; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
                         sys.stderr.flush()
@@ -204,7 +213,7 @@ class PoolWorker:
                 first_err = e
                 sys.stderr.write(
                     f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
-                    f"died: {msg_head!r}; respawning pool and retrying\n"
+                    f"failed: {msg_head!r}; respawning pool and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -306,7 +315,10 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
+    reason="Flash-attn v2 or v3 is required.",
+)
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
@@ -334,11 +346,6 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
-        pytest.skip(
-            "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-            " yet!"
-        )
     if (
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
@@ -480,6 +487,8 @@ model_configs_fused_attn = {
     "cp_4_3": ModelConfig(
         2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),  # GQA
+    "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 
 
@@ -498,6 +507,8 @@ if test_essential:
         "cp_3_4",
         "cp_4_2",
         "cp_4_3",
+        "cp_5_0",
+        "cp_5_1",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
@@ -531,6 +542,23 @@ def test_cp_with_fused_attention(
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
+    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+        # D=256 uses this generic CP runner, but only a subset of its axes is supported.
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+        if dtype == "fp8":
+            pytest.skip("D=256 CP fused attention is covered for BF16/FP16 only.")
+        if cp_comm_type not in ["p2p", "all_gather"]:
+            pytest.skip("D=256 CP fused attention is covered for p2p and all_gather only.")
+
+        required_cudnn_version = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        required_cudnn_version_label = "9.25" if qkv_format == "thd" else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_format.upper()} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
+
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
 
@@ -550,8 +578,6 @@ def test_cp_with_fused_attention(
     if dtype != "fp8" and (fp8_mha or fp8_dpa):
         pytest.skip("dtype!=fp8 requires fp8_dpa=False and fp8_mha=False!")
 
-    if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip("No support for FP8 attention with THD format!")
     if dtype == "fp8" and config.attn_bias_type != "no_bias":
         pytest.skip("No support for FP8 attention with bias!")
 
@@ -560,10 +586,13 @@ def test_cp_with_fused_attention(
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
+    # ROCm: upstream v2.19 lifted the a2a+p2p (Hierarchical A2A) THD skip after
+    # implementing cuDNN support for it. ROCm's CK fused-attn backend has no
+    # equivalent path, so keep the skip gated to ROCm until CK gains support.
+    if IS_HIP_EXTENSION and qkv_format == "thd" and cp_comm_type == "a2a+p2p":
         pytest.skip(
             "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-            " yet!"
+            " yet on ROCm!"
         )
 
     # ROCm: upstream v2.18 narrowed the fused-path THD skip from
@@ -578,6 +607,7 @@ def test_cp_with_fused_attention(
             "THD + all_gather CP fused attention is unsupported on ROCm (CK lacks the FA3"
             " seqused_k path)."
         )
+
 
     if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
@@ -612,6 +642,8 @@ def test_cp_with_fused_attention(
         pytest.skip("scaling_mode=delayed requires f16_O=False!")
     if scaling_mode == "mxfp8" and not f16_O:
         pytest.skip("scaling_mode=mxfp8 requires f16_O=True!")
+    if scaling_mode == "mxfp8" and qkv_format == "thd":
+        pytest.skip("MXFP8 quantization does not support THD format!")
     if scaling_mode == "mxfp8" and fp8_mha:
         pytest.skip("No support for scaling_mode=mxfp8 with fp8_mha=True!")
 

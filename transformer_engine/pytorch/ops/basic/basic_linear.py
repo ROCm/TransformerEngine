@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -613,6 +614,13 @@ class BasicLinear(BasicOperation):
         x_async = None
 
         # Perform GEMM
+        # Some FP8 recipes (e.g. blockwise) require a split accumulator for fprop; honor the
+        # recipe's choice instead of the module default (matches module/linear.py).
+        use_split_accumulator = _2X_ACC_FPROP
+        if with_quantized_compute:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, "fp8_gemm_fprop"):
+                use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
         y, *_ = general_gemm(
             w,
             x,
@@ -623,7 +631,7 @@ class BasicLinear(BasicOperation):
             accumulate=accumulate_into_out,
             out=y,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=use_split_accumulator,
         )
 
         # Reduce tensor-parallel output if needed
