@@ -58,9 +58,7 @@ class BuildPy(_build_py):
         # Generated into the source tree so build_py picks it up as an ordinary module of
         # the package, putting the same file in the checkout and in the wheel. Both need
         # it: transformer_engine/__init__.py imports it with `from . import _rocm_init`
-        # and tolerates its absence, so an install without it silently skips the rocm-sdk
-        # preload and loads the native libraries against an uninitialized ROCm runtime.
-        # The generated file is gitignored.
+        # and tolerates its absence
         #
         # The write has to stay ahead of super().run(): build_py globs the package
         # directory as it runs, so a later write would land in the checkout but miss the
