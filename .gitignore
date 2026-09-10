@@ -64,3 +64,5 @@ transformer_engine/common/util/hip_nvml.*
 .codex/
 .cline_storage/
 .claude/
+test-results/
+ci-weights/

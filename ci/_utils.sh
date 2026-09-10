@@ -39,6 +39,13 @@ TEST_DIR=${TE_PATH}tests/
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
 
+#Scheduler inputs. Empty is the default for all of them
+: ${TEST_FILTER:=}
+: ${TE_CI_LIST_ITEMS:=}
+: ${TE_CI_SKIP_CHECK_SUPPORTED:=}
+: ${TE_CI_SETUP_ONLY:=}
+: ${TE_CI_SKIP_SETUP:=}
+
 if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_SGPU=1
     TEST_MGPU=1
@@ -79,6 +86,7 @@ export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 _script_error_count=0
 _run_error_count=0
 _ignored_error_count=0
+_seen_test_tags=""
 TEST_ERROR_IGNORE=""
 
 script_error() {
@@ -137,6 +145,39 @@ configure_fused_attn_env() {
 
 check_level() {
     test $TEST_LEVEL -ge $1
+}
+
+# Disables check_supported function: so the list becomes every test at this TEST_LEVEL 
+# rather than the subset this host can run. 
+skip_check_supported() {
+    test -n "$TE_CI_LIST_ITEMS" -a -n "$TE_CI_SKIP_CHECK_SUPPORTED"
+}
+
+# Run the container-wide setup once and skip when each test is ran in queue.
+check_setup_needed() {
+    test -z "$TE_CI_SKIP_SETUP" -a -z "$TE_CI_LIST_ITEMS"
+}
+
+check_supported() {
+    skip_check_supported && return 0
+    case "$1" in
+        "mxfp8")
+            #MXFP8-only test filters collect no tests on unsupported archs
+            _probe_result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+            _probe_message="MXFP8 is not supported on this device, skipping MXFP8-only tests"
+        ;;
+        "flash_attn")
+            _probe_result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+            _probe_message="Flash attention is not installed"
+        ;;
+        *)
+            script_error "check_supported: unknown capability $1"
+            return 1
+        ;;
+    esac
+    test "$_probe_result" = "True" && return 0
+    echo "$_probe_message" >&2
+    return 1
 }
 
 check_test_jobs_requested() {
@@ -313,6 +354,20 @@ check_test_filter() {
     return 1
 }
 
+# The test name tag names the JUnit XML file and is the TEST_FILTER key a
+# scheduler re-dispatches on, so two call lines may not share one: the second
+# would overwrite the first's results, and one dispatch would run both. Anything
+# that changes what a line runs -- an env prefix, a -k expression, extra pytest
+# args -- needs its own label to keep the tags apart.
+check_test_tag_unique() {
+    case " $_seen_test_tags " in
+    *" $1 "*)
+        script_error "Duplicate test tag $1: give the call site a distinct label"
+        exit 1
+    esac
+    _seen_test_tags="$_seen_test_tags $1"
+}
+
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     export ROCM_PATH=$(resolve_rocm_path)
@@ -352,6 +407,18 @@ pytest_run() {
     shift 3
     _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
+    check_test_tag_unique $_test_name_tag || return
+    # List mode: emit the work item instead of running it, so an external
+    # scheduler can pack items across GPUs. The tag alone is enough to
+    # re-dispatch the item: setting TEST_FILTER to it and re-entering this
+    # script replays the very same call line, so the inline NVTE_* prefixes and
+    # -k expressions are reapplied by the script itself and never have to be
+    # serialized here. The suite scripts stay the single source of truth for
+    # what runs at each TEST_LEVEL.
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
+        echo "TE_CI_ITEM $_test_name_tag"
+        return
+    fi
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
     # A per-test timeout is applied to every item. Callers may still append their
@@ -387,6 +454,7 @@ pytest_run() {
 
 PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
 ck_jit_prebuild() {
+    check_setup_needed || return 0
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
     if [ ! -f "$_prebuild_list" ]; then
         script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
