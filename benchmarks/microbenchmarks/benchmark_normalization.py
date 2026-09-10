@@ -62,11 +62,11 @@ _FWD_WRITE_BYTES = {
 }
 
 
-# Backend axis (None unsets, so "default" is the native path even if the ambient
+# Backend axis (None unsets, so "hip" is the native C++ path even if the ambient
 # env has a toggle set). "triton" flips the Triton RMSNorm/LayerNorm kernel (each
 # NormType reads only its own toggle).
 NORM_BACKENDS = {
-    "default": {"NVTE_USE_RMSNORM_TRITON": None, "NVTE_USE_LAYERNORM_TRITON": None},
+    "hip": {"NVTE_USE_RMSNORM_TRITON": None, "NVTE_USE_LAYERNORM_TRITON": None},
     "triton": {"NVTE_USE_RMSNORM_TRITON": "1", "NVTE_USE_LAYERNORM_TRITON": "1"},
 }
 

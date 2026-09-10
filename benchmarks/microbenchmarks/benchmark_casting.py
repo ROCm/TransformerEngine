@@ -119,11 +119,11 @@ def _active_formats():
     return formats
 
 
-# Backend axis (None unsets, so "default" is the native path even if the ambient
+# Backend axis (None unsets, so "hip" is the native C++ path even if the ambient
 # env has a toggle set). "triton" flips the Triton kernel for the op being timed:
 # quantize -> NVTE_USE_CAST_TRANSPOSE_TRITON, dequantize -> NVTE_USE_DEQUANTIZE_TRITON.
 CAST_BACKENDS = {
-    "default": {"NVTE_USE_CAST_TRANSPOSE_TRITON": None, "NVTE_USE_DEQUANTIZE_TRITON": None},
+    "hip": {"NVTE_USE_CAST_TRANSPOSE_TRITON": None, "NVTE_USE_DEQUANTIZE_TRITON": None},
     "triton": {"NVTE_USE_CAST_TRANSPOSE_TRITON": "1", "NVTE_USE_DEQUANTIZE_TRITON": "1"},
 }
 
@@ -139,7 +139,7 @@ def _triton_applies(fmt, direction):
 
 
 def _backends_for(fmt, direction):
-    return ["default", "triton"] if _triton_applies(fmt, direction) else ["default"]
+    return ["hip", "triton"] if _triton_applies(fmt, direction) else ["hip"]
 
 
 def _formats():
