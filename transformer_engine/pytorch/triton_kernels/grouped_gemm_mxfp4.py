@@ -397,6 +397,7 @@ def _grouped_mxfp4_variable_k_gemm_kernel(
     CHUNK_SIZE: tl.constexpr,
     CACHE_MODIFIER: tl.constexpr,
     VEC: tl.constexpr,
+    ACCUMULATE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -457,24 +458,33 @@ def _grouped_mxfp4_variable_k_gemm_kernel(
             LS_BASE += BK_SCALE * stride_lsk
             RS_BASE += BK_SCALE * stride_rsk
 
-        c = acc.to(C.type.element_ty)
         rm_s = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rn_s = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         cmask = (rm_s[:, None] < OUT_M) & (rn_s[None, :] < OUT_N)
         C_ = C + group_idx.to(tl.int64) * stride_cg + rm_s[:, None] * stride_cm + rn_s[None, :] * stride_cn
+        if ACCUMULATE:  # beta=1: fold into the existing buffer (e.g. main_grad)
+            acc += tl.load(C_, mask=cmask, other=0.0).to(tl.float32)
+        c = acc.to(C.type.element_ty)
         tl.store(C_, c, cmask)
 
 
 @_scoped_amd_knobs
 def grouped_gemm_mxfp4_variable_k_triton_kernel(
-    lhs, lhs_scale, rhs, rhs_scale, go_pad, OUT_M, OUT_N, G, out_dtype=torch.bfloat16, num_cu=None
+    lhs, lhs_scale, rhs, rhs_scale, go_pad, OUT_M, OUT_N, G,
+    out_dtype=torch.bfloat16, num_cu=None, out=None, accumulate=False,
 ):
     """C[g] (OUT_M, OUT_N) = lhs[:,g] @ rhs[:,g]^T.
 
     lhs (OUT_M, M_total/2) fp4-packed, rhs (OUT_N, M_total/2) fp4-packed.
     go_pad: padded per-group offsets along M (each M_g a multiple of 128).
+    ``out`` (G, OUT_M, OUT_N): reuse this caller buffer instead of allocating; with
+    ``accumulate=True`` the result is added into it (beta=1, e.g. main_grad).
     """
-    c = torch.empty((G, OUT_M, OUT_N), dtype=out_dtype, device=lhs.device)
+    if out is not None:
+        c = out
+    else:
+        assert not accumulate, "accumulate=True requires an existing out buffer"
+        c = torch.empty((G, OUT_M, OUT_N), dtype=out_dtype, device=lhs.device)
     ls = lhs_scale.view(torch.uint8)
     rs = rhs_scale.view(torch.uint8)
     l_u8 = lhs.view(torch.uint8)
@@ -517,6 +527,7 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
+        ACCUMULATE=accumulate,
         num_warps=8,
         num_stages=3,
         waves_per_eu=2,

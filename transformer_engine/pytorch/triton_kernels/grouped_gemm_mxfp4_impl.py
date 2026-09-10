@@ -248,6 +248,8 @@ def grouped_gemm_mxfp4_wgrad(
     *,
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
+    accumulate: bool = False,
 ) -> torch.Tensor:
     """Grouped MXFP4 wgrad: ``dW[g] = gradO[g]^T @ A[g]`` (contract M, variable-K).
 
@@ -257,6 +259,8 @@ def grouped_gemm_mxfp4_wgrad(
     Args:
         a: [total_M, K] activations, grouped along M by ``m_splits``.
         grad_out: [total_M, N] output gradient, grouped along M by ``m_splits``.
+        out: [G, N, K] buffer to write into instead of allocating; with
+            ``accumulate=True`` the wgrad is added into it (beta=1, e.g. main_grad).
 
     Returns:
         [G, N, K] weight gradient in ``out_dtype``.
@@ -280,6 +284,8 @@ def grouped_gemm_mxfp4_wgrad(
         G,
         out_dtype=out_dtype,
         num_cu=num_cu,
+        out=out,
+        accumulate=accumulate,
     )
 
 

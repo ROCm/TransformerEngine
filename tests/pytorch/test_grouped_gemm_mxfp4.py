@@ -168,6 +168,21 @@ def test_wgrad_precise_and_padding():
     assert _rel_err(wgrad, ref_true) < _REL_TOL
 
 
+def test_wgrad_accumulate():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    grad_out = _rand(total_m, N)
+    G = len(M_SPLITS)
+
+    # beta=1: dW accumulates into an existing (main_grad-style) fp32 buffer.
+    base = torch.randn(G, N, K, dtype=torch.float32, device="cuda")
+    out = base.clone()
+    grouped_gemm_mxfp4_wgrad(a, grad_out, M_SPLITS, out_dtype=torch.float32, out=out, accumulate=True)
+
+    fresh = grouped_gemm_mxfp4_wgrad(a, grad_out, M_SPLITS, out_dtype=torch.float32)
+    torch.testing.assert_close(out, base + fresh)
+
+
 def test_autograd_matches_ops():
     total_m = sum(M_SPLITS)
     a = _rand(total_m, K).requires_grad_(True)
