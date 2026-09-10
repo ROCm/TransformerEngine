@@ -34,8 +34,8 @@ inline FusedRsLayout fused_rs_layout(size_t shard_bytes, int tp_size) {
 
 
 bool sentinel_pattern_agrees() {
-    static_assert(static_cast<unsigned int>(RS_SENT_BF16) * 0x00010001u == RS_SENT_DW,
-                  "90 D3: the 16-bit fill pattern and the 32-bit compare pattern disagree.");
+    static_assert(((RS_SENT_BF16 >> 7) & 0xFFu) == 0xFFu && (RS_SENT_BF16 & 0x7Fu) != 0u,
+                  "RS_SENT_BF16 must be a bf16 NaN: a finite poison can collide with real output.");
     static bool checked = false;
     static bool agrees  = false;
     if (!checked) {
@@ -534,6 +534,7 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
     RsLaunchCfg cfg;
     cfg.comm_wg    = rs_comm_wg_tn(M, N_TOTAL, K);
     cfg.wb_group   = rs_wb_group(K);
+    cfg.warn_ticks = ag_ready_warn_ticks();
 
     launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.A)),
                          static_cast<bf16 *>(const_cast<void *>(args.B)), local_stage,

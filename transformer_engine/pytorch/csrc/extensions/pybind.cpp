@@ -732,13 +732,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
         "Dummy function for python side annotations");
   m.def(
-      "reset_fused_ag_gemm_cache",
+      "reset_comm_gemm_cache",
       []() {
 #ifdef USE_HIPKITTENS_GEMM
         kittens_comm_gemm_reset();
 #endif
       },
-      "Drop cached fused AG+GEMM peer base pointers");
+      "Drop every cached comm+GEMM plan");
 #endif
 
   // Experimental fused grouped MLP

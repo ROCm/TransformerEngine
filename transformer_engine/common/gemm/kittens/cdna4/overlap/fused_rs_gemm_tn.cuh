@@ -133,10 +133,13 @@ template <int TP, bool NT>
 __device__ __forceinline__
 void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
                           const bf16 *__restrict__ local_stage, const RsPeers &peers,
-                          bf16 *__restrict__ out, size_t band_elems) {
+                          bf16 *__restrict__ out, size_t band_elems, uint64_t warn_ticks) {
     const int w = (int)blockIdx.x;
     const size_t lines = band_elems / 8;
     typedef int v4i __attribute__((ext_vector_type(4)));
+
+    const uint64_t deadline = warn_ticks ? wall_clock64() + warn_ticks : 0;
+    bool warned = (warn_ticks == 0);
 
     const size_t per_g = (lines + (size_t)ncomm - 1) / (size_t)ncomm;
     const size_t g0    = (size_t)w * per_g;
@@ -165,6 +168,19 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
                 }
             }
             if (pend != 0u) {
+                if (!warned && wall_clock64() > deadline) {
+                    unsigned int srcs = 0u;
+#pragma unroll 1
+                    for (int s = 0; s < TP; s++) {
+                        const bf16 *b = (s == my_pe) ? local_stage : peers.stage[s];
+                        const v4i pv = sent_load16((const rs_v4i *)(b + soff) + l);
+                        if (sent_slot_pending((const int *)&pv)) srcs |= (1u << s);
+                    }
+                    printf("[fused GEMM+RS] fold still waiting: my_pe=%d block=%d band=%d "
+                           "line=%llu pending_srcs=0x%02x\n",
+                           my_pe, (int)blockIdx.x, b0, (unsigned long long)l, srcs);
+                    warned = true;
+                }
                 continue;
             }
             if (NT) {
@@ -186,7 +202,7 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
                              int *__restrict__ tile_counter, const RsPeers peers,
                              int my_pe, int ncomm,
                              int bands, int tiles_N,
-                             int wb_group) {
+                             int wb_group, uint64_t warn_ticks) {
     const int M       = A.rows();
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
@@ -199,7 +215,8 @@ void persistent_rs_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
 
     if ((int)blockIdx.x < ncomm) {
         // The comm workgroups are the reduce-scatter: they read all eight sources and write `out` once.
-        pull_reduce_all_sent<TP, true>(my_pe, ncomm, bands, local_stage, peers, out, band_elems);
+        pull_reduce_all_sent<TP, true>(my_pe, ncomm, bands, local_stage, peers, out, band_elems,
+                                       warn_ticks);
     }
 
     const int hy_ncw = (int)gridDim.x - ncomm;
@@ -333,6 +350,7 @@ static std::vector<TileDesc> build_rs_work_queue(int M, int N_total, int K, int 
 struct RsLaunchCfg {
     int comm_wg  = COMM_WG;
     int wb_group = 1;
+    uint64_t warn_ticks = 0;   // 0 disables the fold's stall report
 };
 
 static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b,
@@ -355,7 +373,7 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b
 #define RS_LAUNCH(TPV)                                                                         \
     persistent_rs_bf16_gemm<TPV><<<grid, NUM_THREADS, 0, stream>>>(                            \
         A_gl, B_gl, d_local_stage, d_out, d_queue, num_tiles, d_tile_counter, peers,           \
-        my_pe, ncomm, bands, tiles_N, cfg.wb_group)
+        my_pe, ncomm, bands, tiles_N, cfg.wb_group, cfg.warn_ticks)
 
     switch (tp_size) {
         case 8: RS_LAUNCH(8); break;

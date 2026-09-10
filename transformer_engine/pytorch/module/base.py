@@ -790,7 +790,7 @@ def destroy_ub():
     _ub_fused_bulk_decisions.clear()
     _ub_disabled_names.clear()
     if IS_HIP_EXTENSION:
-        tex.reset_fused_ag_gemm_cache()
+        tex.reset_comm_gemm_cache()
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;

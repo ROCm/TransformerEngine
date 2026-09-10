@@ -234,6 +234,7 @@ def test_fused_rs_overlap_bf16(nprocs):
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 @pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
 def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
+    """A quantized row-parallel Linear must fall back cleanly instead of reaching the bf16 kernel."""
     if quantization.startswith("fp8") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
@@ -242,15 +243,13 @@ def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
         nprocs,
         [
             f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
+            "--fp8",
             f"--quantization={quantization}",
         ],
     )
     stderr = result.stderr.decode()
     assert "non-bf16 operand" not in stderr, f"a non-bf16 operand reached the kernel\n{stderr}"
-    if result.returncode == 0:
-        disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
-        assert disabled is not None, f"harness printed no disabled set\n{result.stdout.decode()}"
-        assert "proj_fprop" in disabled, f"non-bf16 was not declined at setup: {disabled}"
+    _assert_numerics_passed(result)
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
