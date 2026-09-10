@@ -76,6 +76,9 @@ if fp8_available and (device_compute_capability < (9, 0) or device_compute_capab
         "FP8 attention is not supported for compute capability ="
         f" sm{device_compute_capability[0] * 10 + device_compute_capability[1]}"
     )
+if IS_HIP_EXTENSION and fp8_available:
+    fp8_attn_available = False
+    reason_for_no_fp8_attn = "FP8 Fused attention is not supported on ROCm"
 
 
 # Get determinism
@@ -172,12 +175,13 @@ def test_gqa_mla_thd():
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
-def test_dot_product_mem_calc():
+@pytest.mark.skipif(device_compute_capability == (12, 5),
+                    reason="This test causes GPU VM fault on GFX1250.")
+@pytest.mark.skipif(not is_bf16_available(), reason="This test requires bf16 support.")
+def test_dot_product_mem_calc(monkeypatch):
     """Non-regression test for memory workspace calculation integer overflow issue."""
     ckpt_attn = False
     pad_between_seqs = False
-    if not is_bf16_available():
-        pytest.skip("This test requires bf16 support.")
     dtype = torch.bfloat16
     # b, sq, q, dqk
     config = ModelConfig(16, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal")
@@ -193,8 +197,8 @@ def test_dot_product_mem_calc():
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    os.environ["NVTE_FUSED_ATTN_CK"] = "1"
-    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
     _run_dot_product_attention(
         dtype,
         config,
@@ -204,8 +208,6 @@ def test_dot_product_mem_calc():
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_FUSED_ATTN_CK"]
-    del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -2200,7 +2202,6 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2459,7 +2460,6 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2801,7 +2801,6 @@ model_configs_fp8 = {
 param_types_fp8 = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(
     get_cudnn_version() < (9, 2, 1),
     reason="cuDNN 9.2.1+ is required for FP8 fused attention.",
