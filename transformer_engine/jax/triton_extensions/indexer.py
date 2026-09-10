@@ -2,18 +2,6 @@
 #
 # See LICENSE for license information.
 """Triton score-relu-reduce kernel for the lightning-indexer hybrid backend.
-
-The hybrid backend computes the four projections (C_q, H_q, H_k, W_o) via
-``jnp.einsum`` (which lowers to hipBLASLt bf16 GEMMs) and then hands the
-results to this kernel for the score matmul + ReLU + per-(t, h) weighted
-H-reduction:
-
-    scores = relu(einsum("...thi,...si->...ths", H_q, H_k))   # never written
-    O      = einsum("...ths,...th->...ts", scores, W_o)
-
-The kernel keeps each per-head score tile in registers, avoiding the
-(B, oH, T, H, S) HBM round-trip that an einsum-only implementation pays
-on the pre-relu score tensor.
 """
 
 import functools
@@ -31,6 +19,7 @@ from jax.interpreters import mlir, xla
 from .utils import triton_call_lowering
 
 
+@functools.lru_cache(maxsize=None)
 def _autotune_disabled():
     """True when ``NVTE_INDEXER_DISABLE_AUTOTUNE=1``.
 
@@ -38,7 +27,7 @@ def _autotune_disabled():
     (still prune-valid) config, so no time is spent compiling and benchmarking
     every candidate. Intended for the test suite — a full sweep at large k/T_s
     costs many minutes and only picks the fastest config, not a more correct
-    one. Read at lowering time so a test fixture can toggle it per process."""
+    one. Read once at first lowering and cached."""
     return os.environ.get("NVTE_INDEXER_DISABLE_AUTOTUNE", "0") == "1"
 
 
