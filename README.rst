@@ -314,6 +314,13 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
 
+MXFP4 GEMM support on ROCm (gfx95x only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+MXFP4 GEMM is supported on gfx95x GPUs for a limited number of configurations. A native hipBLASLt MXFP4 (F4F4) path is available when built against hipBLASLt >= 1.3, alongside the default AITER ``a4w4`` backend.
+To select the GEMM backend, use NVTE_ROCM_USE_HIPBLASLT_MXFP4 environment variable which can take the following values:
+* 0 - use the AITER a4w4 backend (default);
+* 1 - use the hipBLASLt MXFP4 GEMM backend.
+
 Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
