@@ -9,15 +9,12 @@ Both backends are exercised through the same public entry point that TE
 by the ``NVTE_GEMM_BACKEND`` env var. Each ``*_call_gemm`` helper flips that var
 per call (see ``_set_backend``), so a single collection can drive both backends.
 
-Each family self-gates on backend *availability*, not on a preset env var:
+Each family self-gates on backend *availability*:
 
 - The ``test_triton_*`` family runs when ``pytorch-triton-rocm`` is importable
   (the Triton GEMM path has no arch gate, so it runs on gfx942 and gfx950).
 - The ``test_flydsl_*`` family runs when the version-gated ``flydsl`` package is
   importable and the device is gfx950 (the only arch the FlyDSL path supports).
-
-so ``ci/pytorch.sh`` invokes this file once and every supported backend runs;
-unsupported families collect-and-skip.
 
 Triton coverage: fp32 / fp16 / bf16 / same-format FP8 / mixed FP8 (skipped for a
 compiler bug) / MXFP8 across TN / NN / NT, plus bias / bias-grad epilogues and a
