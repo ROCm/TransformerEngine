@@ -58,6 +58,18 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 seed = 1234
 reset_rng_states()
 
+if IS_HIP_EXTENSION:
+    from utils import EnvVarCleaner
+
+    @pytest.fixture(autouse=True)
+    def reset_grouped_gemm_backend():
+        # Snapshot/restore the process-global Triton grouped-GEMM env vars so a test
+        # that sets them (and may raise before its own cleanup) cannot leak the
+        # backend into unrelated tests.
+        env = EnvVarCleaner(["NVTE_USE_BLOCKWISE_GMM_TRITON", "NVTE_USE_GROUPED_GEMM_TRITON"])
+        yield
+
+
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
@@ -300,8 +312,6 @@ def test_grouped_linear_accuracy(
         pytest.skip("Triton grouped gemm is only supported on HIP.")
     if IS_HIP_EXTENSION and dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
         pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
@@ -321,7 +331,10 @@ def test_grouped_linear_accuracy(
             )
 
     if use_triton:
-        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        if recipe is not None and recipe.float8_block_scaling():
+            os.environ["NVTE_USE_BLOCKWISE_GMM_TRITON"] = "1"
+        else:
+            os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -385,9 +398,6 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
-    if use_triton:
-        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
-
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
@@ -400,6 +410,40 @@ def test_grouped_linear_accuracy(
             rtol = 5e-2
     for o, o_ref in zip(outputs, outputs_ref):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.parametrize(
+    "in_features,out_features,expected",
+    [
+        (256, 512, True),
+        (384, 512, True),  # 384 % 128 == 0 (not a multiple of 256, still supported)
+        (192, 512, False),  # in_features not a multiple of 128
+        (256, 320, False),  # out_features not a multiple of 128
+    ],
+)
+def test_blockwise_fp8_gate_requires_128_aligned_features(
+    in_features, out_features, expected, monkeypatch
+):
+    """The forward/dgrad kernel applies one scalar B scale per 128-wide N-tile,
+    so non-128-aligned in/out features must fall back to the default path."""
+    from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+    supported = _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+        fp8=True,
+        recipe=recipe.Float8BlockScaling(),
+        use_bias=False,
+        backward_override=None,
+        cpu_offloading=False,
+        save_original_input=False,
+        debug=False,
+        unpad_output=False,
+        actual_m_splits=None,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    assert supported is expected
 
 
 @pytest.mark.skipif(
@@ -471,6 +515,12 @@ def test_grouped_linear_accuracy_rocm_backends(
         and get_device_compute_capability() != (12, 5)
     ):
         pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
+
+    if recipe is not None and recipe.float8_block_scaling():
+        # The HipKittens/CK grouped GEMM backends do not support FP8 block scaling
+        # (they abort at runtime). The blockwise path is covered by the default and
+        # Triton backends in test_grouped_linear_accuracy instead.
+        pytest.skip("HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
 
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
@@ -754,8 +804,6 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -836,8 +884,6 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -2061,6 +2107,69 @@ def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatc
     bad_out = torch.empty(num_rows + 1, out_features, dtype=dtype, device="cuda")
     with pytest.raises(ValueError):
         grouped_linear(x, m_splits, out=bad_out)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason="FP8 block scaling is unsupported.")
+def test_blockwise_fp8_weight_cache_reuse(monkeypatch):
+    """``is_first_microbatch`` caches the packed blockwise weight across microbatches.
+
+    CI never passes ``is_first_microbatch``, so the blockwise cache-hit branch is
+    otherwise unexercised. Verify that (1) the first microbatch quantizes once and
+    stores the packed weight in the single workspace slot (``weight0``), (2) later
+    microbatches reuse it with no re-quantization, (3) the reuse is numerically
+    identical to quantizing fresh, and (4) an incompatible cached workspace fails loud
+    instead of running a wrong weight.
+    """
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+
+    from transformer_engine.pytorch.triton_kernels import blockwise_quantize as _bwq
+
+    # Count quantization launches; the forward re-imports this symbol per call, so
+    # patching the source module is observed.
+    n_quant = {"count": 0}
+    _orig_quant = _bwq.quantize_fp8_blockwise_grouped_weight_qtensor
+
+    def _counting_quant(*args, **kwargs):
+        n_quant["count"] += 1
+        return _orig_quant(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _bwq, "quantize_fp8_blockwise_grouped_weight_qtensor", _counting_quant
+    )
+
+    num_gemms, in_features, out_features = 2, 256, 512
+    fp8_recipe = recipe.Float8BlockScaling()
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+
+    m_splits = [32, 32]
+    x = torch.randn(sum(m_splits), in_features, dtype=torch.bfloat16, device="cuda")
+
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_first = grouped_linear(x, m_splits, is_first_microbatch=True)
+    assert n_quant["count"] == 1, "first microbatch should quantize the weight once"
+    assert "weight0" in grouped_linear._fp8_workspaces
+    cached = grouped_linear._fp8_workspaces["weight0"]
+
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_second = grouped_linear(x, m_splits, is_first_microbatch=False)
+    assert n_quant["count"] == 1, "later microbatch should reuse the cache, not re-quantize"
+    assert grouped_linear._fp8_workspaces["weight0"] is cached
+    torch.testing.assert_close(out_second, out_first, rtol=0, atol=0)
+
+    # A live is_first_microbatch=False cache whose layout does not match the current
+    # weight must raise, not silently GEMM a wrong weight.
+    grouped_linear._fp8_workspaces["weight0"] = torch.empty(1, dtype=torch.uint8, device="cuda")
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        with pytest.raises(RuntimeError, match="Cached blockwise weight workspace"):
+            grouped_linear(x, m_splits, is_first_microbatch=False)
 
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)

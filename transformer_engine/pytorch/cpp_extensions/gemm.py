@@ -356,7 +356,14 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
-    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    # "TT" is only supported for MXFP4 (hipBLASLt ships F4F4 kernels for all four layouts); other
+    # backends (FP8/BF16/MXFP8) keep the historical TN/NN/NT restriction. For MXFP4+AITER the
+    # mxfp4_gemm branch below still rejects TT, so a TT request without hipBLASLt errors there.
+    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+
+    is_mxfp4 = isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage)
+    allowed_layouts = ("TN", "NN", "NT", "TT") if is_mxfp4 else ("TN", "NN", "NT")
+    assert layout in allowed_layouts, f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
@@ -427,21 +434,21 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: route to AITER a4w4 ASM kernels
-    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
-
+    # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
+    # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        result = mxfp4_gemm(
-            A,
-            B,
-            layout=layout,
-            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
-            bias=bias,
-            out=out,
-            grad=grad,
-            accumulate=accumulate,
-        )
-        return result, None, None, None
+        if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
+            result = mxfp4_gemm(
+                A,
+                B,
+                layout=layout,
+                out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+                bias=bias,
+                out=out,
+                grad=grad,
+                accumulate=accumulate,
+            )
+            return result, None, None, None
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # FP8 block-scaling requires split accumulator

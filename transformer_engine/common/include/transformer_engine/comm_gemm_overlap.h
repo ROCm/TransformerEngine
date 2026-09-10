@@ -206,6 +206,14 @@ class CommOverlapCore {
                                 cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void fused_overlap_bulk_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                     bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                     TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                     bool accumulate, bool use_split_accumulator,
+                                     cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -418,13 +426,22 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         cudaStream_t stream_main) override;
 
   /*
-  ** Persistent ROCm fused AllGather + GEMM implemented with hipKittens
+  ** ROCm fused AllGather + GEMM implemented with hipKittens
   */
   void fused_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main) override;
+
+  /*
+  ** ROCm fused bulk AllGather implemented with hipKittens
+  */
+  void fused_overlap_bulk_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                             bool transb, TensorWrapper &D, TensorWrapper &bias,
+                             TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                             bool accumulate, bool use_split_accumulator,
+                             cudaStream_t stream_main) override;
 
   bool is_fused() override { return _fused; }
 
