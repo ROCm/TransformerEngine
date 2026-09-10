@@ -275,6 +275,41 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 * 3 - standard asm, default;
 * 4 - rta_asm.
 
+Small-Sequence Attention in CK Backend (gfx942/gfx950)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For workloads with very short sequences (up to 17 tokens), ROCm TE provides dedicated CK small-sequence
+attention kernels that are more efficient than the general fused-attention path for these shapes.
+
+This path is part of the CK backend and is opt-in at runtime:
+
+* NVTE_FUSED_ATTN_CK_SMALLSEQ - by default 0 (disabled); set to 1 to route eligible problems through the small-seq kernels.
+
+It requires the CK backend to be enabled (NVTE_FUSED_ATTN_CK=1, the default). When enabled, a problem is
+routed to the small-seq kernels only when all of the following hold; otherwise TE transparently falls back
+to the regular CK/AITER fused-attention path:
+
+* GPU architecture is gfx942 or gfx950;
+* data type is BF16.
+* head dimension is 128 or 256, with matching Q/K and V head dimensions;
+* number of attention heads is 16 or 32, with no GQA/MQA (num_heads == num_gqa_groups);
+* no attention bias and no dropout;
+* mask type is padding mask or no mask;
+
+Both ``THD`` (variable-length, e.g. cross-attention) and ``BSHD`` (dense self-attention with s_q == s_kv)
+layouts are supported, with different sequence-length ranges:
+
+* ``THD`` — eligibility uses the **runtime** maximum sequence length per batch (from ``cu_seqlens``).
+  ``1 <= s_q <= 17`` and ``2 <= s_kv <= 17`` (``s_q = 1`` is supported for cross-attention).
+* ``BSHD`` — eligibility uses the **static** sequence length. Requires ``s_q == s_kv`` with
+  ``2 <= s_q <= 17``.
+
+When using the JAX integration, the small-seq path requires XLA GPU graph capture (command buffers) to be
+disabled, and XLA_FLAGS must be set before the process starts, for example:
+
+.. code-block:: bash
+
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' NVTE_FUSED_ATTN_CK_SMALLSEQ=1 python your_script.py
+
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm.
