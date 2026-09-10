@@ -1811,6 +1811,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+            if weight_quantizer is not None and not debug:
+                weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizer, weight_tensor
+                )
 
             if is_grad_enabled:
                 fwd_fn = _LayerNormLinear.apply
@@ -2073,13 +2077,4 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 weight_quantizer.set_usage(columnwise=False)
             else:
                 weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
-        else:
-            # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-            # This wont work when primay weights are in fp8 because of 2 reasons
-            # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-            # currently dont support dequantization.
-            # 2. For FSDP2, quantized weight all-gather would need to be done in the
-            # unswizzled layout.
-            if not self.primary_weights_in_fp8:
-                weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]

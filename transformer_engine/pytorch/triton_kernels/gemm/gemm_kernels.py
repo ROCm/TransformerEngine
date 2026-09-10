@@ -128,18 +128,24 @@ def mxfp8_matmul_kernel(
     a_ptrs = a_ptr + (offs_am[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :].to(tl.int64) * stride_bn)
 
+    # Bound the A/B data loads to M/N. Block sizes (64/128/256) need not divide M/N
+    # (MXFP8 only guarantees multiples of VEC_SIZE=32), so a fringe block would otherwise
+    # read rows >= M / cols >= N out of bounds.
+    mask_m = offs_am < M
+    mask_n = offs_bn < N
+
     # K-loop
     num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
     for k in range(num_k_blocks):
         # Load FP8 data
         if EVEN_K:
-            a = tl.load(a_ptrs)
-            b = tl.load(b_ptrs)
+            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
         else:
             k_remaining = K - k * BLOCK_SIZE_K
             mask_k = offs_k < k_remaining
-            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
-            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
 
         # Load E8M0 scales for this K-block
         # We have:

@@ -57,7 +57,13 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
-from ..tensor import Float8CurrentScalingQuantizer, Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
+from ..tensor import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -110,11 +116,15 @@ class _GroupedLinear(torch.autograd.Function):
         and be incompatible with CUDA Graphs.
 
         Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
+        * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
+          block scaling (1D/2D, including power-of-2 scales).
         * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
           per-tensor current scaling.
-        FP8 delayed scaling and FP8 block scaling are not supported because the
-        corresponding grouped quantization kernels are missing.
+        FP8 delayed scaling is not supported because the corresponding grouped
+        quantization kernels are missing. FP8 block scaling on Blackwell (SM100 and
+        SM110) raises instead of falling back: the fused path is Hopper-only and has
+        no MXFP8-broadcast emulation. Architectures outside the fused-path window
+        (e.g. SM120) fall back to the legacy path like every other recipe.
         Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
         per-tensor current scaling on Hopper); otherwise the legacy path is used.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
@@ -156,6 +166,21 @@ class _GroupedLinear(torch.autograd.Function):
                 # FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.
                 if device_capability < (10, 0) and cublaslt_version < 130500:
                     return False
+                return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block-scaling quantize kernels and cuBLASLt grouped GEMM
+                # scale modes are Hopper-only, and the fused path has no MXFP8-broadcast
+                # emulation. On Blackwell (SM100/SM110, the only other arch that reaches
+                # this branch) fail loudly rather than silently falling back to the
+                # unfused path the user explicitly opted out of.
+                if get_device_compute_capability() >= (10, 0):
+                    raise RuntimeError(
+                        "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1 does not support the"
+                        " FP8 block-scaling recipe on Blackwell GPUs: the fused grouped"
+                        " FP8 block-scaling path is Hopper-only. Unset"
+                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM to use the unfused"
+                        " path (emulated via MXFP8 GEMM on Blackwell)."
+                    )
                 return True
             # MXFP8 and NVFP4 require Blackwell+.
             if not (10, 0) <= device_capability <= (11, 0):
@@ -862,7 +887,12 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=ctx.weights_requires_grad,
             )
             grad_output_quantizer.optimize_for_gemm = True
-            if ctx.use_bias and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
+            # pass, so the fusion needs rowwise output (i.e. dgrad required).
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.requires_dgrad
+            )
+            if ctx.use_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d,
                     grad_output_quantizer,
@@ -1946,6 +1976,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_weight_quantizers,
                 grad_output_quantizers,
             ) = quantizers
+            if not debug and weight_quantizers[0] is not None:
+                # Experts share shape and recipe settings: compute once and broadcast.
+                optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizers[0], weight_tensors[0]
+                )
+                for q in weight_quantizers:
+                    q.optimize_for_gemm = optimize_for_gemm
 
             if is_grad_enabled:
                 linear_fn = _GroupedLinear.apply
@@ -2127,16 +2164,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-        # This wont work when primay weights are in fp8 because of 2 reasons
-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-        # currently dont support dequantization.
-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
-        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
-            if not self.primary_weights_in_fp8:
-                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):
