@@ -297,7 +297,21 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 
     cudaMalloc((void **)&single_in_d, single_data_size);
     cudaMalloc((void **)&single_out_d, single_out_size);
+#ifdef __HIP_PLATFORM_AMD__
+    // gfx1250's shape check needs the declared scale shape padded to a multiple of 4; over-allocate
+    // the buffer to match (padding entries are e8m0 identity and never read). Data stays compact.
+    std::vector<size_t> scale_shape_vec = {per_tensor_scales_first_dim[t],
+                                           per_tensor_scales_last_dim[t]};
+    const size_t align =
+        (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
+    scale_shape_vec = {round_up_to_nearest_multiple(scale_shape_vec[0], align),
+                       round_up_to_nearest_multiple(scale_shape_vec[1], align)};
+    const size_t alloc_scales_size = scale_shape_vec[0] * scale_shape_vec[1] * sizeof(fp8e8m0);
+    cudaMalloc((void **)&single_scales_d, alloc_scales_size);
+    cudaMemset(single_scales_d, 127, alloc_scales_size);  // fill with e8m0 identity
+#else
     cudaMalloc((void **)&single_scales_d, single_scales_size);
+#endif
 
     cudaMemcpy(single_in_d, in_data_h.data() + data_offset, single_data_size,
                cudaMemcpyHostToDevice);
@@ -307,15 +321,9 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 
     // Build single-tensor NVTETensor using TensorWrapper directly
     std::vector<size_t> single_shape = {M, K};
+#ifndef __HIP_PLATFORM_AMD__
     std::vector<size_t> scale_shape_vec = {per_tensor_scales_first_dim[t],
                                            per_tensor_scales_last_dim[t]};
-#ifdef __HIP_PLATFORM_AMD__
-    // gfx1250's single-tensor dequantize shape check expects the declared scale shape padded to a
-    // multiple of 4; grouped member buffers stay compact, so only the reference's shape is padded.
-    const size_t align =
-        (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
-    scale_shape_vec = {round_up_to_nearest_multiple(scale_shape_vec[0], align),
-                       round_up_to_nearest_multiple(scale_shape_vec[1], align)};
 #endif
 
     TensorWrapper input_w(NVTE_MXFP8_1D_SCALING);
