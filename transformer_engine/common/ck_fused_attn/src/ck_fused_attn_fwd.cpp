@@ -344,7 +344,8 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
     }
   }
 #if FA_WITH_SINK
-  if(args.h <= kSinkBufMaxHeads && QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
+  if (args.uses_fwd_v3 && args.h <= kSinkBufMaxHeads &&
+      QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
     fmha_args.sink_ptr = get_gfx1250_sink_buf(device_for_stream(stream));
   }
 #endif
