@@ -1,3 +1,7 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
     using ST_A = st_bf<HALF_ROW, K_STEP, st_16x32_s>;
     using ST_B = st_bf<HALF_COL, K_STEP, st_16x32_s>;
     using RT_A = rt_bf<REG_M, K_STEP, row_l, rt_16x32_s>;

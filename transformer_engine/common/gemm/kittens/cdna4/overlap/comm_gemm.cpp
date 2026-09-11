@@ -217,6 +217,38 @@ int gath_wg_bulk(int k, int tp_size) {
     return GATH_WG;
 }
 
+// MXFP8 sibling of gath_wg_bulk. The thresholds are identical to the bf16 ones, and that is the
+// measured result rather than an inheritance: the ~2x MFMA rate does not shift this balance on its
+// own, because the gathered tensor is MXFP8 too and the comm side halves with it (chunk_bytes is
+// m_local*N_TOTAL*1B against 2B for bf16). Both sides of the balance move together.
+//
+// k is the dgrad GEMM's reduction depth (out_local), not hidden -- the gather moves m*N_TOTAL
+// bytes while the GEMM does 2*m*N_TOTAL*k flops, so flops/byte is proportional to k alone and
+// neither m nor N_TOTAL belongs in the gate.
+//
+// Measured, 288-run sweep on MI350X (gfx950, TP=8, min-of-2, 24 shapes x widths {1,2,4,6,8,12},
+// bench_bulk_mxfp8.py). Geomean total time vs the width this function returns, per k-regime,
+// where * marks that returned width:
+//
+//     k              g=1     g=2     g=4     g=6     g=8     g=12
+//     768, 1280     0.327   0.574   0.880   0.994   1.000*  0.908
+//     2304, 3584    0.405   0.701   0.972   0.990   0.965   0.889
+//     7168, 13312   0.825   1.000*  1.002   0.996   0.987   0.934
+//
+// The best alternative anywhere is +0.2% (k>=7168 at g=4) against a 1.0% median run-to-run spread,
+// so nothing here is resolvable. Widths above 8 lose in every regime, so the optimum is interior
+// and the search bracketed it. Starving the gather is what actually costs: g=1 gives up 17-67%.
+//
+// Kept separate from gath_wg_bulk despite the identical values, so that retuning bf16 cannot
+// silently move MXFP8, and so the next reader can see this was measured rather than assumed.
+int gath_wg_mxfp8_bulk(int k, int tp_size) {
+    if (tp_size != 8) return GATH_WG;
+    if (k >= 7168) return 2;
+    if (k >= 3584) return 4;
+    if (k >= 2304) return 6;
+    return GATH_WG;
+}
+
 template <typename TD>
 bool upload_plan(AgPlan &plan, const std::vector<TD> &queue) {
     const size_t bytes = queue.size() * sizeof(TD);
@@ -408,9 +440,10 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     using kittens::bf16;
     using kittens::fp8e4m3;
 
-    // Both mxfp8 kernels step K by 128; K_STEP stays with the kernels because the bf16 pair steps 64.
-    constexpr int K_STEP = hk_mxfp8_ag_tn::K_STEP;
-    static_assert(K_STEP == hk_mxfp8_ag_nn::K_STEP, "mxfp8 TN/NN must agree on K_STEP");
+    // Both mxfp8 kernels step K by 128; the step stays with the kernels because the bf16 pair
+    // steps 64. Both spell it BLOCK_K, following mxfp8_gemm.cpp.
+    constexpr int BLOCK_K = hk_mxfp8_ag_tn::BLOCK_K;
+    static_assert(BLOCK_K == hk_mxfp8_ag_nn::BLOCK_K, "mxfp8 TN/NN must agree on the K step");
 
     const int M       = args.n;
     const int N_TOTAL = args.m;
@@ -420,7 +453,7 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     const int tiles_m = M / BLOCK_ROW;
     const int tiles_n = N_TOTAL / BLOCK_COL;
 
-    const int k_iters = K / K_STEP;
+    const int k_iters = K / BLOCK_K;
     int scale_K = K / 32;
 
     // The scale region is sized in CommOverlapP2PBase::initialize; bail out rather than read
@@ -710,7 +743,7 @@ bool run_bulk_mxfp8(const KittensAgGemmArgs &args) {
     using kittens::bf16;
     using kittens::fp8e4m3;
 
-    constexpr int K_STEP = hk_mxfp8_ag_nn::K_STEP;
+    constexpr int BLOCK_K = hk_mxfp8_ag_nn::BLOCK_K;
 
     const int M       = args.n;
     const int N_TOTAL = args.m;
@@ -719,7 +752,7 @@ bool run_bulk_mxfp8(const KittensAgGemmArgs &args) {
     const int m_local = M / tp_size;
     const int tiles_m = M / BLOCK_ROW;
     const int tiles_n = N_TOTAL / BLOCK_COL;
-    const int k_iters = K / K_STEP;
+    const int k_iters = K / BLOCK_K;
     const int scale_K = K / 32;
 
     // Same 16B-alignment requirement as the fused path, for the same reason: it is what lets
@@ -822,8 +855,8 @@ bool run_bulk_mxfp8(const KittensAgGemmArgs &args) {
         static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter,
         peers, static_cast<char *>(args.gather_dst), arrive, args.rank, tp_size,
-        gath_wg_bulk(K, tp_size), m_local, args.chunk_bytes, plan.xcd_bucket, buckets, bucket_ctr,
-        args.stream);
+        gath_wg_mxfp8_bulk(K, tp_size), m_local, args.chunk_bytes, plan.xcd_bucket, buckets,
+        bucket_ctr, args.stream);
     return hipGetLastError() == hipSuccess;
 }
 

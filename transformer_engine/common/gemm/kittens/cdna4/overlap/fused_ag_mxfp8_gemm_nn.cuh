@@ -20,13 +20,15 @@ using namespace hk_overlap;
 // Per-PE pointer to each peer's [M,K] A buffer.
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
 
+using G = kittens::group<NUM_WARPS>;
+
 struct TileDesc {
     int chunk_id;
     int tile_m;
     int tile_n;
 };
 
-constexpr int K_STEP = 128;
+constexpr int BLOCK_K = 128;
 
 // MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
 // backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
@@ -152,7 +154,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const int K       = A.cols();
     // NN: B is [K, N_TOTAL], so the N extent is the column count (TN reads B.rows()).
     const int N_TOTAL = B.cols();
-    const int k_tiles = K / K_STEP;
+    const int k_iters = K / BLOCK_K;
 #include "mxfp8_nn_prologue.inc"
 
     const int NGATH = (tp_size - 1) * gath_wg;
@@ -173,7 +175,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
                           "scale_A_smem too small to stage KPP=2 scale tiles");
             gather_all_plus_scales<1, true>(
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
-                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_tiles,
+                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_iters,
                 reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
@@ -221,6 +223,11 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int b_half0 = block_col * 2;
         int b_half1 = b_half0 + 1;
 
+        int sa_stride = tiles_M;
+        int sb_stride = tiles_N;
+        int sa_batch = block_row;
+        int sb_batch = block_col;
+
         RT_A a;
         RT_B b0, b1;
         RT_C cA, cB, cC, cD;
@@ -229,23 +236,23 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int tic = 0, toc = 1;
         int tic_scales = 0, toc_scales = 1;
 
-        G_group::load(Bs[tic][0], B, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G_group::load(As[tic][0], A, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-        G_group::load(Bs[tic][1], B, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G_group::load(As[tic][1], A, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+        G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
+        G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
+        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G_group::load(As[toc][0], A, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-        G_group::load(Bs[toc][0], B, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G_group::load(Bs[toc][1], B, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
+        G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
+        G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G_group::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
-        G_group::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
-        G_group::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
+        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
+        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
+        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -253,115 +260,6 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         if (warp_m == 1) __builtin_amdgcn_s_barrier();
 
         #include "mxfp8_nn_mainloop.inc"
-
-        { // Epilogue k = k_tiles - 2
-            int k = k_tiles - 2;
-            if (k + 1 < k_tiles) {
-                G_group::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-                G_group::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * tiles_N + block_col),     0, 0, 0});
-                G_group::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * tiles_N + block_col) + 1, 0, 0, 0});
-            }
-            asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM: last prefetch iteration
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_barrier();
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
-
-            kittens::load(b0, Bs[tic][0], b_col_off);
-            auto as0 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][0], {warp_m, 0});
-            kittens::load(a, as0);
-            G_group::load(As[toc][1], A, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)"); // need as0/b0 in registers for mma_A
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            kittens::load(b1, Bs[tic][1], b_col_off);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)"); // need b1 in registers for mma_B
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            auto as1 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][1], {warp_m, 0});
-            kittens::load(a, as1);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)"); // need as1 in registers for mma_C
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            kittens::load(b0, Bs[toc][0], b_col_off);
-            asm volatile("s_waitcnt vmcnt(4)"); // wait for toc data; As[toc][1] still in flight
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            tic ^= 1; toc ^= 1;
-            tic_scales ^= 1; toc_scales ^= 1;
-        }
-
-        { // Final epilogue k = k_tiles - 1
-            asm volatile("s_waitcnt vmcnt(0)");
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_barrier();
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
-
-            auto as0 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][0], {warp_m, 0});
-            kittens::load(a, as0);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            kittens::load(b1, Bs[tic][1], b_col_off);
-            asm volatile("s_waitcnt vmcnt(0)");
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            auto as1 = kittens::subtile_inplace<REG_M, K_STEP>(As[tic][1], {warp_m, 0});
-            kittens::load(a, as1);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(2);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-            kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        }
-
-        // Closes the warp_m skew opened by the prologue so the next queue tile starts even.
-        if (warp_m == 0) {
-            __builtin_amdgcn_s_barrier();
-        }
 
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
 
@@ -418,7 +316,7 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
-    const int k_iters = K / K_STEP;
+    const int k_iters = K / BLOCK_K;
 
     gl<fp8e4m3, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M, (size_t)K);
     // NN: B is [K, N_TOTAL] (TN passes (N_TOTAL, K)).
