@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import sys
 from typing import Optional
 
 import torch
@@ -284,6 +285,81 @@ def _grouped_mxfp4_persistent_gemm_kernel(
         tl.store(C_, c, c_mask)
 
 
+# ###########################################################################
+#  Optional launch-param autotuning (env-gated; default off = fixed configs).
+#  NVTE_MXFP4_AUTOTUNE=1 sweeps a few (BLOCK_K, num_warps, num_stages,
+#  waves_per_eu) configs once per shape and caches the fastest (measured with
+#  triton.testing.do_bench). BLOCK_K is a reduction-loop tile, so varying it does
+#  not change the grid. (kpack is deprecated on gfx950 and coerced to 1.)
+# ###########################################################################
+
+_MXFP4_AUTOTUNE = bool(int(os.environ.get("NVTE_MXFP4_AUTOTUNE", "0")))
+# When set, print the winning (BLOCK_K, num_warps, num_stages, waves_per_eu) per shape.
+_MXFP4_AUTOTUNE_VERBOSE = bool(int(os.environ.get("NVTE_MXFP4_AUTOTUNE_VERBOSE", "0")))
+
+# (BLOCK_K, num_warps, num_stages, waves_per_eu); index 0 = current default.
+_FWD_CONFIGS = [
+    (128, 8, 2, 0),
+    (128, 8, 3, 2),
+    (128, 8, 4, 2),
+    (128, 4, 2, 0),
+    (256, 8, 2, 0),
+    (256, 8, 3, 2),
+]
+_VARK_CONFIGS = [
+    (128, 8, 3, 2),
+    (128, 8, 2, 0),
+    (128, 8, 4, 2),
+    (128, 4, 3, 2),
+    (128, 8, 3, 0),
+    (256, 8, 2, 0),
+    (256, 8, 3, 2),
+]
+_fwd_tune_cache: dict = {}
+_vark_tune_cache: dict = {}
+
+
+def _resolve_config(cache, configs, key, launch, valid, label=""):
+    """Return the fastest valid config for ``key``, tuning ``launch`` once if needed.
+
+    ``launch(cfg)`` runs the kernel into a benchmarking buffer; ``valid(cfg)``
+    filters configs that don't fit the shape. Autotune off (or a cache hit) returns
+    without benchmarking; the default is ``configs[0]`` (unchanged behavior).
+    """
+    if not _MXFP4_AUTOTUNE:
+        return configs[0]
+    best = cache.get(key)
+    if best is None:
+        import triton.testing  # only needed when tuning
+
+        best_t = float("inf")
+        best = configs[0]
+        for cfg_try in configs:
+            if not valid(cfg_try):
+                continue
+            try:
+                t = float(triton.testing.do_bench(lambda cfg=cfg_try: launch(cfg)))
+            except Exception:  # a config the compiler rejects -> skip it
+                continue
+            if t < best_t:
+                best_t, best = t, cfg_try
+        cache[key] = best
+        if _MXFP4_AUTOTUNE_VERBOSE:
+            print(
+                f"[mxfp4-autotune] {label} shape={key} -> "
+                f"(BLOCK_K, num_warps, num_stages, waves_per_eu)={best} "
+                f"({best_t:.4f} ms)",
+                file=sys.stderr,
+                flush=True,
+            )
+    return best
+
+
+def _autotune_launch(cache, configs, key, launch, valid, label=""):
+    """Tune (if enabled) then launch the winning config into the caller's output."""
+    launch(_resolve_config(cache, configs, key, launch, valid, label))
+
+
 @_scoped_amd_knobs
 def grouped_gemm_mxfp4_triton_kernel(
     a,
@@ -312,7 +388,7 @@ def grouped_gemm_mxfp4_triton_kernel(
     a_u8 = a.view(torch.uint8)
     b_u8 = b.view(torch.uint8)
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(a.device).multi_processor_count
-    BM, BN, BK = 256, 256, 128
+    BM, BN = 256, 256
     m_alloc = a.shape[0]
     avg_m = max(m_alloc // max(G, 1), 1)
     tiles_n = (N + BN - 1) // BN
@@ -320,44 +396,55 @@ def grouped_gemm_mxfp4_triton_kernel(
     total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
     num_sms = min(total_tiles, cu)
     chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
-    grid = (num_sms,)
-    _grouped_mxfp4_persistent_gemm_kernel[grid](
-        a_u8,
-        b_u8,
-        c,
-        a_s,
-        b_s,
-        group_offs,
-        group_offs_out,
-        G,
-        N,
-        K,
-        a_u8.stride(0),
-        a_u8.stride(1),
-        b_u8.stride(0),
-        b_u8.stride(1),
-        b_u8.stride(2),
-        c.stride(0),
-        c.stride(1),
-        a_s.stride(0),  # stride_asm (M);   a_s is (total_M, K/32)
-        a_s.stride(1),  # stride_ask (K/32 contiguous)
-        b_s.stride(0),  # stride_bsg
-        b_s.stride(1),  # stride_bsn (N);   b_s is (G, N, K/32)
-        b_s.stride(2),  # stride_bsk (K/32 contiguous)
-        BLOCK_SIZE_M=BM,
-        BLOCK_SIZE_N=BN,
-        BLOCK_SIZE_K=BK,
-        GROUP_SIZE_M=GM,
-        NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=chunk,
-        CACHE_MODIFIER=".ca",
-        VEC=VEC_SIZE,
-        num_warps=8,
-        num_stages=2,
-        waves_per_eu=0,
-        matrix_instr_nonkdim=16,
-        kpack=1,
+
+    def _launch(cfg):
+        bk, nw, ns, wpe = cfg
+        _grouped_mxfp4_persistent_gemm_kernel[(num_sms,)](
+            a_u8,
+            b_u8,
+            c,
+            a_s,
+            b_s,
+            group_offs,
+            group_offs_out,
+            G,
+            N,
+            K,
+            a_u8.stride(0),
+            a_u8.stride(1),
+            b_u8.stride(0),
+            b_u8.stride(1),
+            b_u8.stride(2),
+            c.stride(0),
+            c.stride(1),
+            a_s.stride(0),  # stride_asm (M);   a_s is (total_M, K/32)
+            a_s.stride(1),  # stride_ask (K/32 contiguous)
+            b_s.stride(0),  # stride_bsg
+            b_s.stride(1),  # stride_bsn (N);   b_s is (G, N, K/32)
+            b_s.stride(2),  # stride_bsk (K/32 contiguous)
+            BLOCK_SIZE_M=BM,
+            BLOCK_SIZE_N=BN,
+            BLOCK_SIZE_K=bk,
+            GROUP_SIZE_M=GM,
+            NUM_SMS=num_sms,
+            NUM_XCDS=NUM_XCDS,
+            CHUNK_SIZE=chunk,
+            CACHE_MODIFIER=".ca",
+            VEC=VEC_SIZE,
+            num_warps=nw,
+            num_stages=ns,
+            waves_per_eu=wpe,
+            matrix_instr_nonkdim=16,
+            kpack=1,
+        )
+
+    _autotune_launch(
+        _fwd_tune_cache,
+        _FWD_CONFIGS,
+        (m_alloc, N, K, G),
+        _launch,
+        lambda cfg: K % cfg[0] == 0,
+        label="fwd",
     )
     return c
 
@@ -499,48 +586,80 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
     l_u8 = lhs.view(torch.uint8)
     r_u8 = rhs.view(torch.uint8)
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(lhs.device).multi_processor_count
-    BM, BN, BK = 256, 128, 128
+    BM, BN = 256, 128
     tiles_m = (OUT_M + BM - 1) // BM
     tiles_n = (OUT_N + BN - 1) // BN
     GM = 8 if min(tiles_m, tiles_n) < 16 else 4
     total_tiles = G * tiles_m * tiles_n
     num_sms = min(total_tiles, cu)
     chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
-    _grouped_mxfp4_variable_k_gemm_kernel[(num_sms,)](
-        l_u8,
-        r_u8,
-        c,
-        ls,
-        rs,
-        go_pad,
-        G,
-        OUT_M,
-        OUT_N,
-        l_u8.stride(0),
-        l_u8.stride(1),
-        r_u8.stride(0),
-        r_u8.stride(1),
-        c.stride(0),
-        c.stride(1),
-        c.stride(2),
-        ls.stride(0),  # stride_lsm (OUT_M); ls is (OUT_M, M/32)
-        ls.stride(1),  # stride_lsk (M/32 contiguous)
-        rs.stride(0),  # stride_rsm (OUT_N); rs is (OUT_N, M/32)
-        rs.stride(1),  # stride_rsk (M/32 contiguous)
-        BLOCK_SIZE_M=BM,
-        BLOCK_SIZE_N=BN,
-        BLOCK_SIZE_K=BK,
-        GROUP_SIZE_M=GM,
-        NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
-        CHUNK_SIZE=chunk,
-        CACHE_MODIFIER=".ca",
-        VEC=VEC_SIZE,
-        ACCUMULATE=accumulate,
-        num_warps=8,
-        num_stages=3,
-        waves_per_eu=2,
-        matrix_instr_nonkdim=16,
-        kpack=1,
-    )
+
+    def _launch(cfg, c_out=c):
+        bk, nw, ns, wpe = cfg
+        _grouped_mxfp4_variable_k_gemm_kernel[(num_sms,)](
+            l_u8,
+            r_u8,
+            c_out,
+            ls,
+            rs,
+            go_pad,
+            G,
+            OUT_M,
+            OUT_N,
+            l_u8.stride(0),
+            l_u8.stride(1),
+            r_u8.stride(0),
+            r_u8.stride(1),
+            c_out.stride(0),
+            c_out.stride(1),
+            c_out.stride(2),
+            ls.stride(0),  # stride_lsm (OUT_M); ls is (OUT_M, M/32)
+            ls.stride(1),  # stride_lsk (M/32 contiguous)
+            rs.stride(0),  # stride_rsm (OUT_N); rs is (OUT_N, M/32)
+            rs.stride(1),  # stride_rsk (M/32 contiguous)
+            BLOCK_SIZE_M=BM,
+            BLOCK_SIZE_N=BN,
+            BLOCK_SIZE_K=bk,
+            GROUP_SIZE_M=GM,
+            NUM_SMS=num_sms,
+            NUM_XCDS=NUM_XCDS,
+            CHUNK_SIZE=chunk,
+            CACHE_MODIFIER=".ca",
+            VEC=VEC_SIZE,
+            ACCUMULATE=accumulate,
+            num_warps=nw,
+            num_stages=ns,
+            waves_per_eu=wpe,
+            matrix_instr_nonkdim=16,
+            kpack=1,
+        )
+
+    # A vark config is valid only if its BLOCK_K divides every padded group length
+    # (the reduction loop is unmasked); guard 256 against 128-only padding.
+    if _MXFP4_AUTOTUNE:
+        _lens = [b - a for a, b in zip(go_pad.tolist(), go_pad[1:].tolist())]
+        valid = lambda cfg: all(n % cfg[0] == 0 for n in _lens)
+    else:
+        valid = lambda cfg: True
+    key = (OUT_M, OUT_N, G, lhs.shape[1])
+
+    if out is None:
+        # Fresh output: safe for do_bench to overwrite it directly.
+        _autotune_launch(_vark_tune_cache, _VARK_CONFIGS, key, _launch, valid, label="wgrad")
+    else:
+        # Caller buffer (accumulate into e.g. main_grad): do_bench would re-run the
+        # beta=1 kernel into `out` every warmup/timing rep, so tune on a scratch
+        # buffer (never during CUDA-graph capture), then do the real accumulate into
+        # `out` (primus-turbo grouped_gemm_fp4_variable_k_accum_impl pattern).
+        cfg = _VARK_CONFIGS[0]
+        if _MXFP4_AUTOTUNE:
+            if key in _vark_tune_cache:
+                cfg = _vark_tune_cache[key]
+            elif not torch.cuda.is_current_stream_capturing():
+                scratch = torch.zeros_like(out)
+                cfg = _resolve_config(
+                    _vark_tune_cache, _VARK_CONFIGS, key,
+                    lambda cfg_try: _launch(cfg_try, scratch), valid, label="wgrad",
+                )
+        _launch(cfg, out)
     return c

@@ -32,6 +32,7 @@ MX (``use_hadamard=False``) and returns a fresh weight-gradient tensor.
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -47,6 +48,10 @@ from .grouped_gemm_mxfp4 import (
 
 # Logical contraction tile the kernels step by (see grouped_gemm_mxfp4.py).
 BLOCK_SIZE_K = 128
+# Per-group wgrad M padding multiple; must be >= the largest wgrad BLOCK_K the
+# kernel may pick. 256 lets the variable-K autotune try BLOCK_K=256 (at the cost
+# of more padding for small groups). Default 128 = unchanged behavior.
+WGRAD_PAD_MULTIPLE = int(os.environ.get("NVTE_MXFP4_WGRAD_PAD", str(BLOCK_SIZE_K)))
 # One E8M0 scale per 32-element block.
 MXFP4_BLOCK = 32
 
@@ -142,11 +147,56 @@ def _col_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return data, scale
 
 
+def _row_col_operand(
+    x: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One cast_transpose: MXFP4 row-wise *and* col-wise from a single quantize.
+
+    ``x`` [M, F] -> (row_data [M, F/2], row_scale [M, F/32], col_data [F, M/2],
+    col_scale [F, M/32]), all ``uint8``. Lets a caller that needs both layouts of
+    the same tensor (e.g. a weight consumed row-wise by fprop and col-wise by
+    dgrad) pay the transpose-quant once instead of twice. Both dims are padded to
+    a 32-multiple for the quantizer and sliced back.
+    """
+    M, Feat = x.shape
+    M_pad = round_up_to_nearest_multiple(M, MXFP4_BLOCK)
+    Feat_pad = round_up_to_nearest_multiple(Feat, MXFP4_BLOCK)
+    if M_pad != M or Feat_pad != Feat:
+        x = F.pad(x.contiguous(), (0, Feat_pad - Feat, 0, M_pad - M))
+    q = _quantizer(rowwise=True, columnwise=True).quantize(x.contiguous())
+    row_data = q._rowwise_data.view(torch.uint8)[:M, : Feat // 2]
+    row_scale = q._rowwise_scale_inv[:M, : Feat // MXFP4_BLOCK].contiguous()
+    col_data = q._columnwise_data.view(torch.uint8)[:Feat, : M // 2]
+    col_scale = q._columnwise_scale_inv[:Feat, : M // MXFP4_BLOCK].contiguous()
+    return row_data, row_scale, col_data, col_scale
+
+
+def _quantize_weights_row_col(
+    weights: Sequence[torch.Tensor],
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    """Per-expert weight cast_transpose once -> stacked row and col MXFP4 operands.
+
+    Returns ``((row_data [G,N,K/2], row_scale [G,N,K/32]),
+    (col_data [G,K,N/2], col_scale [G,K,N/32]))`` -- row for fprop, col for dgrad,
+    both from a single quantize per expert.
+    """
+    rows_d, rows_s, cols_d, cols_s = [], [], [], []
+    for w in weights:
+        rd, rs, cd, cs = _row_col_operand(w)
+        rows_d.append(rd)
+        rows_s.append(rs)
+        cols_d.append(cd)
+        cols_s.append(cs)
+    row = (torch.stack(rows_d, dim=0), torch.stack(rows_s, dim=0))
+    col = (torch.stack(cols_d, dim=0), torch.stack(cols_s, dim=0))
+    return row, col
+
+
 def _col_operand_grouped_padded(
     x: torch.Tensor,
     m_splits: Sequence[int],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Per-group col-wise MXFP4 with each group's M padded to BLOCK_SIZE_K.
+    """Per-group col-wise MXFP4 with each group's M padded to WGRAD_PAD_MULTIPLE.
 
     ``x`` [total_M, F] grouped along M -> (data [F, total_pad/2] u8,
     scale [F, total_pad/32] u8, go_pad [G+1] int64). Padding rows are zeros, so
@@ -161,7 +211,7 @@ def _col_operand_grouped_padded(
         m = int(m)
         xg = x[start : start + m]
         start += m
-        m_pad = round_up_to_nearest_multiple(m, BLOCK_SIZE_K)
+        m_pad = round_up_to_nearest_multiple(m, WGRAD_PAD_MULTIPLE)
         if m_pad != m:
             xg = F.pad(xg, (0, 0, 0, m_pad - m))
         data, scale = _col_operand(xg)  # (F, m_pad/2), (F, m_pad/32)
@@ -181,6 +231,7 @@ def grouped_gemm_mxfp4_fprop(
     *,
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
+    weight_row: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Grouped MXFP4 forward: ``C[g] = A[g] @ W[g]^T`` (contract K).
 
@@ -188,25 +239,33 @@ def grouped_gemm_mxfp4_fprop(
         a: [total_M, K] activations, grouped along M by ``m_splits``.
         weights: list of G per-expert weight tensors, each [N, K].
         m_splits: per-group token counts (len G).
+        weight_row: optional pre-quantized row-wise weights
+            ``(data [G, N, K/2], scale [G, N, K/32])`` -- skips the weight cast
+            (e.g. shared with dgrad's col-wise cast, see ``_quantize_weights_row_col``).
 
     Returns:
         [total_M, N] output in ``out_dtype``.
     """
     K = a.shape[1]
-    N = weights[0].shape[0]
     _require_gfx950()
     _check_contract(K, "K")
-    _check_splits(m_splits, a.shape[0], len(weights))
+
+    if weight_row is not None:
+        b_data, b_scale = weight_row
+        N = b_data.shape[1]
+        _check_splits(m_splits, a.shape[0], b_data.shape[0])
+    else:
+        N = weights[0].shape[0]
+        _check_splits(m_splits, a.shape[0], len(weights))
+        b_datas, b_scales = [], []
+        for w in weights:
+            d, s = _row_operand(w)  # (N, K/2), (N, K/32)
+            b_datas.append(d)
+            b_scales.append(s)
+        b_data = torch.stack(b_datas, dim=0)  # (G, N, K/2)
+        b_scale = torch.stack(b_scales, dim=0)  # (G, N, K/32)
 
     a_data, a_scale = _row_operand(a)  # (total_M, K/2), (total_M, K/32)
-    b_datas, b_scales = [], []
-    for w in weights:
-        d, s = _row_operand(w)  # (N, K/2), (N, K/32)
-        b_datas.append(d)
-        b_scales.append(s)
-    b_data = torch.stack(b_datas, dim=0)  # (G, N, K/2)
-    b_scale = torch.stack(b_scales, dim=0)  # (G, N, K/32)
-
     group_offs = _prefix_offsets(m_splits, a.device)
     return grouped_gemm_mxfp4_triton_kernel(
         a_data,
@@ -224,11 +283,12 @@ def grouped_gemm_mxfp4_fprop(
 
 def grouped_gemm_mxfp4_dgrad(
     grad_out: torch.Tensor,
-    weights: List[torch.Tensor],
+    weights: Optional[List[torch.Tensor]],
     m_splits: Sequence[int],
     *,
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
+    weight_col: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Grouped MXFP4 dgrad: ``dA[g] = gradO[g] @ W[g]`` (contract N).
 
@@ -238,26 +298,36 @@ def grouped_gemm_mxfp4_dgrad(
 
     Args:
         grad_out: [total_M, N] output gradient, grouped along M by ``m_splits``.
-        weights: list of G per-expert weight tensors, each [N, K].
+        weights: list of G per-expert weight tensors, each [N, K]. May be ``None``
+            when ``weight_col`` supplies the pre-quantized weights.
+        weight_col: optional pre-quantized col-wise weights
+            ``(data [G, K, N/2], scale [G, K, N/32])`` -- skips the weight cast
+            (e.g. shared with fprop's row-wise cast, see ``_quantize_weights_row_col``).
 
     Returns:
         [total_M, K] input gradient in ``out_dtype``.
     """
     N = grad_out.shape[1]
-    K = weights[0].shape[1]
     _require_gfx950()
     _check_contract(N, "N")
-    _check_splits(m_splits, grad_out.shape[0], len(weights))
+
+    if weight_col is not None:
+        b_data, b_scale = weight_col
+        K = b_data.shape[1]
+        _check_splits(m_splits, grad_out.shape[0], b_data.shape[0])
+    else:
+        assert weights is not None, "dgrad needs weights or weight_col"
+        K = weights[0].shape[1]
+        _check_splits(m_splits, grad_out.shape[0], len(weights))
+        b_datas, b_scales = [], []
+        for w in weights:
+            d, s = _col_operand(w)  # (K, N/2), (K, N/32)
+            b_datas.append(d)
+            b_scales.append(s)
+        b_data = torch.stack(b_datas, dim=0)  # (G, K, N/2)
+        b_scale = torch.stack(b_scales, dim=0)  # (G, K, N/32)
 
     go_data, go_scale = _row_operand(grad_out)  # (total_M, N/2), (total_M, N/32)
-    b_datas, b_scales = [], []
-    for w in weights:
-        d, s = _col_operand(w)  # (K, N/2), (K, N/32)
-        b_datas.append(d)
-        b_scales.append(s)
-    b_data = torch.stack(b_datas, dim=0)  # (G, K, N/2)
-    b_scale = torch.stack(b_scales, dim=0)  # (G, K, N/32)
-
     group_offs = _prefix_offsets(m_splits, grad_out.device)
     # Kernel free dim = b.shape[-2] = K; kernel contraction = b.shape[-1]*2 = N.
     return grouped_gemm_mxfp4_triton_kernel(
@@ -328,29 +398,34 @@ def grouped_gemm_mxfp4_wgrad(
 class _GroupedGemmMXFP4Func(torch.autograd.Function):
     """Autograd for grouped MXFP4 linear: ``out[g] = a[g] @ weight[g]^T``.
 
-    Forward/backward pair the MXFP4 recipe exactly (fprop / dgrad / wgrad). Each
-    op quantizes its own operands independently; sharing the quantization across
-    the three passes is a future optimization.
+    The weight is cast_transposed once in forward (``_quantize_weights_row_col``):
+    the row-wise layout feeds fprop and the col-wise layout is stashed for dgrad,
+    so the weight quant is paid once per step instead of twice. Activation and
+    grad_out still cast per pass -- their col layouts are per-group padded for the
+    variable-K wgrad reduction, so they don't share with the un-padded row cast.
     """
 
     @staticmethod
     def forward(ctx, a, weight, m_splits):
+        weights = list(torch.unbind(weight, dim=0))
+        w_row, w_col = _quantize_weights_row_col(weights)
         out = grouped_gemm_mxfp4_fprop(
-            a, list(torch.unbind(weight, dim=0)), m_splits, out_dtype=a.dtype
+            a, weights, m_splits, out_dtype=a.dtype, weight_row=w_row
         )
-        ctx.save_for_backward(a, weight)
+        ctx.save_for_backward(a, weight, w_col[0], w_col[1])
         ctx.m_splits = m_splits
         return out
 
     @staticmethod
     def backward(ctx, grad_out):
-        a, weight = ctx.saved_tensors
+        a, weight, w_col_data, w_col_scale = ctx.saved_tensors
         m_splits = ctx.m_splits
         grad_out = grad_out.contiguous()
         grad_a = grad_weight = None
         if ctx.needs_input_grad[0]:
             grad_a = grouped_gemm_mxfp4_dgrad(
-                grad_out, list(torch.unbind(weight, dim=0)), m_splits, out_dtype=a.dtype
+                grad_out, None, m_splits, out_dtype=a.dtype,
+                weight_col=(w_col_data, w_col_scale),
             )
         if ctx.needs_input_grad[1]:
             grad_weight = grouped_gemm_mxfp4_wgrad(a, grad_out, m_splits, out_dtype=weight.dtype)
