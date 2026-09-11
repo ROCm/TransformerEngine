@@ -27,9 +27,11 @@ FP4 packing notes:
     loads a (K/32, free) tile (coalesced) and transposes it back in-reg for
     tl.dot_scaled.
 
-Only EVEN contraction (a multiple of BLOCK_SIZE_K = 128 logical elements) is
-supported; the FP4 quantizer pads K to 128 and the MX wrapper pads per-group M
-to 128, so this always holds in practice.
+The reduction loop is unmasked, so the contraction must be a multiple of the
+autotuned BLOCK_K (128 or 256). This always holds: fprop/dgrad require the
+contraction K to be a multiple of 128 (enforced in the impl), the wgrad per-group
+M is padded to a 128-multiple, and config pruning only selects BLOCK_K=256 when
+the contraction is also 256-divisible.
 """
 
 from __future__ import annotations
@@ -362,7 +364,7 @@ def grouped_gemm_mxfp4_triton_kernel(
 
     group_offs:     read offsets along M for A / A_scale.
     group_offs_out: write offsets along M for C (defaults to group_offs).
-    K is the logical contraction size (must be a multiple of BLOCK_SIZE_K=128).
+    K is the logical contraction size (must be a multiple of 128).
     """
     if group_offs_out is None:
         group_offs_out = group_offs
