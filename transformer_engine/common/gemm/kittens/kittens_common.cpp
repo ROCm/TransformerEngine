@@ -4,13 +4,15 @@
 *************************************************************************/
 
 #include "hip/hip_runtime.h"
-#include "fused_ag_gemm.h"
+#include "comm_gemm.h"
 #include "kittens_common.h"
 
 #ifdef KITTENS_HAVE_CDNA4
-bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args);
-bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args);
-void kittens_fused_ag_gemm_reset_cdna4();
+bool kittens_fused_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args);
+bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args);
+bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args);
+bool kittens_bulk_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args);
+void kittens_persistent_plans_reset_cdna4();
 #endif
 
 bool kittens_fused_ag_gemm_supported(int sm_arch) {
@@ -23,13 +25,13 @@ bool kittens_fused_ag_gemm_supported(int sm_arch) {
     return false;
 }
 
-void kittens_fused_ag_gemm_reset() {
+void kittens_comm_gemm_reset() {
 #ifdef KITTENS_HAVE_CDNA4
-    kittens_fused_ag_gemm_reset_cdna4();
+    kittens_persistent_plans_reset_cdna4();
 #endif
 }
 
-bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args) {
+bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args) {
 #ifdef KITTENS_HAVE_CDNA4
     return kittens_fused_ag_gemm_bf16_cdna4(args);
 #else
@@ -38,9 +40,27 @@ bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args) {
 #endif
 }
 
-bool kittens_bulk_ag_gemm_bf16(const KittensFusedAgGemmArgs &args) {
+bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_fused_ag_gemm_mxfp8_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
+
+bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args) {
 #ifdef KITTENS_HAVE_CDNA4
     return kittens_bulk_ag_gemm_bf16_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
+
+bool kittens_bulk_ag_gemm_mxfp8(const KittensAgGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_bulk_ag_gemm_mxfp8_cdna4(args);
 #else
     static_cast<void>(args);
     return false;

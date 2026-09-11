@@ -319,6 +319,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _prev_rank;
   int _rank_round_tp;
   int _num_ubuf_chunks;
+  size_t _scale_chunk_bytes{0};
+  size_t _scale_base_offset{0};
   int _self_chunk_id;
   std::vector<TensorWrapper> _ubufs;
   std::vector<cudaStream_t> _stream_send;
@@ -444,6 +446,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
                              cudaStream_t stream_main) override;
 
   bool is_fused() override { return _fused; }
+
+  bool has_scale_buffer() { return _scale_chunk_bytes != 0; }
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.

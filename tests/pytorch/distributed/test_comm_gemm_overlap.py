@@ -462,6 +462,9 @@ FUSED_PROC_COUNTS = [
     if n <= min(torch.cuda.device_count(), FUSED_MAX_GPUS_TO_USE) and _fused_shape_ok(n)
 ]
 
+# Both GEMM layouts the fused AG backend implements; the harness shapes the weight per layout.
+FUSED_LAYOUTS = ("TN", "NN")
+
 fused_available = (
     IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and len(FUSED_PROC_COUNTS) > 0
 )
@@ -477,7 +480,7 @@ def _fused_launch_cmd(nprocs: int):
     return ["torchrun", f"--nproc_per_node={nprocs}"]
 
 
-def _run_fused_ag(nprocs, bulk=False, quantization="none"):
+def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
     """Run the AG overlap harness with the fused backend, returning the completed process."""
     test_cmd = _fused_launch_cmd(nprocs) + [
         str(TEST_ROOT / "run_gemm_with_overlap.py"),
@@ -490,7 +493,12 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none"):
         "--comm-type=AG",
         "--fused",
     ]
-    test_cmd += ["--bulk-overlap"] if bulk else ["--p2p", f"--quantization={quantization}"]
+    # The bulk harness pins its GEMM to NN regardless, so --layout only applies to the p2p path.
+    test_cmd += (
+        ["--bulk-overlap", f"--quantization={quantization}"]
+        if bulk
+        else ["--p2p", f"--quantization={quantization}", f"--layout={layout}"]
+    )
     return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
 ELIGIBLE_OUT_FEATURES_PER_RANK = 1536
@@ -538,25 +546,32 @@ def _assert_numerics_passed(result):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_bf16(nprocs):
+def test_fused_ag_overlap_bf16(nprocs, layout):
     """bf16 at an aligned shape: the fused backend runs and the result is correct."""
-    _assert_numerics_passed(_run_fused_ag(nprocs))
+    _assert_numerics_passed(_run_fused_ag(nprocs, layout=layout))
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_mxfp8(nprocs, layout):
+    """mxfp8 at an aligned shape: the fused backend runs and the result is correct."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(nprocs, quantization="mxfp8", layout=layout))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
-def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is currently outside the backend."""
-    if quantization == "fp8" and not fp8_available:
+def test_fused_ag_overlap_rejects_fp8(nprocs):
+    """Delayed-scaling FP8 is outside the backend; only MXFP8 1D scaling dispatches."""
+    if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    result = _run_fused_ag(nprocs, quantization=quantization)
-    assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
-    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
-
+    result = _run_fused_ag(nprocs, quantization="fp8")
+    assert result.returncode != 0, "fused AG+GEMM accepted a delayed-scaling FP8 operand"
+    assert "only supports MXFP8_1D_SCALING" in result.stderr.decode(), result.stderr.decode()
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
@@ -581,6 +596,19 @@ def test_fused_ag_overlap_is_deterministic(nprocs):
 def test_fused_bulk_ag_overlap_bf16(nprocs):
     """The bulk all-gather that rides in an unrelated GEMM's grid."""
     _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True))
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_bulk_ag_overlap_mxfp8(nprocs):
+    """Bulk all-gather riding in an unrelated MXFP8 GEMM's grid.
+
+    The GEMM operands are MXFP8 while the gathered tensor is independent of them -- bulk overlap
+    exists precisely to hide a collective behind a GEMM it has no data dependency on.
+    """
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True, quantization="mxfp8"))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

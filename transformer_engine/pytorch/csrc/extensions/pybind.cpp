@@ -9,7 +9,7 @@
 #include "pybind.h"
 
 #ifdef USE_HIPKITTENS_GEMM
-#include "common/gemm/kittens/fused_ag_gemm.h"
+#include "common/gemm/kittens/comm_gemm.h"
 #endif
 
 #include <pybind11/cast.h>
@@ -735,7 +735,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "reset_fused_ag_gemm_cache",
       []() {
 #ifdef USE_HIPKITTENS_GEMM
-        kittens_fused_ag_gemm_reset();
+        kittens_comm_gemm_reset();
 #endif
       },
       "Drop cached fused AG+GEMM peer base pointers");
@@ -854,6 +854,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                &CommOverlapP2P::copy_into_buffer),
            py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt)
+      .def("has_scale_buffer", &CommOverlapP2P::has_scale_buffer)
+      .def("copy_scales_into_buffer", &CommOverlapP2P::copy_scales_into_buffer, py::arg("input"),
+           py::arg("local_chunk") = false)
+      .def("get_scale_buffer", &CommOverlapP2P::get_scale_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
 }  // NOLINT(readability/fn_size)

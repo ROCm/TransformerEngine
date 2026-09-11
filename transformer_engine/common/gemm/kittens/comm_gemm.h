@@ -9,10 +9,12 @@
 #include <cstddef>
 #include <cstdint>
 
-struct KittensFusedAgGemmArgs {
+struct KittensAgGemmArgs {
     const void *A;
     void *ub;
     void *D;
+    const void *scale_A;
+    const void *scale_B;
     const void *peer_ub;
     int peer_first;
     int peer_count;
@@ -25,17 +27,28 @@ struct KittensFusedAgGemmArgs {
     bool transa;
     int rank, nranks;
     size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
     void *gather_dst;     // Bulk all-gather only
+    // MFMA operand format codes, as mxfp8_gemm.cpp's fp8_code(): 0 = e4m3, 1 = e5m2. They select
+    // CBSZ/BLGP independently per operand, which HYBRID recipes need (E4M3 fwd, E5M2 bwd).
+    // A is the gathered activation operand (ub), B is the weight (args.A). Ignored by bf16 entries.
+    int a_fp8_code;
+    int b_fp8_code;
 };
 
 bool kittens_fused_ag_gemm_supported(int sm_arch);
 
 // Drops the cached work-queue plans and peer base pointers
-void kittens_fused_ag_gemm_reset();
+void kittens_comm_gemm_reset();
 
-bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
+bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args);
 
-bool kittens_bulk_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);
+bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
