@@ -79,6 +79,26 @@ def _check_contract(dim: int, name: str) -> None:
         )
 
 
+def _check_splits(
+    m_splits: Sequence[int], total_rows: int, num_experts: Optional[int] = None
+) -> None:
+    """Validate ``m_splits`` before it reaches the raw kernel (memory safety).
+
+    Bad splits would otherwise make the Triton kernel read past ``group_offs`` or
+    store past the output. Checks: non-negative splits, ``sum == total_rows``, and
+    (when given) ``len == num_experts``.
+    """
+    if any(int(m) < 0 for m in m_splits):
+        raise ValueError(f"m_splits must be non-negative, got {list(m_splits)}")
+    got = sum(int(m) for m in m_splits)
+    if got != total_rows:
+        raise ValueError(f"sum(m_splits)={got} must equal the grouped row count {total_rows}")
+    if num_experts is not None and len(m_splits) != num_experts:
+        raise ValueError(
+            f"len(m_splits)={len(m_splits)} must equal the number of experts {num_experts}"
+        )
+
+
 def _require_gfx950() -> None:
     # The kernels use the CDNA4 scaled-FP4 MFMA (tl.dot_scaled e2m1); no other arch has it.
     if not _is_gfx950():
@@ -89,10 +109,17 @@ def _require_gfx950() -> None:
 
 
 def _row_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Row-wise MXFP4: ``x`` [M, F] -> (data [M, F/2] u8, scale [M, F/32] u8)."""
+    """Row-wise MXFP4: ``x`` [M, F] -> (data [M, F/2] u8, scale [M, F/32] u8).
+
+    ``M`` is a free (masked) GEMM dim of any size; it is zero-padded to a
+    32-multiple for the quantizer (which requires it) and sliced back.
+    """
     M, Feat = x.shape
+    M_pad = round_up_to_nearest_multiple(M, MXFP4_BLOCK)
+    if M_pad != M:
+        x = F.pad(x.contiguous(), (0, 0, 0, M_pad - M))
     q = _quantizer(rowwise=True, columnwise=False).quantize(x.contiguous())
-    data = q._rowwise_data.view(torch.uint8)
+    data = q._rowwise_data.view(torch.uint8)[:M]
     scale = q._rowwise_scale_inv[:M, : Feat // MXFP4_BLOCK].contiguous()
     return data, scale
 
@@ -101,12 +128,16 @@ def _col_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Col-wise MXFP4: ``x`` [M, F] -> (data [F, M/2] u8, scale [F, M/32] u8).
 
     Requests both directions (matching the production transpose-quant path); the
-    row-wise result is discarded. Columnwise-only quant is a less-exercised
-    config, so we take the safe route here.
+    row-wise result is discarded. Both dims are zero-padded to a 32-multiple for
+    the quantizer and sliced back (both are free/masked in the GEMM).
     """
     M, Feat = x.shape
+    M_pad = round_up_to_nearest_multiple(M, MXFP4_BLOCK)
+    Feat_pad = round_up_to_nearest_multiple(Feat, MXFP4_BLOCK)
+    if M_pad != M or Feat_pad != Feat:
+        x = F.pad(x.contiguous(), (0, Feat_pad - Feat, 0, M_pad - M))
     q = _quantizer(rowwise=True, columnwise=True).quantize(x.contiguous())
-    data = q._columnwise_data.view(torch.uint8)
+    data = q._columnwise_data.view(torch.uint8)[:Feat, : M // 2]
     scale = q._columnwise_scale_inv[:Feat, : M // MXFP4_BLOCK].contiguous()
     return data, scale
 
@@ -165,6 +196,7 @@ def grouped_gemm_mxfp4_fprop(
     N = weights[0].shape[0]
     _require_gfx950()
     _check_contract(K, "K")
+    _check_splits(m_splits, a.shape[0], len(weights))
 
     a_data, a_scale = _row_operand(a)  # (total_M, K/2), (total_M, K/32)
     b_datas, b_scales = [], []
@@ -215,6 +247,7 @@ def grouped_gemm_mxfp4_dgrad(
     K = weights[0].shape[1]
     _require_gfx950()
     _check_contract(N, "N")
+    _check_splits(m_splits, grad_out.shape[0], len(weights))
 
     go_data, go_scale = _row_operand(grad_out)  # (total_M, N/2), (total_M, N/32)
     b_datas, b_scales = [], []
@@ -269,6 +302,9 @@ def grouped_gemm_mxfp4_wgrad(
     K = a.shape[1]
     G = len(m_splits)
     _require_gfx950()
+    if a.shape[0] != grad_out.shape[0]:
+        raise ValueError(f"a rows ({a.shape[0]}) must equal grad_out rows ({grad_out.shape[0]})")
+    _check_splits(m_splits, a.shape[0])
 
     lhs_data, lhs_scale, go_pad = _col_operand_grouped_padded(grad_out, m_splits)  # (N, Mpad/2)
     rhs_data, rhs_scale, _ = _col_operand_grouped_padded(a, m_splits)  # (K, Mpad/2)

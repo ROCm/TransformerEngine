@@ -116,6 +116,24 @@ def test_fprop_precise():
     assert _rel_err(out, ref) < _TIGHT_TOL
 
 
+def test_fprop_unaligned_total_m():
+    # total_M not divisible by 32 must still quantize (leading dim is padded).
+    splits = [100, 130]  # sum = 230, not a multiple of 32
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out = grouped_gemm_mxfp4_fprop(a, weights, splits, out_dtype=DTYPE)
+
+    ref = torch.empty((total_m, N), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, splits):
+        ref[start : start + m] = a[start : start + m].float() @ w.float().t()
+        start += m
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _REL_TOL
+
+
 def test_dgrad_precise():
     total_m = sum(M_SPLITS)
     grad_out = _rand(total_m, N)
