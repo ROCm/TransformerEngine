@@ -15,6 +15,7 @@
     using RT_A     = rt_fp8e4m3<REG_M, BLOCK_K>;
     using RT_B     = rt_fp8e4m3<REG_N, BLOCK_K>;
     using RT_C     = rt_fl<REG_M, REG_N, col_l, rt_16x16_s>;
+    using RT_C_T   = rt_fl<REG_N, REG_M, row_l, rt_16x16_s>;
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
@@ -45,7 +46,6 @@
     const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
     const int b_row_stride = B_local.template stride<2>() * sizeof(T);
     kittens::i32x4 b_srd = kittens::make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
-    bf16 *c_base = (bf16 *)&C[{0, 0, 0, 0}];
 
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
     uint32_t b_lds[2][2];

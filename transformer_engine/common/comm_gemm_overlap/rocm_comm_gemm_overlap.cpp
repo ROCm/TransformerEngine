@@ -325,11 +325,11 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. Note the operand names invert here --
-    // the kernel's A operand is the gathered activation, which is B on this side (B.dptr() ==
-    // ubuf.dptr(), checked above), and its B operand is the weight, which is A.
-    args.a_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
-    args.b_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. The kernel follows the same BLAS
+    // convention as this side: its A operand is the weight (A), its B operand the gathered
+    // activation (B, with B.dptr() == ubuf.dptr(), checked above).
+    args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_fused_ag_gemm_mxfp8(args);
   }
   return kittens_fused_ag_gemm_bf16(args);
@@ -394,9 +394,9 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
       workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
   if (bulk_fp8) {
     if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) return false;
-    // Same operand inversion as the fused path: the kernel's A operand is B here.
-    args.a_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
-    args.b_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    // Same BLAS convention as the fused path: the kernel's A operand is A, its B operand is B.
+    args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_bulk_ag_gemm_mxfp8(args);
   }
   return kittens_bulk_ag_gemm_bf16(args);

@@ -10,13 +10,15 @@
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N_TOTAL / BLOCK_COL;
 
-    // A is K-contiguous [M,K] as in TN; B is K-major [K,N] so its shared tile is transposed and
-    // its registers are filled with the ds_read_*_tr path (col_l), matching mxfp8_gemm_nn_kernel.
-    using ST_A     = st_fp8e4m3<HALF_ROW, BLOCK_K, st_16x128_s>;
-    using ST_B     = st_fp8e4m3<BLOCK_K, HALF_COL, st_16x128_s>;
-    using RT_A     = rt_fp8e4m3<REG_M, BLOCK_K>;
-    using RT_B     = rt<fp8e4m3, REG_N, BLOCK_K, col_l, rt_16x128_s>;
+    // BLAS convention, as in mxfp8_gemm_nn_kernel: A is the weight, stored K-major [K,M], so its
+    // shared tile is transposed and its registers are filled with the ds_read_*_tr path (col_l,
+    // a_col_off); B is the gathered activation, K-contiguous [N,K], read with subtile_inplace.
+    using ST_A     = st_fp8e4m3<BLOCK_K, HALF_ROW, st_16x128_s>;
+    using ST_B     = st_fp8e4m3<HALF_COL, BLOCK_K, st_16x128_s>;
+    using RT_A     = rt<fp8e4m3, REG_M, BLOCK_K, col_l, rt_16x128_s>;
+    using RT_B     = rt_fp8e4m3<REG_N, BLOCK_K>;
     using RT_C     = rt_fl<REG_M, REG_N, col_l, rt_16x16_s>;
+    using RT_C_T   = rt_fl<REG_N, REG_M, row_l, rt_16x16_s>;
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
@@ -32,8 +34,8 @@
 
     constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
     constexpr int bpm = bpt * NUM_THREADS;
-    constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
-    constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
+    constexpr int copies_A = BLOCK_K * HALF_ROW * sizeof(T) / bpm;
+    constexpr int copies_B = HALF_COL * BLOCK_K * sizeof(T) / bpm;
     uint32_t sw_A[copies_A], sw_B[copies_B];
     // Ground-truth spelling: mxfp8_gemm.cpp's main loop reads A_local/B_local, which are its
     // per-expert views of A/B for the grouped path. The AG path has no grouped variant, so these
@@ -48,9 +50,8 @@
     const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
     const int a_row_stride = A_local.template stride<2>() * sizeof(T);
     const int b_row_stride = B_local.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, (size_t)M * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, (size_t)K * b_row_stride, b_row_stride);
-    bf16 *c_base = (bf16 *)&C[{0, 0, 0, 0}];
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, (size_t)K * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
 
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
     uint32_t a_lds[2][2], b_lds[2][2];
@@ -61,4 +62,4 @@
             reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
     }
 
-    const int b_col_off = warp_n * REG_N;
+    const int a_col_off = warp_m * REG_M;

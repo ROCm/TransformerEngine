@@ -212,7 +212,9 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     }
 }
 
-template <int U, bool NT>
+// STEP/NG select the packed-scale geometry, forwarded to pack_tile_scales_from: <64,4> for an
+// operand with 4 scale groups per tile, <32,8> for one with 8.
+template <int U, bool NT, int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
                                   char *gather_dst, const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes,
@@ -241,7 +243,7 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
         const char *peer_scales = (const char *)peers.base[peer] + scale_base
                                 + (size_t)peer * scale_chunk_bytes
                                 + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
-        pack_tile_scales_from((const uint8_t *)peer_scales, packed_sa,
+        pack_tile_scales_from<STEP, NG>((const uint8_t *)peer_scales, packed_sa,
                                         peer * tiles_per_chunk + tn, tiles_per_col,
                                         k_iters, scale_K, smem_tile, sub, gath_wg);
     }
@@ -259,7 +261,7 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
     __syncthreads();
 }
 
-template <int U, bool NT>
+template <int U, bool NT, int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *gb,
                             const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes, unsigned int *arrive,
@@ -270,7 +272,7 @@ void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *g
     const int sub  = (int)blockIdx.x % gath_wg;
     const int peer = pi + (pi >= my_pe ? 1 : 0);
     for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile_plus_scales<U, NT>(
+        gather_peer_tile_plus_scales<U, NT, STEP, NG>(
             peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
             scale_base, scale_chunk_bytes, scale_K, packed_sa, tiles_per_col, k_iters, smem_tile);
     }

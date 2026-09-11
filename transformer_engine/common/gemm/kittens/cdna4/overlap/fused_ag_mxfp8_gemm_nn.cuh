@@ -17,7 +17,7 @@ namespace hk_mxfp8_ag_nn {
 using namespace kittens;
 using namespace hk_overlap;
 
-// Per-PE pointer to each peer's [M,K] A buffer.
+// Per-PE pointer to each peer's [N,K] B buffer (the gathered activation).
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
 
 using G = kittens::group<NUM_WARPS>;
@@ -33,7 +33,7 @@ constexpr int BLOCK_K = 128;
 // MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
 // backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
 // is templated on them and get_persistent_fn() dispatches, as dispatch_gemm() does in
-// mxfp8_gemm.cpp. CBSZ is the A operand (gathered activations), BLGP the B operand (weights).
+// mxfp8_gemm.cpp. CBSZ is the A operand (weights), BLGP the B operand (gathered activations).
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -79,56 +79,26 @@ void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const Pee
     }
 }
 
-template <typename U, typename RT>
-__device__ __forceinline__
-void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
-    using T               = float;
-    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
-    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
-    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
-    const int col_offset  = lane % RT::base_tile_cols;
-
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const int col = j * RT::base_tile_cols + col_offset;
-#pragma unroll
-            for (int k = 0; k < RT::base_tile_num_strides; k++) {
-                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
-#pragma unroll
-                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
-                    const int idx = l + k * RT::base_tile_stride / packing;
-                    dst_ptr[(row + l * 2)     * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
-                }
-            }
-        }
-    }
-}
-
-// Epilogue for the AG path: C is [M, N_TOTAL] (row index = A-operand row), the convention
-// fused_ag_gemm_nn.cuh uses. Stores straight from the col_l accumulators via store_c_tile --
-// no transpose, unlike the non-AG mxfp8_gemm.cpp epilogue whose C is [N, M].
-template<typename RT_C>
+// Epilogue for the AG path: C is [N_TOTAL, M], the same orientation mxfp8_gemm.cpp writes, so the
+// col_l accumulators are transposed before the store. No bias/gelu/accumulate on this path.
+template<typename RT_C, typename RT_C_T, typename OutGL>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
-    bf16 *c_base, int N_TOTAL,
-    int block_row, int block_col, int warp_m, int warp_n) {
+    const OutGL &C, int block_row, int block_col, int warp_m, int warp_n) {
 
-    const int rf0 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + warp_m);
-    const int rf1 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m);
-    const int cf0 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + warp_n);
-    const int cf1 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + WARPS_COL + warp_n);
-    int lane_epi  = kittens::laneid();
-    asm volatile("" : "+v"(lane_epi));
+    auto oc = [&](int n_off, int m_off) {
+        return kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + n_off,
+                                            block_row * WARPS_ROW * 2 + m_off};
+    };
 
-    store_c_tile<bf16>(c_base, cA, rf0, cf0, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cB, rf0, cf1, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cC, rf1, cf0, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cD, rf1, cf1, N_TOTAL, lane_epi);
+    RT_C_T oA, oB, oC, oD;
+    kittens::transpose(oA, cA); kittens::transpose(oB, cB);
+    kittens::transpose(oC, cC); kittens::transpose(oD, cD);
+
+    kittens::store(C, oA, oc(warp_n, warp_m));
+    kittens::store(C, oB, oc(WARPS_COL + warp_n, warp_m));
+    kittens::store(C, oC, oc(warp_n, WARPS_ROW + warp_m));
+    kittens::store(C, oD, oc(WARPS_COL + warp_n, WARPS_ROW + warp_m));
 }
 
 // BULK=true detaches the all-gather from the GEMM: the gather lands in `gather_dst` instead of
@@ -145,22 +115,22 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr,
     // Used by the interleaved gather+pack below when BULK is false. The attribute is for the
     // BULK=true instantiation, which discards that branch -- it does NOT mean "ignored".
-    [[maybe_unused]] uint32_t *__restrict__ packed_sa_raw, [[maybe_unused]] size_t scale_base,
+    [[maybe_unused]] uint32_t *__restrict__ packed_sb_raw, [[maybe_unused]] size_t scale_base,
     [[maybe_unused]] size_t scale_chunk_bytes, [[maybe_unused]] int scale_K,
     [[maybe_unused]] int interleave_scales,
     [[maybe_unused]] char *__restrict__ gather_dst) {
 
-    const int M       = A.rows();
-    const int K       = A.cols();
-    // NN: B is [K, N_TOTAL], so the N extent is the column count (TN reads B.rows()).
-    const int N_TOTAL = B.cols();
+    // NN (BLAS convention): A is the weight [K, M], B the gathered activation [N_TOTAL, K].
+    const int K       = A.rows();
+    const int M       = A.cols();
+    const int N_TOTAL = B.rows();
     const int k_iters = K / BLOCK_K;
 #include "mxfp8_nn_prologue.inc"
 
     const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {
-        // In bulk mode chunk_bytes describes the gathered region's shard, not the A operand's.
-        char *gb = (char *)&A[{0, 0, 0, 0}];
+        // In bulk mode chunk_bytes describes the gathered region's shard, not the B operand's.
+        char *gb = (char *)&B[{0, 0, 0, 0}];
         if constexpr (BULK) gb = gather_dst;
         if constexpr (BULK) {
             // The gathered tensor is not a GEMM operand here, so its scales are moved verbatim by
@@ -172,10 +142,10 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
             // do before the gather below finishes -- so stage the pack there rather than growing
             // the kernel's LDS footprint. Same reasoning, same staging size as the TN path.
             static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
-                          "scale_A_smem too small to stage KPP=2 scale tiles");
-            gather_all_plus_scales<1, true>(
+                          "scale_A_smem too small for pack_tile_scales_from staging");
+            gather_all_plus_scales<1, true, 32, 8>(
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
-                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_iters,
+                scale_base, scale_chunk_bytes, scale_K, packed_sb_raw, tiles_N, k_iters,
                 reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
@@ -203,9 +173,9 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         // In bulk mode this GEMM does not read the gathered tensor, so there is nothing to wait for.
         if constexpr (!BULK) {
             if (desc.chunk_id != my_pe) {
-                const int tm                   = desc.tile_m - desc.chunk_id * tiles_per_chunk;
+                const int tn                   = desc.tile_n - desc.chunk_id * tiles_per_chunk;
                 const unsigned needed_arrivals = (unsigned)gath_wg;
-                unsigned int *f                = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tm];
+                unsigned int *f                = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tn];
                 if (threadIdx.x == 0) {
                     do {
                     } while (AG_SPIN(f) < needed_arrivals);
@@ -218,10 +188,10 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int block_row = desc.tile_m;
         int block_col = desc.tile_n;
 
-        int a_half0 = block_row * 2;
-        int a_half1 = a_half0 + 1;
-        int b_half0 = block_col * 2;
-        int b_half1 = b_half0 + 1;
+        // The shared main loop uses mxfp8_gemm_nn_kernel's spelling for the tile halves, so provide
+        // the names it indexes with rather than renaming the gold kernel, whose ISA is the gate.
+        int a_row_tile = block_row;
+        int n_tile     = block_col;
 
         int sa_stride = tiles_M;
         int sb_stride = tiles_N;
@@ -236,17 +206,17 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int tic = 0, toc = 1;
         int tic_scales = 0, toc_scales = 1;
 
-        G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-        G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+        G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,     0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+        G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+        G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1,  0}, sw_B, b_srd, b_base, b_lds[tic][1]);
+        G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-        G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
+        G::load(Bs[toc][0], B_local, {0, 0, n_tile * 2,     1}, sw_B, b_srd, b_base, b_lds[toc][0]);
+        G::load(Bs[toc][1], B_local, {0, 0, n_tile * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -259,46 +229,51 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
         if (warp_m == 1) __builtin_amdgcn_s_barrier();
 
-        #include "mxfp8_nn_mainloop.inc"
+        // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
+        // this guard. The standalone GEMM includes the same file without defining it.
+        #define MXFP8_AG_SKEW_CLOSE 1
+        #include "../mxfp8_nn_mainloop.inc"
+        #undef MXFP8_AG_SKEW_CLOSE
 
-        gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
+        gemm_epilogue<RT_C, RT_C_T>(cA, cB, cC, cD, C, block_row, block_col, warp_m, warp_n);
 
     } // end persistent loop
 }
 
 static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
     (void)K;
-    const int tiles_N         = N_total / BLOCK_COL;
-    const int m_local         = M / tp_size;
-    const int tiles_per_chunk = m_local / BLOCK_ROW;
+    const int tiles_M         = M / BLOCK_ROW;
+    const int n_local         = N_total / tp_size;
+    const int tiles_per_chunk = n_local / BLOCK_COL;
 
     std::vector<TileDesc> queue;
-    queue.reserve((size_t)tiles_N * tiles_per_chunk * tp_size);
+    queue.reserve((size_t)tiles_M * tiles_per_chunk * tp_size);
 
-    const int N_GROUP = 16;
+    // Grouping runs over the free axis, which is M now that the gather chunks N.
+    const int M_GROUP = 16;
 
-    auto emit = [&](int chunk, int tm, int n0, int n1) {
-        for (int tn = n0; tn < n1; tn++) {
+    auto emit = [&](int chunk, int tn, int m0, int m1) {
+        for (int tm = m0; tm < m1; tm++) {
             TileDesc td{};
             td.chunk_id = chunk;
-            td.tile_m   = chunk * tiles_per_chunk + tm;
-            td.tile_n   = tn;
+            td.tile_n   = chunk * tiles_per_chunk + tn;
+            td.tile_m   = tm;
             queue.push_back(td);
         }
     };
 
-    const int nstep = (N_GROUP > 0 && N_GROUP < tiles_N) ? N_GROUP : tiles_N;
+    const int mstep = (M_GROUP > 0 && M_GROUP < tiles_M) ? M_GROUP : tiles_M;
 
     // Local chunk first, then remote
-    for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
-        const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tiles_per_chunk; tm++) emit(my_pe, tm, n0, n1);
+    for (int m0 = 0; m0 < tiles_M; m0 += mstep) {
+        const int m1 = std::min(m0 + mstep, tiles_M);
+        for (int tn = 0; tn < tiles_per_chunk; tn++) emit(my_pe, tn, m0, m1);
     }
-    for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
-        const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tiles_per_chunk; tm++) {
+    for (int m0 = 0; m0 < tiles_M; m0 += mstep) {
+        const int m1 = std::min(m0 + mstep, tiles_M);
+        for (int tn = 0; tn < tiles_per_chunk; tn++) {
             for (int c = 0; c < tp_size; c++) {
-                if (c != my_pe) emit(c, tm, n0, n1);
+                if (c != my_pe) emit(c, tn, m0, m1);
             }
         }
     }
@@ -309,19 +284,19 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 template <int CBSZ, int BLGP, bool BULK>
 static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
                               TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
-                              int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
+                              int my_pe, int tp_size, int gath_wg, int n_local, size_t chunk_bytes, int xcd_bucket,
                               XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
                               size_t scale_chunk_bytes, int interleave_scales, char *d_gather_dst,
                               hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
-    const int tiles_per_chunk = m_local / BLOCK_ROW;
+    const int tiles_per_chunk = n_local / BLOCK_COL;
     const int k_iters = K / BLOCK_K;
 
-    gl<fp8e4m3, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M, (size_t)K);
-    // NN: B is [K, N_TOTAL] (TN passes (N_TOTAL, K)).
-    gl<fp8e4m3, 1, 1, -1, -1> B_gl(d_b, nullptr, nullptr, (size_t)K, (size_t)N_TOTAL);
-    gl<bf16, 1, 1, -1, -1> C_gl(d_c, nullptr, nullptr, (size_t)M, (size_t)N_TOTAL);
+    // NN: A is the weight [K, M]; B the gathered activation [N_TOTAL, K]; C is [N_TOTAL, M].
+    gl<fp8e4m3, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)K,       (size_t)M);
+    gl<fp8e4m3, 1, 1, -1, -1> B_gl(d_b, nullptr, nullptr, (size_t)N_TOTAL, (size_t)K);
+    gl<bf16, 1, 1, -1, -1> C_gl(d_c, nullptr, nullptr, (size_t)N_TOTAL, (size_t)M);
 
     gl<fp8e8m0, -1, 1, 16, 64> SA_gl(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
                                      k_iters * tiles_M, nullptr, nullptr, nullptr);
@@ -341,21 +316,21 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
         xcd_bucket, buckets, d_bucket_ctr,
-        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales, d_gather_dst);
+        packed_sb, scale_base, scale_chunk_bytes, K / 32, interleave_scales, d_gather_dst);
 }
 
-// Fused: gather feeds the A operand, so there is no separate destination.
+// Fused: gather feeds the B operand, so there is no separate destination.
 template <int CBSZ, int BLGP>
 static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c,
                               uint32_t *packed_sa, uint32_t *packed_sb, TileDesc *d_queue,
                               int num_tiles, int *d_tile_counter, PeerPtrs peers,
                               unsigned int *d_arrive, int my_pe, int tp_size, int gath_wg,
-                              int m_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
+                              int n_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
                               int *d_bucket_ctr, size_t scale_base, size_t scale_chunk_bytes,
                               int interleave_scales, hipStream_t stream) {
     launch_persistent_impl<CBSZ, BLGP, false>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
-        peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
+        peers, d_arrive, my_pe, tp_size, gath_wg, n_local, chunk_bytes, xcd_bucket, buckets,
         d_bucket_ctr, scale_base, scale_chunk_bytes, interleave_scales, nullptr, stream);
 }
 
@@ -365,12 +340,12 @@ static void launch_persistent_bulk(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
                                    uint32_t *packed_sa, uint32_t *packed_sb, TileDesc *d_queue,
                                    int num_tiles, int *d_tile_counter, PeerPtrs peers,
                                    char *d_gather_dst, unsigned int *d_arrive, int my_pe,
-                                   int tp_size, int gath_wg, int m_local, size_t chunk_bytes,
+                                   int tp_size, int gath_wg, int n_local, size_t chunk_bytes,
                                    int xcd_bucket, XcdBuckets buckets, int *d_bucket_ctr,
                                    hipStream_t stream) {
     launch_persistent_impl<CBSZ, BLGP, true>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
-        peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
+        peers, d_arrive, my_pe, tp_size, gath_wg, n_local, chunk_bytes, xcd_bucket, buckets,
         d_bucket_ctr, 0, 0, 0, d_gather_dst, stream);
 }
 

@@ -17,7 +17,7 @@ namespace hk_mxfp8_ag_tn {
 using namespace kittens;
 using namespace hk_overlap;
 
-// Per-PE pointer to each peer's [M,K] A buffer.
+// Per-PE pointer to each peer's [N,K] B buffer (the gathered activation).
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
 
 using G = kittens::group<NUM_WARPS>;
@@ -33,7 +33,7 @@ constexpr int BLOCK_K = 128;
 // MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
 // backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
 // is templated on them and get_persistent_fn() dispatches, as dispatch_gemm() does in
-// mxfp8_gemm.cpp. CBSZ is the A operand (gathered activations), BLGP the B operand (weights).
+// mxfp8_gemm.cpp. CBSZ is the A operand (weights), BLGP the B operand (gathered activations).
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -79,56 +79,26 @@ void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const Pee
     }
 }
 
-template <typename U, typename RT>
-__device__ __forceinline__
-void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
-    using T               = float;
-    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
-    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
-    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
-    const int col_offset  = lane % RT::base_tile_cols;
-
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const int col = j * RT::base_tile_cols + col_offset;
-#pragma unroll
-            for (int k = 0; k < RT::base_tile_num_strides; k++) {
-                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
-#pragma unroll
-                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
-                    const int idx = l + k * RT::base_tile_stride / packing;
-                    dst_ptr[(row + l * 2)     * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
-                }
-            }
-        }
-    }
-}
-
-// Epilogue for the AG path: C is [M, N_TOTAL] (row index = A-operand row), the convention
-// fused_ag_gemm_tn.cuh uses. Stores straight from the col_l accumulators via store_c_tile --
-// no transpose, unlike the non-AG mxfp8_gemm.cpp epilogue whose C is [N, M].
-template<typename RT_C>
+// Epilogue for the AG path: C is [N_TOTAL, M], the same orientation mxfp8_gemm.cpp writes, so the
+// col_l accumulators are transposed before the store. No bias/gelu/accumulate on this path.
+template<typename RT_C, typename RT_C_T, typename OutGL>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
-    bf16 *c_base, int N_TOTAL,
-    int block_row, int block_col, int warp_m, int warp_n) {
+    const OutGL &C, int block_row, int block_col, int warp_m, int warp_n) {
 
-    const int rf0 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + warp_m);
-    const int rf1 = __builtin_amdgcn_readfirstlane(block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m);
-    const int cf0 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + warp_n);
-    const int cf1 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + WARPS_COL + warp_n);
-    int lane_epi  = kittens::laneid();
-    asm volatile("" : "+v"(lane_epi));
+    auto oc = [&](int n_off, int m_off) {
+        return kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + n_off,
+                                            block_row * WARPS_ROW * 2 + m_off};
+    };
 
-    store_c_tile<bf16>(c_base, cA, rf0, cf0, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cB, rf0, cf1, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cC, rf1, cf0, N_TOTAL, lane_epi);
-    store_c_tile<bf16>(c_base, cD, rf1, cf1, N_TOTAL, lane_epi);
+    RT_C_T oA, oB, oC, oD;
+    kittens::transpose(oA, cA); kittens::transpose(oB, cB);
+    kittens::transpose(oC, cC); kittens::transpose(oD, cD);
+
+    kittens::store(C, oA, oc(warp_n, warp_m));
+    kittens::store(C, oB, oc(WARPS_COL + warp_n, warp_m));
+    kittens::store(C, oC, oc(warp_n, WARPS_ROW + warp_m));
+    kittens::store(C, oD, oc(WARPS_COL + warp_n, WARPS_ROW + warp_m));
 }
 
 template <int CBSZ, int BLGP>
@@ -139,7 +109,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     int num_tiles, int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive,
     int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
     int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr,
-    uint32_t *__restrict__ packed_sa_raw, size_t scale_base, size_t scale_chunk_bytes,
+    uint32_t *__restrict__ packed_sb_raw, size_t scale_base, size_t scale_chunk_bytes,
     int scale_K, int interleave_scales) {
 
     const int M       = A.rows();
@@ -150,16 +120,16 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
     const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {
-        char *gb = (char *)&A[{0, 0, 0, 0}];
+        char *gb = (char *)&B[{0, 0, 0, 0}];
         if (interleave_scales) {
             // scale_A_smem is 2 KiB and untouched until this block joins the compute queue, which
             // it cannot do until the gather below is finished -- so stage the pack in it rather
             // than growing the kernel's LDS footprint.
             static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
-                          "scale_A_smem too small to stage KPP=2 scale tiles");
-            gather_all_plus_scales<1, true>(
+                          "scale_A_smem too small for pack_tile_scales_from staging");
+            gather_all_plus_scales<1, true, 32, 8>(
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
-                scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_iters,
+                scale_base, scale_chunk_bytes, scale_K, packed_sb_raw, tiles_N, k_iters,
                 reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
@@ -185,9 +155,9 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
         TileDesc desc = work_queue[tile_idx];
         if (desc.chunk_id != my_pe) {
-            const int tm                   = desc.tile_m - desc.chunk_id * tiles_per_chunk;
+            const int tn                   = desc.tile_n - desc.chunk_id * tiles_per_chunk;
             const unsigned needed_arrivals = (unsigned)gath_wg;
-            unsigned int *f                = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tm];
+            unsigned int *f                = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tn];
             if (threadIdx.x == 0) {
                 do {
                 } while (AG_SPIN(f) < needed_arrivals);
@@ -245,44 +215,45 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         #include "../mxfp8_tn_mainloop.inc"
         #undef MXFP8_AG_SKEW_CLOSE
 
-        gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
+        gemm_epilogue<RT_C, RT_C_T>(cA, cB, cC, cD, C, block_row, block_col, warp_m, warp_n);
 
     } // end persistent loop
 }
 
 static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
     (void)K;
-    const int tiles_N         = N_total / BLOCK_COL;
-    const int m_local         = M / tp_size;
-    const int tiles_per_chunk = m_local / BLOCK_ROW;
+    const int tiles_M         = M / BLOCK_ROW;
+    const int n_local         = N_total / tp_size;
+    const int tiles_per_chunk = n_local / BLOCK_COL;
 
     std::vector<TileDesc> queue;
-    queue.reserve((size_t)tiles_N * tiles_per_chunk * tp_size);
+    queue.reserve((size_t)tiles_M * tiles_per_chunk * tp_size);
 
-    const int N_GROUP = 16;
+    // Grouping runs over the free axis, which is M now that the gather chunks N.
+    const int M_GROUP = 16;
 
-    auto emit = [&](int chunk, int tm, int n0, int n1) {
-        for (int tn = n0; tn < n1; tn++) {
+    auto emit = [&](int chunk, int tn, int m0, int m1) {
+        for (int tm = m0; tm < m1; tm++) {
             TileDesc td{};
             td.chunk_id = chunk;
-            td.tile_m   = chunk * tiles_per_chunk + tm;
-            td.tile_n   = tn;
+            td.tile_n   = chunk * tiles_per_chunk + tn;
+            td.tile_m   = tm;
             queue.push_back(td);
         }
     };
 
-    const int nstep = (N_GROUP > 0 && N_GROUP < tiles_N) ? N_GROUP : tiles_N;
+    const int mstep = (M_GROUP > 0 && M_GROUP < tiles_M) ? M_GROUP : tiles_M;
 
     // Local chunk first, then remote
-    for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
-        const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tiles_per_chunk; tm++) emit(my_pe, tm, n0, n1);
+    for (int m0 = 0; m0 < tiles_M; m0 += mstep) {
+        const int m1 = std::min(m0 + mstep, tiles_M);
+        for (int tn = 0; tn < tiles_per_chunk; tn++) emit(my_pe, tn, m0, m1);
     }
-    for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
-        const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tiles_per_chunk; tm++) {
+    for (int m0 = 0; m0 < tiles_M; m0 += mstep) {
+        const int m1 = std::min(m0 + mstep, tiles_M);
+        for (int tn = 0; tn < tiles_per_chunk; tn++) {
             for (int c = 0; c < tp_size; c++) {
-                if (c != my_pe) emit(c, tm, n0, n1);
+                if (c != my_pe) emit(c, tn, m0, m1);
             }
         }
     }
@@ -293,17 +264,17 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 template <int CBSZ, int BLGP>
 static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
                               TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
-                              int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
+                              int my_pe, int tp_size, int gath_wg, int n_local, size_t chunk_bytes, int xcd_bucket,
                               XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
                               size_t scale_chunk_bytes, int interleave_scales, hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
-    const int tiles_per_chunk = m_local / BLOCK_ROW;
+    const int tiles_per_chunk = n_local / BLOCK_COL;
     const int k_iters = K / BLOCK_K;
 
     gl<fp8e4m3, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M,       (size_t)K);
     gl<fp8e4m3, 1, 1, -1, -1> B_gl(d_b, nullptr, nullptr, (size_t)N_TOTAL, (size_t)K);
-    gl<bf16, 1, 1, -1, -1> C_gl(d_c, nullptr, nullptr, (size_t)M,       (size_t)N_TOTAL);
+    gl<bf16, 1, 1, -1, -1> C_gl(d_c, nullptr, nullptr, (size_t)N_TOTAL, (size_t)M);
 
     gl<fp8e8m0, -1, 1, 16, 64> SA_gl(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
                                      k_iters * tiles_M, nullptr, nullptr, nullptr);
@@ -323,7 +294,7 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
         xcd_bucket, buckets, d_bucket_ctr,
-        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales);
+        packed_sb, scale_base, scale_chunk_bytes, K / 32, interleave_scales);
 }
 
 using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int, int *, PeerPtrs,
