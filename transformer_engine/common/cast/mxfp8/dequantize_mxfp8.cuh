@@ -27,6 +27,7 @@
 #include "swizzle.cuh"
 
 #ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
 #include "./rocm_vectorized_2d.cuh"
 #endif
 
@@ -270,6 +271,12 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // This kernel only decodes the gfx1250 MX pre-swizzle layout; reject swizzled scales elsewhere.
+  NVTE_CHECK(!with_gemm_swizzled_scales || cuda::sm_arch() == 125,
+             "Dequantizing GEMM-swizzled MXFP8 scales is only supported on gfx1250.");
+#endif
+
   // TODO: Make more general
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
   const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
@@ -310,6 +317,14 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const dim3 block(THREADS_PER_CHUNK);
   const dim3 grid(chunks_X, chunks_Y);
 
+#ifdef __HIP_PLATFORM_AMD__
+  // The MX pre-swizzle producer (swizzle_scaling_factors_mx) lays scales out using the actual
+  // padded scale-tensor dimension, so read it back with the same value: rowwise uses the scale
+  // rows, colwise uses the columnwise-scale cols.
+  const size_t mx_swizzle_padded_dim =
+      use_rowwise_scaling ? input.scale_inv.shape[0] : input.columnwise_scale_inv.shape[1];
+#endif
+
   TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
       scale_dim_Y_colwise, SCALE_DIM_Y,
       TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
@@ -320,10 +335,13 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(OType))), IS_ALIGNED,
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                                          WITH_GEMM_SWIZZLED_SCALES>
                   <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                                               rows, cols, scales_stride, mx_swizzle_padded_dim);););  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                       with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
