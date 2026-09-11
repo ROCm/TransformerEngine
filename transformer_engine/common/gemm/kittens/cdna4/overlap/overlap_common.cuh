@@ -133,24 +133,36 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
 //
 // Each block handles the contiguous k-range [sub*kpb, +kpb) and writes tile_id = ki*tiles_per_col
 // + cblk, so blocks never touch the same output.
-// Packs one 256-row tile of A scales into the lane-native layout the GEMM reads, straight from
-// the peer's buffer so the raw scales never reach global memory.
+// Packs one 256-row tile of the gathered operand's scales into the lane-native layout the GEMM
+// reads, straight from the peer's buffer so the raw scales never reach global memory.
 //
-// Per k-iter the tile's scales are 256 rows x 4 bytes (K_STEP=128 elements / 32 per scale block),
-// i.e. one dword per row. Four waves each take 64 of those rows and emit 64 dwords, one per lane.
-// The block runs two k-iters at once so all NUM_WARPS=8 waves are busy.
+// <STEP, NG> selects the operand geometry and must match the pack_scales_kernel<_, STEP, NG>
+// instantiation mxfp8_gemm.cpp uses for that operand, because both write the same buffer layout:
+//     ln[(tile_id * NG + grp) * 64 + lane] = pack_scales(tile, grp * STEP)
+// A side is <64, 4> (256 output words/tile), B side is <32, 8> (512, the hi/lo tile pair).
+//
+// Per k-iter the tile's scales are 256 rows x 4 bytes (BLOCK_K=128 elements / 32 per scale block),
+// i.e. one dword per row. NG waves each emit 64 dwords, one per lane, reading a STEP-strided
+// window of the staged tile. KPP = NUM_WARPS / NG k-iters run at once so all 8 waves stay busy:
+// two for <64,4>, one for <32,8>. pack_scales reads 64 words past the last window start, so the
+// staging stride is PAD = (NG-1)*STEP + 64 words with everything at/after row 256 zero-filled --
+// for <64,4> that is exactly 256, i.e. unchanged.
 //
 // Blocks split the k range: block `sub` takes a contiguous [k0,k1) out of gath_wg. Contiguous
 // rather than strided so each block's reads stay in one span per row. Blocks write disjoint
 // tile_ids, so the only sync is around the staging buffer.
+template <int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
                            int cblk, int tiles_per_col, int k_iters, int scale_K,
                            uint32_t *__restrict__ smem_tile, int sub, int gath_wg) {
-    constexpr int ROWS     = 256;              // rows per tile == BLOCK_ROW
-    constexpr int PER_WAVE = 64;               // rows one wave packs == lanes it fills
-    constexpr int WAVES    = ROWS / PER_WAVE;  // 4 waves per k-iter
-    constexpr int KPP      = NUM_WARPS / WAVES;// k-iters in flight: 8/4 = 2
+    constexpr int ROWS     = 256;                  // rows per tile == BLOCK_ROW
+    constexpr int PER_WAVE = STEP;                 // window stride one wave packs from
+    constexpr int WAVES    = NG;                   // waves per k-iter: 4 (A side) or 8 (B side)
+    constexpr int KPP      = NUM_WARPS / WAVES;    // k-iters in flight: 8/4 = 2, or 8/8 = 1
+    constexpr int PAD      = (NG - 1) * STEP + 64; // staging stride; covers pack_scales' OOB read
+    static_assert(NUM_WARPS % WAVES == 0, "NG must divide NUM_WARPS");
+    static_assert(KPP >= 1, "NG cannot exceed NUM_WARPS");
 
     const int lane  = (int)threadIdx.x % 64;
     const int wave  = (int)threadIdx.x / 64;
@@ -162,23 +174,39 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     const int k1  = (k0 + kpb > k_iters) ? k_iters : k0 + kpb;
     if (k0 >= k_iters) return;
 
-    // One dword per thread: KPP*ROWS == NUM_WARPS*PER_WAVE == NUM_THREADS, since a wave packs
-    // PER_WAVE rows with one lane each. So the stage below is straight-line, not a loop.
-    static_assert(KPP * ROWS == NUM_THREADS, "staging no longer covers the block exactly");
-    const int slot = (int)threadIdx.x / ROWS;   // which of the KPP k-iters this thread stages
-    const int srow = (int)threadIdx.x % ROWS;   // which row
+    // Staging is KPP slots of PAD words. <64,4> lands exactly on KPP*PAD == NUM_THREADS, so it
+    // keeps the original straight-line stage -- one dword per thread, no loop, no bounds test.
+    // That branch is kept verbatim so templating this function is a provable no-op for the A
+    // side; only a geometry that does not tile the block exactly pays for the general path.
+    constexpr bool EXACT = (KPP * PAD == NUM_THREADS);
+    static_assert(KPP * PAD <= 2 * 256, "staging exceeds the caller's scale_A_smem budget");
+
+    const int slot = (int)threadIdx.x / ROWS;   // used by the EXACT path only
+    const int srow = (int)threadIdx.x % ROWS;
 
     for (int kb = k0; kb < k1; kb += KPP) {
-        uint32_t p = 0;
-        if (kb + slot < k1) {
-            __builtin_memcpy(&p, &src_rows[(size_t)srow * scale_K + (kb + slot) * 4], 4);
+        if constexpr (EXACT) {
+            uint32_t p = 0;
+            if (kb + slot < k1) {
+                __builtin_memcpy(&p, &src_rows[(size_t)srow * scale_K + (kb + slot) * 4], 4);
+            }
+            smem_tile[threadIdx.x] = p;
+        } else {
+            for (int i = (int)threadIdx.x; i < KPP * PAD; i += NUM_THREADS) {
+                const int wslot = i / PAD;  // which of the KPP k-iters this word belongs to
+                const int wrow  = i % PAD;  // which row; >= ROWS is the zero-filled OOB tail
+                uint32_t p = 0;
+                if (wrow < ROWS && kb + wslot < k1) {
+                    __builtin_memcpy(&p, &src_rows[(size_t)wrow * scale_K + (kb + wslot) * 4], 4);
+                }
+                smem_tile[i] = p;
+            }
         }
-        smem_tile[threadIdx.x] = p;
         __syncthreads();
         if (kslot < KPP && kb + kslot < k1) {
             const size_t tile_id = (size_t)(kb + kslot) * tiles_per_col + cblk;
             ln[(tile_id * WAVES + wgrp) * 64 + lane] = kittens::pack_scales(
-                (const kittens::fp8e8m0 *)(smem_tile + kslot * ROWS), wgrp * PER_WAVE);
+                (const kittens::fp8e8m0 *)(smem_tile + kslot * PAD), wgrp * PER_WAVE);
         }
         __syncthreads();
     }

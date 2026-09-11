@@ -239,7 +239,11 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        #include "mxfp8_tn_mainloop.inc"
+        // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
+        // this guard. The standalone GEMM includes the same file without defining it.
+        #define MXFP8_AG_SKEW_CLOSE 1
+        #include "../mxfp8_tn_mainloop.inc"
+        #undef MXFP8_AG_SKEW_CLOSE
 
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
 

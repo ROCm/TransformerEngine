@@ -2,7 +2,8 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Main K-loop for the TN fused AG+GEMM: the steady-state loop plus both K-tile epilogues and the
+//! Main K-loop for the MXFP8 TN GEMM, shared by mxfp8_gemm_tn_kernel (mxfp8_gemm.cpp)
+//! and the fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_tn.cuh): the steady-state loop plus both K-tile epilogues and the
 //! skew-closing barrier, i.e. everything up to the C writeback, matching the boundary tn_mainloop.inc
 //! draws. Included inside the persistent tile loop with the stage/scale ping-pong state (tic/toc,
 //! tic_scales/toc_scales), the LDS handles and the swizzle tables in scope. Not a header: no include
@@ -179,7 +180,10 @@
             __builtin_amdgcn_s_barrier();
         }
 
-        // Closes the warp_m skew opened by the prologue so the next queue tile starts even.
+#ifdef MXFP8_AG_SKEW_CLOSE
+        // Closes the warp_m skew the AG prologue opens, so the next queue tile starts even. Only
+        // the fused AG kernels open that skew; the standalone GEMM has no persistent tile loop.
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
         }
+#endif
