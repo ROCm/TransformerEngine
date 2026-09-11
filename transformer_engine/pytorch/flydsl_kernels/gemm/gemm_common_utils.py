@@ -14,6 +14,7 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr.utils.arith import ArithValue
 
 from .exceptions import FlyDSLUnsupportedError
 
@@ -220,3 +221,24 @@ def compute_global_swizzle(lane_id, wave_id, row_stride, n_rounds, preshuffled=F
             r, c = swizzle_128(row, col)
             offsets.append(r * row_stride + c)
     return offsets
+
+
+def _i64(v):
+    """Widen an i32/index runtime value to signed i64 (tile base offsets)."""
+    return ArithValue(arith.unwrap(v)).extsi(fx.T.i64)
+
+
+def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
+    """Kernel ``value_attrs`` dict used by permute-free grouped GEMM launchers."""
+    attrs = {"rocdl.waves_per_eu": waves_per_eu, "rocdl.flat_work_group_size": fwg}
+    if agpr_alloc != 0:
+        if agpr_alloc < 0:
+            alloc = f"0,{-agpr_alloc}"
+        else:
+            alloc = f"{agpr_alloc},{agpr_alloc}"
+        attrs["passthrough"] = [
+            ["amdgpu-agpr-alloc", alloc],
+            ["amdgpu-mfma-vgpr-form", "false"],
+        ]
+    return attrs
+
