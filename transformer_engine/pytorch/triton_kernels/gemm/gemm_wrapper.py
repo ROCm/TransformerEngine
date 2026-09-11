@@ -9,7 +9,7 @@
 - ``te_gemm_triton``: low-level TE-style entry point (BLAS-shaped args)
 - ``te_generic_gemm_triton``: high-level entry point that detects
   Float8Tensor / MXFP8Tensor inputs and dispatches to the right kernel;
-  used by ``cpp_extensions.gemm.general_gemm`` when NVTE_USE_GEMM_TRITON=1
+  used by ``cpp_extensions.gemm.general_gemm`` when NVTE_GEMM_BACKEND=TRITON
 """
 
 import torch
@@ -70,11 +70,11 @@ def _classify_input(t):
         from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
         if isinstance(t, QuantizedTensorStorage):
             raise ValueError(
-                f"The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not "
+                f"The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not "
                 f"support {type(t).__name__}. Only Float8Tensor / "
                 f"Float8TensorStorage (regular FP8) and MXFP8TensorStorage "
                 f"are implemented. Disable the Triton backend for this recipe "
-                f"(unset NVTE_USE_GEMM_TRITON)."
+                f"(unset NVTE_GEMM_BACKEND)."
             )
     except ImportError:
         pass
@@ -389,7 +389,7 @@ def te_generic_gemm_triton(A,
                 f"Triton MXFP8 GEMM requires PyTorch >= 2.10 (found {torch_version()}). "
                 "Earlier versions contain a Triton compiler bug in tl.dot_scaled() that "
                 "produces incorrect results for the RHS scale operand. "
-                "Set NVTE_USE_GEMM_TRITON=0 to use the C++ GEMM backend instead."
+                "Unset NVTE_GEMM_BACKEND to use the C++ GEMM backend instead."
             )
 
         # Validate both are MXFP8
@@ -402,7 +402,7 @@ def te_generic_gemm_triton(A,
         # backward wgrad path uses a separate op and doesn't route through here.
         if bias is not None and bias.numel() > 0 and grad:
             raise ValueError(
-                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                "The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not support "
                 "MXFP8 GEMM with the BGRADB (bias-gradient) epilogue. The forward "
                 "BIAS epilogue is supported; only the grad path is not."
             )
@@ -493,7 +493,7 @@ def te_generic_gemm_triton(A,
             f"Mixed FP8 types (A={a_fp8_dtype}, B={b_fp8_dtype}) are not supported "
             f"in the Triton GEMM backend due to a Triton compiler bug "
             f"(triton-lang/triton#9567). Use the same FP8 format for both operands, "
-            f"or disable the Triton backend (unset NVTE_USE_GEMM_TRITON)."
+            f"or disable the Triton backend (unset NVTE_GEMM_BACKEND)."
         )
 
     # Reinterpret uint8 as native FP8 types for Triton

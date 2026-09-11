@@ -6,6 +6,7 @@
 
 import math
 import os
+import warnings
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -1338,6 +1339,187 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        None,
+        recipe.Float8CurrentScaling(),
+        recipe.DelayedScaling(),
+        recipe.MXFP8BlockScaling(),
+    ],
+)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_linear_accuracy_flydsl(
+    dtype,
+    bs,
+    model,
+    fp8_recipe,
+    fp8_model_params,
+):
+    """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
+
+    # FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py. On any
+    # other arch NVTE_GEMM_BACKEND=FLYDSL is a no-op and the FlyDSL path would
+    # just be the native backend compared against itself, so skip rather than
+    # pass vacuously.
+    if not IS_HIP_EXTENSION or get_device_compute_capability() != (9, 5):
+        pytest.skip("FlyDSL GEMM is only supported on gfx950.")
+    # flydsl is only installed when the FlyDSL backend is built in; without it
+    # the lazy import in general_gemm raises, so skip instead of erroring.
+    pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
+
+    fp8 = fp8_recipe is not None
+    config = model_configs[model]
+
+    # Low-precision (fp8) weight init only makes sense under an fp8 recipe;
+    # without one it is identical to the fp8_model_params=False run.
+    if fp8_model_params and not fp8:
+        pytest.skip("fp8_model_params requires an FP8 recipe.")
+
+    # "small" is the designated fallback case (not a config this PR claims to
+    # support); every other model is expected to run on FlyDSL.
+    expect_fallback = model == "small"
+
+    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+    elif fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    # fp8_model_params controls low-precision (fp8) weight storage; the FlyDSL
+    # path is exercised both with high-precision params (fp8 autocast only) and
+    # fp8-initialized params (fp8 init + fp8 autocast).
+    # bias=False: FlyDSL implements the forward BIAS epilogue but not the fused
+    # bias-gradient (BGRADB), so a bias=True backward wgrad GEMM would fall back
+    # to the native backend on the non-fp8 path.
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=fp8_recipe):
+        linear_ref = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+        linear_flydsl = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    with torch.no_grad():
+        linear_flydsl.weight.copy_(linear_ref.weight)
+
+    input_shape = (
+        config.max_seqlen_q,
+        bs,
+        config.hidden_size,
+    )
+
+    inp_ref = torch.randn(
+        input_shape,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_flydsl = inp_ref.detach().clone().requires_grad_(True)
+
+    try:
+        # Native TE backend.
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
+        os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
+
+        reset_rng_states()
+        FP8GlobalStateManager.reset()
+
+        with autocast(enabled=fp8, recipe=fp8_recipe):
+            out_ref = linear_ref(inp_ref)
+
+        out_ref.sum().backward()
+        torch.cuda.synchronize()
+
+        # FlyDSL backend.
+        os.environ["NVTE_GEMM_BACKEND"] = "FLYDSL"
+        os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
+
+        reset_rng_states()
+        FP8GlobalStateManager.reset()
+
+        # Capture the [FLYDSL WARNING] fallback notices emitted by
+        # cpp_extensions/gemm.py so we can tell whether FlyDSL actually ran.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with autocast(enabled=fp8, recipe=fp8_recipe):
+                out_flydsl = linear_flydsl(inp_flydsl)
+
+            out_flydsl.sum().backward()
+            torch.cuda.synchronize()
+
+        fell_back = any("[FLYDSL WARNING]" in str(w.message) for w in caught)
+
+    finally:
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
+        os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
+        FP8GlobalStateManager.reset()
+
+    # A silent fallback on a supported config means FlyDSL never ran, so the
+    # correctness asserts below would pass vacuously (native vs native).
+    if not expect_fallback and fell_back:
+        pytest.fail(
+            "FlyDSL GEMM unexpectedly fell back to the native backend for "
+            f"model={model}, dtype={dtype}, fp8_recipe={fp8_recipe}; "
+            "the FlyDSL path was not exercised."
+        )
+
+    tols = dtype_tols(dtype)
+    atol = tols["atol"]
+    rtol = tols["rtol"]
+
+    if fp8:
+        atol = max(atol, 1e-2)
+        rtol = max(rtol, 1e-2)
+
+    torch.testing.assert_close(
+        out_flydsl,
+        out_ref,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    torch.testing.assert_close(
+        inp_flydsl.grad,
+        inp_ref.grad,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    # Wgrad is an NT GEMM with a reduction over the flattened
+    # sequence/batch dimension. FlyDSL and the native TE backend may use
+    # different FP32 accumulation orders, so allow the small expected
+    # non-associative rounding difference.
+    wgrad_atol = atol
+    wgrad_rtol = rtol
+
+    if dtype == torch.float32 and not fp8:
+        wgrad_atol = max(wgrad_atol, 1e-4)
+        wgrad_rtol = max(wgrad_rtol, 1e-4)
+
+    torch.testing.assert_close(
+        linear_flydsl.weight.grad,
+        linear_ref.weight.grad,
+        atol=wgrad_atol,
+        rtol=wgrad_rtol,
+    )
 
 
 @pytest.mark.parametrize("dtype", param_types)
