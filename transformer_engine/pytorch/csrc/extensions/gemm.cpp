@@ -351,6 +351,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                 accumulate, use_split_accumulator, main_stream);
           });
+        } else if (comm_overlap->is_fused() && comm_type.value() == CommOverlapType::RS) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->fused_overlap_bulk_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                accumulate, use_split_accumulator,
+                                                extra_output_tensor, main_stream);
+          });
         } else
 #endif
         {
@@ -407,12 +414,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 #ifdef __HIP_PLATFORM_AMD__
           if (comm_overlap->is_p2p_overlap()) {
             NVTE_SCOPED_GIL_RELEASE({
-              comm_overlap->rocm_split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
-                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                                  accumulate, use_split_accumulator, extra_output_tensor,
-                                                  main_stream);
+              if (comm_overlap->is_fused()) {
+                comm_overlap->fused_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                               bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                               accumulate, use_split_accumulator,
+                                               extra_output_tensor, main_stream);
+              } else {
+                comm_overlap->rocm_split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                    bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                    accumulate, use_split_accumulator, extra_output_tensor,
+                                                    main_stream);
+              }
             });
-          } else 
+          } else
 #endif
           {
           NVTE_SCOPED_GIL_RELEASE({

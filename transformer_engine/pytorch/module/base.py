@@ -95,6 +95,7 @@ _ub_with_cublasmp = False
 _ub_fused_names = set()
 _ub_fused_bulk_decisions = {}
 _ub_disabled_names = set()
+_ub_shape = None
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
@@ -243,11 +244,12 @@ def initialize_ub(
                 f"quantization configurations ({len(quantization_modes)})"
             )
 
-    global _ub_communicators, _ub_with_cublasmp
+    global _ub_communicators, _ub_with_cublasmp, _ub_shape
     if _ub_communicators is not None:
         raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
     _ub_with_cublasmp = with_cublasmp
+    _ub_shape = tuple(shape)
 
     if tex.ubuf_built_with_mpi() and not with_cublasmp:
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
@@ -349,12 +351,12 @@ def initialize_ub(
             "qkv_wgrad",
             "fc1_wgrad",
         ]
-        # gfx950 runs the fused backend or nothing by default.
+        # gfx950 runs the fused backend by default.
         _fused_default = get_device_compute_capability() == (9, 5)
         methods = {
             "ring_exchange": [] if _fused_default else list(_rocm_layers),
             "pipeline": [],
-            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            # Bulk regions are rejected on ROCm.
             "bulk": [],
             "fused": list(_rocm_layers) if _fused_default else [],
         }
@@ -432,10 +434,10 @@ def initialize_ub(
         if method == "fused" and get_device_compute_capability() != (9, 5):
             raise ValueError(f"At {name}, `fused` overlap method requires a gfx950 device.")
         if method == "fused" and is_reduce_scatter:
-            # TODO: Add RS support.
-            _ub_disabled_names.add(name)
-            return
-        if method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
+            if not _fused_rs_ub_supported(shape, tp_size, dtype):
+                _ub_disabled_names.add(name)
+                return
+        elif method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
             _ub_disabled_names.add(name)
             return
         if with_cublasmp and method in ("bulk", "external", "fused"):
@@ -661,6 +663,17 @@ def _fused_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dt
     return (shape[0] // tp_size) % 256 == 0
 
 
+def _fused_rs_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dtype) -> bool:
+    """Whether the fused reduce-scatter backend can serve a region of this shape."""
+    if tp_size not in (4, 8):
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if shape[0] % (tp_size * 256) != 0:
+        return False
+    return shape[1] % 256 == 0
+
+
 def fused_ag_gemm_eligible(
     name: str,
     inp: torch.Tensor,
@@ -684,6 +697,40 @@ def fused_ag_gemm_eligible(
     return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
 
 
+def fused_rs_gemm_eligible(
+    name: str,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+    gelu: bool = False,
+    is_dgrad: bool = False,
+) -> bool:
+    """Whether the fused GEMM+RS backend covers this call."""
+    if not _ub_is_fused(name):
+        return True  # not our backend
+    if is_dgrad:
+        return False
+    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
+    if fp8 or gelu or bias is not None:
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if _ub_shape is None:
+        return False
+    tokens, region_hidden = _ub_shape[0], _ub_shape[1]
+    hidden, k = weight.shape
+    if hidden != region_hidden:
+        return False
+    if not _fused_rs_ub_supported(_ub_shape, tp_size, dtype):
+        return False
+    if k % 128 != 0 or k < 256:
+        return False
+    bands = (tokens // tp_size) // 256
+    return bands >= 1
+
+
 def fused_bulk_ag_eligible(
     name: str,
     inp: torch.Tensor,
@@ -703,6 +750,25 @@ def fused_bulk_ag_eligible(
     return eligible
 
 
+def fused_bulk_rs_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+) -> bool:
+    """Whether this call may use the bulk reduce-scatter overlap."""
+    if not IS_HIP_EXTENSION:
+        return True
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    if eligible:
+        m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
+        eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    _ub_fused_bulk_decisions[name] = eligible
+    return eligible
+
+
 def _ub_is_fused(name: str) -> bool:
     """Whether `name` was configured with the fused overlap method."""
     return name in _ub_fused_names
@@ -715,15 +781,16 @@ def ub_overlap_disabled(name: str) -> bool:
 
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators, _ub_with_cublasmp, _ub_initialized
+    global _ub_communicators, _ub_with_cublasmp, _ub_initialized, _ub_shape
     _ub_communicators = None
     _ub_with_cublasmp = False
     _ub_initialized = False
+    _ub_shape = None
     _ub_fused_names.clear()
     _ub_fused_bulk_decisions.clear()
     _ub_disabled_names.clear()
     if IS_HIP_EXTENSION:
-        tex.reset_fused_ag_gemm_cache()
+        tex.reset_comm_gemm_cache()
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
