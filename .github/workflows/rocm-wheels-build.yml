@@ -222,7 +222,7 @@ jobs:
           path: |
             ${{ runner.temp }}/wheelhouse/*.whl
             ${{ runner.temp }}/wheelhouse/*.tar.gz
-          retention-days: 5
+          retention-days: 3
           if-no-files-found: error
 
       - name: Upload build logs on failure
