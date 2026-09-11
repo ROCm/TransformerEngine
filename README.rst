@@ -235,10 +235,10 @@ Support matrix:
 
 The backend is off by default and enabled via an environment variable:
 
-* ``NVTE_USE_FLYDSL=1`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed.
+* ``NVTE_GEMM_BACKEND=FLYDSL`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed. (Leave ``NVTE_GEMM_BACKEND`` unset for the default C++/hipBLASLt backend, or set it to ``TRITON`` for the Triton GEMM backend.)
 * ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` -- emit a warning whenever a GEMM that FlyDSL cannot serve (unsupported shape/config) falls back to the default backend. Off by default.
 
-If ``NVTE_USE_FLYDSL=1`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
+If ``NVTE_GEMM_BACKEND=FLYDSL`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
 
 
 Fused Attention Backends on ROCm
@@ -314,6 +314,13 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
 
+MXFP4 GEMM support on ROCm (gfx95x only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+MXFP4 GEMM is supported on gfx95x GPUs for a limited number of configurations. A native hipBLASLt MXFP4 (F4F4) path is available when built against hipBLASLt >= 1.3, alongside the default AITER ``a4w4`` backend.
+To select the GEMM backend, use NVTE_ROCM_USE_HIPBLASLT_MXFP4 environment variable which can take the following values:
+* 0 - use the AITER a4w4 backend (default);
+* 1 - use the hipBLASLt MXFP4 GEMM backend.
+
 Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
@@ -364,6 +371,11 @@ Transformer Engine
 Latest News
 ===========
 
+* [06/2026] `Boosting MoE Training Throughput with Advanced Fusion Kernels <https://developer.nvidia.com/blog/boosting-moe-training-throughput-with-advanced-fusion-kernels/>`_
+* [06/2026] `Nemotron 3 Ultra: Open, Efficient Mixture-of-Experts Hybrid Mamba-Transformer Model for Agentic Reasoning <https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Ultra-Technical-Report.pdf>`_
+* [06/2026] `Train Models Faster with JAX and MaxText Using NVFP4 on NVIDIA Blackwell <https://developer.nvidia.com/blog/train-models-faster-with-jax-and-maxtext-using-nvfp4-on-nvidia-blackwell/>`_
+* [04/2026] `Run High-Throughput Reinforcement Learning Training with End-to-End FP8 Precision <https://developer.nvidia.com/blog/run-high-throughput-reinforcement-learning-training-with-end-to-end-fp8-precision/>`_
+* [02/2026] `Using NVFP4 Low-Precision Model Training for Higher Throughput Without Losing Accuracy <https://developer.nvidia.com/blog/using-nvfp4-low-precision-model-training-for-higher-throughput-without-losing-accuracy/>`_
 * [12/2025] `NVIDIA Nemotron 3: Efficient and Open Intelligence <https://arxiv.org/abs/2512.20856>`_ - trained with NVFP4 on Transformer Engine
 * [11/2025] `NVIDIA Blackwell Architecture Sweeps MLPerf Training v5.1 Benchmarks <https://developer.nvidia.com/blog/nvidia-blackwell-architecture-sweeps-mlperf-training-v5-1-benchmarks/>`_
 * [11/2025] `Scale Biology Transformer Models with PyTorch and NVIDIA BioNeMo Recipes <https://developer.nvidia.com/blog/scale-biology-transformer-models-with-pytorch-and-nvidia-bionemo-recipes/>`_

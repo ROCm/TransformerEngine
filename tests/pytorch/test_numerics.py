@@ -18,6 +18,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -891,7 +892,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path, weights_only=False))
+        loaded_state_dict = torch.load(path, weights_only=False)
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        try:
+            block.load_state_dict(loaded_state_dict)
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
         torch.set_rng_state(_cpu_rng_state)
         torch.cuda.set_rng_state(_cuda_rng_state)
 
@@ -1355,12 +1364,12 @@ def test_linear_accuracy_flydsl(
     """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
 
     # FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py. On any
-    # other arch NVTE_USE_FLYDSL=1 is a no-op and the FlyDSL path would just be
-    # the native backend compared against itself, so skip rather than pass
-    # vacuously.
+    # other arch NVTE_GEMM_BACKEND=FLYDSL is a no-op and the FlyDSL path would
+    # just be the native backend compared against itself, so skip rather than
+    # pass vacuously.
     if not IS_HIP_EXTENSION or get_device_compute_capability() != (9, 5):
         pytest.skip("FlyDSL GEMM is only supported on gfx950.")
-    # flydsl is only installed when NVTE_USE_FLYDSL=1 at build time; without it
+    # flydsl is only installed when the FlyDSL backend is built in; without it
     # the lazy import in general_gemm raises, so skip instead of erroring.
     pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
 
@@ -1427,7 +1436,7 @@ def test_linear_accuracy_flydsl(
 
     try:
         # Native TE backend.
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
 
         reset_rng_states()
@@ -1440,7 +1449,7 @@ def test_linear_accuracy_flydsl(
         torch.cuda.synchronize()
 
         # FlyDSL backend.
-        os.environ["NVTE_USE_FLYDSL"] = "1"
+        os.environ["NVTE_GEMM_BACKEND"] = "FLYDSL"
         os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
 
         reset_rng_states()
@@ -1459,7 +1468,7 @@ def test_linear_accuracy_flydsl(
         fell_back = any("[FLYDSL WARNING]" in str(w.message) for w in caught)
 
     finally:
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
 

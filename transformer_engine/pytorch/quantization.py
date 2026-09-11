@@ -32,7 +32,7 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type, DType
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, get_gemm_backend
 from .jit import jit_fuser
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -203,15 +203,16 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
+            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return True, ""
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
         False,
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
+
 
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
@@ -284,15 +285,15 @@ def check_recipe_support(recipe: Recipe) -> None:
     # PyTorch 2.11). The HYBRID recipe uses e4m3 for forward and e5m2 for backward,
     # producing mixed-type GEMMs during the backward pass. Only Format.E4M3 (which
     # uses e4m3 for both forward and backward) is compatible with the Triton backend.
-    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    use_gemm_triton = IS_HIP_EXTENSION and get_gemm_backend() == "triton"
     if use_gemm_triton and recipe is not None and hasattr(recipe, "fp8_format"):
         if recipe.fp8_format == Format.HYBRID:
             raise ValueError(
-                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                "The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not support "
                 "Format.HYBRID because the backward pass produces mixed FP8 type GEMMs "
                 "(e5m2 x e4m3), which trigger a Triton compiler bug "
                 "(triton-lang/triton#9567). Use Format.E4M3 instead, or disable the "
-                "Triton backend (unset NVTE_USE_GEMM_TRITON)."
+                "Triton backend (unset NVTE_GEMM_BACKEND)."
             )
 
 
@@ -343,6 +344,14 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         return 128
     if recipe.mxfp4():
         return 256
+    if IS_HIP_EXTENSION and recipe.float8_block_scaling():
+        # CDNA3 (gfx942) blockwise FP8 GEMM needs K padded to 128; the Triton path
+        # (NVTE_USE_BLOCKWISE_GMM_TRITON) pads K internally, so it stays 16-aligned.
+        if (
+            get_device_compute_capability() == (9, 4)
+            and os.environ.get("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") != "1"
+        ):
+            return 128
     return 16
 
 
@@ -1769,12 +1778,26 @@ class MXFP4BlockScalingRecipeState(RecipeState):
 
         use_hadamard = self.recipe.use_hadamard
 
+        # The hipBLASLt MXFP4 GEMM path consumes plain (un-shuffled) FP4 data. Its UE8M0
+        # scales are plain (VEC32_UE8M0) by default, but can optionally be pre-swizzled into
+        # the 32x8 tile order that hipBLASLt's BLK32_UE8M0_32_8_EXT (mode 1001) reads in place
+        # -- opt in via the recipe's use_swizzled_scales flag. The AITER a4w4 backend always
+        # needs the 16x16 weight shuffle and swizzled scales.
+        use_hipblaslt = bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")))
+        use_swizzled = use_hipblaslt and self.recipe.use_swizzled_scales
+        # AITER path swizzles scales; hipBLASLt path swizzles only when the recipe opts in.
+        # FP4 data shuffle stays off on the hipBLASLt path regardless
+        swizzled_scales = use_swizzled if use_hipblaslt else True
+
         if self.mode == "forward":
 
             def _make_quantizer(idx: int):
                 is_activation = idx % 3 == 0
                 is_weight = idx % 3 == 1
-                if is_activation:
+                if use_hipblaslt:
+                    shuffle_rowwise_data = False
+                    shuffle_columnwise_data = False
+                elif is_activation:
                     shuffle_rowwise_data = False
                     shuffle_columnwise_data = True
                 elif is_weight:
@@ -1789,7 +1812,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=shuffle_rowwise_data,
                     shuffle_columnwise_data=shuffle_columnwise_data,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
 
@@ -1803,7 +1826,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=False,
                     shuffle_columnwise_data=False,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
                 for _ in range(self.num_quantizers)

@@ -4,29 +4,37 @@
 
 """FlyDSL GEMM kernels (dense, non-grouped) for BF16/FP16/FP32/FP8/MXFP8."""
 
-# Minimum supported flydsl release. Single source of truth for the version
+# Supported flydsl release series. Single source of truth for the version
 # requirement, since flydsl is user-installed (not a declared dependency). A
-# too-old (or missing) package raises ImportError here, which general_gemm
-# catches to warn once and fall back to the default backend.
+# missing, too-old, or too-new package raises ImportError here, which
+# general_gemm catches to warn once and fall back to the default backend.
+# flydsl is pre-1.0, so the minor version is the breaking-change axis: only
+# the exact 0.3.x series is accepted, since a bump to 0.4.x is expected to
+# change the API.
 _MIN_FLYDSL = (0, 3)
+_MAX_FLYDSL = (0, 4)  # exclusive upper bound
 
 
 def _check_flydsl_version() -> None:
     from importlib.metadata import version
+    from packaging.version import Version, InvalidVersion
 
-    # PackageNotFoundError subclasses ImportError, so a missing package is
-    # handled by the same fallback path as a too-old one.
+    _min = Version(f"{_MIN_FLYDSL[0]}.{_MIN_FLYDSL[1]}")
+    _max = Version(f"{_MAX_FLYDSL[0]}.{_MAX_FLYDSL[1]}")
+
     installed = version("flydsl")
     try:
-        major_minor = tuple(int(part) for part in installed.split(".")[:2])
-    except ValueError:
-        # Unparseable version string: the package imported, so let it proceed
-        # rather than falsely block a valid install.
-        return
-    if major_minor < _MIN_FLYDSL:
+        parsed = Version(installed)
+    except InvalidVersion as e:
+        # A valid install exposes a PEP 440 version string; an unparseable one
+        # is a broken install, so block it rather than let it proceed.
+        raise ImportError(
+            f"flydsl version {installed!r} is not a valid PEP 440 version"
+        ) from e
+    if not _min <= parsed < _max:
         raise ImportError(
             f"flydsl {installed} is installed but the FlyDSL GEMM backend requires "
-            f">= {_MIN_FLYDSL[0]}.{_MIN_FLYDSL[1]}"
+            f">= {_MIN_FLYDSL[0]}.{_MIN_FLYDSL[1]}, < {_MAX_FLYDSL[0]}.{_MAX_FLYDSL[1]}"
         )
 
 

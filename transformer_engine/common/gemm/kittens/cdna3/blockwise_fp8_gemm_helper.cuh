@@ -8,6 +8,7 @@
 #include <type_traits>
 #include "kittens.cuh"
 #include "../../../util/math.h"
+using namespace te_kittens::blockwise;  // NOLINT(build/namespaces)
 
 typedef int int32x4_lds_t __attribute__((ext_vector_type(4)));
 struct __attribute__((packed)) buf_res { const void *ptr; uint32_t range; uint32_t config; };
@@ -87,12 +88,6 @@ __device__ inline float rtne_bias(float v) {
     return __builtin_bit_cast(float, bits);
 }
 
-__device__ inline float read_elem(const void *p, int dtype, int idx) {
-    if (dtype == 6) return __bfloat162float(reinterpret_cast<const __hip_bfloat16 *>(p)[idx]);
-    if (dtype == 5) return __half2float(reinterpret_cast<const __half *>(p)[idx]);
-    return reinterpret_cast<const float *>(p)[idx];
-}
-
 template <typename OType>
 __device__ inline OType convert_out(float v) {
     if constexpr (std::is_same_v<OType, kittens::bf16>) {
@@ -136,26 +131,6 @@ __device__ inline void store_output(OType *c_ptr, const AccType &Cacc,
             if (m0 + 3 < M) c_ptr[(m0 + 3) * N + col] = convert_out<OType>(Cacc.tiles[i][j].data[1].y);
         }
     }
-}
-
-enum struct GemmEpilogue {
-    DEFAULT,
-    BIAS,
-    GELU_AUX,
-    BETA,
-    BIAS_BETA,
-    GELU_AUX_BETA,
-};
-
-__host__ __device__ inline constexpr bool epilogue_has_bias(GemmEpilogue e) {
-    return e == GemmEpilogue::BIAS || e == GemmEpilogue::BIAS_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_gelu(GemmEpilogue e) {
-    return e == GemmEpilogue::GELU_AUX || e == GemmEpilogue::GELU_AUX_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_beta(GemmEpilogue e) {
-    return e == GemmEpilogue::BETA || e == GemmEpilogue::BIAS_BETA
-        || e == GemmEpilogue::GELU_AUX_BETA;
 }
 
 template <typename OType, GemmEpilogue EPILOGUE, typename AccType>

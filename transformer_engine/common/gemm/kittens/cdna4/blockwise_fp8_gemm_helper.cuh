@@ -8,6 +8,7 @@
 #include <type_traits>
 #include "kittens.cuh"
 #include "../../../util/math.h"
+using namespace te_kittens::blockwise;  // NOLINT(build/namespaces)
 
 template <int HEIGHT>
 struct RowScale { float2 v[HEIGHT][2]; };
@@ -77,15 +78,9 @@ __device__ inline void store_output(OType *c_ptr, const AccType &acc,
     }
 }
 
-__device__ inline float read_elem(const void *p, int dtype, int idx) {
-    if (dtype == 6) return __bfloat162float(reinterpret_cast<const __hip_bfloat16 *>(p)[idx]);
-    if (dtype == 5) return __half2float(reinterpret_cast<const __half *>(p)[idx]);
-    return reinterpret_cast<const float *>(p)[idx];
-}
-
 // Deliberate: the reference rounds to the output type before the beta*C add
 // (blockwise_fp8_gemm_reference.py::qgemm). This TU is built with -ffast-math, which folds
-// fpext(fptrunc(x)) back to x, so the empty asm is required to keep the conversion.
+// fpext(fptrunc(x)) back to x, so the empty asm is required to keeWp the conversion.
 template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
@@ -98,26 +93,6 @@ __device__ inline float round_to_out_dtype(float v) {
         // fp16 is not parametrized in test_float8_blockwise_gemm_exact.py; left unchanged.
         return __half2float(__float2half(v));
     }
-}
-
-enum struct GemmEpilogue {
-    DEFAULT,
-    BIAS,
-    GELU_AUX,
-    BETA,
-    BIAS_BETA,
-    GELU_AUX_BETA,
-};
-
-__host__ __device__ inline constexpr bool epilogue_has_bias(GemmEpilogue e) {
-    return e == GemmEpilogue::BIAS || e == GemmEpilogue::BIAS_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_gelu(GemmEpilogue e) {
-    return e == GemmEpilogue::GELU_AUX || e == GemmEpilogue::GELU_AUX_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_beta(GemmEpilogue e) {
-    return e == GemmEpilogue::BETA || e == GemmEpilogue::BIAS_BETA
-        || e == GemmEpilogue::GELU_AUX_BETA;
 }
 
 template <typename OType, bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, typename AccType>
@@ -461,4 +436,3 @@ static void launch_pack_scales_pow2(const float *scales, uint32_t *packed, int p
     pack_scales_pow2_kernel<WEIGHT, TRANSPOSE><<<blocks, 256, 0, stream>>>(scales, packed, padded_dim, real_dim, scale_K, k_iters, scale_block);
 }
 
-static inline size_t align_up_pow2ws(size_t x) { return (x + 255) & ~size_t(255); }

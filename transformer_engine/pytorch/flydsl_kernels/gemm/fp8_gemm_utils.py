@@ -19,6 +19,7 @@ from .gemm_common_utils import (
     barrier,
     cdiv,
     ceildiv,
+    compute_global_swizzle,
     divmod,
     encode_waitcnt,
     min,
@@ -42,33 +43,6 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     )
     iter_f8 = fx.recast_iter(f8_buf_ptr_ty, iter_i8)
     return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
-
-
-# Returns, for one lane (lane_id, wave_id), a list of n_rounds swizzled flat
-# global offsets indexed by DMA pass: offsets[step] = r*K + c where (r,c) =
-# swizzle_128(row, col). Each is the static per-thread/per-pass source of one
-# 16-byte load; the dynamic K-tile base is added later as soffset. K is the
-# global row stride (a_leading_dim / b_leading_dim), not the 128 tile width.
-def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds):
-        if const_expr(preshuffled):
-            row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
-            col = (lane_id // 8) * 16
-            offsets.append(
-                (row // 16) * (K * 16)
-                + (row % 16) * 16
-                + (col // 64) * 1024
-                + ((col % 64) // 16) * 256
-                + (col % 16)
-            )
-        else:
-            row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
-            col = (lane_id % 8) * 16
-            r, c = swizzle_128(row, col)
-            offsets.append(r * K + c)
-    return offsets
 
 
 class G2SLoader:

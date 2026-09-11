@@ -25,6 +25,12 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -58,6 +64,7 @@ from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import (
+    get_device_compute_capability,
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_nvtx_range_context,
@@ -85,6 +92,9 @@ _dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
+_ub_fused_names = set()
+_ub_fused_bulk_decisions = {}
+_ub_disabled_names = set()
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
@@ -160,7 +170,7 @@ def initialize_ub(
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange" or "pipeline">,
+                        "method": <"ring_exchange", "pipeline", or "fused" (ROCm only)>,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -325,24 +335,28 @@ def initialize_ub(
 
     # Default overlap methods for layers
     if IS_HIP_EXTENSION:
+        _rocm_layers = [
+            "qkv_fprop",
+            "fc1_fprop",
+            "proj_dgrad",
+            "fc2_dgrad",
+            "proj_wgrad",
+            "fc2_wgrad",
+            "proj_fprop",
+            "fc2_fprop",
+            "qkv_dgrad",
+            "fc1_dgrad",
+            "qkv_wgrad",
+            "fc1_wgrad",
+        ]
+        # gfx950 runs the fused backend or nothing by default.
+        _fused_default = get_device_compute_capability() == (9, 5)
         methods = {
-            "ring_exchange": [
-                "qkv_fprop",
-                "fc1_fprop",
-                "proj_dgrad",
-                "fc2_dgrad",
-                "proj_wgrad",
-                "fc2_wgrad",
-                "proj_fprop",
-                "fc2_fprop",
-                "qkv_dgrad",
-                "fc1_dgrad",
-                "qkv_wgrad",
-                "fc1_wgrad"
-            ],
+            "ring_exchange": [] if _fused_default else list(_rocm_layers),
             "pipeline": [],
             # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
             "bulk": [],
+            "fused": list(_rocm_layers) if _fused_default else [],
         }
     else:
         methods = {
@@ -379,10 +393,13 @@ def initialize_ub(
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
-            "num_sm": 1 if method == "ring_exchange" else 16,
-            "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
-            "num_splits": tp_size if method == "ring_exchange" else 4,
+            "num_sm": 1 if method in ("ring_exchange", "fused") else 16,
+            "cga_size": 1 if method in ("ring_exchange", "fused") else 2,
+            # Default set to False for HIP for performance
+            "set_sm_margin": (
+                method not in ("ring_exchange", "fused") and not IS_HIP_EXTENSION
+            ),
+            "num_splits": tp_size if method in ("ring_exchange", "fused") else 4,
             "aggregate": False,
             "atomic_gemm": False,
             "use_ce": True,
@@ -410,7 +427,18 @@ def initialize_ub(
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
-        if with_cublasmp and method in ("bulk", "external"):
+        if method not in methods:
+            raise ValueError(f"At {name}, unrecognized overlap method `{method}`.")
+        if method == "fused" and get_device_compute_capability() != (9, 5):
+            raise ValueError(f"At {name}, `fused` overlap method requires a gfx950 device.")
+        if method == "fused" and is_reduce_scatter:
+            # TODO: Add RS support.
+            _ub_disabled_names.add(name)
+            return
+        if method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
+            _ub_disabled_names.add(name)
+            return
+        if with_cublasmp and method in ("bulk", "external", "fused"):
             raise ValueError(
                 f"At {name}, cuBLASMp does not support `{method}` overlap method. "
                 "Please select a different method or set with_cublasmp=False."
@@ -473,7 +501,7 @@ def initialize_ub(
             else dtype
         )
         comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
-        if method == "ring_exchange":
+        if method in ("ring_exchange", "fused"):
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -490,6 +518,7 @@ def initialize_ub(
                 aggregate=aggregate,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                fused=method == "fused",
             )
         else:
             ub_obj = tex.CommOverlap(
@@ -510,6 +539,8 @@ def initialize_ub(
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[(name, quantization_mode)] = ub_obj
+        if method == "fused":
+            _ub_fused_names.add(name)
 
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
         if user_ub_cfg is not None:
@@ -532,9 +563,12 @@ def initialize_ub(
                         layers_all_gather_overlap.remove(name)
                     if name not in layers_reduce_scatter_overlap:
                         layers_reduce_scatter_overlap.append(name)
-                    if name in methods["bulk"]:
-                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
+                    # A leftover entry in another list allocates a second buffer for this name
+                    if IS_HIP_EXTENSION:
+                        for other_method, names in methods.items():
+                            if other_method != new_method and name in names:
+                                names.remove(name)
                     if name not in methods[new_method]:
                         methods[new_method].append(name)
 
@@ -601,12 +635,95 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     return get_ub(name, use_fp8).is_fp8_ubuf()
 
 
+def _fused_gemm_shape_ok(m: int, k: int, n_chunk: int, tp_size: int) -> bool:
+    """The fused comm+GEMM kernels' shape contract."""
+    if tp_size not in (4, 8):
+        return False
+    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
+
+
+def _fused_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, is_dgrad: bool) -> tuple:
+    """(m, k, n_chunk) of the GEMM behind a fused overlap, in the kernel's operand convention."""
+    out_features, in_features = weight.shape
+    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
+    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
+    return m, k, n_chunk
+
+
+def _fused_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dtype) -> bool:
+    """Whether the fused backend can serve a Userbuffers region of this shape."""
+    if tp_size not in (4, 8):
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if shape[0] % tp_size != 0:
+        return False
+    return (shape[0] // tp_size) % 256 == 0
+
+
+def fused_ag_gemm_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+    gelu: bool = False,
+    is_dgrad: bool = False,
+) -> bool:
+    """Whether the fused AG+GEMM backend covers this call."""
+    if not _ub_is_fused(name):
+        return True  # not our backend
+    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
+    if fp8 or gelu or bias is not None:
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad)
+    return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+
+
+def fused_bulk_ag_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+) -> bool:
+    """Whether this call may use the bulk all-gather overlap."""
+    if not IS_HIP_EXTENSION:
+        return True
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    if eligible:
+        m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
+        eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    _ub_fused_bulk_decisions[name] = eligible
+    return eligible
+
+
+def _ub_is_fused(name: str) -> bool:
+    """Whether `name` was configured with the fused overlap method."""
+    return name in _ub_fused_names
+
+
+def ub_overlap_disabled(name: str) -> bool:
+    """Whether `name` has no overlap backend at all and must take the non-overlapped path."""
+    return name in _ub_disabled_names
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators, _ub_with_cublasmp, _ub_initialized
     _ub_communicators = None
     _ub_with_cublasmp = False
     _ub_initialized = False
+    _ub_fused_names.clear()
+    _ub_fused_bulk_decisions.clear()
+    _ub_disabled_names.clear()
+    if IS_HIP_EXTENSION:
+        tex.reset_fused_ag_gemm_cache()
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
@@ -1326,9 +1443,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
+        state["recipe"] = recipe
         if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
@@ -1358,16 +1479,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 

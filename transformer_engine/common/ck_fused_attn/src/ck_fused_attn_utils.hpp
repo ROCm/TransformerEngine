@@ -9,6 +9,7 @@
 
 #include<fstream>
 #include<utility>
+#include<type_traits>
 #include<hip/hip_runtime.h>
 #include "ck_tile/host.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
@@ -34,6 +35,27 @@ switch (dtype) {                                            \
   }                                                         \
   default:                                                  \
     throw std::runtime_error("Invalid type for 16 bit..");  \
+}
+
+// Device-side dtype conversion helpers for the reduction kernels.
+// ck_tile::bf16_t lacks implicit float conversions and needs explicit
+// bf16_to_float / float_to_bf16; fp16/fp32 convert implicitly.
+template<typename T>
+__device__ __forceinline__ float to_f32(T x) {
+  if constexpr (std::is_same_v<T, ck_tile::bf16_t>) {
+    return ck_tile::bf16_to_float(x);
+  } else {
+    return static_cast<float>(x);
+  }
+}
+
+template<typename T>
+__device__ __forceinline__ T from_f32(float x) {
+  if constexpr (std::is_same_v<T, ck_tile::bf16_t>) {
+    return ck_tile::float_to_bf16(x);
+  } else {
+    return static_cast<T>(x);
+  }
 }
 
 // element-wise bias shape
