@@ -379,6 +379,13 @@ def grouped_gemm_mxfp4_wgrad(
     lhs_data, lhs_scale, go_pad = _col_operand_grouped_padded(grad_out, m_splits)  # (N, Mpad/2)
     rhs_data, rhs_scale, _ = _col_operand_grouped_padded(a, m_splits)  # (K, Mpad/2)
 
+    # Whether every padded group length is 256-divisible; part of the wgrad autotune
+    # key so a cached BLOCK_K=256 config is never reused on a shape that can't take
+    # it. Computed from the Python splits, so the hot path needs no device sync.
+    can256 = int(
+        all(round_up_to_nearest_multiple(int(m), WGRAD_PAD_MULTIPLE) % 256 == 0 for m in m_splits)
+    )
+
     return grouped_gemm_mxfp4_variable_k_triton_kernel(
         lhs_data,
         lhs_scale,
@@ -392,6 +399,7 @@ def grouped_gemm_mxfp4_wgrad(
         num_cu=num_cu,
         out=out,
         accumulate=accumulate,
+        can256=can256,
     )
 
 
