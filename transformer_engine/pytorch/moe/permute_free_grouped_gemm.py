@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 
 import torch
 
+from ..utils import packed_3d_view
 from .moe_routing import MoERoutingMetadata, PermuteFreeMetadata
 from .pf_helper_kernels import (
     fused_gated_act_prob_bwd,
@@ -345,38 +346,12 @@ def _prepare_wgrad_align(
 
 
 def _try_view_grouped(weights: list[torch.Tensor]) -> Optional[torch.Tensor]:
-    """Return a zero-copy ``[E, out, in]`` view when the per-expert tensors are contiguous,
-    uniformly-strided, sequential slices of **one shared storage** (e.g. a single grouped weight
-    buffer).
+    """Zero-copy ``[E, out, in]`` view of consecutive expert slices, or ``None``.
 
-    Returns ``None`` when the layout is not a single contiguous block, so the caller can fall
-    back to ``torch.stack``. Note that sequential ``data_ptr``s are not sufficient: separate
-    parameters can be allocated back-to-back yet own distinct storages, so ``as_strided`` from
-    the first tensor would overrun its storage. We therefore require a single shared storage.
+    Same helper as GroupedLinear blockwise/permute-free wgrad packing
+    (:func:`transformer_engine.pytorch.utils.packed_3d_view`).
     """
-    w0 = weights[0]
-    if not w0.is_contiguous():
-        return None
-    out, in_ = w0.shape
-    stride = out * in_
-    itemsize = w0.element_size()
-    base_ptr = w0.data_ptr()
-    storage_ptr = w0.untyped_storage().data_ptr()
-    for i, w in enumerate(weights):
-        if (
-            w.shape != w0.shape
-            or w.dtype != w0.dtype
-            or not w.is_contiguous()
-            or w.untyped_storage().data_ptr() != storage_ptr
-            or w.data_ptr() != base_ptr + i * stride * itemsize
-        ):
-            return None
-    # Guard: the shared storage must actually span all E experts from w0's offset.
-    needed = (w0.storage_offset() + len(weights) * stride) * itemsize
-    if w0.untyped_storage().nbytes() < needed:
-        return None
-    # All experts form one contiguous [E, out, in] block starting at w0's storage offset.
-    return torch.as_strided(w0, (len(weights), out, in_), (stride, in_, 1))
+    return packed_3d_view(weights)
 
 
 def _stack_expert_weights(weights: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:

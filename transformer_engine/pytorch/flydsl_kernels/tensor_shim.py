@@ -3,22 +3,20 @@
 
 import torch
 import flydsl.compiler as flyc
-from flydsl.expr import arith, ptrtoint
-from flydsl.expr.typing import T
-
-from .gemm.gemm_common_utils import make_buffer_rsrc_from_addr
+import flydsl.expr as fx
 
 
-def ptr_rsrc(ptr):
-    """Convert an fx.Pointer kernel arg to a V# buffer resource for the wgrad DMA."""
-    addr_i64 = arith.index_cast(T.i64, ptrtoint(ptr))
-    return make_buffer_rsrc_from_addr(addr_i64)
+def ptr_rsrc(ptr, num_records_bytes=None):
+    """Convert an fx.Pointer kernel arg to a V# (``!llvm.ptr<8>``) for buffer DMA.
+
+    Uses FlyDSL ``make_buffer_ptr`` + ``get_buffer_rsrc``. ``num_records_bytes``
+    bounds the descriptor for hardware OOB zeros (padding / sentinel rows).
+    """
+    return fx.rocdl.get_buffer_rsrc(fx.rocdl.make_buffer_ptr(ptr, num_records_bytes=num_records_bytes))
 
 
 def ptr_arg(t: torch.Tensor):
     """Wrap a torch.Tensor as an fx.Pointer (PointerJitArg) for kernel launch."""
-    import flydsl.expr as fx
-
     type_name = type(t).__name__
     module_name = type(t).__module__
     if type_name == "FakeTensor" or "fake_tensor" in module_name:

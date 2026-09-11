@@ -5,23 +5,26 @@
 """FlyDSL helpers for permute-free MoE grouped GEMM (Mega 8-wave / 32x32x16).
 
 Shared building blocks for ``pf_fwd.py`` and ``pf_dgrad.py``. Dense 4-wave BF16
-utilities live in ``fp16_gemm_utils.py``; the pipelined MMA loop lives in
-``half_prec_gemm.py`` as ``dense_mma_pipeline_bf16``.
+utilities live in ``fp16_gemm_utils.py``. The Mega 8-wave pipelined MMA loop
+lives here as ``dense_mma_pipeline_bf16`` (independent of the 4-wave
+``half_prec_gemm`` core).
 """
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
+from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr import arith, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 
-from .gemm_common_utils import get_element_ptr
-from .half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
+
+# Mega 8-wave K-tile. Independent of the 4-wave ``half_prec_gemm`` BLOCK_K.
+BLOCK_K = 64
 
 
 def _inttoptr_lds(byte_addr):
@@ -30,14 +33,13 @@ def _inttoptr_lds(byte_addr):
     return _llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), _raw(fx.Int64(byte_addr)))
 
 
-_gep = get_element_ptr
-
-
 def _lds_ptr_from_i32(addr_i32, byte_offset=0):
     """Build an LDS pointer (ptr<3>) from an i32 byte address + optional static offset."""
     ptr = _inttoptr_lds(ArithValue(addr_i32).extui(T.i64))
     if byte_offset != 0:
-        ptr = _gep(ptr, static_byte_offset=byte_offset)
+        ptr = _llvm.getelementptr(
+            ir.Type.parse("!llvm.ptr<3>"), ptr, [], [int(byte_offset)], T.i8, None
+        )
     return ptr
 
 
@@ -349,6 +351,205 @@ def _make_shared_storage(BLOCK_M, BLOCK_N):
         B_lds_next_1: fx.Array[fx.BFloat16, b_lds_size, 16]
 
     return SharedStorage
+
+
+def wait_barrier(count):
+    _llvm.inline_asm(
+        res=None,
+        operands_=[],
+        asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
+        constraints="",
+        has_side_effects=True,
+    )
+
+
+@ASTRewriter.transform
+def dense_mma_pipeline_bf16(
+    lds,
+    a_g2s,
+    b_g2s,
+    a_s2r,
+    b_s2r,
+    mfma,
+    store_c,
+    A0_gl_offset,
+    A1_gl_offset,
+    B0_gl_offset,
+    B1_gl_offset,
+    a_k_step,
+    b_k_step,
+    block_m,
+    block_n,
+    wave_m,
+    wave_n,
+    K,
+    BLOCK_M,
+    BLOCK_N,
+    nt_vmcnt,
+    a_g2s_hi=None,
+):
+    """Shared 4-quadrant pipelined MMA loop + store epilogue for the Mega bf16 tile.
+
+    ``a_g2s_hi`` (optional): a second A global->LDS loader used only for the upper
+    LDS half-tile. Defaults to ``a_g2s``. A gathering GEMM passes a distinct loader
+    whose per-lane offsets are redirected through the gather index for the upper rows.
+    """
+    a_g2s_hi = a_g2s if a_g2s_hi is None else a_g2s_hi
+    K_ITERS = K // BLOCK_K
+    assert K_ITERS >= 2, f"K_ITERS={K_ITERS} too small; need K >= {2 * BLOCK_K}"
+    N_TILES_A = BLOCK_M // 128
+    N_TILES_B = BLOCK_N // 256
+    N_ACCUMS = N_TILES_A * N_TILES_B
+    LDS_BLOCK_M = BLOCK_M // 2
+    LDS_BLOCK_N = BLOCK_N // 2
+    N_LDS_STEPS_A = LDS_BLOCK_M // 64
+    N_LDS_STEPS_B = LDS_BLOCK_N // 64
+
+    a_cur0 = lds.A_lds_cur_0
+    a_cur1 = lds.A_lds_cur_1
+    a_next0 = lds.A_lds_next_0
+    a_next1 = lds.A_lds_next_1
+    b_cur0 = lds.B_lds_cur_0
+    b_cur1 = lds.B_lds_cur_1
+    b_next0 = lds.B_lds_next_0
+    b_next1 = lds.B_lds_next_1
+
+    c00_frag = [mfma.zero_value] * N_ACCUMS
+    c01_frag = [mfma.zero_value] * N_ACCUMS
+    c10_frag = [mfma.zero_value] * N_ACCUMS
+    c11_frag = [mfma.zero_value] * N_ACCUMS
+
+    b_g2s.load(b_cur0, B0_gl_offset + 0 * b_k_step)
+    a_g2s.load(a_cur0, A0_gl_offset + 0 * a_k_step)
+    b_g2s.load(b_cur1, B1_gl_offset + 0 * b_k_step)
+    a_g2s_hi.load(a_cur1, A1_gl_offset + 0 * a_k_step)
+
+    if wave_m == 1:
+        rocdl.s_barrier()
+    wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+    b_g2s.load(b_next0, B0_gl_offset + 1 * b_k_step)
+    a_g2s.load(a_next0, A0_gl_offset + 1 * a_k_step)
+    b_g2s.load(b_next1, B1_gl_offset + 1 * b_k_step)
+
+    wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+
+    for k in range_constexpr(K_ITERS - 2):
+        b0_frag = b_s2r.load(b_cur0)
+        a0_frag = a_s2r.load(a_cur0)
+        a_g2s_hi.load(a_next1, A1_gl_offset + (k + 1) * a_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        b1_frag = b_s2r.load(b_cur1)
+        b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * b_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        a1_frag = a_s2r.load(a_cur1)
+        a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * a_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * b_k_step)
+        wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+        rocdl.s_setprio(1)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        if const_expr(nt_vmcnt >= 0):
+            _llvm.inline_asm(
+                res=None,
+                operands_=[],
+                asm_string=f"s_waitcnt vmcnt({nt_vmcnt})",
+                constraints="",
+                has_side_effects=True,
+            )
+        a_cur0, a_next0 = a_next0, a_cur0
+        a_cur1, a_next1 = a_next1, a_cur1
+        b_cur0, b_next0 = b_next0, b_cur0
+        b_cur1, b_next1 = b_next1, b_cur1
+
+    k = K_ITERS - 2
+    b0_frag = b_s2r.load(b_cur0)
+    a0_frag = a_s2r.load(a_cur0)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b1_frag = b_s2r.load(b_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a1_frag = a_s2r.load(a_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b0_frag = b_s2r.load(b_next0)
+    a_g2s_hi.load(a_next1, A1_gl_offset + (k + 1) * a_k_step)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a_cur0, a_next0 = a_next0, a_cur0
+    a_cur1, a_next1 = a_next1, a_cur1
+    b_cur0, b_next0 = b_next0, b_cur0
+    b_cur1, b_next1 = b_next1, b_cur1
+
+    a0_frag = a_s2r.load(a_cur0)
+    wait_barrier(0)
+    rocdl.s_setprio(1)
+    c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b1_frag = b_s2r.load(b_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a1_frag = a_s2r.load(a_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+    c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    wave_n_offset = wave_n * (N_TILES_B * 32)
+    wave_m_offset = wave_m * (N_TILES_A * 32)
+    base_row = block_m * BLOCK_M + wave_m_offset
+    base_col = block_n * BLOCK_N + wave_n_offset
+    store_c.store(c00_frag, base_row + 0, base_col + 0)
+    store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
+    store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
+    store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
 
 
 def _gemm_bf16_nn_tn_tile_impl(

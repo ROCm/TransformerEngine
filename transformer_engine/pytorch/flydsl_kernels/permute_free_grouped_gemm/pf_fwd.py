@@ -36,10 +36,10 @@ import flydsl.expr as fx
 from flydsl.expr import arith, range_constexpr
 from flydsl.expr.typing import AddressSpace, PointerType
 
-from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
-from ..gemm.gemm_common_utils import _i64, extract_base_index, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, make_value_attrs
 from ..gemm.pf_gemm_utils import (
+    BLOCK_K,
     Mfma32x32x16,
     RouteI32Loader,
     S2RLoaderBf16,
@@ -48,6 +48,7 @@ from ..gemm.pf_gemm_utils import (
     compute_global_gather_swizzle_bf16,
     compute_global_identity_swizzle_bf16,
     compute_global_swizzle_bf16,
+    dense_mma_pipeline_bf16,
     xcd_remap_pid,
 )
 
@@ -222,7 +223,7 @@ def compile_grouped_gemm_gather_bf16(
         # gather offsets index this row-major buffer directly; the buffer resource clamps the
         # padding sentinel (src_row == num_recv) to an OOB read of 0. (int32 element count:
         # holds up to 2^31 elems; larger A needs a per-lane i64 rebase like Mega's fp8 path.)
-        a_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, extract_base_index(A)), signed=True)
+        a_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(A))), signed=True)
         A_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, a_base), fx.make_layout(A_ELEMS, 1))
 
         def _emit():
@@ -243,7 +244,7 @@ def compile_grouped_gemm_gather_bf16(
                 # Worst-case pool (cap*N > 2^31): rebase C per tile in int64, int32 in-resource
                 # offset. Mirrors the fused nt path.
                 c_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(c_n) * fx.Int64(2)
-                c_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, extract_base_index(C)), signed=True)
+                c_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(C))), signed=True)
                 C_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, c_base + c_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * c_n, 1),

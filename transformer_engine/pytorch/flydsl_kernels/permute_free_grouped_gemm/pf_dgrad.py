@@ -40,10 +40,10 @@ import flydsl.expr as fx
 from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
-from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
-from ..gemm.gemm_common_utils import _i64, extract_base_index, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, make_value_attrs
 from ..gemm.pf_gemm_utils import (
+    BLOCK_K,
     Mfma32x32x16,
     RouteI32Loader,
     S2RLoaderBf16,
@@ -52,6 +52,7 @@ from ..gemm.pf_gemm_utils import (
     _make_shared_storage,
     compute_global_gather_swizzle_bf16,
     compute_global_swizzle_nn_bf16,
+    dense_mma_pipeline_bf16,
     gemm_bf16_nn_tile,
     xcd_remap_pid,
 )
@@ -223,10 +224,10 @@ def compile_grouped_gemm_dgrad_bf16(
             elem_ty=fx.BFloat16.ir_type, address_space=AddressSpace.Global, alignment=16
         )
         gy_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64, extract_base_index(GRAD_Y)), signed=True
+            arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(GRAD_Y))), signed=True
         )
         dx_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64, extract_base_index(DX)), signed=True
+            arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(DX))), signed=True
         )
         # Flat 1D grad view (gather source; bounded to A_ELEMS so the sentinel row reads 0).
         # Built unconditionally: the route-read tile simply ignores it.

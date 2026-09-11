@@ -39,6 +39,7 @@ from ..utils import (
     get_device_compute_capability,
     init_method_constant,
     requires_grad,
+    packed_3d_view,
     resolve_grouped_linear_single_param_flags,
     get_nvtx_range_context,
 )
@@ -465,26 +466,7 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def _packed_3d_view(tensors):
         """[G, N, K] view of consecutive contiguous 2D buffers, or None."""
-        g0 = tensors[0]
-        if g0 is None or g0.ndim != 2 or not g0.is_contiguous():
-            return None
-        n, k = g0.shape
-        step = g0.numel() * g0.element_size()
-        nbytes_needed = g0.storage_offset() * g0.element_size() + len(tensors) * step
-        if g0.untyped_storage().size() < nbytes_needed:
-            return None
-        for i, g in enumerate(tensors):
-            if (
-                g is None
-                or g.dtype != g0.dtype
-                or g.device != g0.device
-                or tuple(g.shape) != (n, k)
-                or not g.is_contiguous()
-                or g.untyped_storage().data_ptr() != g0.untyped_storage().data_ptr()
-                or g.data_ptr() != g0.data_ptr() + i * step
-            ):
-                return None
-        return g0.as_strided((len(tensors), n, k), (n * k, k, 1))
+        return packed_3d_view(tensors)
 
     @staticmethod
     def _expert_weights_as_3d(weights, dtype):
@@ -530,13 +512,21 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def _handle_fused_wgrad(weight, main_grad):
         """Megatron DDP hook: mark wgrad as consumed and return a dummy (or None)."""
-        if hasattr(weight, "grad_added_to_main_grad"):
-            weight.grad_added_to_main_grad = True
-            shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
-            return get_dummy_wgrad(
-                shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
-            )
-        return None
+        owner_ref = getattr(weight, "_grouped_param_ref", None)
+        owner = owner_ref() if owner_ref is not None else None
+        targets = [
+            t
+            for t in (weight, owner)
+            if t is not None and hasattr(t, "grad_added_to_main_grad")
+        ]
+        if not targets:
+            return None
+        for t in targets:
+            t.grad_added_to_main_grad = True
+        shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
+        return get_dummy_wgrad(
+            shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
+        )
 
     @staticmethod
     def _is_blockwise_fp8_triton_grouped_gemm_supported(
@@ -886,6 +876,218 @@ class _GroupedLinear(torch.autograd.Function):
             *grad_biases,
         )
 
+    @staticmethod
+    def _is_permute_free_grouped_gemm_supported(
+        *,
+        routing_metadata,
+        fp8,
+        activation_dtype,
+        use_bias,
+    ) -> bool:
+        """ROCm permute-free grouped GEMM: HIP, env, bf16, routing metadata, no bias/fp8."""
+        if not IS_HIP_EXTENSION:
+            return False
+        return (
+            is_permute_free_grouped_gemm_enabled()
+            and routing_metadata is not None
+            and not fp8
+            and activation_dtype == torch.bfloat16
+            and not use_bias
+        )
+
+    @staticmethod
+    def _forward_permute_free_grouped_gemm(
+        ctx,
+        *,
+        inp,
+        m_splits,
+        dispatched_probs,
+        weights,
+        routing_metadata,
+        activation_dtype,
+        is_grad_enabled,
+        fuse_wgrad_accumulation,
+        is_first_microbatch,
+        cpu_offloading,
+    ):
+        """Permute-free grouped GEMM forward (ROCm FlyDSL).
+
+        Selected from :meth:`forward` when :meth:`_is_permute_free_grouped_gemm_supported`
+        is true. Gathers tokens inside the GEMM from the unpermuted recv buffer instead
+        of materializing a permute copy. FC1 emits raw ``[gate|up]``; FC2 (``route_space``)
+        applies the gated activation in a standalone pass then runs a plain GEMM.
+        """
+        num_gemms = len(m_splits)
+        in_features = weights[0].size(-1)
+        perm_free_activation = getattr(routing_metadata, "activation", None)
+        perm_free_route_space = getattr(routing_metadata, "route_space", False)
+        # FC2 with gated activation consumes FC1's raw 2F [gate|up] buffer (width 2F).
+        expect_in_features = (
+            2 * in_features
+            if perm_free_route_space and perm_free_activation is not None
+            else in_features
+        )
+        if inp.size(-1) != expect_in_features:
+            raise ValueError(
+                f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
+                f"weight tensor (shape={tuple(weights[0].size())})"
+            )
+
+        inp_view = inp.reshape(-1, expect_in_features)
+        inputmat = cast_if_needed(inp_view, activation_dtype)
+        if cpu_offloading:
+            start_offload(inputmat)
+
+        weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
+        new_workspaces = [None] * num_gemms
+        if cpu_offloading:
+            mark_not_offload(*weights_fp8, *weights)
+
+        # Opt-in exact sizing: with ``m_splits`` carrying tokens_per_expert, its sum is the
+        # route count, which sizes the block-padded buffers exactly instead of to the static
+        # T * min(topk, E) bound. Set before the align is built (lazily, inside the wrapper);
+        # a metadata whose align is already cached keeps the bound it was built with.
+        m_splits_list = m_splits.tolist() if torch.is_tensor(m_splits) else list(m_splits)
+        if is_permute_free_exact_routes_enabled() and routing_metadata.num_routes is None:
+            routing_metadata.num_routes = sum(m_splits_list)
+
+        # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
+        # FC2, which applies the gated activation in a standalone pass and then runs a plain
+        # GEMM. Route probs ride with FC2 too.
+        out = permute_free_grouped_gemm_forward(
+            inputmat,
+            weights_fp8,
+            routing_metadata,
+            activation=perm_free_activation if perm_free_route_space else None,
+            dispatched_probs=dispatched_probs if perm_free_route_space else None,
+        )
+
+        if is_grad_enabled:
+            ctx.use_perm_free_grouped_gemm = True
+            saved = [inputmat, *weights_fp8]
+            if dispatched_probs is not None:
+                saved.append(dispatched_probs)
+                ctx.has_dispatched_probs = True
+            else:
+                ctx.has_dispatched_probs = False
+            ctx.save_for_backward(*saved)
+            ctx.perm_free_fc2_activation = (
+                perm_free_activation if perm_free_route_space else None
+            )
+            ctx.weights_requires_grad = weights[0].requires_grad
+            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.is_first_microbatch = is_first_microbatch
+            # Fuse-wgrad: same as blockwise FP8 — keep the per-expert views (and their
+            # ``main_grad`` aliases into a packed grouped buffer) rather than the grouped
+            # Parameter. Backward packs those aliases with ``_packed_3d_view``.
+            if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                ctx.origin_weights_overwrite_main_grad = getattr(
+                    weights[0], "overwrite_main_grad", False
+                )
+                if hasattr(weights[0], "__fsdp_param__"):
+                    ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                else:
+                    ctx.main_grad_funcs = [
+                        lambda j=i: weights[j].main_grad for i in range(num_gemms)
+                    ]
+            ctx.num_gemms = num_gemms
+            ctx.activation_dtype = activation_dtype
+            ctx.inp_shape = inp.shape
+            ctx.requires_dgrad = inp.requires_grad
+            ctx.routing_metadata = routing_metadata
+
+        # Worst-case padded [T * min(topk, E), out_features]; valid rows are [0, num_routes).
+        return out, new_workspaces
+
+    @staticmethod
+    def _backward_permute_free_grouped_gemm(ctx, grad_output):
+        """Backward path paired with :meth:`_forward_permute_free_grouped_gemm`."""
+        saved = ctx.saved_tensors
+        N = ctx.num_gemms
+        hidden_states = saved[0]
+        weights = list(saved[1 : 1 + N])
+        dispatched_probs = saved[-1] if ctx.has_dispatched_probs else None
+
+        # Fuse-wgrad: point the kernel at a packed [E, out, in] view of the per-expert
+        # ``main_grad`` aliases (same packing as blockwise FP8). Discrete params whose
+        # buffers are not consecutive fall back to a fresh dW plus per-expert add_/copy_.
+        # Both FC1 and FC2 (route_space, via swap_gather) emit native [E, out, in].
+        wgrad_out = None
+        wgrad_accumulate = False
+        origin_weights = [None] * N
+        main_grads = [None] * N
+        fuse = getattr(ctx, "fuse_wgrad_accumulation", False) and ctx.weights_requires_grad
+        if fuse:
+            origin_weight_refs = ctx.origin_weight_refs
+            ctx.origin_weight_refs = None
+            origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
+            assert all(
+                w is not None for w in origin_weights
+            ), "weight was removed while fuse_wgrad_accumulation=True"
+            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            for origin_weight, main_grad in zip(origin_weights, main_grads):
+                if main_grad is not None:
+                    origin_weight.main_grad = main_grad
+            if ctx.is_first_microbatch is not None:
+                wgrad_accumulate = not ctx.is_first_microbatch
+            else:
+                wgrad_accumulate = True
+            if getattr(ctx, "origin_weights_overwrite_main_grad", False):
+                wgrad_accumulate = False
+            wgrad_out = _GroupedLinear._packed_3d_view(main_grads)
+
+        # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
+        pf_result = permute_free_grouped_gemm_backward(
+            grad_output,
+            routing=ctx.routing_metadata,
+            weights=weights,
+            num_gemms=ctx.num_gemms,
+            hidden_states=hidden_states,
+            requires_dgrad=ctx.requires_dgrad,
+            requires_wgrad=ctx.weights_requires_grad,
+            dispatched_probs=dispatched_probs,
+            fc2_activation=getattr(ctx, "perm_free_fc2_activation", None),
+            wgrad_out=wgrad_out,
+            wgrad_accumulate=wgrad_accumulate,
+        )
+
+        wgrad_list = [None] * N
+        if ctx.weights_requires_grad:
+            if fuse:
+                if not pf_result.wgrad_applied and pf_result.wgrad_stacked is not None:
+                    dW = pf_result.wgrad_stacked
+                    for g, mg in enumerate(main_grads):
+                        if mg is None:
+                            continue
+                        if wgrad_accumulate:
+                            mg.add_(dW[g])
+                        else:
+                            mg.copy_(dW[g])
+                wgrad_list = [
+                    _GroupedLinear._handle_fused_wgrad(weight, main_grad)
+                    for weight, main_grad in zip(origin_weights, main_grads)
+                ]
+            else:
+                # Positional per-expert wgrad (autograd leaf params or split views).
+                wgrad_list = (
+                    list(pf_result.wgrad_stacked)
+                    if pf_result.wgrad_stacked is not None
+                    else [None] * N
+                )
+        # Grads match forward inputs:
+        # (inp, m_splits, dispatched_probs, non_tensor_args, out, dgrad_out, *weights, *biases).
+        return (
+            pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            None,  # m_splits
+            pf_result.grad_probs,  # dispatched_probs
+            None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
+            *wgrad_list,
+            *([None] * ctx.num_gemms),
+        )
+
     # pylint: disable=keyword-arg-before-vararg
     @staticmethod
     def forward(
@@ -930,9 +1132,6 @@ class _GroupedLinear(torch.autograd.Function):
             routing_metadata,
             grouped_weight_param,
         ) = non_tensor_args
-        # The gated-activation fusion hint rides on the routing metadata (single source of
-        # truth); ``None`` on every non-permute-free / non-FC1 path.
-        perm_free_activation = getattr(routing_metadata, "activation", None)
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
@@ -949,42 +1148,6 @@ class _GroupedLinear(torch.autograd.Function):
             and not fp8
             and not fuse_wgrad_accumulation
         )
-
-        # Permute-free gather GEMM (fwd + dgrad gather, wgrad on default path).
-        # Training is supported: fp8 / bias are excluded. ``fuse_wgrad_accumulation`` is only
-        # supported together with a single grouped weight param, where the permute-free backward
-        # accumulates wgrad directly into the grouped param's ``main_grad``.
-        use_perm_free_grouped_gemm = (
-            IS_HIP_EXTENSION
-            and is_permute_free_grouped_gemm_enabled()
-            and routing_metadata is not None
-            and not fp8
-            and (not fuse_wgrad_accumulation or grouped_weight_param is not None)
-            and activation_dtype == torch.bfloat16
-            and not use_bias
-        )
-        if use_perm_free_grouped_gemm and use_grouped_gemm_triton:
-            raise RuntimeError(
-                "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON cannot both be enabled."
-            )
-
-        # Permute-free gather GEMM (fwd + dgrad gather, wgrad on default path).
-        # Training is supported: fp8 / bias are excluded. ``fuse_wgrad_accumulation`` is only
-        # supported together with a single grouped weight param, where the permute-free backward
-        # accumulates wgrad directly into the grouped param's ``main_grad``.
-        use_perm_free_grouped_gemm = (
-            IS_HIP_EXTENSION
-            and is_permute_free_grouped_gemm_enabled()
-            and routing_metadata is not None
-            and not fp8
-            and (not fuse_wgrad_accumulation or grouped_weight_param is not None)
-            and activation_dtype == torch.bfloat16
-            and not use_bias
-        )
-        if use_perm_free_grouped_gemm and use_grouped_gemm_triton:
-            raise RuntimeError(
-                "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON cannot both be enabled."
-            )
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -1034,41 +1197,31 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
             )
 
-        # Blockwise FP8 grouped GEMM (ROCm Triton) opt-in. Runs its own quantization +
-        # grouped GEMM and returns early, bypassing the default quantizer setup below.
-        blockwise_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-        if _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+        # Permute-free grouped GEMM (ROCm FlyDSL) opt-in. Gathers inside GEMM and
+        # returns early, bypassing the default permute / split setup below.
+        if _GroupedLinear._is_permute_free_grouped_gemm_supported(
+            routing_metadata=routing_metadata,
             fp8=fp8,
-            recipe=blockwise_recipe,
+            activation_dtype=activation_dtype,
             use_bias=use_bias,
-            backward_override=backward_override,
-            cpu_offloading=cpu_offloading,
-            save_original_input=save_original_input,
-            debug=debug,
-            unpad_output=unpad_output,
-            actual_m_splits=actual_m_splits,
-            in_features=weights[0].size(-1),
-            out_features=weights[0].size(0),
         ):
-            return _GroupedLinear._forward_blockwise_fp8_triton(
+            if use_grouped_gemm_triton:
+                raise RuntimeError(
+                    "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON "
+                    "cannot both be enabled."
+                )
+            return _GroupedLinear._forward_permute_free_grouped_gemm(
                 ctx,
                 inp=inp,
                 m_splits=m_splits,
-                m_splits_tensor=m_splits_tensor,
+                dispatched_probs=dispatched_probs,
                 weights=weights,
-                weight_quantizers=weight_quantizers,
+                routing_metadata=routing_metadata,
                 activation_dtype=activation_dtype,
                 is_grad_enabled=is_grad_enabled,
                 fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                 is_first_microbatch=is_first_microbatch,
-                wgrad_store=wgrad_store,
-                weight_workspaces=weight_workspaces,
-                cache_weight=cache_weight,
-                # Match the recipe's scale rounding (pow2 by default) so the Triton
-                # path quantizes identically to the default Float8BlockScaling path.
-                pow2_x=blockwise_recipe.fp8_quant_fwd_inp.power_2_scale,
-                pow2_w=blockwise_recipe.fp8_quant_fwd_weight.power_2_scale,
-                pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
+                cpu_offloading=cpu_offloading,
             )
 
         # Configure quantizers
@@ -1120,20 +1273,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Initialize input tensors
         in_features = weights[0].size(-1)
-        perm_free_route_space = (
-            getattr(routing_metadata, "route_space", False) if routing_metadata is not None else False
-        )
-        # FC2 with gated activation consumes FC1's raw 2F [gate|up] buffer (width 2F).
-        expect_in_features = (
-            2 * in_features
-            if (
-                use_perm_free_grouped_gemm
-                and perm_free_route_space
-                and perm_free_activation is not None
-            )
-            else in_features
-        )
-        if inp.size(-1) != expect_in_features:
+        if inp.size(-1) != in_features:
             raise ValueError(
                 f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
                 f"weight tensor (shape={tuple(weights[0].size())})"
@@ -1178,9 +1318,7 @@ class _GroupedLinear(torch.autograd.Function):
         # Convert splits to list of ints for compatibility with split functions
         m_splits = m_splits.tolist()
 
-        # Use ``expect_in_features`` (2F on the gated FC2 route-space path, else in_features) so a
-        # raw 2F [gate|up] preact is not mangled into F-wide rows by the reshape.
-        inp_view = inp.reshape(-1, expect_in_features)
+        inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
@@ -1205,8 +1343,6 @@ class _GroupedLinear(torch.autograd.Function):
                 inp_view, input_quantizers, m_splits, activation_dtype
             )
         elif use_grouped_gemm_triton:
-            inputmats = [cast_if_needed(inp_view, activation_dtype)]
-        elif use_perm_free_grouped_gemm:
             inputmats = [cast_if_needed(inp_view, activation_dtype)]
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
@@ -1240,17 +1376,14 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
-        # Initialize output tensor. The permute-free path allocates its own worst-case padded
-        # [T * min(topk, E), out_features] output inside permute_free_grouped_gemm_bf16 (valid rows are
-        # the dense route range [0, num_routes); the tail is inert zero padding).
-        if not use_perm_free_grouped_gemm:
-            out = _GroupedLinear._validate_or_alloc_output(
-                out,
-                sum(m_splits),
-                weights_fp8[0].size(0),
-                activation_dtype,
-                device,
-            )
+        # Initialize output tensor
+        out = _GroupedLinear._validate_or_alloc_output(
+            out,
+            sum(m_splits),
+            weights_fp8[0].size(0),
+            activation_dtype,
+            device,
+        )
 
         # Choose whether to use split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -1260,43 +1393,25 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        if use_perm_free_grouped_gemm:
-            # Opt-in exact sizing: with ``m_splits`` carrying tokens_per_expert, its sum is the
-            # route count, which sizes the block-padded buffers exactly instead of to the static
-            # T * min(topk, E) bound. Set before the align is built (lazily, inside the wrapper);
-            # a metadata whose align is already cached keeps the bound it was built with.
-            if is_permute_free_exact_routes_enabled() and routing_metadata.num_routes is None:
-                routing_metadata.num_routes = sum(m_splits)
-            # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
-            # FC2, which applies the gated activation in a standalone pass and then runs a plain
-            # GEMM (the fused-prologue path regressed throughput). Route probs ride with FC2 too.
-            out = permute_free_grouped_gemm_forward(
-                inputmats[0],
-                weights_fp8,
-                routing_metadata,
-                activation=perm_free_activation if perm_free_route_space else None,
-                dispatched_probs=dispatched_probs if perm_free_route_space else None,
-            )
-        elif use_grouped_gemm_triton:
+        if use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
-        if not use_perm_free_grouped_gemm:
-            general_grouped_gemm_func(
-                weights_fp8,
-                inputmats,
-                [out],
-                output_quantizers,
-                activation_dtype,
-                single_output=True,
-                m_splits=m_splits,
-                bias=biases,
-                use_bias=use_bias,
-                use_split_accumulator=use_split_accumulator,
-                **kwargs,
-            )
+        general_grouped_gemm_func(
+            weights_fp8,
+            inputmats,
+            [out],
+            output_quantizers,
+            activation_dtype,
+            single_output=True,
+            m_splits=m_splits,
+            bias=biases,
+            use_bias=use_bias,
+            use_split_accumulator=use_split_accumulator,
+            **kwargs,
+        )
 
         output_unpadded = False
         if (
@@ -1352,7 +1467,6 @@ class _GroupedLinear(torch.autograd.Function):
                 if backward_override == "high_precision" and inp.requires_grad
                 else [None] * num_gemms
             )
-            # Permute-free FC2 backward needs the route probs when the forward fused them.
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -1362,41 +1476,13 @@ class _GroupedLinear(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
-            ctx.perm_free_fc2_activation = (
-                perm_free_activation
-                if (
-                    use_perm_free_grouped_gemm
-                    and getattr(routing_metadata, "route_space", False)
-                )
-                else None
-            )
 
             ctx.grad_input_quantizers = grad_input_quantizers
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
             ctx.weights_requires_grad = weight_requires_grad
-            # Permute-free backward routes the whole [E, out, in] wgrad straight to the grouped
-            # param, rather than through the detached per-expert views (which carry no grad edge).
-            # With fuse_wgrad_accumulation it accumulates into ``main_grad``; otherwise it
-            # accumulates into the grouped param's autograd ``.grad`` (standard accumulation).
-            ctx.perm_free_grouped = (
-                use_perm_free_grouped_gemm
-                and grouped_weight_param is not None
-                and ctx.weights_requires_grad
-            )
-            ctx.grouped_fuse_wgrad = fuse_wgrad_accumulation
-            if ctx.perm_free_grouped:
-                ctx.grouped_weight_ref = weakref.ref(grouped_weight_param)
-                if ctx.grouped_fuse_wgrad:
-                    ctx.grouped_overwrite_main_grad = getattr(
-                        grouped_weight_param, "overwrite_main_grad", False
-                    )
-                    if hasattr(grouped_weight_param, "__fsdp_param__"):
-                        ctx.grouped_main_grad_func = grouped_weight_param.get_main_grad
-                    else:
-                        ctx.grouped_main_grad_func = lambda: grouped_weight_param.main_grad
-            elif fuse_wgrad_accumulation and ctx.weights_requires_grad:
+            if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
                 ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
@@ -1444,8 +1530,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
             ctx.num_input_tensors = len(inputmats)
             ctx.dgrad_out = dgrad_out
-            ctx.use_perm_free_grouped_gemm = use_perm_free_grouped_gemm
-            ctx.routing_metadata = routing_metadata if use_perm_free_grouped_gemm else None
 
             # backward overrides
             if backward_override is not None:
@@ -1460,10 +1544,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        # [*, in_features] -> [*, out_features], or worst-case padded [T * min(topk, E), out_features]
-        # (permute-free route-list path; valid rows are the dense route range [0, num_routes)).
-        if use_perm_free_grouped_gemm:
-            return out, new_workspaces
+        # [*, in_features] -> [*, out_features]
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
@@ -1664,6 +1745,8 @@ class _GroupedLinear(torch.autograd.Function):
         with get_nvtx_range_context("_GroupedLinear_backward"):
             if getattr(ctx, "use_blockwise_fp8_triton", False):
                 return _GroupedLinear._backward_blockwise_fp8_triton(ctx, grad_output)
+            if getattr(ctx, "use_perm_free_grouped_gemm", False):
+                return _GroupedLinear._backward_permute_free_grouped_gemm(ctx, grad_output)
             if ctx.use_grouped_tensor_path:
                 return _GroupedLinear._backward_grouped_tensor(ctx, grad_output)
 
@@ -1675,98 +1758,6 @@ class _GroupedLinear(torch.autograd.Function):
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
             dispatched_probs = saved_tensors[num_inputs + 3 * N]
-
-            # Permute-free gather GEMM: both dgrad and wgrad gather along the
-            # contraction axis inside a single Triton kernel.
-            if getattr(ctx, "use_perm_free_grouped_gemm", False):
-                # Single grouped weight: the GEMM only ever sees detached per-expert views, so
-                # the whole [E, out, in] wgrad goes straight to the grouped param (the positional
-                # autograd return is dead). Point the kernel at the destination accumulator up
-                # front so it folds the wgrad in directly -- no scratch dW and no separate
-                # add/copy. Both FC1 and FC2 (route_space, via swap_gather) emit [E, out, in]
-                # directly into the buffer.
-                grouped = getattr(ctx, "perm_free_grouped", False) and ctx.weights_requires_grad
-                wgrad_out = None
-                wgrad_accumulate = False
-                if grouped:
-                    grouped_weight = ctx.grouped_weight_ref()
-                    assert (
-                        grouped_weight is not None
-                    ), "grouped weight was removed before its wgrad could be applied"
-                    gw_shape = tuple(grouped_weight.shape)
-                    if ctx.grouped_fuse_wgrad:
-                        wgrad_out = ctx.grouped_main_grad_func().view(gw_shape)
-                        wgrad_accumulate = not ctx.grouped_overwrite_main_grad
-                    else:
-                        # Accumulate into the grouped param's autograd ``.grad``; allocate it on
-                        # the first backward (overwrite) and add in place thereafter so grad
-                        # accumulation across microbatches still works.
-                        if grouped_weight.grad is None:
-                            grouped_weight.grad = torch.empty(
-                                gw_shape, dtype=grouped_weight.dtype, device=grad_output.device
-                            )
-                            wgrad_accumulate = False
-                        else:
-                            wgrad_accumulate = True
-                        wgrad_out = grouped_weight.grad
-
-                # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
-                pf_result = permute_free_grouped_gemm_backward(
-                    grad_output,
-                    routing=ctx.routing_metadata,
-                    weights=weights,
-                    num_gemms=ctx.num_gemms,
-                    hidden_states=inputmats[0],
-                    requires_dgrad=ctx.requires_dgrad,
-                    requires_wgrad=ctx.weights_requires_grad,
-                    dispatched_probs=dispatched_probs,
-                    fc2_activation=getattr(ctx, "perm_free_fc2_activation", None),
-                    wgrad_out=wgrad_out,
-                    wgrad_accumulate=wgrad_accumulate,
-                )
-                if getattr(ctx, "perm_free_grouped", False) and pf_result.wgrad_stacked is not None:
-                    grouped_weight = ctx.grouped_weight_ref()
-                    assert (
-                        grouped_weight is not None
-                    ), "grouped weight was removed before its wgrad could be applied"
-                    if pf_result.wgrad_applied:
-                        # FC1: the kernel already folded the wgrad into main_grad / .grad.
-                        if ctx.grouped_fuse_wgrad and hasattr(
-                            grouped_weight, "grad_added_to_main_grad"
-                        ):
-                            grouped_weight.grad_added_to_main_grad = True
-                    else:
-                        # Fresh wgrad tensor: sink into main_grad / .grad.
-                        dW = pf_result.wgrad_stacked
-                        if ctx.grouped_fuse_wgrad:
-                            main_grad = ctx.grouped_main_grad_func().view(dW.shape)
-                            if ctx.grouped_overwrite_main_grad:
-                                main_grad.copy_(dW)
-                            else:
-                                main_grad.add_(dW)
-                            if hasattr(grouped_weight, "grad_added_to_main_grad"):
-                                grouped_weight.grad_added_to_main_grad = True
-                        elif grouped_weight.grad is None:
-                            grouped_weight.grad = dW
-                        else:
-                            grouped_weight.grad.add_(dW)
-                    wgrad_list = [None] * ctx.num_gemms
-                else:
-                    # Fall back to returning positional per-expert wgrad (separate leaf params).
-                    # Split the [E, out, in] gradient into zero-copy per-expert views.
-                    wgrad_list = (
-                        list(pf_result.wgrad_stacked)
-                        if pf_result.wgrad_stacked is not None
-                        else [None] * ctx.num_gemms
-                    )
-                return (
-                    pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-                    None,  # m_splits
-                    pf_result.grad_probs,  # dispatched_probs
-                    None,  # non_tensor_args
-                    *wgrad_list,
-                    *([None] * ctx.num_gemms),
-                )
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
@@ -2785,8 +2776,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 actual_m_splits,
                 unpad_output,
                 routing_metadata,
-                # Grouped weight param (single_grouped_weight): permute-free backward accumulates
-                # wgrad into its ``main_grad`` instead of returning it through the detached views.
                 getattr(self, "weight", None) if self.single_grouped_weight else None,
             )
             out, new_workspaces = linear_fn(
@@ -2924,6 +2913,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                     w.main_grad = per_expert_main_grad[i]
                 if hasattr(grouped_weight, "overwrite_main_grad"):
                     w.overwrite_main_grad = grouped_weight.overwrite_main_grad
+                if hasattr(grouped_weight, "grad_added_to_main_grad"):
+                    w.grad_added_to_main_grad = grouped_weight.grad_added_to_main_grad
+                # Split views are not ``named_parameters()`` entries; fuse-wgrad marks
+                # ``grad_added_to_main_grad`` on these objects, and ``_handle_fused_wgrad``
+                # forwards it to the grouped Parameter via this ref.
+                w._grouped_param_ref = weakref.ref(grouped_weight)
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):

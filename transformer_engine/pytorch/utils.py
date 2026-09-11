@@ -240,6 +240,37 @@ def resolve_grouped_linear_single_param_flags(
     return single_grouped_weight, single_grouped_bias
 
 
+def packed_3d_view(tensors):
+    """Zero-copy ``[G, N, K]`` view of consecutive contiguous 2D slices, or ``None``.
+
+    Used by GroupedLinear (blockwise FP8 and permute-free) when ``single_grouped_weight``
+    keeps experts as sequential slices of one storage. Discrete ``weight0..N`` (distinct
+    storages) return ``None`` so the caller can ``torch.stack``.
+    """
+    if not tensors:
+        return None
+    g0 = tensors[0]
+    if g0 is None or g0.ndim != 2 or not g0.is_contiguous():
+        return None
+    n, k = g0.shape
+    step = g0.numel() * g0.element_size()
+    nbytes_needed = g0.storage_offset() * g0.element_size() + len(tensors) * step
+    if g0.untyped_storage().size() < nbytes_needed:
+        return None
+    for i, g in enumerate(tensors):
+        if (
+            g is None
+            or g.dtype != g0.dtype
+            or g.device != g0.device
+            or tuple(g.shape) != (n, k)
+            or not g.is_contiguous()
+            or g.untyped_storage().data_ptr() != g0.untyped_storage().data_ptr()
+            or g.data_ptr() != g0.data_ptr() + i * step
+        ):
+            return None
+    return g0.as_strided((len(tensors), n, k), (n * k, k, 1))
+
+
 def attention_mask_func(
     attention_scores: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:

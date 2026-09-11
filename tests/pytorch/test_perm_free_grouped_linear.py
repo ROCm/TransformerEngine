@@ -716,11 +716,10 @@ def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_e
 def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulation):
     """``single_grouped_weight`` wgrad matches the ungrouped per-expert ``.grad``.
 
-    The permute-free backward writes the whole ``[E, out, in]`` wgrad to the grouped param
-    directly (the GEMM only sees detached per-expert views), so only the sink differs:
-
-    * fused (``fuse_wgrad_accumulation=True``): it lands in ``main_grad`` (fp32).
-    * nonfused: it lands in the autograd ``.grad`` (bf16) and accumulates across backwards.
+    Fuse-wgrad writes the packed ``[E, out, in]`` result through the per-expert
+    ``main_grad`` aliases (fp32). Without fuse, autograd receives per-expert views of
+    the kernel ``dW``; those land on the split views' ``.grad`` (and on the grouped
+    Parameter when the views still carry a grad edge to it).
     """
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     # single_grouped_weight requires this gate, else the module falls back to per-expert params.
@@ -771,6 +770,15 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
             single_grouped_weight=single_grouped_weight,
         )
 
+    def grouped_wgrad_fp32(mod, grouped_weight):
+        if grouped_weight.grad is not None:
+            return grouped_weight.grad.view(grouped_shape).float()
+        view_grads = [w.grad for w in mod._get_weight_tensors()]
+        assert all(g is not None for g in view_grads), (
+            "grouped wgrad missing on both Parameter.grad and split expert views"
+        )
+        return torch.stack([g.detach().float() for g in view_grads])
+
     # --- ungrouped reference: separate per-expert params, wgrad via autograd .grad ---
     ungrouped_mod = make(single_grouped_weight=False, fuse=False)
     run(ungrouped_mod, [getattr(ungrouped_mod, f"weight{i}") for i in range(num_experts)])
@@ -790,8 +798,8 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
         grouped_grad = grouped_weight.main_grad.view(grouped_shape).float()
     else:
         assert getattr(grouped_weight, "grad_added_to_main_grad", False) is False
-        assert tuple(grouped_weight.grad.shape) == grouped_shape
-        grouped_grad = grouped_weight.grad.view(grouped_shape).float()
+        grouped_grad = grouped_wgrad_fp32(grouped_mod, grouped_weight)
+        assert tuple(grouped_grad.shape) == grouped_shape
 
     # Same kernel dW on both sides, so the only difference is the sink dtype (exact for the bf16
     # .grad, one bf16 rounding of the reference for the fp32 main_grad): no absolute floor needed.
@@ -804,7 +812,7 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
         routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
         out = grouped_mod(inp, m_splits, permute_free_metadata=routing)
         (out[valid].float() * grad_output.float()).sum().backward()
-        accumulated = grouped_weight.grad.view(grouped_shape).float()
+        accumulated = grouped_wgrad_fp32(grouped_mod, grouped_weight)
         assert_close(accumulated, 2.0 * grad_ref, **dtype_tols(torch.bfloat16))
 
 

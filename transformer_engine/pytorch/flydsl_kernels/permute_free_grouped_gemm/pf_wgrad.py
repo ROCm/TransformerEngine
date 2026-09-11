@@ -47,19 +47,14 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, gpu, ptrtoint, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl._mlir.dialects import vector
 
+from flydsl.expr.rocdl import _to_ir
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator
 
-from ..gemm.gemm_common_utils import (
-    make_buffer_rsrc_from_addr,
-    raw_buffer_load,
-    raw_buffer_load_i32 as buffer_load_i32,
-    raw_buffer_store,
-)
 from ..tensor_shim import ptr_rsrc
 
 __all__ = ["compile_moe_wgrad_v2", "WGRAD_BLOCK_M"]
@@ -76,6 +71,40 @@ FILL_V = 8
 
 WGRAD_BLOCK_M = 32  # contraction (slot) step; matches the align block_size
 NUM_BUF = 3         # triple-buffered DMA pipeline (pipe_stages == 3)
+
+
+def _i32_zero():
+    return arith.constant(0, type=T.i32)
+
+
+def _as_i32(offset):
+    if isinstance(offset, int):
+        return arith.constant(offset, type=T.i32)
+    raw = arith.unwrap(offset)
+    if isinstance(raw.type, ir.IntegerType) and raw.type.width == 32:
+        return raw
+    return arith.index_cast(T.i32, offset)
+
+
+def raw_buffer_load(rsrc, offset, dtype):
+    """Element-offset ``rocdl.raw_ptr_buffer_load`` (flydsl 0.3 aux is an i32 operand)."""
+    ty = dtype.ir_type if hasattr(dtype, "ir_type") else dtype
+    byte_off = arith.muli(_as_i32(offset), arith.constant(ty.width // 8, type=T.i32))
+    z = _i32_zero()
+    return rocdl.raw_ptr_buffer_load(ty, _to_ir(rsrc), _to_ir(byte_off), _to_ir(z), _to_ir(z))
+
+
+def buffer_load_i32(rsrc, offset):
+    return raw_buffer_load(rsrc, offset, T.i32)
+
+
+def raw_buffer_store(data, rsrc, offset):
+    data = arith.unwrap(data)
+    elem = data.type.element_type if hasattr(data.type, "element_type") else data.type
+    byte_off = arith.muli(_as_i32(offset), arith.constant(elem.width // 8, type=T.i32))
+    z = _i32_zero()
+    rocdl.raw_ptr_buffer_store(_to_ir(data), _to_ir(rsrc), _to_ir(byte_off), _to_ir(z), _to_ir(z))
+
 
 
 @functools.lru_cache(maxsize=None)
@@ -244,17 +273,11 @@ def compile_moe_wgrad_v2(
         # garbage (clamped to row 0) for those slots. FC1 gathers ``x`` (stride K); FC2
         # (``swap_gather``) gathers ``grad`` (stride N).
         if swap_gather:
-            grad_addr_i64 = arith.index_cast(T.i64, ptrtoint(GRAD))
             grad_nrec_bytes = nrecv_idx * N_idx * arith.index(2)
-            grad_rsrc = make_buffer_rsrc_from_addr(
-                grad_addr_i64, num_records_bytes=grad_nrec_bytes
-            )
+            grad_rsrc = ptr_rsrc(GRAD, num_records_bytes=grad_nrec_bytes)
         else:
-            x_addr_i64 = arith.index_cast(T.i64, ptrtoint(X))
             x_nrec_bytes = nrecv_idx * K_idx * arith.index(2)
-            x_rsrc = make_buffer_rsrc_from_addr(
-                x_addr_i64, num_records_bytes=x_nrec_bytes
-            )
+            x_rsrc = ptr_rsrc(X, num_records_bytes=x_nrec_bytes)
 
         n_block_base = n_tile * block_n
         k_block_base = k_tile * block_k
