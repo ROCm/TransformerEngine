@@ -105,3 +105,55 @@ def test_dequantize_mxfp8(shape, in_dtype, out_dtype, fp8_dtype, rowwise, column
 
     atol, rtol = get_tolerances(te_dtype_to_torch_dtype(out_dtype))
     te_compare_results(out_triton, out_hip, atol, rtol, "output doesn't match", use_torch_semantics=True)
+
+
+@pytest.mark.parametrize("shape",
+                         [
+                        (128, 128),
+                        (256, 256),
+                        (2048, 6144),
+                        (16384, 128),
+                        (8, 32, 1024),
+                        ])
+@pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+def test_mxfp8_rowwise_to_columnwise_restripe(shape, in_dtype, fp8_dtype):
+    """Rowwise MXFP8 + update_usage(columnwise) matches dequant + columnwise quantize."""
+    torch_out_dtype = te_dtype_to_torch_dtype(fp8_dtype)
+    x = fill_uniform(shape, dtype=in_dtype)
+
+    row_quantizer = MXFP8Quantizer(fp8_dtype, rowwise=True, columnwise=False)
+    row_tensor = row_quantizer(x)
+
+    hp = row_tensor.dequantize(dtype=in_dtype)
+    col_quantizer = MXFP8Quantizer(fp8_dtype, rowwise=False, columnwise=True)
+    col_ref = col_quantizer.make_empty(x.shape, dtype=in_dtype)
+    te_quantize_triton(hp, quantizer=col_quantizer, output=col_ref)
+
+    row_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
+    assert row_tensor._columnwise_data is not None
+    assert row_tensor._rowwise_data is not None
+
+    atol_fp8, rtol_fp8 = get_tolerances(torch_out_dtype)
+    te_compare_results(
+        row_tensor._columnwise_data.view(torch_out_dtype),
+        col_ref._columnwise_data.view(torch_out_dtype),
+        atol_fp8, rtol_fp8,
+        msg="restriped columnwise data doesn't match dequant+requant",
+    )
+    te_compare_results(
+        row_tensor._columnwise_scale_inv,
+        col_ref._columnwise_scale_inv,
+        0.0, 0.0,
+        msg="restriped columnwise scale inv doesn't match",
+        use_torch_semantics=True,
+    )
+
+
+def test_mxfp8_update_usage_columnwise_only_drops_rowwise():
+    x = fill_uniform((128, 256), dtype=torch.bfloat16)
+    tensor = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(x)
+    tensor.update_usage(rowwise_usage=False, columnwise_usage=True)
+    assert tensor._rowwise_data is None
+    assert tensor._columnwise_data is not None
+    assert tensor._columnwise_scale_inv is not None

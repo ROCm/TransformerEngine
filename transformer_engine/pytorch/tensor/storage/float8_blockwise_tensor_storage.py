@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 import math
+import os
 from typing import Optional, Dict, Any, Tuple, Union
 import torch
 
@@ -340,11 +341,87 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             return self._columnwise_data.device
         raise RuntimeError("Float8BlockwiseQTensorStorage has no data!")
 
+    def _allocate_columnwise_buffers(self) -> None:
+        """Allocate transposed columnwise payload + 1D scale_inv if missing."""
+        from ..float8_blockwise_tensor import Float8BlockQuantizer
+
+        if self._quantizer is not None:
+            quantizer = self._quantizer.copy()
+            quantizer.set_usage(rowwise=False, columnwise=True)
+        else:
+            quantizer = Float8BlockQuantizer(
+                self._fp8_dtype, rowwise=False, columnwise=True, block_scaling_dim=1
+            )
+
+        empty = quantizer.make_empty(
+            tuple(self.size()), dtype=self._dtype, device=self.device
+        )
+        if self._columnwise_data is None:
+            self._columnwise_data = empty._columnwise_data
+        if self._columnwise_scale_inv is None:
+            self._columnwise_scale_inv = empty._columnwise_scale_inv
+
+    def _create_columnwise_1d_from_high_precision(self) -> None:
+        """Fallback: dequant to HBM then columnwise-only 1x128 quantize."""
+        from ..float8_blockwise_tensor import Float8BlockQuantizer, Float8BlockwiseQTensor
+
+        hp_dtype = (
+            self._dtype if getattr(self._dtype, "is_floating_point", False) else torch.bfloat16
+        )
+        hp = self.dequantize(dtype=hp_dtype)
+        if self._quantizer is not None:
+            quantizer = self._quantizer.copy()
+            quantizer.set_usage(rowwise=False, columnwise=True)
+        else:
+            quantizer = Float8BlockQuantizer(
+                self._fp8_dtype,
+                rowwise=False,
+                columnwise=True,
+                block_scaling_dim=1,
+                force_pow_2_scales=True,
+            )
+        dst = Float8BlockwiseQTensor(
+            shape=tuple(self.size()),
+            dtype=hp_dtype,
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=self._columnwise_data,
+            columnwise_scale_inv=self._columnwise_scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            quantizer=quantizer,
+            is_2D_scaled=False,
+        )
+        quantizer.update_quantized(hp, dst)
+        self._columnwise_data = dst._columnwise_data
+        self._columnwise_scale_inv = dst._columnwise_scale_inv
+
     def _create_columnwise(self):
+        """Create columnwise data from rowwise.
+
+        2D 128x128: byte transpose + scale transpose.
+        1D 1x128: fused dequant + columnwise requant (pow-2 scales).
         """
-        Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
-        """
-        assert self._is_2D_scaled, "Cannot create columnwise data when not using 2D scaling."
+        if not self._is_2D_scaled:
+            if (
+                self._columnwise_data is not None
+                and self._columnwise_scale_inv is not None
+            ):
+                return
+            if self._rowwise_data is None or self._rowwise_scale_inv is None:
+                raise RuntimeError(
+                    "Cannot create 1D columnwise FP8 without rowwise payload and scales"
+                )
+            self._allocate_columnwise_buffers()
+            use_triton = int(os.environ.get("NVTE_FP8_BLOCKWISE_1D_ROWWISE_TO_COLWISE", "1"))
+            if use_triton:
+                from ...triton_kernels.cast_transpose import (
+                    te_fp8_blockwise_1d_rowwise_to_columnwise_triton,
+                )
+
+                te_fp8_blockwise_1d_rowwise_to_columnwise_triton(self)
+            else:
+                self._create_columnwise_1d_from_high_precision()
+            return
 
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
@@ -408,8 +485,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     def update_usage(
         self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
     ):
-        """
-        update_usage can be used to clear out one of two possible copies of the data.
+        """Keep, drop, or synthesize blockwise layouts.
+
+        2D: columnwise is a transpose of rowwise. 1D (1x128): columnwise is
+        built by fused dequant + requant when pow-2 scales are used.
         """
 
         if rowwise_usage is None:
@@ -420,42 +499,26 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             columnwise_usage or rowwise_usage
         ), "Must retain some data either columnwise or rowwise"
 
-        if columnwise_usage and rowwise_usage:
-            if not self._is_2D_scaled:
-                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
-                # data/scale_inv because their scale values are different.
-                assert (
-                    self._rowwise_data is not None
-                    and self._rowwise_scale_inv is not None
-                    and self._columnwise_data is not None
-                    and self._columnwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage."
-            else:
-                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
-                # rowwise data/scale_inv.
+        if columnwise_usage:
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
                 assert (
                     self._rowwise_data is not None and self._rowwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
-                if self._columnwise_data is None or self._columnwise_scale_inv is None:
-                    self._create_columnwise()
-            return
+                ), "Cannot create columnwise usage because rowwise data is None."
+                self._create_columnwise()
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                raise RuntimeError("Requested column-wise usage but columnwise buffers are missing")
 
         if rowwise_usage:
             assert (
                 self._rowwise_data is not None and self._rowwise_scale_inv is not None
             ), "Cannot update to rowwise usage."
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
-            return
-        if columnwise_usage:
-            assert (
-                self._columnwise_data is not None and self._columnwise_scale_inv is not None
-            ), "Cannot update to columnwise usage."
+        else:
             self._rowwise_data = None
             self._rowwise_scale_inv = None
-            return
 
-        return
+        if not columnwise_usage:
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""

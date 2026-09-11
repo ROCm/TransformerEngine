@@ -908,6 +908,344 @@ def te_dequantize_mxfp8_triton(input, dtype):
 
     return out
 
+
+@triton.jit
+def _mxfp8_rowwise_to_columnwise_triton(
+    x_ptr, y_ptr,
+    stride_row, stride_col,
+    n_rows, n_cols,
+    rowwise_scale_inv_ptr, stride_rowwise_scale_inv_row, stride_rowwise_scale_inv_col,
+    rowwise_scale_M, rowwise_scale_N,
+    colwise_scale_inv_ptr, stride_colwise_scale_inv_row, stride_colwise_scale_inv_col,
+    colwise_scale_M, colwise_scale_N,
+    max_fp8: tl.constexpr,
+    BLOCK_X: tl.constexpr,
+    BLOCK_Y: tl.constexpr,
+    GROUP_Y: tl.constexpr,
+    MXFP8_BLOCK_SCALING_SIZE: tl.constexpr,
+):
+    """Dequant rowwise MXFP8 in registers and requantize columnwise.
+
+    Each program owns a BLOCK_Y x BLOCK_X tile, walked in 32x32 MX blocks.
+    Columnwise amax is the max over the 32 rows of a block (same as the x2
+    high-precision cast kernel).
+    """
+    pid = tl.program_id(0)
+
+    num_pid_along_Y = tl.cdiv(n_rows, BLOCK_Y)
+    num_pid_along_X = tl.cdiv(n_cols, BLOCK_X)
+    num_pid_in_group = GROUP_Y * num_pid_along_X
+
+    group_id = pid // num_pid_in_group
+    group_size = min(num_pid_along_Y - group_id * GROUP_Y, GROUP_Y)
+    pid_m = group_id * GROUP_Y + ((pid % num_pid_in_group) % group_size)
+    pid_n = (pid % num_pid_in_group) // group_size
+
+    global_offset_Y_base = pid_m.to(tl.int64) * BLOCK_Y
+    global_offset_X_base = pid_n.to(tl.int64) * BLOCK_X
+
+    num_chunks_in_block_Y = BLOCK_Y // MXFP8_BLOCK_SCALING_SIZE
+    num_chunks_in_block_X = BLOCK_X // MXFP8_BLOCK_SCALING_SIZE
+    max_norm_rcp = 1.0 / max_fp8
+
+    for chunk_id_y in range(0, num_chunks_in_block_Y):
+        offsets_Y = (
+            global_offset_Y_base
+            + chunk_id_y * MXFP8_BLOCK_SCALING_SIZE
+            + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
+        )
+        for chunk_id_x in range(0, num_chunks_in_block_X):
+            offsets_X = (
+                global_offset_X_base
+                + chunk_id_x * MXFP8_BLOCK_SCALING_SIZE
+                + tl.arange(0, MXFP8_BLOCK_SCALING_SIZE)
+            )
+            mask = (offsets_Y < n_rows)[:, None] & (offsets_X < n_cols)[None, :]
+            x_chunk = tl.load(
+                x_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col,
+                mask=mask,
+                other=0.0,
+            )
+
+            scale_offset_X = (pid_n * num_chunks_in_block_X) + chunk_id_x
+            rowwise_scale_offs = (
+                (offsets_Y[:, None] * stride_rowwise_scale_inv_row)
+                + scale_offset_X * stride_rowwise_scale_inv_col
+            )
+            rowwise_scale_mask = (offsets_Y < rowwise_scale_M)[:, None] & (
+                scale_offset_X < rowwise_scale_N
+            )
+            biased_exponent_row = tl.load(
+                rowwise_scale_inv_ptr + rowwise_scale_offs,
+                mask=rowwise_scale_mask,
+                other=127,
+            )
+            block_scale_row = tl.exp2(biased_exponent_row.to(tl.float32) - 127)
+            x_dequant = x_chunk.to(tl.float32) * block_scale_row
+
+            subwarp_amax_colwise = tl.max(tl.abs(x_dequant), axis=0, keep_dims=True)
+            biased_exponent_colwise = float_to_e8m0_triton(
+                subwarp_amax_colwise * max_norm_rcp
+            )
+
+            scale_offset_Y = (pid_m * num_chunks_in_block_Y) + chunk_id_y
+            colwise_scale_offs = (
+                scale_offset_Y * stride_colwise_scale_inv_row
+                + (offsets_X[None, :] * stride_colwise_scale_inv_col)
+            )
+            colwise_scale_mask = (scale_offset_Y < colwise_scale_M) & (
+                offsets_X < colwise_scale_N
+            )[None, :]
+            tl.store(
+                colwise_scale_inv_ptr + colwise_scale_offs,
+                biased_exponent_colwise,
+                mask=colwise_scale_mask,
+            )
+
+            block_inverse_scale_colwise = exp2f_rcp_triton(biased_exponent_colwise)
+            y_chunk = x_dequant * block_inverse_scale_colwise
+            tl.store(
+                y_ptr + offsets_Y[:, None] * stride_row + offsets_X[None, :] * stride_col,
+                y_chunk.to(y_ptr.type.element_ty),
+                mask=mask,
+            )
+
+
+def te_mxfp8_rowwise_to_columnwise_triton(tensor):
+    """Fill columnwise MXFP8 payload + E8M0 scales from rowwise data.
+
+    Fuses dequant of the rowwise layout with columnwise requant so callers
+    do not materialize a high-precision HBM buffer. Numerics match
+    ``dequantize()`` followed by a columnwise-only MXFP8 quantize.
+    """
+    meta = tensor.get_metadata()
+    if meta["rowwise_data"] is None or meta["rowwise_scale_inv"] is None:
+        raise RuntimeError(
+            "MXFP8 rowwise->columnwise restripe requires rowwise data and scales"
+        )
+    if meta["columnwise_data"] is None or meta["columnwise_scale_inv"] is None:
+        raise RuntimeError(
+            "MXFP8 rowwise->columnwise restripe requires preallocated columnwise buffers"
+        )
+    if meta["with_gemm_swizzled_scales"]:
+        raise RuntimeError(
+            "MXFP8 rowwise->columnwise restripe requires compact (unswizzled) scales"
+        )
+
+    x_ptr = meta["rowwise_data"]
+    if x_ptr.numel() == 0:
+        return tensor
+    row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+    num_rows = x_ptr.numel() // row_length
+    x_2d = x_ptr.reshape(num_rows, row_length)
+    y_2d = meta["columnwise_data"].reshape(num_rows, row_length)
+    rowwise_scale_inv = meta["rowwise_scale_inv"]
+    colwise_scale_inv = meta["columnwise_scale_inv"]
+
+    fp8_dtype = meta["fp8_dtype"]
+    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
+    max_fp8 = get_fp8_max(fp8_dtype)
+
+    BLOCK_X = 64
+    BLOCK_Y = 64
+    GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
+    grid = lambda META: (
+        triton.cdiv(num_rows, META["BLOCK_Y"]) * triton.cdiv(row_length, META["BLOCK_X"]),
+    )
+    _mxfp8_rowwise_to_columnwise_triton[grid](
+        triton.reinterpret(x_2d, tl_dtype),
+        triton.reinterpret(y_2d, tl_dtype),
+        x_2d.stride(0),
+        x_2d.stride(1),
+        num_rows,
+        row_length,
+        rowwise_scale_inv,
+        rowwise_scale_inv.stride(0),
+        rowwise_scale_inv.stride(1),
+        rowwise_scale_inv.shape[0],
+        rowwise_scale_inv.shape[1],
+        colwise_scale_inv,
+        colwise_scale_inv.stride(0),
+        colwise_scale_inv.stride(1),
+        colwise_scale_inv.shape[0],
+        colwise_scale_inv.shape[1],
+        max_fp8,
+        BLOCK_X,
+        BLOCK_Y,
+        GROUP_Y,
+        MXFP8_BLOCK_SCALING_SIZE,
+    )
+    return tensor
+
+
+FP8_BLOCKWISE_1D_BLOCK_LEN = 128
+
+
+@triton.jit
+def _fp8_blockwise_1d_rowwise_to_columnwise_triton(
+    x_ptr,
+    y_ptr,
+    stride_x_m,
+    stride_x_n,
+    stride_y_n,
+    stride_y_m,
+    n_rows,
+    n_cols,
+    rowwise_scale_inv_ptr,
+    stride_rs0,
+    stride_rs1,
+    rs0,
+    rs1,
+    colwise_scale_inv_ptr,
+    stride_cs0,
+    stride_cs1,
+    cs0,
+    cs1,
+    max_fp8,
+    epsilon,
+    BLOCK_LEN: tl.constexpr,
+    VEC_M: tl.constexpr,
+    FORCE_POW_2_SCALES: tl.constexpr,
+):
+    """Dequant 1x128 rowwise FP8 and requantize 128x1 columnwise (pow-2 scales).
+
+    Columnwise payload is stored transposed: y has logical shape [K, M].
+    Rowwise scale_inv is GEMM layout [K/128, M] (HIP) / padded CUDA equivalent.
+    Columnwise scale_inv is [M/128, K].
+    """
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(n_rows, BLOCK_LEN)
+    num_pid_n = tl.cdiv(n_cols, BLOCK_LEN)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    offs_n = pid_n.to(tl.int64) * BLOCK_LEN + tl.arange(0, BLOCK_LEN)
+    col_mask = offs_n < n_cols
+    k_block = pid_n
+    m_block = pid_m
+
+    amax = tl.zeros([BLOCK_LEN], dtype=tl.float32)
+    num_vec = BLOCK_LEN // VEC_M
+    for it in range(0, num_vec):
+        offs_m = pid_m.to(tl.int64) * BLOCK_LEN + it * VEC_M + tl.arange(0, VEC_M)
+        row_mask = offs_m < n_rows
+        mask = row_mask[:, None] & col_mask[None, :]
+        q = tl.load(
+            x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        rs_offs = k_block * stride_rs0 + offs_m * stride_rs1
+        rs_mask = (k_block < rs0) & (offs_m < rs1)
+        s_row = tl.load(rowwise_scale_inv_ptr + rs_offs, mask=rs_mask, other=1.0)
+        x = q * s_row[:, None]
+        tile_max = tl.max(tl.where(mask, tl.abs(x), 0.0), axis=0)
+        amax = tl.maximum(amax, tile_max)
+
+    a = amax
+    a = tl.where(a < epsilon, epsilon, a)
+    bad = (a != a) | (tl.abs(a) == float("inf")) | (a == 0.0)
+    s = max_fp8 / a
+    s = tl.where(bad, 1.0, s)
+    if FORCE_POW_2_SCALES:
+        s = tl.math.exp2(tl.floor(tl.log2(s)))
+    scale_inv = 1.0 / s
+
+    cs_offs = m_block * stride_cs0 + offs_n * stride_cs1
+    cs_mask = (m_block < cs0) & col_mask
+    tl.store(colwise_scale_inv_ptr + cs_offs, scale_inv, mask=cs_mask)
+
+    for it in range(0, num_vec):
+        offs_m = pid_m.to(tl.int64) * BLOCK_LEN + it * VEC_M + tl.arange(0, VEC_M)
+        row_mask = offs_m < n_rows
+        mask = row_mask[:, None] & col_mask[None, :]
+        q = tl.load(
+            x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        rs_offs = k_block * stride_rs0 + offs_m * stride_rs1
+        rs_mask = (k_block < rs0) & (offs_m < rs1)
+        s_row = tl.load(rowwise_scale_inv_ptr + rs_offs, mask=rs_mask, other=1.0)
+        x = q * s_row[:, None]
+        scaled = x * s[None, :]
+        scaled = tl.clamp(scaled, -max_fp8, max_fp8)
+        tl.store(
+            y_ptr + offs_n[None, :] * stride_y_n + offs_m[:, None] * stride_y_m,
+            scaled.to(y_ptr.type.element_ty),
+            mask=mask,
+        )
+
+
+def te_fp8_blockwise_1d_rowwise_to_columnwise_triton(tensor):
+    """Fill 1x128 columnwise FP8 + FP32 scale_inv from rowwise data.
+
+    Intended for ``force_pow_2_scales`` (DeepSeek-style). Numerics match
+    dequantize() followed by a columnwise-only 1D blockwise quantize.
+    Columnwise payload is transposed ([K, M]).
+    """
+    meta = tensor.get_metadata()
+    if meta.get("is_2D_scaled", True):
+        raise RuntimeError("1D blockwise restripe requires block_scaling_dim=1")
+    if meta["rowwise_data"] is None or meta["rowwise_scale_inv"] is None:
+        raise RuntimeError(
+            "Blockwise rowwise->columnwise restripe requires rowwise data and scales"
+        )
+    if meta["columnwise_data"] is None or meta["columnwise_scale_inv"] is None:
+        raise RuntimeError(
+            "Blockwise rowwise->columnwise restripe requires preallocated columnwise buffers"
+        )
+
+    x_ptr = meta["rowwise_data"]
+    if x_ptr.numel() == 0:
+        return tensor
+    row_length = x_ptr.shape[-1] if len(x_ptr.shape) > 0 else 1
+    num_rows = x_ptr.numel() // row_length
+    x_2d = x_ptr.reshape(num_rows, row_length)
+    y = meta["columnwise_data"]
+    y_2d = y.reshape(row_length, num_rows)
+    rowwise_scale_inv = meta["rowwise_scale_inv"]
+    colwise_scale_inv = meta["columnwise_scale_inv"]
+
+    fp8_dtype = meta["fp8_dtype"]
+    tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
+    max_fp8 = get_fp8_max(fp8_dtype)
+    quantizer = meta.get("quantizer")
+    epsilon = float(getattr(quantizer, "amax_epsilon", 0.0) or 0.0)
+    force_pow2 = bool(getattr(quantizer, "force_pow_2_scales", True))
+
+    BLOCK_LEN = FP8_BLOCKWISE_1D_BLOCK_LEN
+    VEC_M = 16
+    grid = (triton.cdiv(num_rows, BLOCK_LEN) * triton.cdiv(row_length, BLOCK_LEN),)
+    _fp8_blockwise_1d_rowwise_to_columnwise_triton[grid](
+        triton.reinterpret(x_2d, tl_dtype),
+        triton.reinterpret(y_2d, tl_dtype),
+        x_2d.stride(0),
+        x_2d.stride(1),
+        y_2d.stride(0),
+        y_2d.stride(1),
+        num_rows,
+        row_length,
+        rowwise_scale_inv,
+        rowwise_scale_inv.stride(0),
+        rowwise_scale_inv.stride(1),
+        rowwise_scale_inv.shape[0],
+        rowwise_scale_inv.shape[1],
+        colwise_scale_inv,
+        colwise_scale_inv.stride(0),
+        colwise_scale_inv.stride(1),
+        colwise_scale_inv.shape[0],
+        colwise_scale_inv.shape[1],
+        max_fp8,
+        epsilon,
+        BLOCK_LEN,
+        VEC_M,
+        force_pow2,
+        num_warps=8,
+    )
+    return tensor
+
+
 def te_cast_transpose_mxfp4_triton(input, out, noop_flag=None):
     # Reshape input to 2D: (M, N) logical
     N = input.shape[-1] if len(input.shape) > 0 else 1

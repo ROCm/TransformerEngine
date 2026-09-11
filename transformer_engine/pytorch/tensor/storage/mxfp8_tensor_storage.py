@@ -281,14 +281,87 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         except Exception as exc:  # pylint: disable=broad-except
             return safe_quantized_repr(self, "MXFP8TensorStorage", error=exc)
 
+    def _allocate_columnwise_buffers(self) -> None:
+        """Allocate columnwise payload + E8M0 scales if missing."""
+        from ..mxfp8_tensor import MXFP8Quantizer
+
+        if self._quantizer is not None:
+            quantizer = self._quantizer.copy()
+            quantizer.set_usage(rowwise=False, columnwise=True)
+        else:
+            quantizer = MXFP8Quantizer(self._fp8_dtype, rowwise=False, columnwise=True)
+
+        empty = quantizer.make_empty(
+            tuple(self.size()), dtype=self._dtype, device=self.device
+        )
+        if self._columnwise_data is None:
+            self._columnwise_data = empty._columnwise_data
+        if self._columnwise_scale_inv is None:
+            self._columnwise_scale_inv = empty._columnwise_scale_inv
+
+    def _create_columnwise_from_high_precision(self) -> None:
+        """Fallback: dequant to HBM then columnwise-only quantize."""
+        from ..mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+
+        hp_dtype = self._dtype if getattr(self._dtype, "is_floating_point", False) else torch.bfloat16
+        hp = self.dequantize(dtype=hp_dtype)
+        if self._quantizer is not None:
+            quantizer = self._quantizer.copy()
+            quantizer.set_usage(rowwise=False, columnwise=True)
+        else:
+            quantizer = MXFP8Quantizer(self._fp8_dtype, rowwise=False, columnwise=True)
+        dst = MXFP8Tensor(
+            shape=tuple(self.size()),
+            dtype=hp_dtype,
+            fp8_dtype=self._fp8_dtype,
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=self._columnwise_data,
+            columnwise_scale_inv=self._columnwise_scale_inv,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=False,
+        )
+        quantizer.update_quantized(hp, dst)
+        self._columnwise_data = dst._columnwise_data
+        self._columnwise_scale_inv = dst._columnwise_scale_inv
+
+    def _create_columnwise(self) -> None:
+        """Synthesize columnwise MXFP8 from the rowwise layout.
+
+        Fused Triton path dequants in registers and requants along the
+        token axis (E8M0). Matches dequantize + columnwise quantize.
+        """
+        if self._columnwise_data is not None and self._columnwise_scale_inv is not None:
+            return
+        if self._rowwise_data is None or self._rowwise_scale_inv is None:
+            raise RuntimeError(
+                "Cannot create columnwise MXFP8 data without rowwise payload and scales"
+            )
+        if self._with_gemm_swizzled_scales:
+            raise RuntimeError(
+                "Cannot restripe MXFP8 columnwise from GEMM-swizzled rowwise scales. "
+                "Keep compact scales until after the restripe."
+            )
+
+        self._allocate_columnwise_buffers()
+        use_triton = int(os.environ.get("NVTE_MXFP8_ROWWISE_TO_COLWISE", "1"))
+        if use_triton:
+            from ...triton_kernels.cast_transpose import te_mxfp8_rowwise_to_columnwise_triton
+
+            te_mxfp8_rowwise_to_columnwise_triton(self)
+        else:
+            self._create_columnwise_from_high_precision()
+
     def update_usage(
         self,
         rowwise_usage: Optional[bool] = None,
         columnwise_usage: Optional[bool] = None,
     ):
-        """
-        For MXFP8, columnwise scaled output is only produced by x2
-        scaling kernels, so this function only disables usages.
+        """Keep, drop, or synthesize MXFP8 layouts.
+
+        Columnwise data can be built from rowwise MXFP8 via
+        ``_create_columnwise`` (fused dequant + columnwise requant).
+        Columnwise-only tensors cannot reconstruct rowwise.
         """
 
         # Default usage is based on available data
@@ -297,7 +370,17 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
 
-        # Update row-scaled data
+        if columnwise_usage:
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                self._create_columnwise()
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled data"
+                )
+        else:
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+
         if rowwise_usage:
             if self._rowwise_data is None:
                 raise RuntimeError(
@@ -310,21 +393,6 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         else:
             self._rowwise_data = None
             self._rowwise_scale_inv = None
-
-        # Update column-scaled data
-        if columnwise_usage:
-            if self._columnwise_data is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
-                )
-            if self._columnwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
-                )
-        else:
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
