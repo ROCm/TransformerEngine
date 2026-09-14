@@ -27,6 +27,7 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    get_grouped_gemm_setup_workspace_size,
 )
 if not is_hip_extension():
     from transformer_engine_jax import (
@@ -34,7 +35,6 @@ if not is_hip_extension():
         initialize_cgemm_communicator,
         is_collective_gemm_with_cublasmp,
         get_cgemm_num_max_streams,
-        get_grouped_gemm_setup_workspace_size,
     )
 
 from .base import BasePrimitive, register_primitive
@@ -90,13 +90,11 @@ num_cublas_streams = get_num_compute_streams()
 # compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
 _v2_grouped_gemm_available_reason = ""
 try:
-    if is_hip_extension():
-        _v2_grouped_gemm_available = False
-    else:
-        get_grouped_gemm_setup_workspace_size(1)
-        _v2_grouped_gemm_available = True
+    get_grouped_gemm_setup_workspace_size(1)
+    _v2_grouped_gemm_available = True
 except RuntimeError as e:
-    if "cublas" in str(e).lower():
+    err = str(e).lower()
+    if "cublas" in err or "rocm" in err or "not supported" in err:
         _v2_grouped_gemm_available = False
         _v2_grouped_gemm_available_reason = str(e)
     else:
@@ -2138,9 +2136,18 @@ def _is_v2_grouped_gemm_supported(
             ),
         )
 
-    # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
-    # Fall back to the v1 path on SM90 (Hopper) and older architectures.
-    if get_min_device_compute_capability() < 100:
+    # nvte_grouped_gemm requires Blackwell (SM100+) on CUDA, or gfx942/950/1250 on ROCm.
+    if is_hip_extension():
+        if get_min_device_compute_capability() not in (94, 95, 125):
+            return (
+                False,
+                (
+                    "The TE V2 grouped GEMM on ROCm requires gfx942, gfx950, or gfx1250 but"
+                    f" current min device compute capability is"
+                    f" {get_min_device_compute_capability()}."
+                ),
+            )
+    elif get_min_device_compute_capability() < 100:
         return (
             False,
             (
@@ -2152,10 +2159,14 @@ def _is_v2_grouped_gemm_supported(
     if has_bias:
         return False, "Grouped GEMM with bias is not supported in the TE V2 grouped GEMM kernel."
 
-    if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16:
-        return True, ""
+    if scaling_mode == ScalingMode.NO_SCALING:
+        if is_hip_extension():
+            if dtype == jnp.float16:
+                return True, ""
+        elif dtype == jnp.bfloat16:
+            return True, ""
 
-    if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+    if scaling_mode == ScalingMode.MXFP8_1D_SCALING and not is_hip_extension():
         # V2 MXFP8 requires that the total first dimension of both operands (up to
         # axis_boundary) is divisible by 128, matching the quantize V2 kernel requirement.
         # Individual group sizes must also be 128-aligned (dynamic constraint).
@@ -2215,8 +2226,9 @@ def _is_v2_grouped_gemm_supported(
     return (
         False,
         (
-            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
-            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 (CUDA), FP16"
+            " (ROCm hipBLASLt), and MXFP8 with 1D block scaling (CUDA only), but"
+            " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
             f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
             f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
             f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
@@ -2238,8 +2250,9 @@ def is_v2_grouped_gemm_supported(
     Returns:
         A tuple of (is_supported: bool, reason: str) where is_supported indicates whether the V2 grouped GEMM can be used, and reason provides an explanation if it is not supported.
     """
-    # Use the V2 path for plain BF16 non-quantized inputs and MXFP8; fall back to
-    # the legacy nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
+    # Use the V2 path for plain BF16 non-quantized inputs and MXFP8(CUDA only),
+    # ROCm: FP16 unscaled via hipBLASLt only; fall back to the legacy
+    # nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
     enforce_v2_gmm = _should_enforce_v2_grouped_gemm()
