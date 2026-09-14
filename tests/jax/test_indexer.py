@@ -20,7 +20,6 @@ from transformer_engine.jax.triton_extensions.indexer import (
     fp8_dtype,
     quantize_e4m3,
     score_reduce_triton,
-    score_topk_triton,
 )
 
 
@@ -153,11 +152,6 @@ def test_score_ops_accept_prequantized_operands():
     )
     assert _rel_err(o_ext, o_ref) < 5e-3
 
-    idx_ext = score_topk_triton(H_q_q, H_k_q, W_o, k=32, Sq=Sq, Ks=Ks)
-    ref_vals = jax.lax.top_k(o_ref, k=32)[0]
-    picked = jnp.sort(jnp.take_along_axis(o_ref, idx_ext, axis=-1), axis=-1)[..., ::-1]
-    assert float(jnp.abs(ref_vals - picked).max()) / float(ref_vals.max()) < 1e-2
-
 
 def test_prequantized_path_agrees_with_indexer():
     """Quantizing externally matches letting ``indexer`` do it one layer up.
@@ -218,15 +212,16 @@ def test_prequantized_grads_follow_operand_dtype():
 
 
 @pytest.mark.parametrize("fp8", [False, True])
-@pytest.mark.parametrize("k", [32, 64, 128, 256, 512, 1024])
+@pytest.mark.parametrize("k", [32, 100, 128, 256, 512, 1024])
 def test_topk_matches_reference(k, fp8):
-    """Fused top-k selects the same scores as reference + ``jax.lax.top_k``.
+    """``indexer_topk`` selects the same scores as reference + ``jax.lax.top_k``.
 
-    Index set-equality is too strict (backends break ties differently), so the
-    check is on the *scores* at the fused-selected indices, compared rank-by-rank
-    against the reference top-k. ``T_s`` is ``4 * max(k)`` so the largest ``k``
-    (1024) sits at the top quartile — deep enough to exercise the streaming
-    top-k path (2K candidate buffer) that small ``k`` / ``T_s`` never reaches.
+    Index set-equality is too strict (the op's logits and the fp32 reference
+    break ties differently), so the check is on the *scores* at the selected
+    indices, compared rank-by-rank against the reference top-k. ``T_s`` is
+    ``4 * max(k)`` so the largest ``k`` (1024) still sits at the top quartile
+    rather than sweeping nearly the whole row. ``k=100`` covers a non-power-of-2
+    ``k``, which the previous fused kernel could not accept.
 
     The gap is normalized by the overall score *scale* (max reference score), not
     per element: as ``k`` grows into the near-zero ReLU tail, per-element relative
@@ -253,7 +248,7 @@ def test_topk_matches_reference(k, fp8):
     # bound is looser -- but still measured against the *reference* score at each
     # rank, so a genuinely wrong selection (not just a swapped near-tie) fails.
     tol = 1e-1 if fp8 else 1e-2
-    assert max_gap < tol, f"fused top-k scores diverge: max_gap={max_gap:.3e} (k={k})"
+    assert max_gap < tol, f"top-k scores diverge: max_gap={max_gap:.3e} (k={k})"
 
 
 @pytest.mark.parametrize("fp8", [False, True])
@@ -298,7 +293,7 @@ def test_lightning_indexer_module_matches_functional():
 
 
 def test_lightning_indexer_topk_mode():
-    """``LightningIndexer(topk=k)`` returns fused top-k indices of shape (..., T, k)."""
+    """``LightningIndexer(topk=k)`` returns top-k indices of shape (..., T, k)."""
     B, oH, T_t, T_s, d, d_c, H, d_i, k = 2, 3, 64, 128, 32, 32, 16, 32, 32
     keys = jax.random.split(jax.random.PRNGKey(9), 2)
     Q = jax.random.normal(keys[0], (B, oH, T_t, d), dtype=jnp.bfloat16)

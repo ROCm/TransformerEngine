@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -63,7 +64,6 @@ from .utils import *
 from .permutation import *
 from .indexer import (
     score_reduce_triton,
-    score_topk_triton,
     quantize_e4m3,
     fp8_dot_supported,
 )

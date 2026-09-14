@@ -13,11 +13,11 @@ DeepSeek lightning indexer. Because these entry points own the projections,
 they also own the quantization: H_q and H_k are quantized along ``d_i`` here
 and handed to the Triton op together with their row scales.
 
-The Triton ops themselves never quantize. A caller that already holds
+The Triton op itself never quantizes. A caller that already holds
 quantized index-q / index-k — from an fp8 GEMM epilogue, a TE quantizer, or a
 previous step — should skip this module and call
-``triton_extensions.indexer.score_reduce_triton`` / ``score_topk_triton``
-directly, passing the fp8 tensors and their scales; no requantization needed.
+``triton_extensions.indexer.score_reduce_triton`` directly, passing the fp8
+tensors and their scales; no requantization needed.
 
 Functional entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w)``.
 User-facing Flax module: :class:`LightningIndexer`, which owns the projection
@@ -93,27 +93,23 @@ def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None, fp8=True):
 
 @functools.partial(jax.jit, static_argnames=("k", "fp8"))
 def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k, fp8=True):
-    """Lightning-indexer + top-k (fused).
+    """Lightning-indexer logits followed by a top-k selection.
 
-    Same projections as ``indexer()`` (reference math), then a single Triton
-    kernel that computes the score row, ReLU, weighted H-reduction, and
-    streaming top-k all in one pass — the (B, oH, T_t, T_s) score matrix is
-    never materialized.
+    Runs ``indexer()`` to produce the (..., T_t, T_s) logits, then selects the
+    top ``k`` per row with ``jax.lax.top_k``. The selection is a separate pass
+    over the materialized logits, not fused into the score kernel.
 
     Args:
         Q, K, W_uq, W_dq, W_k, weights: same as ``indexer()``.
-        k: number of top scores to return per (B, oH, T_t) row.
-           Must be a power of 2 and <= S.
+        k: number of top scores to return per (B, oH, T_t) row. Must be <= S.
         fp8: run the score matmul in e4m3 (default).
 
     Returns:
         Topk_idx: (..., T_t, k) int32 — top-k indices into the S axis,
         in descending score order.
     """
-    from transformer_engine.jax.triton_extensions.indexer import score_topk_triton
-    H_q, H_k, W_o = _indexer_projections(Q, K, W_uq, W_dq, W_k, weights)
-    H_q, H_k, Sq, Ks = _maybe_quantize(H_q, H_k, fp8)
-    return score_topk_triton(H_q, H_k, W_o, k=k, Sq=Sq, Ks=Ks)
+    scores = _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights, fp8=fp8)
+    return jax.lax.top_k(scores, k)[1]
 
 
 @functools.partial(jax.jit, static_argnames=("out_dtype", "fp8"))
@@ -157,9 +153,9 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
     d_i : int
         Inner head dimension (``d_i``).
     topk : Optional[int], default ``None``
-        If set, :meth:`__call__` returns the fused top-``k`` indices
+        If set, :meth:`__call__` returns the top-``k`` indices
         (``(..., T, k)`` int32) via :func:`indexer_topk`, and ``out_dtype`` is
-        ignored (top-k always uses the fused Triton kernel).
+        ignored (the logits are selected over in their native dtype).
         If ``None``, :meth:`__call__` returns the full score tensor
         ``(..., T, S)`` (hybrid Triton backend).
     out_dtype : Optional[jnp.dtype]
