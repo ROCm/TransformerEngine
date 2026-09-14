@@ -58,6 +58,18 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 seed = 1234
 reset_rng_states()
 
+if IS_HIP_EXTENSION:
+    from utils import EnvVarCleaner
+
+    @pytest.fixture(autouse=True)
+    def reset_grouped_gemm_backend():
+        # Snapshot/restore the process-global Triton grouped-GEMM env vars so a test
+        # that sets them (and may raise before its own cleanup) cannot leak the
+        # backend into unrelated tests.
+        env = EnvVarCleaner(["NVTE_USE_BLOCKWISE_GMM_TRITON", "NVTE_USE_GROUPED_GEMM_TRITON"])
+        yield
+
+
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
@@ -300,8 +312,6 @@ def test_grouped_linear_accuracy(
         pytest.skip("Triton grouped gemm is only supported on HIP.")
     if IS_HIP_EXTENSION and dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
         pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
@@ -321,7 +331,10 @@ def test_grouped_linear_accuracy(
             )
 
     if use_triton:
-        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        if recipe is not None and recipe.float8_block_scaling():
+            os.environ["NVTE_USE_BLOCKWISE_GMM_TRITON"] = "1"
+        else:
+            os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
 
     with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
@@ -385,9 +398,6 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
 
-    if use_triton:
-        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
-
     atol, rtol = 0, 0
     if use_cutlass:
         atol, rtol = 1e-3, 1e-3
@@ -400,6 +410,40 @@ def test_grouped_linear_accuracy(
             rtol = 5e-2
     for o, o_ref in zip(outputs, outputs_ref):
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.parametrize(
+    "in_features,out_features,expected",
+    [
+        (256, 512, True),
+        (384, 512, True),  # 384 % 128 == 0 (not a multiple of 256, still supported)
+        (192, 512, False),  # in_features not a multiple of 128
+        (256, 320, False),  # out_features not a multiple of 128
+    ],
+)
+def test_blockwise_fp8_gate_requires_128_aligned_features(
+    in_features, out_features, expected, monkeypatch
+):
+    """The forward/dgrad kernel applies one scalar B scale per 128-wide N-tile,
+    so non-128-aligned in/out features must fall back to the default path."""
+    from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+    supported = _GroupedLinear._is_blockwise_fp8_triton_grouped_gemm_supported(
+        fp8=True,
+        recipe=recipe.Float8BlockScaling(),
+        use_bias=False,
+        backward_override=None,
+        cpu_offloading=False,
+        save_original_input=False,
+        debug=False,
+        unpad_output=False,
+        actual_m_splits=None,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    assert supported is expected
 
 
 @pytest.mark.skipif(
@@ -462,6 +506,7 @@ def test_grouped_linear_accuracy_rocm_backends(
     delay_wgrad_compute,
     grouped_gemm_backend,
     monkeypatch,
+    capfd,
 ):
     if (
         grouped_gemm_backend == "ck"
@@ -471,6 +516,12 @@ def test_grouped_linear_accuracy_rocm_backends(
     ):
         pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
 
+    if recipe is not None and recipe.float8_block_scaling():
+        # The HipKittens/CK grouped GEMM backends do not support FP8 block scaling
+        # (they abort at runtime). The blockwise path is covered by the default and
+        # Triton backends in test_grouped_linear_accuracy instead.
+        pytest.skip("HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
+
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
@@ -478,6 +529,16 @@ def test_grouped_linear_accuracy_rocm_backends(
         monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
     else:
         monkeypatch.setenv("NVTE_USE_CK_GROUPED_GEMM", "1")
+
+    # For the configs CK grouped GEMM is guaranteed to handle, 
+    # assert it does not silently fall back to multi-stream hipBLASLt.
+    expect_ck_no_fallback = (
+        grouped_gemm_backend == "ck"
+        and recipe is None
+        and dtype in (torch.bfloat16, torch.float16)
+    )
+    if expect_ck_no_fallback:
+        monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
     test_grouped_linear_accuracy(
         dtype,
@@ -493,6 +554,16 @@ def test_grouped_linear_accuracy_rocm_backends(
         parallel_mode=None,
         use_cutlass=True,
     )
+
+    if expect_ck_no_fallback:
+        # NVTE_WARN writes to std::cerr; capfd captures file-descriptor-level
+        # output, including C/C++ stderr.
+        captured = capfd.readouterr()
+        assert "Fallback to cuBLAS grouped GEMM" not in captured.err, (
+            "CK grouped GEMM fell back to multi-stream hipBLASLt for a config it "
+            f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
+            f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
+        )
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -733,8 +804,6 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -815,8 +884,6 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
-    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
-        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -959,6 +1026,146 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass, monkeypatch
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="CK grouped GEMM is ROCm-only")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=str)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT", "TT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize(
+    "pad_dim",
+    ["K", "M", "N", "MK", "MKN"],
+    ids=lambda d: f"pad{d}",
+)
+def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim, capfd, monkeypatch):
+    """Test CK grouped GEMM with M, N, or K not aligned to CK tile size.
+
+    CK constraints for bf16/fp16:
+    - Contiguous dim of A/B must be dword-aligned (even for 2-byte types).
+        RowMajor: contiguous dim is cols (K for A, N for B).
+        ColMajor: contiguous dim is rows (M for A, K for B).
+    - K tile: 64, M tile: 256, N tile: 128/256
+    """
+    torch.manual_seed(0)
+
+    # Unaligned values per dimension (all satisfy CK vector-load constraints).
+    # K: even but not multiple of tile (64). Same for all groups.
+    # M: not multiples of tile (256), varies per group.
+    # N: multiple of 16 but not multiple of tile (128).
+    unaligned_k = 2016
+    unaligned_m = [100, 300, 150, 200, 50, 350, 250, 180]
+    unaligned_n = 2032
+    z = len(unaligned_m)
+
+    # Aligned defaults.
+    k_aligned = 2048
+    m_aligned = 256
+    n_aligned = 2048
+
+    # Select (un)aligned values based on pad_dim.
+    k_val = unaligned_k if "K" in pad_dim else k_aligned
+    m_vals = unaligned_m if "M" in pad_dim else [m_aligned] * z
+    n_val = unaligned_n if "N" in pad_dim else n_aligned
+
+    total_m = sum(m_vals)
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
+
+    if layout == "TN":
+        A = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+        B = [torch.randn(m, k_val, dtype=dtype, device="cuda") for m in m_vals]
+        out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+        out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+        m_splits = m_vals
+        grad = False
+        single_output = True
+    elif layout == "NN":
+        A = [torch.randn(k_val, n_val, dtype=dtype, device="cuda") for _ in range(z)]
+        B = [torch.randn(m, k_val, dtype=dtype, device="cuda") for m in m_vals]
+        out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+        out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+        m_splits = m_vals
+        grad = True
+        single_output = True
+    elif layout == "NT":
+        A = list(torch.split(
+            torch.randn(total_m, k_val, dtype=dtype, device="cuda"), m_vals
+        ))
+        B = list(torch.split(
+            torch.randn(total_m, n_val, dtype=dtype, device="cuda"), m_vals
+        ))
+        out = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+        out_ref = [o.clone() for o in out]
+        m_splits = m_vals
+        grad = True
+        single_output = False
+    else:  # TT
+        A = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+        B = [torch.randn(k_val, m, dtype=dtype, device="cuda") for m in m_vals]
+        out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+        out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+        m_splits = m_vals
+        grad = False
+        single_output = True
+
+    # Reference: individual GEMMs
+    for i in range(z):
+        if layout == "TT":
+            # general_gemm doesn't support TT; compute reference manually.
+            ref = B[i].T.to(torch.float32) @ A[i].T.to(torch.float32)
+            if accumulate:
+                out_ref[i] = (out_ref[i].to(torch.float32) + ref).to(dtype)
+            else:
+                out_ref[i] = ref.to(dtype)
+        else:
+            general_gemm(
+                A[i],
+                B[i],
+                dtype,
+                grad=grad,
+                accumulate=accumulate,
+                layout=layout,
+                out=out_ref[i],
+            )
+
+    if single_output:
+        out_ref = [torch.cat(out_ref)]
+
+    general_grouped_gemm(
+        A,
+        B,
+        out,
+        [None] * z,
+        dtype,
+        m_splits=m_splits,
+        grad=grad,
+        accumulate=accumulate,
+        layout=layout,
+        single_output=single_output,
+    )
+
+    for o, o_ref in zip(out, out_ref):
+        if accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
+            torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
+        else:
+            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+
+    # Check for CK fallback warnings from C++ (NVTE_WARN writes to std::cerr).
+    # capfd captures file-descriptor-level output, including C/C++ stderr.
+    captured = capfd.readouterr()
+    if "Falling back" in captured.err or "Fallback" in captured.err:
+        if "K" in pad_dim and layout != "NN":
+            pytest.xfail(
+                "Known CK_Tile limitation: K-padding with non-NN layouts may fall back to cuBLAS "
+                "(kPadK + ColMajor B bug, or CK_Tile stride alignment requirements)"
+            )
+        if "M" in pad_dim and layout == "TT":
+            pytest.xfail(
+                "Known CK_Tile limitation: M-padding with TT layout may fall back to cuBLAS "
+                "(newer CK requires M to satisfy A vector-load alignment requirements)"
+            )
+        else:
+            pytest.fail(f"CK_Tile grouped GEMM fell back to cuBLAS:\n{captured.err}")
 
 
 @pytest.mark.skipif(
@@ -1588,6 +1795,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
 
 _FUSED_GROUPED_GEMM_ENV = "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
 _ALL_BOOLEAN = all_boolean
+_fp8_available, _reason_for_no_fp8 = fp8_available, reason_for_no_fp8
 _mxfp8_available, _reason_for_no_mxfp8 = mxfp8_available, reason_for_no_mxfp8
 _nvfp4_available, _reason_for_no_nvfp4 = nvfp4_available, reason_for_no_nvfp4
 
@@ -1670,6 +1878,10 @@ def _run_grouped_linear_path(
     [
         None,
         pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not _fp8_available, reason=_reason_for_no_fp8),
+        ),
+        pytest.param(
             recipe.MXFP8BlockScaling(),
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
         ),
@@ -1678,7 +1890,7 @@ def _run_grouped_linear_path(
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
     ],
-    ids=["bf16", "mxfp8", "nvfp4"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
@@ -1692,13 +1904,20 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-    if use_fp8 and device_capability < (10, 0):
-        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
     if IS_HIP_EXTENSION:
         pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
+    # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
+    # current scaling also runs on the Hopper grouped GEMM path.
+    is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
+    if use_fp8 and not is_current_scaling and device_capability < (10, 0):
+        pytest.skip(
+            "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
+        )
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
+        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
     if cublaslt_version < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
 
@@ -1792,6 +2011,167 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
+@pytest.mark.parametrize("use_fused_path", [False, True], ids=["legacy", "grouped_tensor"])
+@pytest.mark.parametrize("supply", ["out", "dgrad_out", "both"])
+def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatch):
+    """Caller-provided forward out and/or backward dgrad_out buffers.
+
+    Checks that a supplied buffer is written in place (bit-for-bit vs internal allocation)
+    and, on the fused path with a padded input, that only the valid rows are touched.
+    """
+    if use_fused_path:
+        if IS_HIP_EXTENSION:
+            pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
+        device_capability = torch.cuda.get_device_capability()
+        if not (9, 0) <= device_capability <= (11, 0):
+            pytest.skip(
+                "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell"
+                " (SM10x and SM110)."
+            )
+        cublaslt_version = tex.get_cublasLt_version()
+        if device_capability < (10, 0) and cublaslt_version < 130400:
+            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+        if cublaslt_version < 130300:
+            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1" if use_fused_path else "0")
+    give_out = supply in ("out", "both")
+    give_dgrad = supply in ("dgrad_out", "both")
+
+    dtype = torch.bfloat16
+    num_gemms = 3
+    in_features = 128
+    out_features = 128
+    m_splits_list = [64, 96, 80]
+    valid_tokens = sum(m_splits_list)  # 240
+    # The fused path supports a padded input; the legacy path requires tight packing.
+    num_rows = valid_tokens + (80 if use_fused_path else 0)
+    m_splits = (
+        torch.tensor(m_splits_list, dtype=torch.int64, device="cuda")
+        if use_fused_path
+        else m_splits_list
+    )
+
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(num_rows, in_features, device="cuda")).to(dtype)
+    dy = torch.zeros(num_rows, out_features, dtype=dtype, device="cuda")
+    dy[:valid_tokens] = (0.1 * torch.randn(valid_tokens, out_features, device="cuda")).to(dtype)
+
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+    )
+
+    # Reference: internal allocation.
+    x_ref = x_base.detach().clone().requires_grad_(True)
+    y_ref = grouped_linear(x_ref, m_splits)
+    y_ref.backward(dy)
+
+    # Caller-provided buffers with a sentinel-filled tail (only the requested ones).
+    sentinel = 7.0
+    out_buf = (
+        torch.full((num_rows, out_features), sentinel, dtype=dtype, device="cuda")
+        if give_out
+        else None
+    )
+    dgrad_buf = (
+        torch.full((num_rows, in_features), sentinel, dtype=dtype, device="cuda")
+        if give_dgrad
+        else None
+    )
+    x = x_base.detach().clone().requires_grad_(True)
+    y = grouped_linear(x, m_splits, out=out_buf, dgrad_out=dgrad_buf)
+
+    if give_out:
+        # Forward output is the caller buffer itself (no copy); padded tail untouched.
+        assert y.data_ptr() == out_buf.data_ptr()
+        assert tuple(y.shape) == (num_rows, out_features)
+        assert torch.all(out_buf[valid_tokens:] == sentinel)
+    torch.testing.assert_close(y[:valid_tokens], y_ref[:valid_tokens], rtol=0, atol=0)
+
+    y.backward(dy)
+
+    if give_dgrad:
+        # dgrad written into the caller buffer; padded tail untouched.
+        assert torch.all(dgrad_buf[valid_tokens:] == sentinel)
+        torch.testing.assert_close(
+            dgrad_buf[:valid_tokens], x_ref.grad[:valid_tokens], rtol=0, atol=0
+        )
+    torch.testing.assert_close(x.grad[:valid_tokens], x_ref.grad[:valid_tokens], rtol=0, atol=0)
+
+    # A buffer whose row count does not match the input rows is rejected.
+    bad_out = torch.empty(num_rows + 1, out_features, dtype=dtype, device="cuda")
+    with pytest.raises(ValueError):
+        grouped_linear(x, m_splits, out=bad_out)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Blockwise FP8 grouped GEMM is ROCm-only.")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason="FP8 block scaling is unsupported.")
+def test_blockwise_fp8_weight_cache_reuse(monkeypatch):
+    """``is_first_microbatch`` caches the packed blockwise weight across microbatches.
+
+    CI never passes ``is_first_microbatch``, so the blockwise cache-hit branch is
+    otherwise unexercised. Verify that (1) the first microbatch quantizes once and
+    stores the packed weight in the single workspace slot (``weight0``), (2) later
+    microbatches reuse it with no re-quantization, (3) the reuse is numerically
+    identical to quantizing fresh, and (4) an incompatible cached workspace fails loud
+    instead of running a wrong weight.
+    """
+    monkeypatch.setenv("NVTE_USE_BLOCKWISE_GMM_TRITON", "1")
+
+    from transformer_engine.pytorch.triton_kernels import blockwise_quantize as _bwq
+
+    # Count quantization launches; the forward re-imports this symbol per call, so
+    # patching the source module is observed.
+    n_quant = {"count": 0}
+    _orig_quant = _bwq.quantize_fp8_blockwise_grouped_weight_qtensor
+
+    def _counting_quant(*args, **kwargs):
+        n_quant["count"] += 1
+        return _orig_quant(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _bwq, "quantize_fp8_blockwise_grouped_weight_qtensor", _counting_quant
+    )
+
+    num_gemms, in_features, out_features = 2, 256, 512
+    fp8_recipe = recipe.Float8BlockScaling()
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+
+    m_splits = [32, 32]
+    x = torch.randn(sum(m_splits), in_features, dtype=torch.bfloat16, device="cuda")
+
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_first = grouped_linear(x, m_splits, is_first_microbatch=True)
+    assert n_quant["count"] == 1, "first microbatch should quantize the weight once"
+    assert "weight0" in grouped_linear._fp8_workspaces
+    cached = grouped_linear._fp8_workspaces["weight0"]
+
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        out_second = grouped_linear(x, m_splits, is_first_microbatch=False)
+    assert n_quant["count"] == 1, "later microbatch should reuse the cache, not re-quantize"
+    assert grouped_linear._fp8_workspaces["weight0"] is cached
+    torch.testing.assert_close(out_second, out_first, rtol=0, atol=0)
+
+    # A live is_first_microbatch=False cache whose layout does not match the current
+    # weight must raise, not silently GEMM a wrong weight.
+    grouped_linear._fp8_workspaces["weight0"] = torch.empty(1, dtype=torch.uint8, device="cuda")
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        with pytest.raises(RuntimeError, match="Cached blockwise weight workspace"):
+            grouped_linear(x, m_splits, is_first_microbatch=False)
+
+
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
 def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
     """Non-RHT NVFP4 falls back to the legacy path; check it stays numerically correct.
@@ -1881,6 +2261,10 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
     [
         None,
         pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not _fp8_available, reason=_reason_for_no_fp8),
+        ),
+        pytest.param(
             recipe.MXFP8BlockScaling(),
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
         ),
@@ -1889,7 +2273,7 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
     ],
-    ids=["bf16", "mxfp8", "nvfp4"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
@@ -1900,13 +2284,20 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-    if use_fp8 and device_capability < (10, 0):
-        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
     if IS_HIP_EXTENSION:
         pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
+    # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
+    # current scaling also runs on the Hopper grouped GEMM path.
+    is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
+    if use_fp8 and not is_current_scaling and device_capability < (10, 0):
+        pytest.skip(
+            "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
+        )
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
+        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
     if cublaslt_version < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
 
@@ -1930,6 +2321,15 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         params_dtype=dtype,
         device=device,
     )
+    reference_grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=dtype,
+        device=device,
+    )
+    reference_grouped_linear.load_state_dict(grouped_linear.state_dict())
 
     static_x = torch.randn(total_tokens, in_features, dtype=dtype, device=device)
     static_x.requires_grad_(True)
@@ -1992,7 +2392,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     expected_x = fresh_x.detach().clone().requires_grad_(True)
     expected_dy = fresh_dy.detach().clone()
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
-        expected_out = grouped_linear(expected_x, static_m_splits)
+        expected_out = reference_grouped_linear(expected_x, static_m_splits)
     expected_out.backward(expected_dy)
 
     tols = dict(rtol=1e-2, atol=5e-3)
@@ -2000,7 +2400,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         tols = dict(rtol=0.05, atol=0.05)
     torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
     torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
-    for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
+    for graph_grad, param in zip(graph_param_grads, reference_grouped_linear.parameters()):
         assert param.grad is not None
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 

@@ -283,13 +283,13 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t max_batc
   // workspace size requires 4 bytes
   uint32_t *dout = static_cast<uint32_t *>(workspace);
   uint32_t hout{};
-  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream));
   constexpr int threads = 128;
   const int blocks = (max_batch_size - 1) / threads + 1; // ceil
   get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
                                                                   max_batch_size, dout);
-  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
   return hout;
 }
 

@@ -170,6 +170,17 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
     ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
 
+#ifdef __HIP_PLATFORM_AMD__
+    // gfx1250 MX pre-swizzle pads MXFP8 scales to a multiple of 4 in both dims
+    if (getDeviceComputeCapability() == 125) {
+      const size_t align = mxfp8_gfx1250_scale_tensor_alignment;
+      ret_rowwise.shape = {DIVUP_TO_MULTIPLE(ret_rowwise.shape[0], align),
+                           DIVUP_TO_MULTIPLE(ret_rowwise.shape[1], align)};
+      ret_colwise.shape = {DIVUP_TO_MULTIPLE(ret_colwise.shape[0], align),
+                           DIVUP_TO_MULTIPLE(ret_colwise.shape[1], align)};
+    }
+#endif
+
     ret_rowwise.type = DType::kFloat8E8M0;
     ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
     ret_colwise.type = DType::kFloat8E8M0;
@@ -1321,6 +1332,10 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                : nvfp4_scale_tensor_alignment_Y_colwise;
       alignment_X = is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise
                                : nvfp4_scale_tensor_alignment_X_colwise;
+    } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      // gfx1250 MX pre-swizzle requires MXFP8 scales padded to a multiple of 4 in both dims (1 on other architectures)
+      alignment_Y = alignment_X =
+          (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
     } else {
       alignment_Y = 1;
       alignment_X = 1;

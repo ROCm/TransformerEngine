@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,6 +9,7 @@
 import os
 import sys
 import socket
+import hashlib
 import warnings
 import subprocess
 import argparse
@@ -16,6 +19,7 @@ from functools import partial, reduce
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
@@ -75,6 +79,12 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--atomic", action="store_true", default=False, help="Test overlap with atomic GEMM."
+    )
+    parser.add_argument(
+        "--fused",
+        action="store_true",
+        default=False,
+        help="Select the fused AG+GEMM backend (gfx950 only).",
     )
     parser.add_argument(
         "--aggregate",
@@ -177,8 +187,18 @@ def _parse_args(argv=None, namespace=None):
     )
     opts = parser.parse_args(argv, namespace)
 
+    if opts.fused and not IS_HIP_EXTENSION:
+        warnings.warn("The fused AG+GEMM backend is ROCm only.")
+        opts.fused = False
+
     if opts.bulk_overlap:
-        if opts.p2p:
+        if opts.fused and opts.comm_type != tex.CommOverlapType.AG:
+            warnings.warn("The fused bulk overlap is all-gather only.")
+            opts.fused = False
+        if opts.fused:
+            # `fused_overlap_bulk_ag` is a CommOverlapP2P entry point
+            opts.p2p = True
+        elif opts.p2p:
             warnings.warn("Point-2-point comms are not supported with bulk overlap.")
             opts.p2p = False
         if opts.atomic:
@@ -357,6 +377,7 @@ def _main(opts):
             atomic_gemm=opts.atomic,
             aggregate=opts.aggregate,
             use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            fused=opts.fused,
         )
     else:
         ub_obj = tex.CommOverlap(
@@ -409,6 +430,8 @@ def _main(opts):
         # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)
         local_inp_shape = (outer_size, hidden_size)
+        if opts.fused:
+            local_inp_shape = (outer_size, ffn_hidden_size)
         # Bulk overlap comm tensor is distributed for AG overlap only
         if opts.comm_type == tex.CommOverlapType.AG:
             bulk_inp_shape = (outer_size // tp_size, hidden_size)
@@ -699,11 +722,15 @@ def _main(opts):
             extra_output=rs_out2,
         )
 
+    # The fused bulk all-gather GEMM is the NN one shaped above.
+    gemm_layout = "NN" if (opts.bulk_overlap and opts.fused) else "TN"
+
     def _gemm():
         return tex.general_gemm(
             kernel_t,
             gemm_inp,
             out_dtype=torch.bfloat16,
+            layout=gemm_layout,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,
             ub_type=opts.comm_type,
@@ -874,6 +901,14 @@ def _main(opts):
 
         torch.cuda.synchronize()
         dist.barrier(tp_group)
+        # Bit-exact fingerprint of the output.
+        out_bytes = test_out.detach().contiguous().cpu().flatten().view(torch.uint8)
+        out_hash = hashlib.sha256(out_bytes.numpy().tobytes()).hexdigest()
+        all_hashes = [None] * tp_size
+        dist.all_gather_object(all_hashes, out_hash, group=tp_group)
+        dist_print("OUTPUT HASH: " + " ".join(all_hashes), src=0, section=True, info=True,
+                   group=tp_group)
+
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)
         abs_err = diff[m].item()

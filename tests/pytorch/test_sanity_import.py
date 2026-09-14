@@ -9,20 +9,29 @@ import transformer_engine.pytorch
 if __name__ == "__main__":
     print("OK")
 
-AMDSMI_SRC = "/opt/rocm/share/amd_smi"
-
-
 def _amdsmi_pythonpath():
     """Return ROCm amdsmi source dir if the package is not already installed.
 
     torch counts devices through amdsmi whenever it is importable, reading
     HIP_VISIBLE_DEVICES at call time rather than asking an already initialized HIP
     runtime -- which is what makes a visible-devices change after import observable.
+
+    With TheRock pip wheels, bindings live under the rocm-sdk-core tree
+    (``<core-root>/share/amd_smi``).
     """
-    import importlib.util, os
-    if importlib.util.find_spec("amdsmi") is not None or not os.path.isdir(AMDSMI_SRC):
+    import importlib.util
+
+    if importlib.util.find_spec("amdsmi") is not None:
         return None
-    return AMDSMI_SRC
+    try:
+        from rocm_sdk_core._cli import _get_core_module_path
+
+        candidate = _get_core_module_path() / "share/amd_smi"
+        if candidate.is_dir():
+            return str(candidate)
+    except (ImportError, ModuleNotFoundError, OSError):
+        pass
+    return None
 
 
 def _env_with_amdsmi_pythonpath(env, amdsmi_path):

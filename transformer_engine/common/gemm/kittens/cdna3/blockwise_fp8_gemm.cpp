@@ -6,8 +6,9 @@
 #include <type_traits>
 #include "kittens.cuh"
 #include "../kittens_common.h"
+#include "../kittens_kernel_common.cuh"
 
-namespace {
+namespace te_kittens::cdna3::blockwise_fp8 {
 
 #include "blockwise_fp8_gemm_helper.cuh"
 
@@ -354,16 +355,6 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
     store_output(g.c.raw_ptr, C_accum[1], row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col, M, N);
 }
 
-#define BOOL_SWITCH(val, NAME, ...) \
-    if (val) { constexpr bool NAME = true; __VA_ARGS__ } \
-    else { constexpr bool NAME = false; __VA_ARGS__ }
-
-static GemmEpilogue select_epilogue(bool has_bias, bool has_gelu, bool has_beta) {
-    if (has_gelu) return has_beta ? GemmEpilogue::GELU_AUX_BETA : GemmEpilogue::GELU_AUX;
-    if (has_bias) return has_beta ? GemmEpilogue::BIAS_BETA     : GemmEpilogue::BIAS;
-    return has_beta ? GemmEpilogue::BETA : GemmEpilogue::DEFAULT;
-}
-
 template <bool IS_1D2D, typename AType, typename BType, typename OType,
           GemmEpilogue EPILOGUE, bool IS_PARTIAL_K, bool A_E4M3, bool B_E4M3>
 static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
@@ -374,8 +365,8 @@ static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
         hipFuncSetAttribute((void*)kern, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         kern<<<g.grid(), g.block(), mem_size, g.stream>>>(g);
     };
-    BOOL_SWITCH(is_partial_m, IS_PARTIAL_M,
-        BOOL_SWITCH(is_partial_n, IS_PARTIAL_N,
+    KITTENS_BOOL_SWITCH(is_partial_m, IS_PARTIAL_M,
+        KITTENS_BOOL_SWITCH(is_partial_n, IS_PARTIAL_N,
             launch(micro_tk<AType, BType, OType, IS_PARTIAL_M, IS_PARTIAL_N, IS_1D2D, EPILOGUE, IS_PARTIAL_K, A_E4M3, B_E4M3>);
         )
     )
@@ -405,7 +396,7 @@ template <bool IS_1D2D, typename AType, typename BType, typename OType,
           bool A_E4M3, bool B_E4M3>
 static void dispatch_micro(micro_globals<AType, BType, OType> g,
                            bool has_bias, bool has_gelu, bool has_beta, bool has_partial_k) {
-    BOOL_SWITCH(has_partial_k, IS_PARTIAL_K,
+    KITTENS_BOOL_SWITCH(has_partial_k, IS_PARTIAL_K,
         dispatch_micro_k<IS_1D2D, AType, BType, OType, IS_PARTIAL_K, A_E4M3, B_E4M3>(g, has_bias, has_gelu, has_beta);
     )
 }
@@ -465,11 +456,9 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
     }
 };
 
-#undef BOOL_SWITCH
-
-}
+}  // namespace te_kittens::cdna3::blockwise_fp8
 
 BlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna3() {
-    static BlockwiseGemmCdna3 impl;
+    static te_kittens::cdna3::blockwise_fp8::BlockwiseGemmCdna3 impl;
     return &impl;
 }

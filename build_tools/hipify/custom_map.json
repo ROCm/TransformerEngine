@@ -5,7 +5,8 @@
         "<cuda_fp4.h>" : "<hip/hip_fp4.h>",
         "cuda_runtime.h\"" : "hip_runtime.h\"",
         "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
-        "CUfunc_cache" : "hipFuncCache_t", 
+        "CUfunc_cache" : "hipFuncCache_t",
+        "CUfunction_attribute" : "hipFuncAttribute",
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
         "__nv_fp8_e5m2" : "te_hip_fp8_e5m2",
@@ -24,7 +25,8 @@
         "cudaLaunchConfig_t": "hipLaunchConfig_t",
         "cudaLaunchAttribute": "hipLaunchAttribute",
         "cudaLaunchAttributeCooperative": "hipLaunchAttributeCooperative",
-        "CUdeviceptr": "hipDeviceptr_t"
+        "CUdeviceptr": "hipDeviceptr_t",
+        "__CUDACC_RTC__": "__HIPCC_RTC__"
  }
 }
 

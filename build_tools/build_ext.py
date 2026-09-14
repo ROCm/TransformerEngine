@@ -74,11 +74,11 @@ class CMakeExtension(setuptools.Extension):
             ]
         configure_command += self.cmake_flags
 
-        import pybind11
-
-        pybind11_dir = Path(pybind11.__file__).resolve().parent
-        pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
-        configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
+        #ROCm: below variable is not used by CMake build. Leave it here for reference
+        #import pybind11
+        #pybind11_dir = Path(pybind11.__file__).resolve().parent
+        #pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
+        #configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
 
         # CMake build and install commands
         build_command = [_cmake_bin, "--build", build_dir, "--verbose"]

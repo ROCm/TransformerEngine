@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -229,6 +231,40 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
                                   &offsets_tensor, sizeof(offsets_tensor));
   }
 
+#ifdef __HIP_PLATFORM_AMD__
+  bool bad_last_dim = false;
+  for (size_t t = 0; t < num_tensors; ++t) {
+    if (last_dims_h[t] % 16 != 0) bad_last_dim = true;
+  }
+  auto free_device = [&]() {
+    cudaFree(in_data_d);
+    cudaFree(out_grouped_d);
+    cudaFree(in_scales_d);
+    cudaFree(first_dims_d);
+    cudaFree(last_dims_d);
+    cudaFree(offsets_d);
+  };
+
+  if (bad_last_dim) {
+    EXPECT_THROW(nvte_group_dequantize(in_group_tensor, out_group_tensor, 0), std::runtime_error);
+    free_device();
+    return;
+  }
+
+  const bool uniform_last_dim = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  bool ragged_colwise = false;
+  if (!rowwise && uniform_last_dim && num_tensors > 1) {
+    for (size_t t = 0; t < num_tensors; ++t) {
+      if (first_dims_h[t] % 32 != 0) ragged_colwise = true;
+    }
+  }
+  if (ragged_colwise) {
+    EXPECT_THROW(nvte_group_dequantize(in_group_tensor, out_group_tensor, 0), std::runtime_error);
+    free_device();
+    return;
+  }
+#endif
+
   // Run grouped dequantize
   nvte_group_dequantize(in_group_tensor, out_group_tensor, 0);
   cudaDeviceSynchronize();
@@ -312,14 +348,20 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
                         tensor_elts * sizeof(OutputType));
     if (result != 0) {
       // Find first mismatch for error reporting
-      for (size_t i = 0; i < tensor_elts; ++i) {
-        if (out_grouped_h[data_offset + i] != out_ref_h[data_offset + i]) {
-          GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i
-                       << " (global offset " << (data_offset + i) << "): grouped="
-                       << static_cast<float>(out_grouped_h[data_offset + i])
-                       << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
-        }
+      // ROCm scans bytes, not elements: memcmp flags differences element comparison misses.
+      const auto *grouped_bytes =
+          reinterpret_cast<const unsigned char *>(out_grouped_h.data() + data_offset);
+      const auto *ref_bytes =
+          reinterpret_cast<const unsigned char *>(out_ref_h.data() + data_offset);
+      size_t byte = 0;
+      while (grouped_bytes[byte] == ref_bytes[byte]) {
+        ++byte;
       }
+      const size_t i = byte / sizeof(OutputType);
+      GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i << " (global offset "
+                   << (data_offset + i)
+                   << "): grouped=" << static_cast<float>(out_grouped_h[data_offset + i])
+                   << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
     }
   }
 
@@ -349,6 +391,18 @@ std::vector<std::vector<size_t>> input_configs = {
     {VARYING_FIRST_DIM, 3, 768, 96, 256, 256, 256},
     {VARYING_LAST_DIM, 2, 160, 384, 128, 256},
     {VARYING_LAST_DIM, 3, 96, 512, 128, 128, 256},
+#ifdef __HIP_PLATFORM_AMD__
+    // Per-tensor rows not scale-block aligned: rejected on ROCm.
+    {VARYING_FIRST_DIM, 2, 96, 128, 48, 48},
+    // Last dim not 16-byte aligned: vectorized loads would shift the tile.
+    {SAME_BOTH_DIMS, 1, 128, 120},
+    // Launcher derives fewer blocks than the tile count, so the grid-stride loop must iterate.
+    {VARYING_LAST_DIM, 2, 256, 256, 96, 160},
+    // Rows are scale-block aligned but not chunk aligned: valid, must not be rejected.
+    {VARYING_FIRST_DIM, 2, 128, 128, 64, 64},
+    // Uniform shape whose per-tensor rows are not scale-block aligned.
+    {SAME_BOTH_DIMS, 2, 96, 128},
+#endif
 };
 
 std::vector<ScalingDirection> scaling_directions = {
@@ -366,10 +420,12 @@ class GroupedDequantizeMXFP8TestSuite
                                                  >> {};
 
 TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
+#ifndef __HIP_PLATFORM_AMD__
   // Skip tests for pre-Blackwell architectures
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
 
   using namespace transformer_engine;
   using namespace test;
@@ -419,6 +475,19 @@ TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
         (shape_rep == VARYING_FIRST_DIM || shape_rep == VARYING_BOTH_DIMS);
     const bool last_dim_varies =
         (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS);
+#ifdef __HIP_PLATFORM_AMD__
+    // ROCm rejects the shapes below instead of skipping them; see the EXPECT_THROW paths.
+    const bool uniform_last = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+    if (first_dim_varies && shape_rep != VARYING_FIRST_DIM && (first_dims[t] % 128 != 0)) {
+      GTEST_SKIP();
+    }
+    if (last_dim_varies && shape_rep != VARYING_LAST_DIM && (last_dims[t] % 128 != 0)) {
+      GTEST_SKIP();
+    }
+    if (!rowwise && !uniform_last && (first_dims[t] % 32 != 0)) {
+      GTEST_SKIP();
+    }
+#else
     if (first_dim_varies && (first_dims[t] % 128 != 0)) {
       GTEST_SKIP();
     }
@@ -433,6 +502,7 @@ TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
     if (!rowwise && (first_dims[t] % 32 != 0)) {
       GTEST_SKIP();
     }
+#endif
     // For rowwise: last dim must be divisible by 32
     if (rowwise && (last_dims[t] % 32 != 0)) {
       GTEST_SKIP();
