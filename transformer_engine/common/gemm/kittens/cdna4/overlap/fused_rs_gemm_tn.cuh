@@ -33,6 +33,8 @@ constexpr int RS_MAX_TP = 8;
 #endif
 
 // Arrival poison, a comm workgroup still reading it knows the producing GEMM has not stored there yet
+// NOTE: These are signalling NaNs, so while hardware should never output them, if a user initializes their 
+// data or pads with this specific value, they will see hangs until the timeout is hit.
 #define RS_SENT_BF16 0xFFAAu
 #define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
