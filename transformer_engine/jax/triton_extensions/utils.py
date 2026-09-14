@@ -536,11 +536,6 @@ def compile_triton(
     return kernel
 
 
-# Track HSACO temp files for the lifetime of the process so the kernel paths
-# we hand to jaxlib don't get garbage-collected.
-_HSACO_TEMP_FILES: list[str] = []
-
-
 def _compile_triton_hip(
     kernel_fn,
     signature,
@@ -607,11 +602,15 @@ def _compile_triton_hip(
         options=options.__dict__,
     )
 
-    # jaxlib's HIP TritonKernel ctor takes a path to an HSACO blob, not bytes.
-    fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", prefix=f"te_{compiled.name}_")
+    # jaxlib's HIP TritonKernel ctor takes a path to an HSACO blob, not bytes. The
+    # plugin reads the file once, unlinks it, and serves later launches from its own
+    # cache; writing into the process-scoped dir means a blob whose kernel is never
+    # launched still gets cleaned up at exit instead of lingering in /tmp.
+    fd, hsaco_path = tempfile.mkstemp(
+        suffix=".hsaco", prefix=f"te_{compiled.name}_", dir=_hsaco_dir()
+    )
     with os.fdopen(fd, "wb") as f:
         f.write(compiled.asm["hsaco"])
-    _HSACO_TEMP_FILES.append(hsaco_path)
 
     return gpu_triton.TritonKernel(
         compiled.name,
