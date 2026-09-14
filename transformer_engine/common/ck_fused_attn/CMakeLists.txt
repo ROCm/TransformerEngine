@@ -24,14 +24,17 @@ if(NOT _gfx1250_idx EQUAL -1)
 endif()
 
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
-set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola/third_party/aiter")
-if (DEFINED ENV{NVTE_AITER_SOURCE_DIR} AND NOT $ENV{NVTE_AITER_SOURCE_DIR} STREQUAL "")
-  set(__AITER_SOURCE_DIR $ENV{NVTE_AITER_SOURCE_DIR})
-  message(STATUS "Using AITER source from NVTE_AITER_SOURCE_DIR=${__AITER_SOURCE_DIR}. Disable AITER checkout.")
-  set(__SKIP_AITER_CHECKOUT TRUE)
-else()
-  set(__SKIP_AITER_CHECKOUT FALSE)
+
+# The AITER source tree is checked out once by the parent scope
+# (transformer_engine/common) and shared by every QoLA module group, so this
+# directory only consumes it -- see qola_checkout_aiter() in
+# 3rdparty/QoLA/cmake/QoLA.cmake for the NVTE_AITER_SOURCE_DIR override.
+if(NOT TE_AITER_SOURCE_DIR)
+  message(FATAL_ERROR
+          "TE_AITER_SOURCE_DIR is not set; ck_fused_attn expects the shared "
+          "QoLA AITER checkout performed by transformer_engine/common.")
 endif()
+set(__AITER_SOURCE_DIR "${TE_AITER_SOURCE_DIR}")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
@@ -44,51 +47,14 @@ if(NOT Python_EXECUTABLE)
   endif()
 endif()
 
-# Resolve the manifest-pinned AITER commit (defines AITER_SHA) and bring the
-# QoLA-managed AITER source tree to that commit before any consumer reads it
-# (header validation below, header includes for the .cpp build later, and
-# QoLA's own kernel build if the prebuilt cache misses).
 # TE keeps a single QoLA manifest so the whole build shares one AITER commit,
 # one patch set and one checkout.  Each consumer builds only its own module
-# group (see `qola build --group`).
-set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/../qola_manifest.toml")
+# group (see `qola build --group`).  aiter_prebuilt.cmake keys its cache on the
+# manifest-pinned commit, so resolve it here as AITER_SHA.
+set(__QOLA_MANIFEST "${TE_QOLA_MANIFEST}")
 set(__QOLA_GROUP "ck_fused_attn")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${__QOLA_MANIFEST}")
-file(STRINGS "${__QOLA_MANIFEST}" __AITER_COMMIT_LINES
-     REGEX "^[ \t]*aiter_commit[ \t]*=[ \t]*\"[^\"]+\"")
-list(LENGTH __AITER_COMMIT_LINES __AITER_COMMIT_COUNT)
-if(NOT __AITER_COMMIT_COUNT EQUAL 1)
-  message(FATAL_ERROR
-          "Expected exactly one 'aiter_commit = \"...\"' line in "
-          "${__QOLA_MANIFEST}, found ${__AITER_COMMIT_COUNT}.")
-endif()
-list(GET __AITER_COMMIT_LINES 0 __AITER_COMMIT_LINE)
-string(REGEX MATCH "\"([^\"]+)\"" _UNUSED "${__AITER_COMMIT_LINE}")
-set(AITER_SHA "${CMAKE_MATCH_1}")
-if("${AITER_SHA}" STREQUAL "")
-  message(FATAL_ERROR
-          "Failed to parse 'aiter_commit = \"...\"' line in ${__QOLA_MANIFEST}.")
-endif()
-if (NOT __SKIP_AITER_CHECKOUT)
-  execute_process(
-    COMMAND sh -c
-      "PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
---manifest '${__QOLA_MANIFEST}' \
---aiter-root '${__AITER_SOURCE_DIR}'"
-    RESULT_VARIABLE AITER_CHECKOUT_RESULT
-    OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
-    ERROR_VARIABLE AITER_CHECKOUT_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_STRIP_TRAILING_WHITESPACE
-  )
-  if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
-    message(FATAL_ERROR
-            "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
-            "manifest-pinned commit ${AITER_SHA}.\n"
-            "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
-  endif()
-  message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
-endif()
+qola_read_manifest_commit("${__QOLA_MANIFEST}" AITER_SHA)
 
 execute_process(
   COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
@@ -109,8 +75,8 @@ if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
 endif()
 message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
 
-# Sanity-check the resolved include directories now that `qola checkout` has
-# materialized the AITER tree.
+# qola_checkout_aiter() already validated AITER's own headers; the CK submodule
+# under the checkout is this backend's extra requirement.
 message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
 if(NOT EXISTS "${CK_INCLUDE_DIR}")
   message(FATAL_ERROR
@@ -118,13 +84,7 @@ if(NOT EXISTS "${CK_INCLUDE_DIR}")
           "Re-run the build to let `qola checkout` clone AITER and its "
           "composable_kernel submodule.")
 endif()
-
 message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
-if(NOT EXISTS "${AITER_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find AITER API at ${AITER_INCLUDE_DIR}. "
-          "Re-run the build to let `qola checkout` clone AITER.")
-endif()
 
 set(__AITER_CACHE_DIR "")
 set(__AITER_MHA_PATH "")
@@ -183,29 +143,24 @@ if(__AITER_CACHE_DIR STREQUAL "")
     set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
   else()
     set(__QOLA_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola")
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
-              ${Python_EXECUTABLE} -m qola.cli build
-              --manifest ${__QOLA_MANIFEST}
-              --aiter-root ${__AITER_SOURCE_DIR}
-              --output-dir ${__QOLA_BUILD_DIR}
-              --group ${__QOLA_GROUP}
-              --arch "${GPU_ARCHS_STR}"
-              --skip-checkout
-      RESULT_VARIABLE QOLA_BUILD_RESULT
-    )
-    if(NOT QOLA_BUILD_RESULT EQUAL 0)
-      message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
-    endif()
+    qola_build_modules(
+      GROUP           ${__QOLA_GROUP}
+      MANIFEST        ${__QOLA_MANIFEST}
+      BUILD_DIR       ${__QOLA_BUILD_DIR}
+      AITER_DIR       ${__AITER_SOURCE_DIR}
+      ARCHS           ${CMAKE_HIP_ARCHITECTURES}
+      LIBS            te_libmha_fwd.so te_libmha_bwd.so
+      OUT_INCLUDE_DIR __QOLA_BUILT_INCLUDE_DIR
+      OUT_LIB_DIR     __QOLA_BUILT_LIB_DIR)
 
     # Copy the final .so libs and exported public headers into the aiter
     # prebuilt cache so downstream consumers see a self-contained tree.
     get_default_aiter_cache_dir(__AITER_CACHE_DIR)
     set(__QOLA_CACHE_LIB "${__AITER_CACHE_DIR}/lib")
     file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
-    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
+    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILT_LIB_DIR}/*.so")
     file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
-    file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__AITER_CACHE_DIR}")
+    file(COPY "${__QOLA_BUILT_INCLUDE_DIR}" DESTINATION "${__AITER_CACHE_DIR}")
     set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
     set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
   endif()
