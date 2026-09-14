@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from utils import (
-    collect_kernel_rows,
+    configure_kernel_profile,
     configure_rotating,
     format_results_table,
     print_case,
@@ -57,7 +57,8 @@ def pytest_addoption(parser):
     )
     group.addoption(
         "--kernel-profile", action="store_true", default=False,
-        help="Also profile GPU kernels via torch.profiler and write a _kernel_profile CSV.",
+        help="Also measure GPU kernel (device) time alongside wall time, adding "
+             "Kernel Time / Kernel <unit> columns to the CSV.",
     )
     group.addoption(
         "--rotating", nargs="?", type=int, const=0, default=None, metavar="MB",
@@ -80,6 +81,7 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line("markers", "benchmark: TE GPU microbenchmark")
     configure_rotating(config.getoption("--rotating"), config.getoption("--no-rotating"))
+    configure_kernel_profile(config.getoption("--kernel-profile"))
     config._microbench_store = {}
     if not config.getoption("--no-gpu-interference-check"):
         status, foreign = gpu_neighbors.detect_gpu_interference(_GPU_SNAPSHOT)
@@ -119,12 +121,9 @@ class _MicroBench:
         records = bench_callable()
         print_case(case, records)
         family = Path(self._request.module.__file__).stem
-        kernel_rows = None
-        if self._config.getoption("--kernel-profile"):
-            kernel_rows = collect_kernel_rows(bench_callable, case)
         record_bench(
             self._config._microbench_store, family, case, records,
-            kernel_rows, self._request.node.name,
+            self._request.node.name,
         )
         return records
 
@@ -154,7 +153,6 @@ def pytest_sessionfinish(session, exitstatus):
         store,
         csv=config.getoption("--csv"),
         csv_samples=config.getoption("--csv-samples"),
-        kernel_profile=config.getoption("--kernel-profile"),
     )
     for path in written:
         print(f"microbench: wrote {path}")

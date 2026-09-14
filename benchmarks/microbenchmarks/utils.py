@@ -198,6 +198,50 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     return m.mean * 1e3, m
 
 
+# Dual wall + GPU-kernel timing. Off by default; enabled per run by
+# --kernel-profile (set via configure_kernel_profile from run_benchmarks / conftest).
+_KERNEL_PROFILE = False
+
+
+def configure_kernel_profile(enabled):
+    """Enable/disable dual wall+kernel timing (set from --kernel-profile)."""
+    global _KERNEL_PROFILE
+    _KERNEL_PROFILE = bool(enabled)
+
+
+def _kernel_time_ms(fn, warmup=100, iters=100):
+    """Mean GPU kernel (device) time per call, in ms, via torch.profiler.
+
+    Sums the self device time of every kernel launched per call, so it excludes
+    host launch overhead and host-side timing noise -- the device-time metric
+    reported alongside wall time under --kernel-profile.
+    """
+    from torch.profiler import profile, ProfilerActivity
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(iters):
+            fn()
+        torch.cuda.synchronize()
+    events = [e for e in prof.key_averages() if e.self_device_time_total > 0]
+    device_us = sum(e.self_device_time_total for e in events)
+    return (device_us / iters) / 1e3
+
+
+def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
+    """Time *fn* and return ``(wall_ms, measurement, kernel_ms)``.
+
+    ``wall_ms`` / ``measurement`` are the host wall-clock timing from
+    :func:`time_func`. ``kernel_ms`` is the mean GPU kernel (device) time per
+    call from :func:`_kernel_time_ms` when kernel profiling is enabled
+    (``--kernel-profile``); otherwise it is ``None`` and no profiler pass runs.
+    """
+    wall_ms, measurement = time_func(fn, method=method, min_run_time=min_run_time)
+    kernel_ms = _kernel_time_ms(fn) if _KERNEL_PROFILE else None
+    return wall_ms, measurement, kernel_ms
+
+
 # ---------------------------------------------------------------------------
 # Rotating input buffers (on by default; disable via --no-rotating)
 # ---------------------------------------------------------------------------
@@ -320,12 +364,15 @@ def compute_gbps(nbytes, ms):
 
 def make_metric_record(label, ms, unit, throughput, derived=False,
                        ms_precision=3, throughput_precision=2,
-                       measurement=None, samples_only=False):
+                       measurement=None, samples_only=False,
+                       kernel_ms=None, kernel_throughput=None):
     """Create a structured metric record for stdout and CSV generation.
 
     Each record describes one benchmark line item such as "GEMM Forward".
     ``run_benchmarks`` formats these records for stdout and expands them into
-    ``<label> Time (ms)`` and ``<label> <unit>`` CSV columns.
+    ``<label> Wall Time (ms)`` / ``<label> Wall <unit>`` columns, plus
+    ``<label> Kernel Time (ms)`` / ``<label> Kernel <unit>`` when kernel timing
+    is enabled (``kernel_ms`` is not None).
 
     If *measurement* is provided (a ``torch.utils.benchmark.Measurement``),
     the per-sample times are available for the ``--csv-samples`` output.
@@ -342,6 +389,8 @@ def make_metric_record(label, ms, unit, throughput, derived=False,
         "throughput_precision": throughput_precision,
         "measurement": measurement,
         "samples_only": samples_only,
+        "kernel_ms": kernel_ms,
+        "kernel_throughput": kernel_throughput,
     }
 
 
@@ -353,7 +402,11 @@ def make_forward_backward_metric_records(label_prefix, unit,
                                          throughput_precision=2,
                                          fwd_measurement=None,
                                          bwd_measurement=None,
-                                         fwd_bwd_measurement=None):
+                                         fwd_bwd_measurement=None,
+                                         forward_kernel_ms=None,
+                                         forward_kernel_throughput=None,
+                                         backward_kernel_ms=None,
+                                         backward_kernel_throughput=None):
     """Create standard forward/backward metric records for a benchmark.
 
     When *backward_derived* is True and *fwd_bwd_measurement* is provided,
@@ -369,6 +422,8 @@ def make_forward_backward_metric_records(label_prefix, unit,
             ms_precision=ms_precision,
             throughput_precision=throughput_precision,
             measurement=fwd_measurement,
+            kernel_ms=forward_kernel_ms,
+            kernel_throughput=forward_kernel_throughput,
         ),
         make_metric_record(
             f"{label_prefix} Backward",
@@ -379,6 +434,8 @@ def make_forward_backward_metric_records(label_prefix, unit,
             ms_precision=ms_precision,
             throughput_precision=throughput_precision,
             measurement=bwd_measurement,
+            kernel_ms=backward_kernel_ms,
+            kernel_throughput=backward_kernel_throughput,
         ),
     ]
     if fwd_bwd_measurement is not None:
@@ -404,14 +461,18 @@ def direction_records(direction, label, unit, throughput,
     spread is inherited from fwd+bwd).
     """
     if direction == "fwd":
-        fwd_ms, fwd_measurement = time_func(fwd_func)
+        fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
         return [make_metric_record(
             label, fwd_ms, unit, throughput(fwd_work, fwd_ms), measurement=fwd_measurement,
+            kernel_ms=fwd_kernel_ms,
+            kernel_throughput=throughput(fwd_work, fwd_kernel_ms) if fwd_kernel_ms else None,
         )]
     fwd_bwd_func()  # warm the backward graph
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
+    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
+    fwd_bwd_ms, fwd_bwd_measurement, fwd_bwd_kernel_ms = time_func_dual(fwd_bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
+    bwd_kernel_ms = (fwd_bwd_kernel_ms - fwd_kernel_ms
+                     if fwd_kernel_ms is not None and fwd_bwd_kernel_ms is not None else None)
     fwd_mean_s = fwd_measurement.mean
     bwd_measurement = SimpleNamespace(
         times=[t - fwd_mean_s for t in fwd_bwd_measurement.times]
@@ -419,15 +480,25 @@ def direction_records(direction, label, unit, throughput,
     return [make_metric_record(
         label, bwd_ms, unit, throughput(bwd_work, bwd_ms),
         derived=True, measurement=bwd_measurement,
+        kernel_ms=bwd_kernel_ms,
+        kernel_throughput=throughput(bwd_work, bwd_kernel_ms) if bwd_kernel_ms else None,
     )]
 
 
 def _metric_time_key(metric):
-    return f"{metric['label']} Time (ms)"
+    return f"{metric['label']} Wall Time (ms)"
 
 
 def _metric_throughput_key(metric):
-    return f"{metric['label']} {metric['unit']}"
+    return f"{metric['label']} Wall {metric['unit']}"
+
+
+def _metric_kernel_time_key(metric):
+    return f"{metric['label']} Kernel Time (ms)"
+
+
+def _metric_kernel_throughput_key(metric):
+    return f"{metric['label']} Kernel {metric['unit']}"
 
 
 def _format_metric_number(value, precision):
@@ -445,6 +516,16 @@ def _metric_row_from_records(metric_records):
         row[_metric_throughput_key(metric)] = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
+        # Kernel columns appear only under --kernel-profile (kernel_ms present).
+        if metric.get("kernel_ms") is not None:
+            row[_metric_kernel_time_key(metric)] = _format_metric_number(
+                metric["kernel_ms"], metric.get("ms_precision", 3)
+            )
+            kt = metric.get("kernel_throughput")
+            row[_metric_kernel_throughput_key(metric)] = (
+                _format_metric_number(kt, metric.get("throughput_precision", 2))
+                if kt is not None else ""
+            )
     return row
 
 
@@ -459,10 +540,18 @@ def _print_metric_records(metric_records):
             metric["throughput"], metric.get("throughput_precision", 2)
         )
         derived_suffix = " (derived)" if metric.get("derived", False) else ""
-        print(
+        line = (
             f"  {metric['label']:<{label_width}} {ms_str} ms | "
             f"{throughput_str} {metric['unit']}{derived_suffix}"
         )
+        kernel_ms = metric.get("kernel_ms")
+        if kernel_ms is not None:
+            k_ms = _format_metric_number(kernel_ms, metric.get("ms_precision", 3))
+            kt = metric.get("kernel_throughput")
+            k_thr = (_format_metric_number(kt, metric.get("throughput_precision", 2))
+                     if kt is not None else "-")
+            line += f"  ||  kernel {k_ms} ms | {k_thr} {metric['unit']}"
+        print(line)
 
 
 def _default_csv_name(bench_fn):
@@ -496,10 +585,8 @@ def make_parser(**kwargs):
     parser.add_argument(
         "--kernel-profile", action="store_true", default=False,
         help=(
-            "Profile GPU kernels using torch.profiler in addition to normal "
-            "timing. Prints per-kernel CUDA times output. "
-            "Use with --csv to write kernel-level data to CSV. "
-            "--csv-samples is ignored in this mode."
+            "Also measure GPU kernel (device) time alongside wall time, adding "
+            "Kernel Time / Kernel <unit> columns to the CSV."
         ),
     )
     rotating_group = parser.add_mutually_exclusive_group()
@@ -523,30 +610,6 @@ def make_parser(**kwargs):
         ),
     )
     return parser
-
-
-_KERNEL_NAME_MAX_WIDTH = 80
-
-
-def _shorten_kernel_name(name):
-    """Shorten verbose C++/HIP kernel names for readable terminal output.
-
-    Strips ``void `` prefix and template arguments (``<...>``) from
-    fully-qualified kernel names while preserving the function name and
-    any top-level namespace.
-    """
-    import re
-    s = name
-    # Strip leading "void "
-    if s.startswith("void "):
-        s = s[5:]
-    # Remove balanced template args (handles one level of nesting)
-    s = re.sub(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "", s)
-    # Collapse whitespace
-    s = " ".join(s.split())
-    if len(s) > _KERNEL_NAME_MAX_WIDTH:
-        s = s[: _KERNEL_NAME_MAX_WIDTH - 3] + "..."
-    return s
 
 
 def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
@@ -582,13 +645,10 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         args = make_parser().parse_args()
 
     configure_rotating(getattr(args, "rotating", None), getattr(args, "no_rotating", False))
-
-    if args.kernel_profile:
-        from torch.profiler import profile, ProfilerActivity
+    configure_kernel_profile(getattr(args, "kernel_profile", False))
 
     rows = []
     all_case_metrics = []
-    all_kernel_rows = []
     resolved_metric_columns = None
 
     for case in test_cases:
@@ -617,57 +677,6 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         rows.append(row)
         all_case_metrics.append((case_params, metric_records))
 
-        if args.kernel_profile:
-            with profile(
-                activities=[ProfilerActivity.CUDA],
-            ) as prof:
-                bench_fn(**case)
-                torch.cuda.synchronize()
-
-            averages = prof.key_averages()
-            gpu_events = [e for e in averages if e.self_device_time_total > 0]
-            gpu_events.sort(key=lambda e: e.self_device_time_total, reverse=True)
-
-            if gpu_events:
-                total_cuda_us = sum(e.self_device_time_total for e in gpu_events)
-                w = _KERNEL_NAME_MAX_WIDTH
-                print(
-                    f"\n  | {'Kernel':<{w}} | "
-                    f"{'Total (us)':>11} | {'Calls':>6} | "
-                    f"{'Avg (us)':>10} | {'%':>6} |"
-                )
-                print(
-                    f"  | {'-'*w} | "
-                    f"{'-'*11} | {'-'*6} | "
-                    f"{'-'*10} | {'-'*6} |"
-                )
-                for e in gpu_events:
-                    avg_us = e.self_device_time_total / e.count if e.count > 0 else 0
-                    pct = (
-                        100.0 * e.self_device_time_total / total_cuda_us
-                        if total_cuda_us > 0
-                        else 0
-                    )
-                    short = _shorten_kernel_name(e.key)
-                    print(
-                        f"  | {short:<{w}} | {e.self_device_time_total:>11.1f} | "
-                        f"{e.count:>6} | {avg_us:>10.2f} | {pct:>5.1f}% |"
-                    )
-                print(
-                    f"  | {'TOTAL':<{w}} | {total_cuda_us:>11.1f} | "
-                    f"{'---':>6} | {'---':>10} | {'---':>6} |"
-                )
-
-            for e in gpu_events:
-                kr = dict(case_params)
-                kr["kernel_name"] = e.key
-                kr["cuda_time_total_us"] = round(e.self_device_time_total, 1)
-                kr["num_calls"] = e.count
-                kr["cuda_time_avg_us"] = (
-                    round(e.self_device_time_total / e.count, 2) if e.count > 0 else 0
-                )
-                all_kernel_rows.append(kr)
-
     if args.csv is not None:
         import pandas as pd
         out_csv = args.csv if isinstance(args.csv, str) else (
@@ -677,23 +686,6 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         results = pd.DataFrame(rows, columns=columns)
         results.to_csv(out_csv, index=False)
         print(f"\nResults saved to {out_csv}")
-
-    if args.kernel_profile and args.csv is not None and all_kernel_rows:
-        import pandas as pd
-        from pathlib import Path
-        base = default_csv or _default_csv_name(bench_fn)
-        out_csv_name = args.csv if isinstance(args.csv, str) else (
-            Path(base).stem + "_kernel_profile.csv"
-        )
-        # Don't overwrite the main CSV if --csv was given a filename
-        if isinstance(args.csv, str):
-            out_csv_name = Path(args.csv).stem + "_kernel_profile.csv"
-        kernel_columns = param_columns + [
-            "kernel_name", "cuda_time_total_us", "num_calls", "cuda_time_avg_us",
-        ]
-        df = pd.DataFrame(all_kernel_rows, columns=kernel_columns)
-        df.to_csv(out_csv_name, index=False)
-        print(f"Kernel profile saved to {out_csv_name}")
 
     if args.csv_samples is not None:
         import pandas as pd
@@ -732,8 +724,8 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
 # The microbenchmarks can also run under pytest; conftest.py is a thin shim over
 # the framework-agnostic helpers below (no pytest import here, so importing
 # utils.py never requires pytest). Results are collected per family (test module)
-# and written with the same CSV / samples / kernel-profile schema run_benchmarks
-# produces, so downstream tooling (e.g. the dashboard ingest) is unaffected.
+# and written with the same CSV / samples schema run_benchmarks produces, so
+# downstream tooling (e.g. the dashboard ingest) is unaffected.
 
 def configure_rotating(rotating, no_rotating):
     """Set module-level input-rotation state from parsed options."""
@@ -800,21 +792,20 @@ def te_honors_env(varname):
 
 
 class _FamilyResults:
-    """Accumulated rows / samples / kernel rows for one benchmark family."""
+    """Accumulated rows / samples for one benchmark family."""
 
     def __init__(self):
         self.param_columns = None
         self.metric_columns = None
         self.rows = []
         self.case_metrics = []
-        self.kernel_rows = []
 
 
 def _stringify_params(case_params):
     return {k: (str(v) if isinstance(v, torch.dtype) else v) for k, v in case_params.items()}
 
 
-def record_bench(store, family, case_params, metric_records, kernel_rows=None, node_name=""):
+def record_bench(store, family, case_params, metric_records, node_name=""):
     """Record one benchmark case into *store* (a dict keyed by *family*)."""
     fam = store.setdefault(family, _FamilyResults())
     metric_row = _metric_row_from_records(metric_records)
@@ -831,8 +822,6 @@ def record_bench(store, family, case_params, metric_records, kernel_rows=None, n
     row.update(metric_row)
     fam.rows.append(row)
     fam.case_metrics.append((_stringify_params(case_params), metric_records, node_name))
-    if kernel_rows:
-        fam.kernel_rows.extend(kernel_rows)
 
 
 def print_case(case_params, metric_records):
@@ -842,28 +831,8 @@ def print_case(case_params, metric_records):
     _print_metric_records(metric_records)
 
 
-def collect_kernel_rows(bench_callable, case_params):
-    """Re-run *bench_callable* under torch.profiler and return per-kernel rows."""
-    from torch.profiler import profile, ProfilerActivity
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        bench_callable()
-        torch.cuda.synchronize()
-    events = [e for e in prof.key_averages() if e.self_device_time_total > 0]
-    events.sort(key=lambda e: e.self_device_time_total, reverse=True)
-    params = _stringify_params(case_params)
-    rows = []
-    for e in events:
-        kr = dict(params)
-        kr["kernel_name"] = e.key
-        kr["cuda_time_total_us"] = round(e.self_device_time_total, 1)
-        kr["num_calls"] = e.count
-        kr["cuda_time_avg_us"] = round(e.self_device_time_total / e.count, 2) if e.count else 0
-        rows.append(kr)
-    return rows
-
-
-def write_bench_outputs(store, *, csv=None, csv_samples=None, kernel_profile=False):
-    """Write per-family CSV / samples / kernel-profile outputs; return paths written."""
+def write_bench_outputs(store, *, csv=None, csv_samples=None):
+    """Write per-family CSV / samples outputs; return paths written."""
     import pandas as pd
     from pathlib import Path
 
@@ -889,13 +858,6 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None, kernel_profile=Fal
                 out, index=False
             )
             written.append(out)
-            if kernel_profile and fam.kernel_rows:
-                kout = f"{Path(out).stem}_kernel_profile.csv"
-                cols = fam.param_columns + [
-                    "kernel_name", "cuda_time_total_us", "num_calls", "cuda_time_avg_us",
-                ]
-                pd.DataFrame(fam.kernel_rows, columns=cols).to_csv(kout, index=False)
-                written.append(kout)
         if csv_samples is not None:
             sout = _dest(csv_samples, family, f"{family}_samples.csv")
             sample_rows = []
@@ -926,7 +888,7 @@ def _times_ms(measurement):
 
 
 def _result_rows(store):
-    """Flatten *store* into (suite, name, stats_ms, throughput, unit) rows for the summary."""
+    """Flatten *store* into (suite, name, wall_ms, wall_thr, kernel_ms, kernel_thr, unit) rows."""
     import numpy as np
 
     rows = []
@@ -940,15 +902,11 @@ def _result_rows(store):
             for m in visible:
                 name = base if len(visible) == 1 else f"{base} {m['label']}"
                 times = _times_ms(m.get("measurement"))
-                if times:
-                    a = np.asarray(times)
-                    stats = {
-                        "min": float(a.min()), "median": float(np.median(a)),
-                        "max": float(a.max()), "std": float(a.std()),
-                    }
-                else:  # no per-sample distribution: show the single value as the median
-                    stats = {"min": None, "median": m["ms"], "max": None, "std": None}
-                rows.append((suite, name, stats, m["throughput"], m["unit"]))
+                wall_ms = float(np.median(np.asarray(times))) if times else m["ms"]
+                rows.append((
+                    suite, name, wall_ms, m["throughput"],
+                    m.get("kernel_ms"), m.get("kernel_throughput"), m["unit"],
+                ))
     return rows
 
 
@@ -957,19 +915,25 @@ def format_results_table(store):
     rows = _result_rows(store)
     if not rows:
         return ""
+    has_kernel = any(r[4] is not None for r in rows)
 
-    def cell(v):
+    def ms_cell(v):
         return "-" if v is None else f"{v:.4f}"
 
-    headers = [
-        "Benchmark", "Config", "Min (ms)", "Median (ms)", "Max (ms)", "StdDev (ms)", "Throughput",
-    ]
+    def thr_cell(v, unit):
+        return "-" if v is None else f"{v:.2f} {unit}"
+
+    headers = ["Benchmark", "Config", "Wall Median (ms)", "Wall Throughput"]
+    if has_kernel:
+        headers += ["Kernel Median (ms)", "Kernel Throughput"]
     body = []
-    for suite, name, s, thr, unit in sorted(rows, key=lambda r: (r[0], r[1])):
-        body.append([
-            suite, name, cell(s["min"]), cell(s["median"]),
-            cell(s["max"]), cell(s["std"]), f"{thr:.2f} {unit}",
-        ])
+    for suite, name, wall_ms, wall_thr, kernel_ms, kernel_thr, unit in sorted(
+        rows, key=lambda r: (r[0], r[1])
+    ):
+        cells = [suite, name, ms_cell(wall_ms), thr_cell(wall_thr, unit)]
+        if has_kernel:
+            cells += [ms_cell(kernel_ms), thr_cell(kernel_thr, unit)]
+        body.append(cells)
     widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
 
     def row(cells):

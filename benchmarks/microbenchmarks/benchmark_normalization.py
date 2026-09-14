@@ -31,7 +31,7 @@ from transformer_engine.pytorch import ops
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     build_recipes,
-    apply_backend_env, time_func, compute_gbps, make_metric_record,
+    apply_backend_env, time_func_dual, compute_gbps, make_metric_record,
     make_input, te_honors_env,
 )
 
@@ -121,10 +121,12 @@ def bench_norm(NormType, Precision, M, hidden_size):
     # BF16 read + quantized write.
     fwd_bytes = int(M * hidden_size * (2 + _FWD_WRITE_BYTES[Precision]))
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
+    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
     return [make_metric_record(
         BENCHMARK_LABEL, fwd_ms, "GB/s", compute_gbps(fwd_bytes, fwd_ms),
         measurement=fwd_measurement,
+        kernel_ms=fwd_kernel_ms,
+        kernel_throughput=compute_gbps(fwd_bytes, fwd_kernel_ms) if fwd_kernel_ms else None,
     )]
 
 

@@ -39,7 +39,7 @@ from transformer_engine.pytorch.quantization import (
 )
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
-    apply_backend_env, time_func, compute_gbps, make_metric_record,
+    apply_backend_env, time_func_dual, compute_gbps, make_metric_record,
     make_input, rotating, te_honors_env,
 )
 
@@ -201,9 +201,11 @@ def bench_cast(Format, Direction, M, hidden_size):
         cast_func = lambda: next_q().dequantize()
         total_bytes = int(numel * (q_bytes_per_elem + 2))  # quantized read + BF16 write
 
-    ms, measurement = time_func(cast_func, method="blocked")
+    ms, measurement, kernel_ms = time_func_dual(cast_func, method="blocked")
     return [make_metric_record(
         CAST_LABEL, ms, "GB/s", compute_gbps(total_bytes, ms), measurement=measurement,
+        kernel_ms=kernel_ms,
+        kernel_throughput=compute_gbps(total_bytes, kernel_ms) if kernel_ms else None,
     )]
 
 
