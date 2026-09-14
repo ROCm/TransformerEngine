@@ -61,4 +61,9 @@ Usage:
 
 from .utils import *
 from .permutation import *
-from .indexer import score_reduce_triton, score_topk_triton
+from .indexer import (
+    score_reduce_triton,
+    score_topk_triton,
+    quantize_e4m3,
+    fp8_dot_supported,
+)
