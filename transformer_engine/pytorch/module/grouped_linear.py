@@ -935,8 +935,8 @@ class _GroupedLinear(torch.autograd.Function):
         # route count, which sizes the block-padded buffers exactly instead of to the static
         # T * min(topk, E) bound. Set before the align is built (lazily, inside the wrapper);
         # a metadata whose align is already cached keeps the bound it was built with.
-        m_splits_list = m_splits.tolist() if torch.is_tensor(m_splits) else list(m_splits)
         if is_permute_free_exact_routes_enabled() and routing_metadata.num_routes is None:
+            m_splits_list = m_splits.tolist() if torch.is_tensor(m_splits) else list(m_splits)
             routing_metadata.num_routes = sum(m_splits_list)
 
         # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
@@ -1182,12 +1182,25 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Permute-free grouped GEMM (ROCm FlyDSL) opt-in. Gathers inside GEMM and
         # returns early, bypassing the default permute / split setup below.
-        if _GroupedLinear._is_permute_free_grouped_gemm_supported(
+        perm_free_supported = _GroupedLinear._is_permute_free_grouped_gemm_supported(
             routing_metadata=routing_metadata,
             fp8=fp8,
             activation_dtype=activation_dtype,
             use_bias=use_bias,
-        ):
+        )
+        if routing_metadata is not None and not perm_free_supported:
+            # ``permute_free_metadata`` supplied is an unambiguous statement of caller intent,
+            # and the contract (see the module ``forward`` docstring) is that the caller has
+            # skipped ``moe_permute``. Degrading to the standard permuted path would feed it
+            # token-ordered activations and silently drop the router (``dispatched_probs``)
+            # gradient -- wrong numerics with no error. Fail loudly instead. Mirrors the
+            # mutual-exclusion check below for the Triton backend.
+            raise ValueError(
+                "permute_free_metadata was provided but the permute-free path is unavailable "
+                "(requires ROCm, NVTE_PERMUTE_FREE_GROUPED_GEMM=1, bf16, bias=False, no FP8). "
+                "The caller must not skip moe_permute on the fallback path."
+            )
+        if perm_free_supported:
             if use_grouped_gemm_triton:
                 raise RuntimeError(
                     "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON "
@@ -1741,7 +1754,6 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[num_inputs : num_inputs + N]
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
-            dispatched_probs = saved_tensors[num_inputs + 3 * N]
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)

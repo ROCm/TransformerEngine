@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """FlyDSL permute-free MoE weight-gradient (wgrad) op wrapper.
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 
+from ..flydsl_kernels.gemm.gemm_common_utils import require_launch_size
 from ..flydsl_kernels.permute_free_grouped_gemm.pf_wgrad import (
     WGRAD_BLOCK_M,
     compile_moe_wgrad_v2,
@@ -65,6 +66,17 @@ def flydsl_moe_wgrad(
     assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
+    # The kernel computes ``dw`` store offsets in int32 (``out_off`` in ``pf_wgrad.py``, then
+    # ``_as_i32``), so a ``dw`` at/above 2 GiB wraps negative and silently corrupts memory.
+    # ``x`` / ``grad`` share the int32 launch-signature limit. Reject up front -- no fallback
+    # exists on the PF wgrad path, so this is a hard error rather than silent corruption.
+    require_launch_size(
+        "permute-free wgrad",
+        ("dw", dw),
+        ("x", x),
+        ("grad", grad),
+    )
+
     out_dtype = "fp32" if dw.dtype == torch.float32 else "bf16"
     exe = compile_moe_wgrad_v2(
         block_n=int(block_n),
@@ -89,6 +101,7 @@ def flydsl_moe_wgrad(
         int(K),
         int(num_recv_tokens),
         int(num_experts),
+        int(sorted_slot_ids.numel()),
         torch.cuda.current_stream(),
     )
 
@@ -159,6 +172,7 @@ def _wgrad_run(
         int(K),
         int(num_recv_tokens),
         int(num_experts),
+        int(sorted_slot_ids.numel()),
         torch.cuda.current_stream(),
     )
 

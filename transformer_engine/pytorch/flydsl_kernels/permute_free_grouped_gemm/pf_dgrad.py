@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """Permute-free MoE data-gradient (dgrad) grouped-GEMM: MegaMOE's fast bf16 NN GEMM.
 
@@ -41,39 +41,33 @@ from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.fp16_gemm_utils import ceildiv
-from ..gemm.gemm_common_utils import _i64, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, make_value_attrs, require_launch_size
 from ..gemm.pf_gemm_utils import (
     RouteI32Loader,
     _make_shared_storage,
     gemm_bf16_nn_gather_tile,
-    gemm_bf16_nn_tile,
     xcd_remap_pid,
 )
 
 __all__ = ["compile_grouped_gemm_dgrad_bf16", "grouped_gemm_dgrad_bf16"]
 
 
-def _dgrad_gather_body(
-    GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base, block_n, gbase,
+def _dgrad_tile(
+    gather, GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base, block_n, gbase,
     *, N, Kout, BLOCK_M, BLOCK_N, out_fp16, nt_vmcnt,
 ):
-    """FC2 dgrad tile: gather the token-space grad rows via ``sorted_slot_ids`` (NN gather)."""
+    """Emit one NN dgrad tile via the unified :func:`gemm_bf16_nn_gather_tile`.
+
+    Plain-Python dispatch (runs at trace time, so the ``gather`` branch is *not* lowered to device
+    control flow): ``gather=True`` (FC2 dgrad) reads the flat token-space grad and gathers rows via
+    ``sorted_slot_ids``; ``gather=False`` (FC1 dgrad) reads the per-tile-rebased route-ordered grad
+    contiguously. The unused view is simply ignored.
+    """
+    A = GY_flat if gather else GY_tile
     gemm_bf16_nn_gather_tile(
-        GY_flat, WEIGHT, DX_tile, fx.Int32(Kout), lds, sorted_res, sorted_row_base, block_n,
+        A, WEIGHT, DX_tile, fx.Int32(Kout), lds, sorted_res, sorted_row_base, block_n,
         Kc=N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, out_fp16=out_fp16, nt_vmcnt=nt_vmcnt,
-        b_group_base=gbase,
-    )
-
-
-def _dgrad_routeread_body(
-    GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base, block_n, gbase,
-    *, N, Kout, BLOCK_M, BLOCK_N, out_fp16, nt_vmcnt,
-):
-    """FC1 dgrad tile: read the dense route-ordered grad directly (plain Mega NN tile)."""
-    gemm_bf16_nn_tile(
-        GY_tile, WEIGHT, DX_tile, fx.Int32(BLOCK_M), fx.Int32(Kout), lds, fx.Int32(0), block_n,
-        K=N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, out_fp16=out_fp16, nt_vmcnt=nt_vmcnt,
-        b_group_base=gbase,
+        b_group_base=gbase, gather=gather,
     )
 
 
@@ -99,9 +93,6 @@ def compile_grouped_gemm_dgrad_bf16(
     pools; the grid front-loads via XCD swizzle over the real tile range.
     """
     SharedStorage = _make_shared_storage(BLOCK_M, BLOCK_N)
-    # Compile-time tile selector (plain Python; resolved before the AST rewriter so the kernel
-    # body stays branch-free -- a device ``if gather`` would be lowered to real control flow).
-    tile_body = _dgrad_gather_body if gather else _dgrad_routeread_body
 
     @flyc.kernel(known_block_size=[512, 1, 1])
     def grouped_gemm_dgrad_k(
@@ -132,7 +123,7 @@ def compile_grouped_gemm_dgrad_bf16(
             arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(DX))), signed=True
         )
         # Flat 1D grad view (gather source; bounded to A_ELEMS so the sentinel row reads 0).
-        # Built unconditionally: the route-read tile simply ignores it.
+        # Built unconditionally: the route-read variant simply ignores it.
         GY_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, gy_base), fx.make_layout(A_ELEMS, 1))
 
         def _emit():
@@ -157,17 +148,18 @@ def compile_grouped_gemm_dgrad_bf16(
                     fx.inttoptr(pool_ptr_ty, dx_base + dx_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * fx.Int32(Kout), 1),
                 )
-                # Route-read grad tile (rebased); ignored by the gather tile.
+                # Route-read grad tile: rebased per tile in i64 so the base pointer (not an i32
+                # offset) carries block_m -- read contiguously. Ignored by the gather variant.
                 gy_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(fx.Int32(N)) * fx.Int64(2)
                 GY_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, gy_base + gy_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * fx.Int32(N), 1),
                 )
 
-                tile_body(
-                    GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base, block_n,
-                    gbase, N=N, Kout=Kout, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, out_fp16=out_fp16,
-                    nt_vmcnt=nt_vmcnt,
+                _dgrad_tile(
+                    gather, GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base,
+                    block_n, gbase, N=N, Kout=Kout, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                    out_fp16=out_fp16, nt_vmcnt=nt_vmcnt,
                 )
 
         if fx.block_idx.x < real_grid:
@@ -219,6 +211,22 @@ def grouped_gemm_dgrad_bf16(
     c_m = int(dx.shape[0])
     assert grad_y.shape[1] == N, f"grad_y N={grad_y.shape[1]} != weight N={N}"
     assert dx.shape[1] == K, f"dx K={dx.shape[1]} != weight K={K}"
+    # See ``pf_fwd.grouped_gemm_gather_bf16``: reject operands that overflow the int32 launch
+    # signature / expert-base voffset up front (no fallback on the PF path -> hard error).
+    require_launch_size(
+        "permute-free dgrad",
+        ("grad_y", grad_y),
+        ("weight", weight),
+        ("dx", dx),
+    )
+    # The NN dgrad tile contracts over N (out features) in BLOCK_K=64 steps and needs >= 2
+    # tiles. Enforced by a bare ``assert`` inside the traced kernel (stripped under
+    # ``python -O``), so validate host-side here where it always runs.
+    if N % 64 != 0 or N < 128:
+        raise ValueError(
+            f"permute-free dgrad requires N % 64 == 0 and N >= 128 (contraction BLOCK_K=64, "
+            f">= 2 tiles), got N={N}."
+        )
     if not gather:
         assert grad_y.shape[0] == c_m, (
             f"route-read dgrad expects grad_y rows == dx rows ({grad_y.shape[0]} != {c_m}); "

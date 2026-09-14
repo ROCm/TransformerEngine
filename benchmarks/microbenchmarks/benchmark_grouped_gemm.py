@@ -184,6 +184,7 @@ if __name__ == "__main__":
         + generate_deepseekv2_test_cases()
         + generate_deepseekv3_test_cases()
         + generate_grok_v2_test_cases()
+        + generate_qwen3_235b_test_cases()
     )
 
     run_benchmarks(

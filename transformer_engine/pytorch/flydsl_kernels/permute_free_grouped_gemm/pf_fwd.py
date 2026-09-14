@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """Permute-free MoE forward gather grouped-GEMM: MegaMOE's fast bf16 GEMM + route-list gather.
 
@@ -37,7 +37,7 @@ from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.fp16_gemm_utils import ceildiv
-from ..gemm.gemm_common_utils import _i64, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, make_value_attrs, require_launch_size
 from ..gemm.pf_gemm_utils import (
     RouteI32Loader,
     _make_shared_storage,
@@ -200,6 +200,26 @@ def grouped_gemm_gather_bf16(
     E, N, K = weight.shape
     assert K == A.shape[1], f"weight K={K} != A K={A.shape[1]}"
     assert output.shape[1] == N, f"output N={output.shape[1]} != weight N={N}"
+
+    # FlyDSL packs each operand's flat byte view into an int32 launch signature, and the
+    # in-kernel expert-base voffset (``expert_id * N * K``, byte-scaled) is int32 too, so a
+    # >= 2 GiB operand overflows and silently stores to a wrong address instead of crashing.
+    # Reject up front (mirrors the base FlyDSL GEMM backend). The PF path has no fallback, so
+    # this surfaces as a hard error rather than degrading silently.
+    require_launch_size(
+        "permute-free fwd",
+        ("A", A),
+        ("weight", weight),
+        ("output", output),
+    )
+
+    # The tile core contracts over K in BLOCK_K=64 steps and needs >= 2 K-tiles. This is
+    # enforced by a bare ``assert`` inside the traced kernel (stripped under ``python -O``,
+    # yielding garbage), so validate host-side here where it always runs.
+    if K % 64 != 0 or K < 128:
+        raise ValueError(
+            f"permute-free fwd requires K % 64 == 0 and K >= 128 (BLOCK_K=64, >= 2 K-tiles), got K={K}."
+        )
 
     A = A.contiguous()
     a_elems = int(A.numel())

@@ -153,10 +153,16 @@ def _fwd_align_block_size_m(num_tokens: int) -> int:
 
 def _ensure_fwd_align(
     routing: MoERoutingMetadata,
-    A: torch.Tensor,
-    B: torch.Tensor,
 ) -> int:
-    """Return ``routing.block_size_m``, building fwd align buffers when missing."""
+    """Return ``routing.block_size_m``, building fwd align buffers when missing.
+
+    Depends only on ``routing`` (the align is built from ``routing_map`` and sizes derived
+    from ``num_recv_tokens``); operands are intentionally not taken so callers never have to
+    materialize a stand-in tensor just to satisfy the signature.
+    """
+    # Drop cached buffers first if ``routing_map`` was mutated/swapped, so this early-return
+    # never hands back a stale align (the same guard runs inside ``prepare_moe_align``).
+    _invalidate_align_if_stale(routing)
     if routing.sorted_slot_ids is not None and routing.block_size_m is not None:
         return int(routing.block_size_m)
     block_m = _fwd_align_block_size_m(routing.num_recv_tokens)
@@ -167,7 +173,15 @@ def _ensure_fwd_align(
 def is_permute_free_grouped_gemm_enabled() -> bool:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-    return IS_HIP_EXTENSION and os.getenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "0") == "1"
+    if not (IS_HIP_EXTENSION and os.getenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "0") == "1"):
+        return False
+    # gfx950 (CDNA4) only, matching every other FlyDSL entry point in the tree. The kernels
+    # emit CDNA4-specific instructions (``ds_read_tr16_b64`` in pf_wgrad, the CDNA4 S_WAITCNT
+    # encoding in gemm_common_utils), so on gfx942 (MI300/MI325) the env var alone would take
+    # the path and emit invalid code. Gate on the arch here so it stays off elsewhere.
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    return get_device_compute_capability() == (9, 5)
 
 
 def is_permute_free_exact_routes_enabled() -> bool:
@@ -270,8 +284,56 @@ def _ensure_route_scan(metadata: MoERoutingMetadata):
     return metadata.route_counts, metadata.route_within
 
 
+def _routing_map_signature(metadata: MoERoutingMetadata):
+    """``(id, _version)`` of ``routing_map`` -- the cache key for all align-derived buffers."""
+    rmap = metadata.routing_map
+    return (id(rmap), rmap._version)
+
+
+def _stamp_align_signature(metadata: MoERoutingMetadata) -> None:
+    """Record the ``routing_map`` signature the currently-cached align buffers were built from."""
+    metadata.align_routing_id, metadata.align_routing_version = _routing_map_signature(metadata)
+
+
+def _invalidate_align_if_stale(metadata: MoERoutingMetadata) -> None:
+    """Drop all cached align/scan buffers if ``routing_map`` changed since they were built.
+
+    Detects both a swapped tensor (``id``) and an in-place mutation (``_version``, bumped by
+    ``copy_`` etc.). Without this, a reused metadata whose ``routing_map`` is written in place --
+    the natural CUDA-graph capture pattern -- hits the early-return below and gathers every token
+    for the wrong expert, silently. The align is a pure function of ``routing_map``, so clearing
+    the caches forces a correct rebuild on the next build call.
+    """
+    if metadata.align_routing_id is None:
+        return  # nothing built yet
+    if (metadata.align_routing_id, metadata.align_routing_version) == _routing_map_signature(
+        metadata
+    ):
+        return  # unchanged since last build
+    # Stale: clear every routing-map-derived cache (fwd/dgrad align, scan, and the shared wgrad
+    # align holder) so the next build rebuilds against the current routing map.
+    metadata.sorted_slot_ids = None
+    metadata.expert_ids = None
+    metadata.slot_expert_ids = None
+    metadata.num_tokens_post_padded = None
+    metadata.block_start = None
+    metadata.token_routes = None
+    metadata.token_route_count = None
+    metadata.block_size_m = None
+    metadata.route_counts = None
+    metadata.route_within = None
+    if metadata.wgrad_align is not None:
+        metadata.wgrad_align.sorted_slot_ids = None
+        metadata.wgrad_align.block_start = None
+        metadata.wgrad_align.blocks_per_expert = None
+        metadata.wgrad_align.block_size = None
+    metadata.align_routing_id = None
+    metadata.align_routing_version = None
+
+
 def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingMetadata:
     """Build and cache the fwd/dgrad route-list align buffers on ``metadata`` (sync-free)."""
+    _invalidate_align_if_stale(metadata)
     if (
         metadata.sorted_slot_ids is not None
         and metadata.block_size_m == block_m
@@ -314,6 +376,7 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
     metadata.block_size_m = block_m  # int: BLOCK_SIZE_M the layout is padded to
     metadata.token_routes = token_routes  # [T, min(topk, E)] int32: token -> padded route slot indices
     metadata.token_route_count = token_route_count  # [T] int32: number of routes per token
+    _stamp_align_signature(metadata)
     return metadata
 
 
@@ -423,7 +486,7 @@ def permute_free_grouped_gemm_bf16(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    block_size_m = _ensure_fwd_align(routing, hidden_states, weights_stacked)
+    block_size_m = _ensure_fwd_align(routing)
 
     # Worst-case (sync-free) allocation: size the output to the block-padded upper bound
     # R_block = sorted_slot_ids.shape[0], which is derived purely from shapes (num_recv_tokens,
@@ -445,6 +508,22 @@ def permute_free_grouped_gemm_bf16(
         index_a_by_route_pos=False,
     )
     return output
+
+
+def _validate_dispatched_probs(
+    routing: MoERoutingMetadata, dispatched_probs: Optional[torch.Tensor]
+) -> None:
+    """Enforce the ``[num_recv_tokens, num_local_experts]`` layout the kernels index into.
+    """
+    if dispatched_probs is None:
+        return
+    expected = (routing.num_recv_tokens, int(routing.num_experts))
+    if tuple(dispatched_probs.shape) != expected:
+        raise ValueError(
+            "dispatched_probs must be [num_recv_tokens, num_local_experts] = "
+            f"{expected} (indexed by local expert id), got {tuple(dispatched_probs.shape)}. "
+            "The Megatron [T, topk] post-dispatch layout is not accepted here."
+        )
 
 
 def permute_free_gated_act_bwd(
@@ -489,6 +568,7 @@ def permute_free_gated_act_bwd(
     # token/expert -- so we must feed the padded slot arrays (sorted_slot_ids + slot expert),
     # not the dense route arrays, or the padded valid slots beyond routes_max never get a dpre
     # row (and each route pairs a correct token with the wrong padded grad row).
+    _validate_dispatched_probs(routing, dispatched_probs)
     R_block = int(routing.sorted_slot_ids.shape[0])
     token = routing.sorted_slot_ids.to(torch.int32)
     expert = _expert_per_route(routing, R_block)
@@ -536,6 +616,7 @@ def permute_free_gated_act_fwd(
     # Block-padded canonical layout: emit one row per padded slot (keyed by sorted_slot_ids) so
     # the activation lines up with the [R_block] grad the wgrad route-reads. Padding slots
     # (token sentinel >= num_recv_tokens) are masked to zero by the kernel.
+    _validate_dispatched_probs(routing, dispatched_probs)
     R_block = int(routing.sorted_slot_ids.shape[0])
     token = routing.sorted_slot_ids.to(torch.int32)
     expert = _expert_per_route(routing, R_block)
@@ -592,7 +673,7 @@ def permute_free_grouped_gemm_bf16_dgrad(
     if weights_stacked.stride(-1) != 1:
         weights_stacked = weights_stacked.contiguous()
 
-    block_size_m = _ensure_fwd_align(routing, grad_output, weights_stacked)
+    block_size_m = _ensure_fwd_align(routing)
 
     # Two-stage dgrad: (1) store per-route dX into block-padded route-ordered [R_block, in],
     # then (2) token-parallel gather-combine back to token-ordered dA. Replaces atomic scatter.
@@ -696,11 +777,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
     # can pass that padded per-expert base to the kernel; routes are contiguous within an expert,
     # so base + within-rank indexes the correct padded grad row.
     if routing.block_start is None or routing.block_size_m is None:
-        stub_w = torch.empty(
-            num_experts, out_features, in_features,
-            device=hidden_states.device, dtype=torch.bfloat16,
-        )
-        _ensure_fwd_align(routing, hidden_states, stub_w)
+        _ensure_fwd_align(routing)
     routing = _prepare_wgrad_align(routing, contract_m)
     grad_base = (routing.block_start.to(torch.int64) * int(routing.block_size_m)).to(torch.int32)
 
@@ -798,7 +875,7 @@ def permute_free_grouped_gemm_bf16_fc2(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    block_size_m = _ensure_fwd_align(routing, fc2_input, weights_stacked)
+    block_size_m = _ensure_fwd_align(routing)
 
     # Two-stage combine: (1) block-padded route-ordered per-route GEMM into [R_block, out],
     # then (2) gather-combine to token-ordered output. Replaces atomic scatter-to-token.
@@ -870,7 +947,7 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
     if weights_stacked.stride(-1) != 1:
         weights_stacked = weights_stacked.contiguous()
 
-    block_size_m = _ensure_fwd_align(routing, grad_output, weights_stacked)
+    block_size_m = _ensure_fwd_align(routing)
 
     # Block-padded route-ordered output; the gather-GEMM writes only the dense route range
     # [0, num_routes) and never visits the tail (bounded by num_tokens_post_padded, sentinel-masked).
@@ -1068,11 +1145,18 @@ def permute_free_grouped_gemm_backward(
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the route buffer,
         # then the standalone gated-activation backward maps dL/dF -> dL/d(2F) (+ dprob).
         recompute = fc2_activation is not None and hidden_states is not None
+        # The router-prob gradient rides the *same* FC2 activation-backward as the input dgrad
+        # (both derive from ``dgrad_f``). The two are independent, though: ``dispatched_probs``
+        # needs a gradient whenever it requires grad, regardless of whether ``inp`` does. Run
+        # the act-bwd pass when EITHER is wanted -- otherwise a detached / frozen expert input
+        # silently zeroes the router gradient (router-only fine-tuning trains nothing).
+        need_probs = dispatched_probs is not None and dispatched_probs.requires_grad
+        run_act_bwd = requires_dgrad or (need_probs and recompute)
         # When both grads are wanted with a gated activation, fuse the wgrad's activation
         # recompute into the act-bwd (which is already streaming the 2F preact) so the wgrad
         # can reuse the F-wide fc2_input instead of re-reading the 2F preact a second time.
         fused_fc2_input = None
-        if requires_dgrad:
+        if run_act_bwd:
             weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
             dgrad_f = permute_free_grouped_gemm_bf16_fc2_dgrad(
                 grad_output, weights_stacked, routing
@@ -1095,10 +1179,13 @@ def permute_free_grouped_gemm_backward(
                         activation=fc2_activation,
                         dispatched_probs=dispatched_probs,
                     )
-                if not (dispatched_probs is not None and dispatched_probs.requires_grad):
+                if not need_probs:
                     grad_probs = None
             else:
                 dgrad = dgrad_f
+            # Drop the input grad if only the router probs were being solved for.
+            if not requires_dgrad:
+                dgrad = None
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             if fused_fc2_input is not None:

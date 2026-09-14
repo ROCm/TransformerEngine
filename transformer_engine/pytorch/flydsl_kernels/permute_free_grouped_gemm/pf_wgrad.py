@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 """Permute-free MoE weight-gradient (wgrad) grouped GEMM in FlyDSL.
 
@@ -191,6 +191,7 @@ def compile_moe_wgrad_v2(
         N: fx.Int32,
         K: fx.Int32,
         num_recv_tokens: fx.Int32,
+        sorted_numel: fx.Int32,  # SORTED (sorted_slot_ids) element count, to bound its SRD
     ):
         bf16 = T.bf16
         c0 = arith.constant(0, index=True)
@@ -198,7 +199,13 @@ def compile_moe_wgrad_v2(
         dW_rsrc = ptr_rsrc(dW)
         x_rsrc = ptr_rsrc(X)
         grad_rsrc = ptr_rsrc(GRAD)
-        sorted_rsrc = ptr_rsrc(SORTED)
+        # The slot-id prefetch is NUM_BUF+D tiles deep: the prologue and the loop look-ahead
+        # index past the last routed slot for the final expert (``base_slot + num_slots`` can
+        # reach the full R_block allocation). Bound the SRD to the real [sorted_numel] i32 extent
+        # so those overruns read hardware zero (-> sentinel token -> zeroed gather) instead of
+        # reading past the end of ``sorted_slot_ids``. Mirrors the x_rsrc/grad_rsrc bounds below.
+        sorted_bytes = arith.index_cast(T.index, sorted_numel * fx.Int32(4))
+        sorted_rsrc = ptr_rsrc(SORTED, num_records_bytes=sorted_bytes)
         bstart_rsrc = ptr_rsrc(BLOCK_START)
         bpe_rsrc = ptr_rsrc(BLOCKS_PER_EXPERT)
         gbase_rsrc = ptr_rsrc(GRAD_BASE)
@@ -342,8 +349,12 @@ def compile_moe_wgrad_v2(
                     # (its padding contribution is cancelled by the zeroed x column).
                     row_idx = valid.select(grad_base_idx + slot_base_idx + slot_idx, c0)
                 else:
-                    # x: gather by received-token; sentinel/OOB row -> hardware 0.
-                    row_idx = token
+                    # x: gather by received-token. Real padding already carries the sentinel
+                    # (token == num_recv) -> OOB -> hardware 0. But the deep look-ahead past
+                    # ``num_slots`` reads ``sorted`` off its (bounded) end, which returns 0, a
+                    # *valid* token -> ``x[0]`` would be fetched and discarded. Force those
+                    # invalid slots to an OOB row so ``x``/``grad`` hardware-zeroes with no DMA.
+                    row_idx = valid.select(token, nrecv_idx)
                 swz = slot & fx.Int32(cpr - 1)
                 glob_feat = (chunk ^ swz) * fx.Int32(FILL_V)
                 glob_feat_idx = arith.index_cast(T.index, glob_feat)
@@ -621,6 +632,7 @@ def compile_moe_wgrad_v2(
         K: fx.Int32,
         num_recv_tokens: fx.Int32,
         num_experts: fx.Int32,
+        sorted_numel: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         ctx = CompilationContext.get_current()
@@ -638,7 +650,7 @@ def compile_moe_wgrad_v2(
         wgrad_kernel._func.__name__ = KERNEL_NAME
         wgrad_kernel(
             dW, X, GRAD, SORTED, BLOCK_START, BLOCKS_PER_EXPERT, GRAD_BASE,
-            N, K, num_recv_tokens,
+            N, K, num_recv_tokens, sorted_numel,
         ).launch(grid=(gx, gy, gz), block=(n_threads, 1, 1), stream=stream)
 
     return launch_wgrad

@@ -241,4 +241,3 @@ def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
             ["amdgpu-mfma-vgpr-form", "false"],
         ]
     return attrs
-

@@ -131,6 +131,13 @@ class MoERoutingMetadata:
     # fwd/dgrad and wgrad align builds so it is computed once per routing map.
     route_counts: Optional[torch.Tensor] = None
     route_within: Optional[torch.Tensor] = None
+    # Identity + version of ``routing_map`` when the cached align buffers above were last built.
+    # An in-place mutation (``routing_map.copy_(...)`` -- the natural persistent-buffer / CUDA
+    # graph reuse pattern) bumps ``routing_map._version``; a swapped tensor changes ``id()``.
+    # Either invalidates the cache (see ``permute_free_grouped_gemm._invalidate_align_if_stale``)
+    # so a reused metadata never gathers with stale routing.
+    align_routing_id: Optional[int] = None
+    align_routing_version: Optional[int] = None
 
     def __post_init__(self):
         # num_experts is redundant with the routing map width (one column per local

@@ -4,10 +4,33 @@
 """Tests for the route-list permute-free bf16 MoE gather-GEMM kernels."""
 
 import dataclasses
+import importlib.util
 
 import pytest
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+# Gate the WHOLE module at collection time, before the imports below. Those pull in
+# ``pf_helper_kernels`` (module-scope ``triton``) and ``pf_fwd`` (module-scope
+# ``flydsl.compiler``), which are absent on non-gfx950 / non-FlyDSL stacks and would ERROR
+# at import rather than skip. Mirrors tests/pytorch/test_gemm_backends.py, which established
+# this pattern. A ``pytest.mark.skipif`` is not enough here -- it runs after import.
+if not (IS_HIP_EXTENSION and torch.cuda.is_available()):
+    pytest.skip(
+        "Permute-free grouped GEMM tests require ROCm and a CUDA device.",
+        allow_module_level=True,
+    )
+
+from transformer_engine.pytorch.utils import get_device_compute_capability
+
+if get_device_compute_capability() != (9, 5):
+    pytest.skip(
+        "Permute-free grouped GEMM tests require gfx950 (CDNA4).",
+        allow_module_level=True,
+    )
+
+if importlib.util.find_spec("flydsl") is None:
+    pytest.skip("FlyDSL package is not installed.", allow_module_level=True)
 
 from transformer_engine.pytorch import GroupedLinear
 from transformer_engine.pytorch.moe import (
@@ -34,11 +57,6 @@ from transformer_engine.pytorch.moe.permute_free_grouped_gemm import (
 from transformer_engine.pytorch.moe.pf_helper_kernels import route_list_scan
 from utils import assert_close, dtype_tols
 
-pytestmark = pytest.mark.skipif(
-    not (IS_HIP_EXTENSION and torch.cuda.is_available()),
-    reason="Permute-free grouped GEMM tests require ROCm and CUDA device.",
-)
-
 _TEST_SEED = 1
 
 
@@ -58,12 +76,21 @@ def _test_seed():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _assert_close(actual: torch.Tensor, ref: torch.Tensor, dtype=torch.bfloat16) -> None:
+def _assert_close(
+    actual: torch.Tensor, ref: torch.Tensor, dtype=torch.bfloat16, tol_scale: float = 1.0
+) -> None:
     tols = dtype_tols(dtype)
-    # Gather-combine (and similar reductions) can cancel to near-zero; those
-    # entries need an absolute floor. Use the same relative bound ``dtype_tols``
-    # already provides, scaled by peak |ref|.
-    tols["atol"] = max(tols["atol"], tols["rtol"] * ref.detach().float().abs().max().item())
+    # ``tol_scale`` widens both bounds for chained-GEMM comparisons (e.g. the FC1->FC2 pipeline),
+    # where bf16 error accumulates across two GEMMs + activation beyond a single-op budget.
+    tols["rtol"] *= tol_scale
+    tols["atol"] *= tol_scale
+    # Gather-combine (and similar reductions) can cancel to near-zero, so exact-zero entries
+    # need an absolute floor. Scale by the RMS of ``ref``, NOT its peak |ref|: scaling by the
+    # max would grant every element an absolute budget of ``rtol`` * the *largest* entry, muting
+    # the check on the bulk of a wide-dynamic-range tensor (a kernel could zero most of it and
+    # still pass). RMS keeps the floor meaningful while still tolerating cancellation to zero.
+    rms = ref.detach().float().pow(2).mean().sqrt().item()
+    tols["atol"] = max(tols["atol"], tols["rtol"] * rms)
     assert_close(actual, ref, **tols)
 
 
@@ -272,8 +299,12 @@ def test_route_list_gemm(
         _assert_close(dW2, ref)
 
         # ``out=`` folds the wgrad straight into a caller buffer (the fp32 ``main_grad`` sink),
-        # overwriting or accumulating in-kernel.
-        out = torch.zeros(weights_shape, device="cuda", dtype=torch.float32)
+        # overwriting or accumulating in-kernel. Pre-fill with nonzero garbage so that
+        # ``accumulate=False`` must OVERWRITE (not accumulate): starting from zeros would make
+        # ``0 + ref == ref`` pass even for a kernel that always accumulates -- which is exactly
+        # the first-microbatch / ``overwrite_main_grad`` path _backward_permute_free_grouped_gemm
+        # relies on. This is the one check that can distinguish the two modes.
+        out = torch.full(weights_shape, -7.0, device="cuda", dtype=torch.float32)
         permute_free_grouped_gemm_bf16_fc2_wgrad(
             fc2_input, grad_output, weights_shape, routing, out=out, accumulate=False
         )
@@ -315,6 +346,70 @@ def test_route_list_gemm(
     _assert_close(dW2_stored, ref)
     _assert_close(dW2_recompute, ref)
     _assert_close(dW2_recompute, dW2_stored)
+
+
+def _routing_map_fixed(num_recv_tokens, num_experts, live_experts, device, seed=_TEST_SEED):
+    """Boolean routing map that routes ONLY to ``live_experts`` (others own zero routes).
+
+    Unlike :func:`_random_routing_map`, this deliberately leaves the non-live experts empty so
+    the zero-route / ``blocks_per_expert[e] == 0`` edge case is exercised (block-padded layout,
+    ``block_start`` zero-width entries, and the trailing-empty-expert OOB path in pf_wgrad).
+    """
+    gen = torch.Generator(device=device).manual_seed(seed)
+    rmap = torch.zeros(num_recv_tokens, num_experts, dtype=torch.bool, device=device)
+    live = list(live_experts)
+    for t in range(num_recv_tokens):
+        e = live[int(torch.randint(0, len(live), (1,), device=device, generator=gen).item())]
+        rmap[t, e] = True
+    for i, e in enumerate(live):  # ensure each live expert owns >= 1 route
+        rmap[i % num_recv_tokens, e] = True
+    return rmap
+
+
+# (num_recv_tokens, num_experts, live_experts) -- empty trailing / middle expert, and E==1.
+_EMPTY_EXPERT_CASES = [
+    pytest.param(64, 4, (0, 1, 2), id="empty-last-of-4"),
+    pytest.param(64, 4, (0, 1, 3), id="empty-middle-of-4"),
+    pytest.param(96, 8, (0, 1, 2, 3, 4, 5, 6), id="empty-last-of-8"),
+    pytest.param(64, 1, (0,), id="single-expert"),
+]
+
+
+@pytest.mark.parametrize("num_recv_tokens,num_experts,live_experts", _EMPTY_EXPERT_CASES)
+def test_route_list_gemm_empty_and_single_expert(num_recv_tokens, num_experts, live_experts):
+    """Zero-route experts (esp. the trailing one) and ``num_experts == 1``.
+
+    This is the highest-risk case in the block-padded layout: a trailing empty expert puts the
+    wgrad prologue's ``base_slot`` at/past the end of ``sorted_slot_ids`` -- the out-of-bounds
+    read that the bounded ``sorted`` SRD (see ``pf_wgrad.py``) must clamp to hardware zero -- and
+    ``block_start`` gains zero-width entries. Covers FC1 fwd and wgrad, and asserts the empty
+    experts' wgrad rows are exactly zero.
+    """
+    in_features, out_features = 128, 128
+    routing_map = _routing_map_fixed(num_recv_tokens, num_experts, live_experts, "cuda")
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    num_routes = int(routing_map.sum().item())
+    weights_shape = (num_experts, out_features, in_features)
+    weights = torch.randn(weights_shape, device="cuda", dtype=torch.bfloat16)
+    empty = [e for e in range(num_experts) if e not in set(live_experts)]
+
+    # FC1 forward (builds the align on demand).
+    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+    out = permute_free_grouped_gemm_bf16(hidden, weights, routing)
+    R_block, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+    assert int(valid.sum().item()) == num_routes
+    ref = torch.einsum("rk,rnk->rn", hidden[tok].float(), weights[exp].float())
+    _assert_close(out[valid], ref[valid])
+
+    # FC1 wgrad: the trailing-empty-expert prologue must clamp its OOB slot reads to zero, and the
+    # empty experts' dW rows must come out exactly zero (no OOB read pulling in a real route).
+    grad = _randn_route_buffer(R_block, out_features, valid)
+    dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad, weights_shape, routing)
+    per_slot_w = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
+    dW_ref = _sum_by_expert(per_slot_w * valid[:, None, None].float(), exp, weights_shape)
+    _assert_close(dW, dW_ref)
+    for e in empty:
+        assert dW[e].abs().sum().item() == 0.0, f"empty expert {e} wgrad is nonzero"
 
 
 # ---------------------------------------------------------------------------
@@ -690,18 +785,24 @@ def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_e
     )
 
     assert preact.shape[1] == 2 * ffn
+    # ``preact`` is FC1 output (single GEMM) -> default tolerance. Everything downstream of FC2
+    # (``out`` and all gradients) chains two GEMMs + the gated activation, so bf16 error
+    # accumulates past a single-op budget: widen with ``tol_scale=2``.
     _assert_close(preact[valid].detach().cpu(), preact_ref.detach()[slot_token, slot_expert])
-    _assert_close(out.detach().cpu(), out_ref.detach())
+    _assert_close(out.detach().cpu(), out_ref.detach(), tol_scale=2.0)
 
     out_ref.sum().backward()
     out.float().sum().backward()
 
-    _assert_close(inp.grad.cpu(), inp_ref.grad)
-    _assert_close(probs.grad.cpu(), probs_ref.grad)
-    _assert_close(preact.grad[valid].cpu(), preact_ref.grad[slot_token, slot_expert])
+    _assert_close(inp.grad.cpu(), inp_ref.grad, tol_scale=2.0)
+    _assert_close(probs.grad.cpu(), probs_ref.grad, tol_scale=2.0)
+    _assert_close(preact.grad[valid].cpu(), preact_ref.grad[slot_token, slot_expert], tol_scale=2.0)
     for mod, ref in ((fc1, w1_ref), (fc2, w2_ref)):
         wgrad = _stack_expert_grads(mod, num_experts, to_cpu=True)
-        _assert_close(wgrad, ref.grad)
+        # wgrad reduces over the token dim on top of the two-GEMM chain, so it accumulates the
+        # most bf16 error of any comparison here -- give it extra headroom (a single element in
+        # the ``wide`` case lands just past the 2x budget).
+        _assert_close(wgrad, ref.grad, tol_scale=3.0)
 
 
 @pytest.mark.parametrize(
