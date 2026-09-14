@@ -452,11 +452,18 @@ def compile_triton(
         _TRITON_KERNEL_CACHE[cache_key] = kernel
         return kernel
 
+    # Mark constants as constexpr in signature
+    signature_with_constexpr = dict(signature)
+    for const_name in constants.keys():
+        if const_name in signature_with_constexpr:
+            signature_with_constexpr[const_name] = "constexpr"
+
     # Compile kernel
     cuda_option_kwargs = {}
     if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
         cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-    options = cb.CUDAOptions(
+    # cb is bound whenever this path runs; see the guarded import above.
+    options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
         num_warps=num_warps,
         num_stages=num_stages,
         num_ctas=num_ctas,
@@ -464,45 +471,8 @@ def compile_triton(
         enable_fp_fusion=enable_fp_fusion,
         **cuda_option_kwargs,
     )
-
-    # Mark constants as constexpr in signature
-    signature_with_constexpr = dict(signature)
-    for const_name in constants.keys():
-        if const_name in signature_with_constexpr:
-            signature_with_constexpr[const_name] = "constexpr"
-
-    if is_hip:
-        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
-        import triton
-        from triton.compiler import make_backend
-
-        target = triton.runtime.driver.active.get_current_target()
-        backend = make_backend(target)
-        options = backend.parse_options(
-            {
-                "num_warps": num_warps,
-                "num_ctas": num_ctas,
-                "num_stages": num_stages,
-                "warp_size": target.warp_size,
-                "enable_fp_fusion": enable_fp_fusion,
-            }
-        )
-        binary_key = backend.binary_ext
-    else:
-        cuda_option_kwargs = {}
-        if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
-            cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-        # cb is bound whenever this branch runs; see the guarded import above.
-        options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
-            num_warps=num_warps,
-            num_stages=num_stages,
-            num_ctas=num_ctas,
-            debug=False,
-            enable_fp_fusion=enable_fp_fusion,
-            **cuda_option_kwargs,
-        )
-        target = tc.GPUTarget("cuda", compute_capability, 32)
-        binary_key = "ptx"
+    target = tc.GPUTarget("cuda", compute_capability, 32)
+    binary_key = "ptx"
 
     # Gluon uses GluonASTSource, which (unlike ASTSource) requires every constexpr
     # parameter to be listed in the signature.
@@ -535,14 +505,7 @@ def compile_triton(
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
-    # The plugin's HIP branch takes a filename, not the blob; it reads the file once, unlinks it,
-    # and serves every later launch from its own cache.
     binary = compiled.asm[binary_key]
-    if is_hip:
-        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
-        with os.fdopen(fd, "wb") as f:
-            f.write(binary)
-        binary = hsaco_path
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
