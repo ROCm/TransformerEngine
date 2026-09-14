@@ -447,10 +447,15 @@ enum NVTEQuantizationConfigAttribute {
    *  of ordinary NVFP4 fast-math settings.
    */
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
+<<<<<<< 8c116a51befec6e96c47715ad0c0b9a9dd759544
 #ifdef USE_ROCM
   /*! Whether to apply Hadamard transform before MXFP4 quantization */
   kNVTEQuantizationConfigMXFP4UseHadamard = 10,
 #endif
+=======
+  /*! Whether to use 2D block scaling for MXFP8 */
+  kNVTEQuantizationConfigMXFP82DQuantization = 10,
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1555,6 +1560,13 @@ class QuantizationConfigWrapper {
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
     const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
+                                           &val, sizeof(val));
+  }
+
+  /*! \brief Set whether to use 2D block scaling for MXFP8 */
+  void set_mxfp8_2d_quantization(bool mxfp8_2d_quantization) {
+    const auto val = static_cast<uint8_t>(mxfp8_2d_quantization);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP82DQuantization,
                                            &val, sizeof(val));
   }
 

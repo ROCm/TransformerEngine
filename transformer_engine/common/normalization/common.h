@@ -421,6 +421,7 @@ bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
 
 bool& use_zero_centered_gamma_in_weight_dtype();
+<<<<<<< 8c116a51befec6e96c47715ad0c0b9a9dd759544
 #endif
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -465,6 +466,9 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
   );
 }
 #endif 
+=======
+bool use_cudnn_mxfp8_norm_output_in_input_dtype();
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
 
 }  // namespace normalization
 }  // namespace transformer_engine

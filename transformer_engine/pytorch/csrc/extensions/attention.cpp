@@ -10,6 +10,7 @@
 #include "common.h"
 #include "pybind.h"
 
+<<<<<<< 8c116a51befec6e96c47715ad0c0b9a9dd759544
 #include <torch/version.h>
 #if USE_ROCM && TORCH_VERSION_MINOR < 11
 using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
@@ -46,6 +47,8 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
 }  // namespace
 
+=======
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
@@ -159,7 +162,6 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   AttentionShape o_parsed(q_format, o_shape_tmp.data());
-  size_t h = o_parsed.h(), d = o_parsed.d();
   o_parsed.to_format(o_format, o_shape.data());
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   auto [te_O, py_O, o_amax_buf] =
@@ -173,11 +175,8 @@ std::vector<py::object> fused_attn_fwd(
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     if (set_zero && (o_format == NVTE_QKV_Format::NVTE_THD)) {
-      if ((h * d) % block_size == 0) {
-        mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      } else {
-        te_O.zero_(at::cuda::getCurrentCUDAStream());
-      }
+      // Initialize both the output data and its amax metadata.
+      te_O.zero_(at::cuda::getCurrentCUDAStream());
     }
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
     if (o_format == NVTE_QKV_Format::NVTE_THD) {
@@ -374,13 +373,11 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
   AttentionShape q_parsed(q_format, q_shape.data());
-  size_t h_q = q_parsed.h(), d_qk = q_parsed.d();
+  size_t h_q = q_parsed.h();
   q_parsed.to_format(dq_format, dQ_shape.data());
   AttentionShape k_parsed(kv_format, k_shape.data());
-  size_t h_kv = k_parsed.h();
   k_parsed.to_format(dkv_format, dK_shape.data());
   AttentionShape v_parsed(kv_format, v_shape.data());
-  size_t d_v = v_parsed.d();
   v_parsed.to_format(dkv_format, dV_shape.data());
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
@@ -477,22 +474,18 @@ std::vector<py::object> fused_attn_bwd(
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
     if (set_zero) {
+      // dQ/dK/dV may be strided views, so zero data through ATen and reset the shared amax
+      // separately.
       if (dq_format == NVTE_QKV_Format::NVTE_THD) {
-        if (((h_q * d_qk) % block_size == 0) && dQ.is_contiguous()) {
-          mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        } else {
-          dQ.fill_(0);
-        }
+        dQ.fill_(0);
       }
       if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
-        if (((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
-            dK.is_contiguous() && dV.is_contiguous()) {
-          mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-          mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        } else {
-          dK.fill_(0);
-          dV.fill_(0);
-        }
+        dK.fill_(0);
+        dV.fill_(0);
+      }
+      if (dq_format == NVTE_QKV_Format::NVTE_THD || dkv_format == NVTE_QKV_Format::NVTE_THD) {
+        auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
+        fp8_quantizer->amax.zero_();
       }
     }
   } else if (dqkv_quantizer.is_none() ||

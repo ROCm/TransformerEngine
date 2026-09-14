@@ -266,10 +266,14 @@ def register_primitive(cls, outer_only=False):
     cls.outer_primitive = outer_p
 
 
+<<<<<<< 8c116a51befec6e96c47715ad0c0b9a9dd759544
 for _name, _value in transformer_engine_jax.registrations().items():
     ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension() else "CUDA")
 
+=======
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
 # Register EpInstanceState (no-op when TE is built without NCCL EP).
+# Custom types must be registered before any FFI handler that references them.
 if hasattr(transformer_engine_jax, "get_ep_instance_state_type_id"):
     ffi.register_ffi_type(
         "EpInstanceState",
@@ -279,6 +283,10 @@ if hasattr(transformer_engine_jax, "get_ep_instance_state_type_id"):
         },
         platform="CUDA",
     )
+
+
+for _name, _value in transformer_engine_jax.registrations().items():
+    ffi.register_ffi_target(_name, _value, platform="CUDA")
 
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):

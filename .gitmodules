@@ -17,6 +17,7 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+<<<<<<< 8c116a51befec6e96c47715ad0c0b9a9dd759544
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
 	url = https://github.com/ROCm/QoLA.git
@@ -33,3 +34,8 @@
 [submodule "3rdparty/nccl"]
 	path = 3rdparty/nccl
 	url = https://github.com/NVIDIA/nccl.git
+=======
+[submodule "3rdparty/nccl-extensions"]
+	path = 3rdparty/nccl-extensions
+	url = https://github.com/NVIDIA/nccl-extensions.git
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
