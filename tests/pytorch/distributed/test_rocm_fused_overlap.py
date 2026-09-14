@@ -90,6 +90,8 @@ def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
             "--linear-parallel-mode=column",
             "--num-layers=1",
             "--use-bf16-params",
+            # TODO: Add bias support
+            "--no-bias",
         ]
         + extra_args
     )

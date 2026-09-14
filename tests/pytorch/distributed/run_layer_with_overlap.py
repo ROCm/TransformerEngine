@@ -89,6 +89,8 @@ def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
         "ub_overlap_ag": not reference,
         "ub_overlap_rs": not reference,
     }
+    if config.no_bias:
+        kwargs["bias"] = False
 
     if config.layer_type in [te.Linear, te.LayerNormLinear]:
         if config.linear_parallel_mode == "row":
@@ -214,6 +216,9 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
+    )
+    parser.add_argument(
+        "--no-bias", action="store_true", default=False, help="Build the linear layer without a bias.",
     )
     parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
     parser.add_argument(

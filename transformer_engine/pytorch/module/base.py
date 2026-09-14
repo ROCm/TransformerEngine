@@ -757,11 +757,13 @@ def fused_bulk_rs_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    bias: Optional[torch.Tensor] = None,
 ) -> bool:
     """Whether this call may use the bulk reduce-scatter overlap."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    # TODO: Add bias support
+    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16 and bias is None
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
