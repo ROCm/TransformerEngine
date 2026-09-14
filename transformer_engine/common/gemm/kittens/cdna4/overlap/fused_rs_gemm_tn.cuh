@@ -153,20 +153,20 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
         v4i *dst          = (v4i *)(out + (size_t)b0 * band_elems);
 
         for (size_t l = g0 + threadIdx.x; l < g1; ) {
-            v4i acc;
+            float acc[8];
             unsigned int pend = 0u;
 #pragma unroll 1
             for (int s = 0; s < TP; s++) {
                 const bf16 *base = (s == my_pe) ? local_stage : peers.stage[s];
                 const v4i v = sent_load16((const rs_v4i *)(base + soff) + l);
                 pend |= sent_slot_pending((const int *)&v);
+                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
                 if (s == 0) {
-                    acc = v;
-                } else {
-                    __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&acc);
-                    const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
 #pragma unroll
-                    for (int j = 0; j < 8; j++) a[j] = bf16_add(a[j], x[j]);
+                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
                 }
             }
             if (pend != 0u) {
@@ -185,10 +185,14 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
                 }
                 continue;
             }
+            v4i res;
+            __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&res);
+#pragma unroll
+            for (int j = 0; j < 8; j++) a[j] = __float2bfloat16(acc[j]);
             if (NT) {
-                __builtin_nontemporal_store(acc, &dst[l]);
+                __builtin_nontemporal_store(res, &dst[l]);
             } else {
-                dst[l] = acc;
+                dst[l] = res;
             }
             l += blockDim.x;
         }

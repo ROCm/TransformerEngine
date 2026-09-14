@@ -62,21 +62,25 @@ void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
         const size_t boff = (size_t)b0 * band_elems;
         v4i *const dst = (v4i *)(out + boff);
         for (size_t l = l0 + threadIdx.x; l < l1; l += blockDim.x) {
-            v4i acc;
+            float acc[8];
 #pragma unroll 1
             for (int s = 0; s < tp_size; s++) {
                 const bf16 *base = peers.base[s] + soff + boff;
                 const v4i v = ((const v4i *)base)[l];
+                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
                 if (s == 0) {
-                    acc = v;
-                } else {
-                    __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&acc);
-                    const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
 #pragma unroll
-                    for (int j = 0; j < 8; j++) a[j] = bf16_add(a[j], x[j]);
+                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
                 }
             }
-            __builtin_nontemporal_store(acc, &dst[l]);
+            v4i res;
+            __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&res);
+#pragma unroll
+            for (int j = 0; j < 8; j++) a[j] = __float2bfloat16(acc[j]);
+            __builtin_nontemporal_store(res, &dst[l]);
         }
     }
     // Rendezvous the workgroup and retire its stores before the early return.
