@@ -124,12 +124,6 @@ jobs:
             3rdparty/googletest \
             3rdparty/hipify_torch
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: te-rocm-wheels
-          path: dist/
-
       - name: Host Diagnostics
         run: |
           echo "::group::Host Diagnostics"
@@ -139,9 +133,17 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      - name: Pull Docker Image
-        run: |
-          docker pull ${{ env.DOCKER_IMAGE }}
+      # Download artifacts and pull the Docker image concurrently
+      - parallel:
+          - name: Download build artifacts
+            uses: actions/download-artifact@v8
+            with:
+              name: te-rocm-wheels
+              path: dist/
+
+          - name: Pull Docker Image
+            run: |
+              docker pull ${{ env.DOCKER_IMAGE }}
 
       - &run_container
         name: Run Container
@@ -243,7 +245,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
@@ -272,12 +274,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: te-rocm-wheels
-          path: dist/
-
       - name: Host Diagnostics
         run: |
           echo "::group::Host Diagnostics"
@@ -287,9 +283,17 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      - name: Pull Docker Image
-        run: |
-          docker pull ${{ env.DOCKER_IMAGE }}
+      # Download artifacts and pull the Docker image concurrently
+      - parallel:
+          - name: Download build artifacts
+            uses: actions/download-artifact@v8
+            with:
+              name: te-rocm-wheels
+              path: dist/
+
+          - name: Pull Docker Image
+            run: |
+              docker pull ${{ env.DOCKER_IMAGE }}
 
       - *run_container
 
@@ -369,7 +373,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
           path: |

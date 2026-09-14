@@ -281,6 +281,44 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
   return kittens_fused_ag_gemm_bf16(args);
 }
+
+// Bulk sibling of hk_fused_ag_gemm. AG is not associated with the GEMM.
+static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                            TensorWrapper &D, const TensorWrapper &bias,
+                            const TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
+                            bool accumulate, const TensorWrapper &ubuf, const TensorWrapper &chunk,
+                            communicator *comm, int reg, int tp_id, int tp_size, uint64_t signal,
+                            cudaStream_t stream) {
+  NVTE_CHECK(!transa, "fused bulk AG is NN only");
+  NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0,
+             "fused bulk AG reached with an unsupported epilogue");
+  NVTE_CHECK(A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
+                 D.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16,
+             "fused bulk AG reached with a non-bf16 operand");
+  NVTE_CHECK(ubuf.numel() != 0, "fused bulk AG reached without a gather destination");
+
+  const size_t m       = A.size(1);
+  const size_t k       = A.size(0);
+  const size_t n_chunk = chunk.size(0);
+  NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
+             "fused bulk AG reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
+             " tp_size=", tp_size, ")");
+  NVTE_CHECK(D.size(0) == n_chunk * tp_size,
+             "fused bulk AG: the GEMM writes ", D.size(0), " rows but the kernel grid is sized for ",
+             n_chunk * tp_size, " from the Userbuffers region.");
+
+  const int rank_round_tp = comm->myrank - tp_id;
+  KittensFusedAgGemmArgs args{
+      A.dptr(), B.dptr(), D.dptr(),
+      reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
+      rank_round_tp % comm->nvsize, comm->nvsize,
+      GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
+      static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, reg, 0) - reinterpret_cast<char *>(comm->peer_ptr[0][0])),
+      static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
+      signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
+      tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
+  return kittens_bulk_ag_gemm_bf16(args);
+}
 #endif
 
 void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -300,6 +338,24 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
   }
 #endif
   NVTE_ERROR("fused AG+GEMM was selected but is not built into this library");
+}
+
+void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool transa,
+                                const TensorWrapper &B, bool transb, TensorWrapper &D,
+                                TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                                TensorWrapper &workspace, bool grad, bool accumulate,
+                                bool use_split_accumulator, cudaStream_t stream_main) {
+#ifdef USE_HIPKITTENS_GEMM
+  if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
+    const bool launched = hk_bulk_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, workspace,
+                                          accumulate, _ubuf, _ubufs[0], _ub_comm, _ub_reg, _tp_id,
+                                          _tp_size, _ag_signal_base + _tp_size, stream_main);
+    NVTE_CHECK(launched, "fused bulk AG failed to launch");
+    _ag_signal_base += _tp_size;
+    return;
+  }
+#endif
+  NVTE_ERROR("fused bulk AG was selected but is not built into this library");
 }
 
 // TODO: Introduce HIPGraphs for dependency management.
@@ -477,13 +533,13 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
 
           NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, slice_bytes, cudaMemcpyDeviceToDevice, l_stream_send[r]));
           signal_val = ag_signal_base + step + 1;
-          hipStreamWriteValue64(l_stream_send[r], flagptr, signal_val, 0);
+          NVTE_CHECK_CUDA(hipStreamWriteValue64(l_stream_send[r], flagptr, signal_val, 0));
         }
 
         {
           void *flagptr = GET_RECV_PTR_BY_INDEX(prev_rank, _ub_comm, _ub_reg, r);
           signal_val = ag_signal_base + step + 1;
-          hipStreamWaitValue64(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
+          NVTE_CHECK_CUDA(hipStreamWaitValue64(l_stream_recv[r], flagptr, signal_val, hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF));
         }
         
         NVTE_CHECK_CUDA(cudaEventRecord(get_event(next_recv_chunk_id, r), l_stream_recv[r]));
@@ -607,14 +663,14 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
 
         NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, comm_bytes,
                                         cudaMemcpyDeviceToDevice, l_stream_send[comm_stream_id]));
-        hipStreamWriteValue64(l_stream_send[comm_stream_id], flagptr, signal_val, 0);
+        NVTE_CHECK_CUDA(hipStreamWriteValue64(l_stream_send[comm_stream_id], flagptr, signal_val, 0));
       }
 
       // Wait for incoming partial from chunk contributor
       {
         void *flagptr = GET_RECV_PTR_BY_INDEX(recv_rank, _ub_comm, _ub_reg, comm_stream_id);
-        hipStreamWaitValue64(l_stream_recv[comm_stream_id], flagptr, signal_val,
-                             hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF);
+        NVTE_CHECK_CUDA(hipStreamWaitValue64(l_stream_recv[comm_stream_id], flagptr, signal_val,
+                                             hipStreamWaitValueGte, 0xFFFFFFFFFFFFFFFF));
       }
     }
   }

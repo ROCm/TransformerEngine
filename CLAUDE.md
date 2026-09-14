@@ -31,6 +31,7 @@ The following directories are **excluded** from hipify (native ROCm code — edi
 - `transformer_engine/common/ck_fused_attn/` — CK kernel wrappers
 - `transformer_engine/common/amd_detail/` — AMD-specific utilities
 - `transformer_engine/common/rocshmem_api/` — ROCshmem wrappers
+- `transformer_engine/common/aotriton/` — AOTriton integration
 
 Framework bindings (`pytorch/csrc`, `jax/csrc`) are hipified separately via `build_tools/pytorch.py` and `build_tools/jax.py`.
 
@@ -76,20 +77,38 @@ CI backend configs (`ci/_utils.sh::configure_fused_attn_env`): `auto`, `ck`, `ao
 ## Code conventions
 - Edit `transformer_engine/*`, `build_tools/*`, `tests/*`, `ci/*`; avoid `3rdparty/*` unless explicitly required.
 - Keep env-var behavior stable; tests toggle flags intentionally.
-- Python: Black, line length 100, lint via `.pylintrc`. C/C++: cpplint + `.clang-format`.
+- Python: Black, line length 100.
+- C/C++/HIP in AMD-authored code: 120 columns, K&R braces, and always brace `if`/`else` even for a single statement. 
+  Align `=` across consecutive declarations *of the same type*; `const int` and `int` are different types and form separate alignment groups.
 - **Preserve the existing style of each file you edit.** Much of the codebase originates from upstream, and style can vary file-to-file (naming conventions, comment style, control flow patterns, etc.). Before writing new code in a file, read enough of it to understand how similar logic is already written, and follow that style. Consistency within a file matters more than imposing a uniform style across the project.
 
 ## Copyright headers
 When you modify a file, update its copyright header so the end-year reflects the current year.
 
-This repo carries **two** copyright lines — AMD and NVIDIA. Follow these rules:
+This repo carries copyright lines from AMD and NVIDIA. Follow these rules:
 
 1. **Files with an existing AMD copyright line** — update the AMD end-year to the current year (e.g. `2025` → `2026`). Leave the NVIDIA line untouched.
 2. **Files with only an NVIDIA copyright line** — add an AMD line **above** the NVIDIA line:
    - Python: `# Copyright (c) <YEAR>, Advanced Micro Devices, Inc. All rights reserved.`
    - C/C++/HIP: `/* Copyright (c) <YEAR>, Advanced Micro Devices, Inc. All rights reserved. */` (or use the `*`-block style matching the file).
    - `<YEAR>` is the current year (single year) for newly-added lines, e.g. `2026`.
-3. **New files you create** — include both AMD and NVIDIA headers with the current year, followed by a blank comment line and `See LICENSE for license information.`
+3. **New files you create** — include **only** an AMD header with the current year and the MIT
+   notice. Do not add an NVIDIA line: a file with no upstream counterpart carries no NVIDIA
+   copyright. This applies to every extension, `.inc` fragments included. C/C++/HIP form:
+
+   ```
+   /*************************************************************************
+    * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+    * License for AMD contributions = MIT. See LICENSE for more information
+   *************************************************************************/
+   ```
+
+   Python form:
+   ```
+   # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+   # License for AMD contributions = MIT. See LICENSE for more information
+   ```
+
 4. **Never change the NVIDIA copyright year range** — those dates are updated during IFU (integrate from upstream) merges.
 
 AMD headers are our addition and should stay consistent with the patterns already in the codebase.

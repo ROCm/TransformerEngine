@@ -483,6 +483,7 @@ class MXFP4QuantizerRef(Quantizer):
         gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,  # pylint: disable=unused-argument
         qresult_x: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
         qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
+        layout: str = "TN",  # pylint: disable=unused-argument
     ) -> torch.Tensor:
         """Reference MXFP4 GEMM: ``Y = dequant(qx, sx) @ dequant(qw, sw)^T``.
 
@@ -519,6 +520,11 @@ class MXFP4QuantizerRef(Quantizer):
             accepted for API parity with NVFP4.
         """
         assert bias is None, "Bias not yet supported in MXFP4 reference GEMM."
+        # ``layout`` selects which quantized buffer the caller extracted for each operand
+        # (row-wise for a transposed operand, column-wise for a non-transposed one). Both buffers
+        # are physically ``(rows, K/2)`` with block scales along K, so both ``qx`` and ``qw`` reach
+        # this reference already contraction-last and the math is ``qx @ qw^T`` for every layout.
+        assert layout in ("TN", "NN", "NT", "TT"), f"Unsupported MXFP4 reference layout {layout}."
 
         hp_x = mxfp4_to_f32(qx)
         hp_w = mxfp4_to_f32(qw)

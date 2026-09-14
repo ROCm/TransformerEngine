@@ -92,6 +92,26 @@ int auto_xcd_bucket(int num_tiles, int tiles_m) {
     return (grid_cap > 0 && num_tiles <= 1024 && tiles_m >= 5) ? 1 : 0;
 }
 
+// Gatherer width. Tuned based off AG BW / GEMM FLOPS ratio.
+int gath_wg_tn(int n_total, int tp_size) {
+    if (tp_size != 8) return GATH_WG;
+    return (n_total >= 3584) ? 6 : GATH_WG;
+}
+
+int gath_wg_nn(int n_total, int tp_size) {
+    if (tp_size != 8) return GATH_WG;
+    return (n_total >= 4608) ? 6 : GATH_WG;
+}
+
+// Tuned s.t. wgrad AG BW ~=~ dgrad GEMM TFLOPS
+int gath_wg_bulk(int k, int tp_size) {
+    if (tp_size != 8) return GATH_WG;
+    if (k >= 7168) return 2;
+    if (k >= 3584) return 4;
+    if (k >= 2304) return 6;
+    return GATH_WG;
+}
+
 template <typename TD>
 bool upload_plan(AgPlan &plan, const std::vector<TD> &queue) {
     const size_t bytes = queue.size() * sizeof(TD);
@@ -183,7 +203,7 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
         M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
         static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter, peers, arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, plan.xcd_bucket,
+        args.rank, tp_size, gath_wg_tn(N_TOTAL, tp_size), m_local, args.chunk_bytes, plan.xcd_bucket,
         buckets, bucket_ctr, args.stream);
     return hipGetLastError() == hipSuccess;
 }
@@ -198,7 +218,7 @@ struct NnSetup {
     float *cw;
 };
 
-bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, NnSetup &out) {
+bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, void *peer_local, NnSetup &out) {
     using namespace hk_ag_nn;
 
     const int M       = args.n;
@@ -244,7 +264,7 @@ bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, NnSetup &out) {
     for (int c = 0; c < tp_size; c++) {
         out.peers.base[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
     }
-    out.peers.base[args.rank] = static_cast<bf16 *>(args.ub);
+    out.peers.base[args.rank] = static_cast<bf16 *>(peer_local);
 
     out.buckets = XcdBuckets{};
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
@@ -289,16 +309,59 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
     std::lock_guard<std::mutex> lock(g_mu);
 
     NnSetup s{};
-    if (!prepare_nn(args, S, s)) return false;
+    if (!prepare_nn(args, S, args.ub, s)) return false;
 
     pfn(M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
         static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D), s.cw,
         static_cast<TileDesc *>(s.plan->queue), s.plan->num_tiles, s.tile_counter, s.peers, s.arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, s.plan->xcd_bucket,
+        args.rank, tp_size, gath_wg_nn(N_TOTAL, tp_size), m_local, args.chunk_bytes, s.plan->xcd_bucket,
         s.buckets, s.bucket_ctr, args.stream);
     if (S > 1) launch_sk_reduce(s.cw, static_cast<bf16 *>(args.D), static_cast<size_t>(M) * N_TOTAL,
                                 S, args.stream);
     return hipGetLastError() == hipSuccess;
+}
+
+bool run_bulk_nn(const KittensFusedAgGemmArgs &args) {
+    using namespace hk_ag_nn;
+
+    const int M          = args.n;
+    const int N_TOTAL    = args.m;
+    const int K          = args.k;
+    const int tp_size    = args.nranks;
+    const int gath_tiles = (M / tp_size) / BLOCK_ROW;
+
+    const int S = split_k_nn(args);
+    persistent_bulk_fn_t bfn = get_persistent_bulk_fn(M, N_TOTAL, K, S);
+    if (!bfn) return false;
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    NnSetup s{};
+    if (!prepare_nn(args, S, args.gather_dst, s)) return false;
+
+    bfn(M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
+        static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D), s.cw,
+        static_cast<TileDesc *>(s.plan->queue), s.plan->num_tiles, s.tile_counter, s.peers,
+        static_cast<bf16 *>(args.gather_dst), s.arrive, args.rank, tp_size, gath_wg_bulk(K, tp_size), gath_tiles,
+        args.chunk_bytes, s.plan->xcd_bucket, s.buckets, s.bucket_ctr, args.stream);
+    if (S > 1) launch_sk_reduce(s.cw, static_cast<bf16 *>(args.D), static_cast<size_t>(M) * N_TOTAL,
+                                S, args.stream);
+    return hipGetLastError() == hipSuccess;
+}
+
+// Shape and pointer requirements shared by all entry points
+bool guards_ok(const KittensFusedAgGemmArgs &args) {
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+
+    // Order matters here
+    return tp_size >= 1 && tp_size <= 8 && tp_size <= args.peer_count &&
+           args.rank >= 0 && args.rank < tp_size &&
+           M % tp_size == 0 && M % 256 == 0 && N_TOTAL % 256 == 0 &&
+           K % 128 == 0 && K >= 256 && (M / tp_size) % 256 == 0 &&
+           args.workspace && args.ub && args.A && args.D && args.peer_ub;
 }
 
 }  // namespace
@@ -314,21 +377,27 @@ void kittens_fused_ag_gemm_reset_cdna4() {
 
 bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     const int M       = args.n;
-    const int N_TOTAL = args.m;
     const int K       = args.k;
     const int tp_size = args.nranks;
 
-    // Shape and pointer requirements. Order matters: the tp_size range test has to short-circuit
-    // ahead of the M % tp_size and M / tp_size terms. The gathered region IS the [M,K] A operand,
-    // so chunk_bytes is pinned to it exactly -- a mis-sized region declines instead of silently
-    // gathering a fraction of itself.
-    const bool ok = tp_size >= 1 && tp_size <= 8 && tp_size <= args.peer_count &&
-                    args.rank >= 0 && args.rank < tp_size &&
-                    M % tp_size == 0 && M % 256 == 0 && N_TOTAL % 256 == 0 &&
-                    K % 128 == 0 && K >= 256 && (M / tp_size) % 256 == 0 &&
-                    args.workspace && args.ub && args.A && args.D && args.peer_ub &&
-                    args.chunk_bytes == static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t);
-    if (!ok) return false;
+    if (!guards_ok(args)) return false;
+    if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t)) return false;
 
     return args.transa ? run_tn(args) : run_nn(args);
+}
+
+bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int tp_size = args.nranks;
+
+    // NN only
+    if (args.transa) return false;
+    if (!args.gather_dst) return false;
+    if (!guards_ok(args)) return false;
+    if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * N_TOTAL * sizeof(uint16_t)) {
+        return false;
+    }
+
+    return run_bulk_nn(args);
 }
