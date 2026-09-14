@@ -47,8 +47,6 @@ __all__ = [
     "is_permute_free_grouped_gemm_enabled",
 ]
 
-_WGRAD_CONTRACT_M = 32
-
 # Minimum gather/dgrad align block_m (128x256 MFMA floor).
 _FLYDSL_MIN_BLOCK_M = 128
 _FLYDSL_FWD_BLOCK_M = 256
@@ -111,13 +109,24 @@ def _get_flydsl_wgrad():
     return flydsl_moe_wgrad_autotuned
 
 
+def _wgrad_contract_m() -> int:
+    """Wgrad align contraction (slot) step -- single source of truth in the FlyDSL kernel.
+
+    The align builds ``block_start`` / ``blocks_per_expert`` in units of this step and the
+    kernel computes ``base_slot = block_start * WGRAD_BLOCK_M``, so the two must agree; read the
+    kernel's value rather than duplicating the literal.
+    """
+    from .pf_wgrad_wrapper import WGRAD_BLOCK_M
+
+    return int(WGRAD_BLOCK_M)
+
+
 def _pf_moe_fwd(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
     routing: MoERoutingMetadata,
     *,
-    num_recv_tokens: int,
     block_m: int,
     index_a_by_route_pos: bool = False,
     dgrad: bool = False,
@@ -131,7 +140,6 @@ def _pf_moe_fwd(
         C,
         routing.sorted_slot_ids,
         routing.expert_ids,
-        num_recv_tokens=num_recv_tokens,
         block_m=block_m,
         index_a_by_route_pos=index_a_by_route_pos,
         dgrad=dgrad,
@@ -345,15 +353,6 @@ def _prepare_wgrad_align(
     return metadata
 
 
-def _try_view_grouped(weights: list[torch.Tensor]) -> Optional[torch.Tensor]:
-    """Zero-copy ``[E, out, in]`` view of consecutive expert slices, or ``None``.
-
-    Same helper as GroupedLinear blockwise/permute-free wgrad packing
-    (:func:`transformer_engine.pytorch.utils.packed_3d_view`).
-    """
-    return packed_3d_view(weights)
-
-
 def _stack_expert_weights(weights: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
     if isinstance(weights, torch.Tensor):
         if weights.dim() != 3:
@@ -363,7 +362,8 @@ def _stack_expert_weights(weights: torch.Tensor | list[torch.Tensor]) -> torch.T
         return weights
     if not weights:
         raise ValueError("At least one expert weight tensor is required.")
-    grouped = _try_view_grouped(weights)
+    # Zero-copy [E, out, in] view of consecutive expert slices when contiguous, else stack.
+    grouped = packed_3d_view(weights)
     return grouped if grouped is not None else torch.stack(weights, dim=0)
 
 
@@ -412,7 +412,7 @@ def permute_free_grouped_gemm_bf16(
     if weights_stacked.stride(-1) != 1:
         weights_stacked = weights_stacked.contiguous()
 
-    num_recv_tokens, in_features = hidden_states.shape
+    in_features = hidden_states.shape[1]
     num_experts, out_features, in_k = weights_stacked.shape
     if in_k != in_features:
         raise ValueError(
@@ -441,7 +441,6 @@ def permute_free_grouped_gemm_bf16(
         weights_stacked,
         output,
         routing,
-        num_recv_tokens=num_recv_tokens,
         block_m=block_size_m,
         index_a_by_route_pos=False,
     )
@@ -608,7 +607,6 @@ def permute_free_grouped_gemm_bf16_dgrad(
         weights_stacked,
         route_buf,
         routing,
-        num_recv_tokens=routing.num_recv_tokens,
         block_m=block_size_m,
         index_a_by_route_pos=True,
         dgrad=True,
@@ -692,7 +690,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
     if not grad_output.is_contiguous():
         grad_output = grad_output.contiguous()
 
-    contract_m = _WGRAD_CONTRACT_M
+    contract_m = _wgrad_contract_m()
     # The grad operand lives in the forward's block-padded [R_block] slot layout (its row for
     # route (e, w) is block_start[e]*block_size_m + w). Ensure the forward align is present so we
     # can pass that padded per-expert base to the kernel; routes are contiguous within an expert,
@@ -815,7 +813,6 @@ def permute_free_grouped_gemm_bf16_fc2(
         weights_stacked,
         route_buf,
         routing,
-        num_recv_tokens=routing.num_recv_tokens,
         block_m=block_size_m,
         index_a_by_route_pos=True,
     )
@@ -890,7 +887,6 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
         weights_stacked,
         dx,
         routing,
-        num_recv_tokens=grad_output.shape[0],
         block_m=block_size_m,
         index_a_by_route_pos=False,
         dgrad=True,

@@ -279,7 +279,6 @@ def fused_gated_act_prob_bwd(
     num_recv_tokens: int,
     activation: str,
     dispatched_probs: Optional[torch.Tensor] = None,
-    grad_probs_shape: Optional[torch.Size] = None,
     num_routes_bound: Optional[torch.Tensor] = None,
     emit_act: bool = False,
 ):

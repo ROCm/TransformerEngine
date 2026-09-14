@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Launch and buffer-descriptor helpers adapted from Primus-Turbo
+# (https://github.com/AMD-AGI/Primus-Turbo):
+#   primus_turbo/flydsl/utils/gemm_helper.py
+#     (run_compiled; buffer-resource construction)
+#   primus_turbo/flydsl/grouped_gemm/grouped_gemm_bf16_kernel.py
+#     (compile-once wgrad launch)
 
 import torch
 import flydsl.compiler as flyc

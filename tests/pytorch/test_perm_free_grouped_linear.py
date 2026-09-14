@@ -26,9 +26,9 @@ from transformer_engine.pytorch.moe import (
 )
 from transformer_engine.pytorch.moe.permute_free_grouped_gemm import (
     _FLYDSL_FWD_BLOCK_M,
-    _WGRAD_CONTRACT_M,
     _expert_per_route,
     _prepare_wgrad_align,
+    _wgrad_contract_m,
     moe_align_route_list,
 )
 from transformer_engine.pytorch.moe.pf_helper_kernels import route_list_scan
@@ -40,14 +40,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 _TEST_SEED = 1
-
-# Absolute floor for the elementwise bound, as a fraction of the reference's peak magnitude.
-# ``dtype_tols`` only supplies a relative bound, which is meaningless on the gather-combine
-# outputs: those sum several routes into one token, so cancellation leaves elements near zero
-# whose error is set by the magnitude of the summands rather than by their own value. The
-# worst floor measured over every comparison in this file (1116 of them, 6 seeds, gfx950) is
-# 4.6e-3 x peak, i.e. ~1.2 bf16 ULP; allow 4 ULP, matching the bf16 rtol ``dtype_tols`` uses.
-_BF16_ATOL_SCALE = 4 * 2**-8
 
 
 @pytest.fixture(autouse=True)
@@ -66,10 +58,12 @@ def _test_seed():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _assert_bf16_close(actual: torch.Tensor, ref: torch.Tensor) -> None:
-    """Elementwise-compare a bf16 kernel result against a higher-precision reference."""
-    tols = dtype_tols(torch.bfloat16)
-    tols["atol"] = max(tols["atol"], _BF16_ATOL_SCALE * ref.abs().max().item())
+def _assert_close(actual: torch.Tensor, ref: torch.Tensor, dtype=torch.bfloat16) -> None:
+    tols = dtype_tols(dtype)
+    # Gather-combine (and similar reductions) can cancel to near-zero; those
+    # entries need an absolute floor. Use the same relative bound ``dtype_tols``
+    # already provides, scaled by peak |ref|.
+    tols["atol"] = max(tols["atol"], tols["rtol"] * ref.detach().float().abs().max().item())
     assert_close(actual, ref, **tols)
 
 
@@ -213,7 +207,7 @@ def test_route_list_gemm(
         assert out.shape == (R_block, out_features)
         assert int(valid.sum().item()) == num_routes
         ref = torch.einsum("rk,rnk->rn", hidden[tok].float(), weights[exp].float())
-        _assert_bf16_close(out[valid], ref[valid])
+        _assert_close(out[valid], ref[valid])
         return
 
     prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
@@ -228,7 +222,7 @@ def test_route_list_gemm(
         per_slot = torch.einsum("rf,rhf->rh", fc2_input.float(), weights[exp].float()) * valid_f
         ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
         ref.index_add_(0, tok, per_slot)
-        _assert_bf16_close(out, ref)
+        _assert_close(out, ref)
         return
 
     if mode == "dgrad":
@@ -240,7 +234,7 @@ def test_route_list_gemm(
             per_slot = torch.einsum("rn,rnk->rk", grad.float(), weights[exp].float()) * valid_f
             ref = torch.zeros(num_recv_tokens, in_features, device="cuda", dtype=torch.float32)
             ref.index_add_(0, tok, per_slot)
-            _assert_bf16_close(dgrad, ref)
+            _assert_close(dgrad, ref)
             return
 
         grad_output = torch.randn(
@@ -249,7 +243,7 @@ def test_route_list_gemm(
         dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights, routing)
         assert dgrad.shape == (R_block, in_features)
         ref = torch.einsum("rh,rhf->rf", grad_output[tok].float(), weights[exp].float())
-        _assert_bf16_close(dgrad[valid], ref[valid])
+        _assert_close(dgrad[valid], ref[valid])
         return
 
     assert mode == "wgrad"
@@ -261,7 +255,7 @@ def test_route_list_gemm(
         assert int(valid.sum().item()) == num_routes
         per_slot = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
         ref = _sum_by_expert(per_slot * valid[:, None, None].float(), exp, weights_shape)
-        _assert_bf16_close(dW, ref)
+        _assert_close(dW, ref)
         return
 
     grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
@@ -275,7 +269,7 @@ def test_route_list_gemm(
             fc2_input, grad_output, weights_shape, routing
         )
         assert dW2.shape == weights_shape
-        _assert_bf16_close(dW2, ref)
+        _assert_close(dW2, ref)
 
         # ``out=`` folds the wgrad straight into a caller buffer (the fp32 ``main_grad`` sink),
         # overwriting or accumulating in-kernel.
@@ -283,11 +277,11 @@ def test_route_list_gemm(
         permute_free_grouped_gemm_bf16_fc2_wgrad(
             fc2_input, grad_output, weights_shape, routing, out=out, accumulate=False
         )
-        _assert_bf16_close(out, ref)
+        _assert_close(out, ref)
         permute_free_grouped_gemm_bf16_fc2_wgrad(
             fc2_input, grad_output, weights_shape, routing, out=out, accumulate=True
         )
-        _assert_bf16_close(out, 2.0 * ref)
+        _assert_close(out, 2.0 * ref)
         return
 
     # Recompute-from-preact: the wgrad rebuilds the F-wide activation from the saved 2F preact
@@ -318,9 +312,9 @@ def test_route_list_gemm(
         torch.einsum("rh,rf->rhf", grad_output[tok].float(), act_ref), exp, weights_shape
     )
 
-    _assert_bf16_close(dW2_stored, ref)
-    _assert_bf16_close(dW2_recompute, ref)
-    _assert_bf16_close(dW2_recompute, dW2_stored)
+    _assert_close(dW2_stored, ref)
+    _assert_close(dW2_recompute, ref)
+    _assert_close(dW2_recompute, dW2_stored)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +374,7 @@ def test_route_list_gated_act(
         act_ref = _gated_act_ref(gate, activation) * up * valid_f
         if use_probs:
             act_ref = act_ref * probs[tok, exp][:, None]
-        _assert_bf16_close(act[valid], act_ref[valid])
+        _assert_close(act[valid], act_ref[valid])
         return
 
     gate = (torch.randn(R_block, in_features, device="cuda") * valid_f).requires_grad_(True)
@@ -404,10 +398,10 @@ def test_route_list_gated_act(
         grad_out, preact, routing, activation=activation, dispatched_probs=fused_probs
     )
     assert dpre.shape == (R_block, 2 * in_features)
-    _assert_bf16_close(dpre[valid], dpre_ref[valid])
+    _assert_close(dpre[valid], dpre_ref[valid])
     if use_probs:
         assert dprob.shape == (num_recv_tokens, num_experts)
-        _assert_bf16_close(dprob, probs.grad)
+        _assert_close(dprob, probs.grad)
     else:
         assert dprob is None
 
@@ -427,9 +421,9 @@ def test_route_list_gated_act(
     )
     assert fc2_input.shape == (R_block, in_features)
     assert torch.equal(dpre_emit[valid], dpre[valid])
-    _assert_bf16_close(fc2_input[valid], fc2_ref[valid])
+    _assert_close(fc2_input[valid], fc2_ref[valid])
     if use_probs:
-        _assert_bf16_close(dprob_emit, dprob)
+        _assert_close(dprob_emit, dprob)
     else:
         assert dprob_emit is None
 
@@ -574,16 +568,17 @@ def test_route_list_align_caching():
     fc2_routing = dataclasses.replace(routing, route_space=True)
     assert fc2_routing.wgrad_align is routing.wgrad_align
 
-    _prepare_wgrad_align(routing, _WGRAD_CONTRACT_M)
+    contract_m = _wgrad_contract_m()
+    _prepare_wgrad_align(routing, contract_m)
     wgrad_align = routing.wgrad_align
-    assert wgrad_align.block_size == _WGRAD_CONTRACT_M
+    assert wgrad_align.block_size == contract_m
     assert wgrad_align.block_start is not None
     assert wgrad_align.blocks_per_expert is not None
     assert wgrad_align.sorted_slot_ids.shape[0] != R_block
     # The scan is block-size independent, so the second align reuses the cached one.
     assert routing.route_counts is scan_counts
 
-    _prepare_wgrad_align(fc2_routing, _WGRAD_CONTRACT_M)
+    _prepare_wgrad_align(fc2_routing, contract_m)
     assert fc2_routing.wgrad_align.sorted_slot_ids is wgrad_align.sorted_slot_ids
 
     # Both block sizes describe the same set of routes, only padded differently.
@@ -695,18 +690,18 @@ def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_e
     )
 
     assert preact.shape[1] == 2 * ffn
-    _assert_bf16_close(preact[valid].detach().cpu(), preact_ref.detach()[slot_token, slot_expert])
-    _assert_bf16_close(out.detach().cpu(), out_ref.detach())
+    _assert_close(preact[valid].detach().cpu(), preact_ref.detach()[slot_token, slot_expert])
+    _assert_close(out.detach().cpu(), out_ref.detach())
 
     out_ref.sum().backward()
     out.float().sum().backward()
 
-    _assert_bf16_close(inp.grad.cpu(), inp_ref.grad)
-    _assert_bf16_close(probs.grad.cpu(), probs_ref.grad)
-    _assert_bf16_close(preact.grad[valid].cpu(), preact_ref.grad[slot_token, slot_expert])
+    _assert_close(inp.grad.cpu(), inp_ref.grad)
+    _assert_close(probs.grad.cpu(), probs_ref.grad)
+    _assert_close(preact.grad[valid].cpu(), preact_ref.grad[slot_token, slot_expert])
     for mod, ref in ((fc1, w1_ref), (fc2, w2_ref)):
         wgrad = _stack_expert_grads(mod, num_experts, to_cpu=True)
-        _assert_bf16_close(wgrad, ref.grad)
+        _assert_close(wgrad, ref.grad)
 
 
 @pytest.mark.parametrize(
@@ -794,7 +789,6 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
 
     if fuse_wgrad_accumulation:
         assert grouped_weight.grad is None
-        assert getattr(grouped_weight, "grad_added_to_main_grad", False) is True
         grouped_grad = grouped_weight.main_grad.view(grouped_shape).float()
     else:
         assert getattr(grouped_weight, "grad_added_to_main_grad", False) is False

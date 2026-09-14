@@ -29,7 +29,7 @@ _PF_NUM_XCD = 1
 
 
 def _run_gather_gemm(
-    A, B, C, sorted_slot_ids, expert_ids, *, num_recv_tokens, block_m,
+    A, B, C, sorted_slot_ids, expert_ids, *, block_m,
     transpose_b, index_a_by_route_pos,
 ):
     """Dispatch fwd/dgrad to the permute-free FlyDSL gather-GEMM kernels.
@@ -84,7 +84,6 @@ def flydsl_moe_fwd(
     sorted_slot_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     *,
-    num_recv_tokens: int,
     block_m: int,
     index_a_by_route_pos: bool = False,
     dgrad: bool = False,
@@ -104,6 +103,6 @@ def flydsl_moe_fwd(
 
     _run_gather_gemm(
         A, B, C, sorted_slot_ids, expert_ids,
-        num_recv_tokens=num_recv_tokens, block_m=block_m,
+        block_m=block_m,
         transpose_b=dgrad, index_a_by_route_pos=index_a_by_route_pos,
     )

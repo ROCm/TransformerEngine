@@ -464,11 +464,6 @@ class _GroupedLinear(torch.autograd.Function):
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
-    def _packed_3d_view(tensors):
-        """[G, N, K] view of consecutive contiguous 2D buffers, or None."""
-        return packed_3d_view(tensors)
-
-    @staticmethod
     def _expert_weights_as_3d(weights, dtype):
         """[G, N, K] expert weights without stacking when storage is already packed.
 
@@ -476,7 +471,7 @@ class _GroupedLinear(torch.autograd.Function):
         ``GroupedTensor.rowwise_data`` buffer; those slices are a zero-copy view.
         Discrete ``weight0..weightN`` still need a stack.
         """
-        packed = _GroupedLinear._packed_3d_view(weights)
+        packed = packed_3d_view(weights)
         if packed is not None:
             if packed.dtype != dtype:
                 packed = packed.to(dtype)
@@ -501,8 +496,8 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Zero-copy [G, N, K] / [G, bn, bk] views when the per-expert payloads are
         # consecutive slices of one buffer; the wrap builder flattens them to 2D.
-        b_fp8 = _GroupedLinear._packed_3d_view([w._rowwise_data for w in weights])
-        b_scale = _GroupedLinear._packed_3d_view([w._rowwise_scale_inv for w in weights])
+        b_fp8 = packed_3d_view([w._rowwise_data for w in weights])
+        b_scale = packed_3d_view([w._rowwise_scale_inv for w in weights])
         if b_fp8 is None or b_scale is None:
             b_fp8, b_scale = _stack_weight_qtensors(weights, te_dtype_to_torch_dtype(dt))
         return wrap_fp8_blockwise_grouped_weight_qtensor(
@@ -512,21 +507,13 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def _handle_fused_wgrad(weight, main_grad):
         """Megatron DDP hook: mark wgrad as consumed and return a dummy (or None)."""
-        owner_ref = getattr(weight, "_grouped_param_ref", None)
-        owner = owner_ref() if owner_ref is not None else None
-        targets = [
-            t
-            for t in (weight, owner)
-            if t is not None and hasattr(t, "grad_added_to_main_grad")
-        ]
-        if not targets:
-            return None
-        for t in targets:
-            t.grad_added_to_main_grad = True
-        shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
-        return get_dummy_wgrad(
-            shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
-        )
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+            shape = list(main_grad.shape) if main_grad is not None else list(weight.shape)
+            return get_dummy_wgrad(
+                shape, weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
+            )
+        return None
 
     @staticmethod
     def _is_blockwise_fp8_triton_grouped_gemm_supported(
@@ -812,7 +799,7 @@ class _GroupedLinear(torch.autograd.Function):
                     accumulate = True
                 if getattr(ctx, "origin_weights_overwrite_main_grad", False):
                     accumulate = False
-                packed_out = _GroupedLinear._packed_3d_view(main_grads)
+                packed_out = packed_3d_view(main_grads)
                 wgrad_list = main_grads
                 out_dtype = (
                     main_grads[0].dtype if main_grads[0] is not None else ctx.activation_dtype
@@ -865,13 +852,14 @@ class _GroupedLinear(torch.autograd.Function):
         grad_biases = [None] * ctx.num_gemms  # bias not supported on this path
 
         # Grads match forward inputs:
-        # (inp, m_splits, non_tensor_args, out, dgrad_out, *weights, *biases).
+        # (inp, m_splits, non_tensor_args, out, dgrad_out, dispatched_probs, *weights, *biases).
         return (
             dgrad.view(ctx.inp_shape) if dgrad is not None else None,
             None,  # m_splits
             None,  # non_tensor_args
             None,  # out
             None,  # dgrad_out
+            None,  # dispatched_probs
             *wgrad_list,
             *grad_biases,
         )
@@ -979,7 +967,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             # Fuse-wgrad: same as blockwise FP8 — keep the per-expert views (and their
             # ``main_grad`` aliases into a packed grouped buffer) rather than the grouped
-            # Parameter. Backward packs those aliases with ``_packed_3d_view``.
+            # Parameter. Backward packs those aliases with ``packed_3d_view``.
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
                 ctx.origin_weights_overwrite_main_grad = getattr(
@@ -1035,7 +1023,7 @@ class _GroupedLinear(torch.autograd.Function):
                 wgrad_accumulate = True
             if getattr(ctx, "origin_weights_overwrite_main_grad", False):
                 wgrad_accumulate = False
-            wgrad_out = _GroupedLinear._packed_3d_view(main_grads)
+            wgrad_out = packed_3d_view(main_grads)
 
         # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
         pf_result = permute_free_grouped_gemm_backward(
@@ -1076,14 +1064,14 @@ class _GroupedLinear(torch.autograd.Function):
                     else [None] * N
                 )
         # Grads match forward inputs:
-        # (inp, m_splits, dispatched_probs, non_tensor_args, out, dgrad_out, *weights, *biases).
+        # (inp, m_splits, non_tensor_args, out, dgrad_out, dispatched_probs, *weights, *biases).
         return (
             pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
-            pf_result.grad_probs,  # dispatched_probs
             None,  # non_tensor_args
             None,  # out
             None,  # dgrad_out
+            pf_result.grad_probs,  # dispatched_probs
             *wgrad_list,
             *([None] * ctx.num_gemms),
         )
@@ -1094,10 +1082,11 @@ class _GroupedLinear(torch.autograd.Function):
         ctx,
         inp: torch.Tensor,
         m_splits: torch.Tensor,
-        dispatched_probs: Optional[torch.Tensor],
         non_tensor_args: Tuple,
         out: Optional[torch.Tensor],
         dgrad_out: Optional[torch.Tensor],
+        # Fork-only permute-free arg, appended last to keep the upstream fixed-arg block intact.
+        dispatched_probs: Optional[torch.Tensor],
         *weights_and_biases,
     ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
@@ -1130,7 +1119,6 @@ class _GroupedLinear(torch.autograd.Function):
             actual_m_splits,
             unpad_output,
             routing_metadata,
-            grouped_weight_param,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -1153,12 +1141,7 @@ class _GroupedLinear(torch.autograd.Function):
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
         device = inp.device
-        # Grouped weights expose detached per-expert views; the grouped param carries requires_grad.
-        weight_requires_grad = (
-            grouped_weight_param.requires_grad
-            if grouped_weight_param is not None
-            else weights[0].requires_grad
-        )
+        weight_requires_grad = weights[0].requires_grad
 
         # Blockwise FP8 grouped GEMM (ROCm Triton) opt-in. Runs its own quantization +
         # grouped GEMM and returns early, bypassing the default quantizer setup below.
@@ -1481,7 +1464,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
-            ctx.weights_requires_grad = weight_requires_grad
+            ctx.weights_requires_grad = weights[0].requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
@@ -1544,7 +1527,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        # [*, in_features] -> [*, out_features]
+        # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
@@ -1733,6 +1716,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # non_tensor_args
             None,  # out
             None,  # dgrad_out
+            None,  # dispatched_probs
             *wgrad_list,
             *grad_biases,
         )
@@ -2085,10 +2069,10 @@ class _GroupedLinear(torch.autograd.Function):
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
-            None,  # dispatched_probs
             None,  # non_tensor_args
             None,  # out
             None,  # dgrad_out
+            None,  # dispatched_probs
             *wgrad_list,
             *grad_biases,
         )
@@ -2776,15 +2760,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                 actual_m_splits,
                 unpad_output,
                 routing_metadata,
-                getattr(self, "weight", None) if self.single_grouped_weight else None,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx,
                 inp,
                 m_splits,
-                dispatched_probs, non_tensor_args,
+                non_tensor_args,
                 out,
                 dgrad_out,
+                dispatched_probs,
                 *weight_tensors,
                 *bias_tensors,
             )
@@ -2915,10 +2899,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                     w.overwrite_main_grad = grouped_weight.overwrite_main_grad
                 if hasattr(grouped_weight, "grad_added_to_main_grad"):
                     w.grad_added_to_main_grad = grouped_weight.grad_added_to_main_grad
-                # Split views are not ``named_parameters()`` entries; fuse-wgrad marks
-                # ``grad_added_to_main_grad`` on these objects, and ``_handle_fused_wgrad``
-                # forwards it to the grouped Parameter via this ref.
-                w._grouped_param_ref = weakref.ref(grouped_weight)
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):

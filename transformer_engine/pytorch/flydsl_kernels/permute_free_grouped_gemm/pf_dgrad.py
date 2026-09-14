@@ -40,115 +40,17 @@ import flydsl.expr as fx
 from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
-from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
+from ..gemm.fp16_gemm_utils import ceildiv
 from ..gemm.gemm_common_utils import _i64, make_value_attrs
 from ..gemm.pf_gemm_utils import (
-    BLOCK_K,
-    Mfma32x32x16,
     RouteI32Loader,
-    S2RLoaderBf16,
-    S2RLoaderTrBf16,
-    StoreCBf16,
     _make_shared_storage,
-    compute_global_gather_swizzle_bf16,
-    compute_global_swizzle_nn_bf16,
-    dense_mma_pipeline_bf16,
+    gemm_bf16_nn_gather_tile,
     gemm_bf16_nn_tile,
     xcd_remap_pid,
 )
 
 __all__ = ["compile_grouped_gemm_dgrad_bf16", "grouped_gemm_dgrad_bf16"]
-
-
-def gemm_bf16_nn_gather_tile(
-    A,  # flat [num_recv, N] grad buffer (gather source)
-    B,  # weight [E, N, K] flat
-    C,  # dx tile (already rebased to this row block)
-    c_n,
-    lds,
-    sorted_res,
-    sorted_row_base,
-    block_n,
-    *,
-    Kc,  # contraction dim (forward intermediate feature N)
-    BLOCK_M,
-    BLOCK_N,
-    out_fp16=False,
-    nt_vmcnt=3,
-    b_group_base,
-):
-    """One NN dgrad tile with the A (grad) rows *gathered* via ``sorted_slot_ids``.
-
-    Mirrors the forward :func:`pf_fwd.gemm_bf16_nt_gather_tile` (same two-loader row
-    redirection, A base 0, store block_m 0) but on the NN B path (transpose-read B, ``b_k_step =
-    BLOCK_K * c_n``), contracting over ``Kc`` (= N).
-    """
-    assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
-    assert Kc % BLOCK_K == 0, f"NN gather needs N % {BLOCK_K} == 0 (got N={Kc})"
-    N_TILES_A = BLOCK_M // 128
-    N_TILES_B = BLOCK_N // 256
-    LDS_BLOCK_M = BLOCK_M // 2
-    LDS_BLOCK_N = BLOCK_N // 2
-    N_LDS_STEPS_A = LDS_BLOCK_M // 64
-    N_LDS_STEPS_B = LDS_BLOCK_N // 64
-    N_LDS_ROUNDS = max(N_LDS_STEPS_A, N_LDS_STEPS_B)
-
-    lane_id = fx.thread_idx.x % 64
-    wave_id = fx.thread_idx.x // 64
-    wave_m = wave_id // 4
-    wave_n = wave_id % 4
-
-    A0_gl_offset = fx.Int32(0)
-    A1_gl_offset = fx.Int32(0)
-    B0_gl_offset = block_n * BLOCK_N + b_group_base
-    B1_gl_offset = block_n * BLOCK_N + LDS_BLOCK_N + b_group_base
-
-    gA = make_byte_buffer_tensor(A)
-    gB = make_byte_buffer_tensor(B)
-    a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
-    b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
-
-    gl_off_a_lo = compute_global_gather_swizzle_bf16(
-        lane_id, wave_id, Kc, N_LDS_ROUNDS, sorted_res, sorted_row_base
-    )
-    gl_off_a_hi = compute_global_gather_swizzle_bf16(
-        lane_id, wave_id, Kc, N_LDS_ROUNDS, sorted_res, sorted_row_base + fx.Int32(LDS_BLOCK_M)
-    )
-    gl_off_b = compute_global_swizzle_nn_bf16(lane_id, wave_id, c_n, N_LDS_STEPS_B)
-
-    mfma = Mfma32x32x16(N_TILES_A, N_TILES_B)
-    a_g2s = G2SLoader(a_div, gl_off_a_lo, N_LDS_STEPS_A, fx.BFloat16.ir_type, wave_id)
-    a_g2s_hi = G2SLoader(a_div, gl_off_a_hi, N_LDS_STEPS_A, fx.BFloat16.ir_type, wave_id)
-    b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, fx.BFloat16.ir_type, wave_id)
-    a_s2r = S2RLoaderBf16(wave_m, N_TILES_A)
-    b_s2r = S2RLoaderTrBf16(wave_n, N_TILES_B)
-    _out_ty = fx.Float16 if out_fp16 else fx.BFloat16
-    store_c = StoreCBf16(C, fx.Int32(BLOCK_M), c_n, _out_ty)
-
-    dense_mma_pipeline_bf16(
-        lds,
-        a_g2s,
-        b_g2s,
-        a_s2r,
-        b_s2r,
-        mfma,
-        store_c,
-        A0_gl_offset,
-        A1_gl_offset,
-        B0_gl_offset,
-        B1_gl_offset,
-        BLOCK_K,          # a_k_step (contraction rides soffset)
-        BLOCK_K * c_n,    # b_k_step (NN: B is [K, c_n] row-major)
-        fx.Int32(0),      # store block_m: C is already rebased to this tile
-        block_n,
-        wave_m,
-        wave_n,
-        Kc,
-        BLOCK_M,
-        BLOCK_N,
-        nt_vmcnt,
-        a_g2s_hi=a_g2s_hi,
-    )
 
 
 def _dgrad_gather_body(
