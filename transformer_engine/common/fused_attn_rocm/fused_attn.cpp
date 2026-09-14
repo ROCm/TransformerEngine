@@ -309,7 +309,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         qkv_layout,
         bias_type,
         attn_mask_type,
-        softmax_type,
         dropout,
         num_attn_heads, num_gqa_groups,
         max_seqlen_q, max_seqlen_kv,
@@ -370,6 +369,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *input_K = convertNVTETensorCheck(K);
   const Tensor *input_V = convertNVTETensorCheck(V);
   const Tensor *input_Bias = convertNVTETensorCheck(Bias);
+  const Tensor *input_SoftmaxOffset = convertNVTETensorCheck(SoftmaxOffset);
   Tensor *output_O = convertNVTETensorCheck(O);
   Tensor *wkspace = convertNVTETensorCheck(workspace);
 
@@ -401,9 +401,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       is_training, attn_scale, dropout, 
-      qkv_layout, bias_type, attn_mask_type,
+      qkv_layout, bias_type, attn_mask_type, softmax_type,
       window_size_left, window_size_right,
-      input_Q, input_K, input_V, input_Bias, 
+      input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
@@ -474,6 +474,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]); //softmax lse
   const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
   Tensor *input_Bias = nullptr;
+  Tensor *input_SoftmaxOffset = nullptr;
+  Tensor *output_dSoftmaxOffset = convertNVTETensorCheck(dSoftmaxOffset);
 
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -500,18 +502,26 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       false, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
+    size_t ctx_next_id = 2;
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+      input_Bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[ctx_next_id++]);
+    }
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      input_SoftmaxOffset =
+          convertNVTETensorCheck(Aux_CTX_Tensors->tensors[ctx_next_id++]);
     }
     fused_attn_ck_bwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
+      softmax_type,
       window_size_left, window_size_right,
       deterministic,
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
+      input_SoftmaxOffset,
       output_S,
       output_dQ, output_dK, output_dV, output_dBias,
+      output_dSoftmaxOffset,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
       input_cu_seqlens_q_padded,

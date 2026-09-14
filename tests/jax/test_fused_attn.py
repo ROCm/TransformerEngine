@@ -1145,18 +1145,26 @@ class FusedAttnRunner:
         }
         reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
+        arg_nums = (0, 1, 2)
+        grad_shardings = (self.qkvo_sharding, self.qkvo_sharding, self.qkvo_sharding)
+
+        optional_dgrad_idx = 3
+
         # We can compute dBias only for the [1, h, s, s] layout
-        if self.bias_shape == BiasShape._1HSS:
-            arg_nums = (0, 1, 2, 3)
-            grad_shardings = (
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.bias_sharding,
-            )
-        else:
-            arg_nums = (0, 1, 2)
-            grad_shardings = (self.qkvo_sharding, self.qkvo_sharding, self.qkvo_sharding)
+        compute_dbias = self.bias_shape == BiasShape._1HSS
+        if compute_dbias:
+            arg_nums += (3,)
+            grad_shardings += (self.bias_sharding,)
+            dgrad_idx_dbias = optional_dgrad_idx
+            optional_dgrad_idx += 1
+
+        # dsoftmax_offset is only meaningful for the learnable softmax variant
+        compute_dsoftmax_offset = self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        if compute_dsoftmax_offset:
+            arg_nums += (4,)
+            grad_shardings += (self.softmax_offset_sharding,)
+            dgrad_idx_dsoftmax_offset = optional_dgrad_idx
+            optional_dgrad_idx += 1
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
@@ -1267,11 +1275,11 @@ class FusedAttnRunner:
         check_dqkv(primitive_dk, reference_dk, self.pad_kv, 1)
         check_dqkv(primitive_dv, reference_dv, self.pad_kv, 2)
 
-        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape._1HSS:
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and compute_dbias:
             # TODO(mgoldfarb-nvidia): Inverse reorder bias once supported by a CP implementation.
 
-            primitive_dbias = primitive_dgrad[3]
-            reference_dbias = reference_dgrad[3]
+            primitive_dbias = primitive_dgrad[dgrad_idx_dbias]
+            reference_dbias = reference_dgrad[dgrad_idx_dbias]
 
             # Assume all batch has the same actual_seqlen, probably needs to extend the tests
             bias_mask = self.mask[0, 0]
@@ -1300,6 +1308,33 @@ class FusedAttnRunner:
                 jnp.where(bias_mask, 0, reference_dbias),
                 rtol=self.rtol,
                 atol=self.atol,
+                dtype=self.dtype,
+            )
+
+        if compute_dsoftmax_offset:
+            primitive_dsoftmax_offset = primitive_dgrad[dgrad_idx_dsoftmax_offset]
+            reference_dsoftmax_offset = reference_dgrad[dgrad_idx_dsoftmax_offset]
+
+            print_debug_tensor_stats("primitive_dsoftmax_offset", primitive_dsoftmax_offset)
+            print_debug_tensor_stats("reference_dsoftmax_offset", reference_dsoftmax_offset)
+            print_debug_tensor_stats(
+                "diff_dsoftmax_offset",
+                jnp.abs(primitive_dsoftmax_offset - reference_dsoftmax_offset),
+            )
+
+            if is_hip_extension():
+                assert not jnp.any(
+                    jnp.isnan(primitive_dsoftmax_offset)
+                ), "Fused dsoftmax_offset contains NaN"
+                assert not jnp.any(
+                    jnp.isinf(primitive_dsoftmax_offset)
+                ), "Fused dsoftmax_offset contains Inf"
+
+            # softmax_offset is always fp32, but its gradient is only as accurate as the
+            # attention math that produced it, so tolerance follows the compute dtype.
+            assert_allclose(
+                primitive_dsoftmax_offset,
+                reference_dsoftmax_offset,
                 dtype=self.dtype,
             )
 

@@ -90,6 +90,8 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
 
   log_value(log_file, "dropout_seed_ptr", std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
   log_value(log_file, "dropout_offset_ptr", std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
+  log_value(log_file, "has_sink", fmha_args.has_sink);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
 }
 
 void dump_fwd_timings(const char* dump_path, float average_runtime){
@@ -153,7 +155,7 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
-  fmha_args.sink_ptr = nullptr;
+  fmha_args.sink_ptr = args.sink_ptr;
   fmha_args.seqlen_k     = args.s_kv; // unused in group mode (or kvcache enabled)
   fmha_args.max_seqlen_q = args.s_q;
 
@@ -200,10 +202,15 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
-  fmha_args.has_sink        = false;
+  fmha_args.has_sink        = args.has_sink;
   fmha_args.q_descale_ptr    = nullptr;
   fmha_args.k_descale_ptr    = nullptr;
   fmha_args.v_descale_ptr    = nullptr;
+  // sink_size is CK's StreamingLLM sink *prefix width* in key columns, which is a
+  // different feature from the learnable softmax offset NVTE asks for here. The
+  // offset only needs has_sink + sink_ptr (CK folds it into the softmax
+  // denominator).
+  // (aiter's mha_bwd_args has no sink_size at all). Keep it at 0.
   fmha_args.sink_size        = 0;
   fmha_args.min_seqlen_q     = 0;
   fmha_args.block_scale_size_q  = 0;
