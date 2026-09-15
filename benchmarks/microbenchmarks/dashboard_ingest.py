@@ -138,56 +138,134 @@ def _family_of(path):
     return stem[len("benchmark_"):] if stem.startswith("benchmark_") else stem
 
 
-def _shape_dtype(row, key_cols):
-    """Derive a compact (shape, dtype) label from a CSV row's parameter columns.
+# Canonical dtype labels: grouped GEMM records its torch params dtype (so
+# str(torch.bfloat16) -> "torch.bfloat16"); map it to the short precision names
+# the other suites already emit so the dtype axis is consistent.
+_DTYPE_ALIASES = {"bfloat16": "bf16", "float16": "fp16", "float32": "fp32", "float64": "fp64"}
 
-    The label must be *unique* per distinct parameter combination -- otherwise
-    several kernels collapse onto one series (e.g. grouped GEMM sweeps an extra
-    expert-count column ``B``, so DSV2-Down/M512/B{5,10,20} are three kernels,
-    not one). ``Case`` implies ``N``/``K`` for these suites so those stay
-    summarized by the readable base; every *other* swept column is appended so
-    nothing is silently merged.
+
+def _norm_dtype(d):
+    d = (d or "").strip()
+    if d.startswith("torch."):
+        d = d[len("torch."):]
+    return _DTYPE_ALIASES.get(d, d)
+
+
+# Weekly-sim harness columns: per-row run metadata (used for ts/commit/run_id,
+# not part of the shape) and the precision axis (bf16/fp8/mxfp8/cast format) --
+# the dtype the dashboard groups by, i.e. the real axis rather than the torch
+# params dtype grouped GEMM also records.
+_META_COLS = {"run_week", "commit_sha", "commit_date"}
+_PRECISION_COLS = {"Precision", "recipe", "Format"}
+
+
+def _backend(row):
+    """Kernel backend for the op label; TE's native HIP path reports 'default'."""
+    b = (row.get("Backend") or "").strip()
+    return "hip" if b == "default" else b
+
+
+def _iso_utc(s):
+    """Normalize an ISO-8601 timestamp (any offset) to ``...Z`` UTC."""
+    try:
+        dt = datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return s
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _shape_dtype(row, key_cols):
+    """Derive a compact (shape, dtype) from a row's parameter columns.
+
+    Shape reads ``Case \u00b7 [B{B} ]M\u00d7N\u00d7K`` (dense/grouped GEMM) or
+    ``Case \u00b7 M{M} h{hidden}`` (casting/norm); the precision column is the
+    dtype. *key_cols* already excludes metadata, ``Direction`` and ``Backend``
+    (those live in the op). Any *other* swept column is appended so distinct
+    configs never silently merge.
     """
-    dtype = "bf16"
-    params = {}
+    dtype = ""
+    p = {}
     for col in key_cols:
-        if "dtype" in col.lower():                   # "dtype" or "dtype_str"
-            dtype = str(row[col]).replace("torch.", "")
+        if col in _PRECISION_COLS:                   # precision axis (bf16/fp8/mxfp8/cast format)
+            dtype = _norm_dtype(str(row[col]))       # authoritative: wins over the params dtype
+        elif "dtype" in col.lower():                 # torch params dtype (grouped GEMM etc.)
+            dtype = dtype or _norm_dtype(str(row[col]))
         else:
-            params[col] = row[col]
-    # Columns already represented by the readable base (Case summarizes N/K here).
-    summarized = {"Case", "M", "N", "K"}
-    extras = "".join(f" {k}={v}" for k, v in params.items() if k not in summarized)
-    if "Case" in params and "M" in params:          # dense/grouped GEMM: readable
-        shape = f"{params['Case']} M{params['M']}"
-    elif {"M", "N", "K"} <= set(params):
-        shape = f"{params['M']}x{params['N']}x{params['K']}"
-    else:
-        return (", ".join(f"{k}={v}" for k, v in params.items()) or "-"), dtype
-    return shape + extras, dtype
+            p[col] = row[col]
+    dtype = dtype or "bf16"
+    dims = []
+    if p.get("NormType"):                            # RMSNorm/LayerNorm -- not encoded in Case
+        dims.append(p["NormType"])
+    if p.get("B"):
+        dims.append(f"B{p['B']}")
+    if p.get("M") and p.get("N") and p.get("K"):
+        dims.append(f"{p['M']}\u00d7{p['N']}\u00d7{p['K']}")
+    elif p.get("M") and p.get("hidden_size"):
+        dims.append(f"M{p['M']} h{p['hidden_size']}")
+    elif p.get("M"):
+        dims.append(f"M{p['M']}")
+    handled = {"Case", "B", "M", "N", "K", "hidden_size", "NormType"}
+    dims += [f"{k}={v}" for k, v in p.items() if k not in handled]
+    body = " ".join(d for d in dims if d)
+    case = p.get("Case", "")
+    return (f"{case} \u00b7 {body}" if body else case), dtype
 
 
 def long_rows_from_csv(path, meta):
-    """Yield long-format shard rows (dicts keyed by SHARD_HEADER) for one CSV."""
+    """Yield ``(kind, row)`` shard rows for one CSV.
+
+    One canonical series per config (*kind* is always ``""``): kernel time for
+    forward/direct metrics, but WALL time for backward -- the backward kernel
+    value is a ``(fwd+bwd) - fwd`` subtraction that swings wildly for
+    low-precision recipes and would flood the noise band with false regressions.
+    Run metadata is taken per-row from the weekly-sim columns when present,
+    otherwise from *meta*.
+    """
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         cols = reader.fieldnames or []
         metric_cols = [c for c in cols if _unit_of(c)]
-        key_cols = [c for c in cols if c not in metric_cols and "Time" not in c]
+        key_cols = [c for c in cols if c not in metric_cols and "Time" not in c
+                    and c not in _META_COLS and c not in ("Direction", "Backend")]
         for row in reader:
+            commit = row.get("commit_sha") or meta["commit"]
+            cdate = row.get("commit_date")
+            if cdate:
+                ts = _iso_utc(cdate)
+                run_id = _run_id_from_ts(ts)
+            else:
+                ts, run_id = meta["ts"], meta["run_id"]
+            direction = (row.get("Direction") or "").strip()   # raw: fwd/bwd/quantize/...
+            backend = _backend(row)
             shape, dtype = _shape_dtype(row, key_cols)
+            # Group each metric's Wall/Kernel variants under a base label so we
+            # can emit one series per config from the right timing source.
+            variants = {}   # base -> {"wall"/"kernel"/"": metric_col}
             for mcol in metric_cols:
+                label = mcol[: -(len(_unit_of(mcol)) + 1)].rstrip()
+                if label.endswith(" Kernel"):
+                    variants.setdefault(label[: -len(" Kernel")], {})["kernel"] = mcol
+                elif label.endswith(" Wall"):
+                    variants.setdefault(label[: -len(" Wall")], {})["wall"] = mcol
+                else:
+                    variants.setdefault(label, {})[""] = mcol
+            for base, vmap in variants.items():
+                prefer = "wall" if direction == "bwd" else "kernel"
+                mcol = next((vmap[k] for k in (prefer, "wall", "kernel", "")
+                             if k in vmap and (_num(row.get(vmap[k])) or 0) > 0), None)
+                if mcol is None:
+                    continue
                 unit = _unit_of(mcol)
                 value = _num(row.get(mcol))
-                if value is None or value <= 0:
-                    continue
-                label = mcol[: -(len(unit) + 1)].rstrip()  # "GEMM Forward TFLOPS" -> "GEMM Forward"
+                label = mcol[: -(len(unit) + 1)].rstrip()
                 ms = _num(row.get(f"{label} Time (ms)"))
-                yield {
-                    "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
-                    "model": meta.get("model", ""),
-                    "runner": meta["runner"],
-                    "op": label + meta.get("op_suffix", ""), "shape": shape, "dtype": dtype,
+                op = base + (f" {direction}" if direction else "") + (f" \u00b7 {backend}" if backend else "") + meta.get("op_suffix", "")
+                yield "", {
+                    "ts": ts, "commit": commit, "run_id": run_id,
+                    "model": meta.get("model", ""), "runner": meta["runner"],
+                    "op": op, "shape": shape, "dtype": dtype,
                     "metric": unit, "value": round(value, 4),
                     "time_ms": "" if ms is None else round(ms, 4),
                     "pr": meta["pr"],
@@ -332,18 +410,23 @@ def main():
     for path in args.csv:
         family = _family_of(path)
         try:
-            rows = list(long_rows_from_csv(path, meta))
+            tagged = list(long_rows_from_csv(path, meta))
         except (OSError, csv.Error) as exc:
             print(f"  skip {Path(path).name}: {exc}")
             continue
-        if not rows:
+        if not tagged:
             print(f"  skip {Path(path).name}: no TFLOPS/GB/s columns")
             continue
-        shard = out_dir / f"perf-{family}-{ref}.csv"
-        _, n = append_shard(shard, rows)
-        total += n
-        per_shard.append((shard.name, n))
-        entries.append({"file": shard.name, "family": family, "ref": ref, "pr": pr_field})
+        by_kind = {}
+        for kind, r in tagged:
+            by_kind.setdefault(kind, []).append(r)
+        for kind in sorted(by_kind):                     # "" (wall) before "kernel"
+            k_ref = f"{ref}-{kind}" if kind else ref
+            shard = out_dir / f"perf-{family}-{k_ref}.csv"
+            _, n = append_shard(shard, by_kind[kind])
+            total += n
+            per_shard.append((shard.name, n))
+            entries.append({"file": shard.name, "family": family, "ref": k_ref, "pr": pr_field})
 
     if total == 0:
         sys.exit("no throughput (TFLOPS / GB/s) rows found in the given CSV(s)")

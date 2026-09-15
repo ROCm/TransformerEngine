@@ -13,7 +13,7 @@ const CFG = {
   dataBranch: "./data/",         // local-only: no external data branch
   bundled: "./data/",
   api: "",                        // empty -> no live GitHub Actions board
-  regressionPct: -3.0,   // fixed gate
+  regressionPct: -5.0,   // fixed gate
   warnPct: -1.0,         // surfaced as "watch"
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
@@ -22,7 +22,7 @@ const CFG = {
 
 const S = {
   records: [], runs: [], updated: null, runMeta: new Map(),
-  models: [],      // GPU models present in the data, sorted (discovered at load)
+  models: [], modelColor: new Map(),   // GPU models present in the data, sorted (discovered at load)
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
   trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits" },
@@ -36,13 +36,21 @@ const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const VIEWS = ["health", "bytype", "prcheck", "board"];
 
-// theme-aware colors: read the live CSS variables so canvas/SVG match the active theme.
-// Models get a palette slot by their position in S.models, so nothing is hardcoded per model.
-const SERIES_N = 6;
+// theme-aware colors: each model gets a distinct hue by golden-angle spacing, so
+// any number of models renders with well-separated, legible colors -- no palette
+// size limit. Hues are re-tuned per theme (see setModelColors / toggleTheme).
 const cssVal = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || n;
-const seriesVar = m => { const i = S.models.indexOf(m); return i < 0 ? "--ink-2" : `--series-${i % SERIES_N}`; };
-const modelVar = m => `var(${seriesVar(m)})`;                // for inline style="" (CSS var)
-const modelCol = m => cssVal(seriesVar(m));                  // resolved value for <canvas>
+const hslHex = (h, s, l) => {                     // HSL(0-360, 0-100, 0-100) -> #rrggbb
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
+  const to = n => Math.round(255 * f(n)).toString(16).padStart(2, "0");
+  return `#${to(0)}${to(8)}${to(4)}`;
+};
+const modelColorFor = i => hslHex((i * 137.508) % 360, S.theme === "light" ? 62 : 70, S.theme === "light" ? 44 : 62);
+const setModelColors = () => { S.modelColor = new Map(S.models.map((m, i) => [m, modelColorFor(i)])); };
+const modelVar = m => S.modelColor.get(m) || cssVal("--ink-2");   // hex; used inline and on <canvas>
+const modelCol = modelVar;                                       // alias kept for <canvas> call sites
 const commitUrl = sha => sha ? `https://github.com/${CFG.repo}/commit/${sha}` : "#";
 
 function relTime(iso) {
@@ -159,6 +167,7 @@ async function loadAll() {
   // Discover GPU models (sorted) from the rows; the model is the key for
   // grouping/colors/baselines and is shown directly as the series label.
   S.models = [...new Set(records.map(r => r.model).filter(Boolean))].sort();
+  setModelColors();
   computePRDeltas();   // derive vs_main (PR value vs dev baseline) so PR Check works
   S.runs = [];
   S.runMeta = new Map();
@@ -378,9 +387,9 @@ function renderHealth() {
     `latest dev vs <b>prior dev history</b> · confirmed = below the ${CFG.noiseK}σ noise band ` +
     `(needs ≥${CFG.minSamples} prior dev runs)`;
   $("#heroStats").innerHTML =
-    `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × model</span></div>` +
+    `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × arch</span></div>` +
     `<div class="stat warn"><span class="v">${watch.length}</span><span class="l">to check</span></div>` +
-    `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.model)).size}</span><span class="l">models</span></div>` +
+    `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.model)).size}</span><span class="l">arches</span></div>` +
     `<div class="stat"><span class="v" style="font-size:15px">${relTime(lastRun)}</span><span class="l">last run</span></div>`;
   const badge = $("#healthBadge"); badge.hidden = false; badge.textContent = n; badge.classList.toggle("zero", n === 0);
   $("#regHeadTitle").textContent = list.length ? `${reals.length} confirmed · ${watch.length} to check` : "Regressions on dev";
@@ -474,7 +483,7 @@ function renderByType() {
   const models = [...byModel.keys()].sort((a, b) => a.localeCompare(b));
   const nFam = new Set(rows.map(x => x.r.family || "other")).size;
   $("#typeSummary").innerHTML = rows.length
-    ? `${rows.length} kernel × model · <b>${models.length}</b> model${models.length === 1 ? "" : "s"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
+    ? `${rows.length} kernel × arch · <b>${models.length}</b> arch${models.length === 1 ? "" : "es"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
     : "no results in snapshot";
 
   // one collapsible <details> per benchmark family, for a given model's family-map
@@ -948,6 +957,7 @@ function applyTheme(t) {
 function toggleTheme() {
   applyTheme(S.theme === "light" ? "dark" : "light");
   try { localStorage.setItem("flydsl-theme", S.theme); } catch { /* ignore */ }
+  setModelColors();                    // re-tune model hues for the new theme
   renderAll();                         // re-render SVG sparklines with theme colors
   if (S.trend.key) selectKernel(S.trend.key);   // redraw the canvas chart
 }

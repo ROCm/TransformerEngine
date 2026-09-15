@@ -24,7 +24,7 @@
     </a>
   </div>
 
-  <div class="arch-legend" id="modelLegend" aria-label="GPU models"></div>
+  <div class="arch-legend" id="modelLegend" aria-label="GPU architectures"></div>
 
   <div class="status-cluster">
     <span class="updated syncing" id="updated">syncing…</span>
@@ -74,7 +74,7 @@
         <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
       </div>
       <div class="col-head">
-        <span>kernel</span><span>shape · dtype</span><span>model</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
+        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
       </div>
       <div id="regList"></div>
     </div>
@@ -91,7 +91,7 @@
           <span class="spacer"></span>
           <div class="seg" id="trendRange" role="group" aria-label="Time range"></div>
           <div class="seg" id="trendXMode" role="group" aria-label="X axis"></div>
-          <div class="seg" id="trendModel" role="group" aria-label="GPU model"></div>
+          <div class="seg" id="trendModel" role="group" aria-label="GPU architecture"></div>
           <div class="seg" id="metricSel" role="group" aria-label="Metric"></div>
         </div>
         <div class="chart-frame"><canvas id="trendChart"></canvas></div>
@@ -117,7 +117,7 @@
       <label class="facet">type <select class="sel" id="facetFamily" data-facet="family" aria-label="Filter by benchmark type"></select></label>
       <label class="facet">timing <select class="sel" id="facetMode" data-facet="mode" aria-label="Filter by timing mode"></select></label>
       <label class="facet">dtype <select class="sel" id="facetDtype" data-facet="dtype" aria-label="Filter by dtype"></select></label>
-      <label class="facet">model <select class="sel" id="facetModel" data-facet="model" aria-label="Filter by GPU model"></select></label>
+      <label class="facet">arch <select class="sel" id="facetModel" data-facet="model" aria-label="Filter by GPU architecture"></select></label>
       <button class="btn-mini" id="facetReset" type="button">reset</button>
     </div>
     <div class="view-head" style="margin-top:-6px"><span class="hint" id="typeSummary"></span></div>

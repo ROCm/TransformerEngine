@@ -23,12 +23,6 @@
   --warn-bg: rgba(237,160,106,.10);
   --bad-bg:  rgba(242,92,78,.10);
 
-  --series-0: #54adff;
-  --series-1: #b88ff0;
-  --series-2: #ec9a4f;
-  --series-3: #5fd39a;
-  --series-4: #e8779c;
-  --series-5: #4fd0d6;
   --band:    rgba(191,193,208,.12);
 
   --mono: "SF Mono", "Fira Code", Consolas, monospace;
@@ -60,12 +54,6 @@
   --warn-bg: rgba(196,122,48,.10);
   --bad-bg:  rgba(214,58,47,.10);
 
-  --series-0: #2b7fd6;
-  --series-1: #8654c8;
-  --series-2: #c1741a;
-  --series-3: #2f9e6a;
-  --series-4: #c9557a;
-  --series-5: #2596a0;
   --band:    rgba(96,108,124,.13);
 
   --hover:   rgba(20,30,45,.04);
@@ -107,7 +95,7 @@ a:hover { text-decoration: underline; }
 .brand-name b { color: var(--brand); font-weight: 700; }
 .brand-sub { font-family: var(--mono); font-size: 10px; color: var(--ink-3); letter-spacing: 2px; margin-top: 4px; }
 
-.arch-legend { display: flex; gap: 6px; }
+.arch-legend { display: flex; flex-wrap: wrap; gap: 6px; }
 .arch-chip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--ink-2);
   padding: 4px 10px; border: 1px solid var(--border-2); border-radius: 6px; background: var(--bg-2); }
 .arch-chip i { width: 8px; height: 8px; border-radius: 3px; background: var(--c); }
