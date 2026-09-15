@@ -2,18 +2,9 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Main K-loop for the MXFP8 TN GEMM, shared by mxfp8_gemm_tn_kernel (mxfp8_gemm.cpp)
-//! and the fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_tn.cuh): the steady-state loop plus both K-tile epilogues and the
-//! skew-closing barrier, i.e. everything up to the C writeback, matching the boundary tn_mainloop.inc
-//! draws. Included inside the persistent tile loop with the stage/scale ping-pong state (tic/toc,
-//! tic_scales/toc_scales), the LDS handles and the swizzle tables in scope. Not a header: no include
-//! guard, and it is a statement, not a declaration.
-//!
-//! Mirrors the K-loop of mxfp8_gemm_tn_kernel in ../mxfp8_gemm.cpp, which is the ground truth for
-//! this schedule; the AG path adopts its spelling (k_iters, BLOCK_K, G, A_local/B_local,
-//! sa_stride/sa_batch) so the two can be diffed line-for-line. Both operands are K-contiguous in
-//! both, so unlike the NN pair there is no layout mismatch and the bodies agree outright; what is
-//! left in the caller is only the C writeback, which the AG path spells differently.
+//! Main K-loop for the MXFP8 TN GEMM, shared by mxfp8_gemm_tn_kernel (mxfp8_gemm.cpp) and the
+//! fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_tn.cuh); only the C writeback is left to the caller.
+//! Both operands are K-contiguous, so unlike the NN pair there is no layout mismatch here.
 #pragma unroll 2
         for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
             if (k + 1 < k_iters) {
@@ -181,8 +172,7 @@
         }
 
 #ifdef MXFP8_AG_SKEW_CLOSE
-        // Closes the warp_m skew the AG prologue opens, so the next queue tile starts even. Only
-        // the fused AG kernels open that skew; the standalone GEMM has no persistent tile loop.
+        // Closes the warp_m skew the AG prologue opens; the standalone GEMM never opens one.
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
         }

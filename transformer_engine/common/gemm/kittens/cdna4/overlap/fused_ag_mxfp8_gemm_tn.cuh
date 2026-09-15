@@ -30,10 +30,9 @@ struct TileDesc {
 
 constexpr int BLOCK_K = 128;
 
-// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
-// backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
-// is templated on them and get_persistent_fn() dispatches, as dispatch_gemm() does in
-// mxfp8_gemm.cpp. CBSZ is the A operand (weights), BLGP the B operand (gathered activations).
+// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, per operand -- HYBRID recipes mix them, so the
+// kernel is templated and get_persistent_fn() dispatches. CBSZ is the A operand (weights), BLGP
+// the B operand (gathered activations).
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -122,9 +121,8 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     if ((int)blockIdx.x < NGATH) {
         char *gb = (char *)&B[{0, 0, 0, 0}];
         if (interleave_scales) {
-            // scale_A_smem is 2 KiB and untouched until this block joins the compute queue, which
-            // it cannot do until the gather below is finished -- so stage the pack in it rather
-            // than growing the kernel's LDS footprint.
+            // scale_A_smem is untouched until this block joins the compute queue, which it cannot
+            // do before the gather finishes -- so stage the pack there rather than grow the LDS.
             static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
                           "scale_A_smem too small for pack_tile_scales_from staging");
             gather_all_plus_scales<1, true, 32, 8>(

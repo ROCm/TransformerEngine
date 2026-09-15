@@ -144,18 +144,10 @@ __device__ __forceinline__ void gemm_epilogue(
     kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
 }
 
-// Epilogue for the FLIPPED NN kernel. With the activation in the A slot and the weight in the B
-// slot the accumulator already carries C's orientation: its M axis is the activation extent
-// (BLAS N, C's rows) and its N axis is the weight extent (BLAS M, C's cols). So the col_l tiles
-// store straight through kittens::store with a coord<RT_C> -- no RT_C_T and no transposes.
-//
-// The consequence for the epilogue branches is that everything keyed to an output *column* of C
-// moved axis. BLAS bias has length m = the weight extent, which is now the accumulator's N axis,
-// so read_bias() is indexed by the column the lane owns (lane % base_tile_cols, plus the subtile
-// column j) and is CONSTANT across the register index -- the mirror image of the [N,M] epilogue,
-// where bias varied with the register index and was shared by cA/cB. Here it is shared by cA/cC
-// (low weight half) and cB/cD (high weight half), and .x/.y of a data slot get the same value
-// because they differ along M, not N.
+// Epilogue for the NN kernel, whose operand slots are flipped: the accumulator already carries
+// C's orientation, so the col_l tiles store straight through kittens::store with no transpose.
+// BLAS bias has length m = the accumulator's N axis, so it is CONSTANT across the register index
+// and shared by cA/cC (low weight half) and cB/cD (high) -- the mirror of gemm_epilogue.
 template<GemmEpilogue EPILOGUE, bool ACCUMULATE, typename RT_C, typename OutGL, typename AuxGLType>
 __device__ __forceinline__ void gemm_epilogue_nn(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -445,11 +437,10 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 
     int k_iters = K / BLOCK_K;
 
-    // FLIPPED operand slots: the A slot holds the activation (K-contiguous [M,K], plain
-    // subtile_inplace reads) and the B slot the weight (K-major [K,N], ds_read_*_tr via
-    // b_col_off). The transposing operand now sits on the N axis, replicated by WARPS_ROW=2
-    // warps rather than the M axis's WARPS_COL=4, and the accumulator lands already in C's
-    // [M,N] orientation, so the writeback needs no transpose.
+    // FLIPPED operand slots: the A slot holds the activation (K-contiguous [M,K], plain reads),
+    // the B slot the weight (K-major [K,N], ds_read_*_tr via b_col_off). The transposing operand
+    // therefore sits on N, replicated by WARPS_ROW=2 warps instead of M's WARPS_COL=4, and the
+    // accumulator lands already in C's [M,N] orientation so the writeback needs no transpose.
     using ST_A     = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<BLOCK_K, HALF_COL, kittens::st_16x128_s>;
     using RT_A     = kittens::rt_fp8e4m3<REG_M, BLOCK_K>;
@@ -476,20 +467,16 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
     int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
 
-    // GROUPED: the slot flip left the blockIdx -> (m_tile, n_tile) mapping alone, so experts still
-    // partition n_tile (the activation / BLAS N axis) exactly as in the TN kernel and the expert
-    // lookup is unchanged. What did move is which *slot* each per-expert array feeds: the host
-    // hands a_expert_ptrs the activation and b_expert_ptrs the weight (see grouped_mxfp8_gemm).
+    // GROUPED: experts still partition n_tile (the activation / BLAS N axis) as in TN. What the
+    // slot flip moved is which slot each per-expert array feeds -- see grouped_mxfp8_gemm.
     int expert_id = 0;
     if constexpr (GROUPED) {
         expert_id = hk_upper_bound(tile_offsets, num_experts, n_tile);
         n_tile -= tile_offsets[expert_id];
     }
 
-    // The blockIdx -> (m_tile, n_tile) mapping above is untouched; only the operand roles move.
-    // m_tile still indexes the weight (BLAS M), n_tile the activation (BLAS N). After the flip the
-    // activation feeds the A slot and the weight the B slot, so the accumulator's M axis is n_tile
-    // and its N axis is m_tile -- which is exactly C's [N_blas, M_blas] memory order.
+    // m_tile indexes the weight (BLAS M), n_tile the activation (BLAS N). The activation feeds
+    // the A slot, so the accumulator's M axis is n_tile and its N axis m_tile -- C's memory order.
     int a_half0      = n_tile * 2;
     int a_half1      = a_half0 + 1;
     int b_half0      = m_tile * 2;
@@ -504,8 +491,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     [[maybe_unused]] int sb_batch  = GROUPED ? expert_id * k_iters * total_m_tiles + m_tile : m_tile;
     [[maybe_unused]] int sb_stride = total_m_tiles;
     if constexpr (GROUPED) {
-        // Experts partition the activation axis, which is now the A side: sb_tile_offsets carries
-        // the per-expert cursor into the packed activation scales (the roles of sa/sb swapped too).
+        // sb_tile_offsets is the activation's per-expert cursor, which is now the A side.
         sa_batch  = sb_tile_offsets[expert_id] + n_tile;
         sa_stride = tile_offsets[expert_id + 1] - tile_offsets[expert_id];
     }
@@ -912,11 +898,8 @@ static void launch_gemm_typed(
                 N, K, tiles_M, tiles_N);
         } else if constexpr (!TRANSA && !TRANSB) {
             // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N,K]) and
-            // the B slot takes A's tensor (the weight, K-major [K,M]). The scale buffers follow:
-            // packed_sa carries the activation's <64,4> tiles (one per 256 columns of N) and
-            // packed_sb the weight's <32,8> hi/lo pairs (one pair per 256 columns of M).
-            // gl_C and aux_gl are unchanged: the kernel keeps m_tile on the weight axis and
-            // n_tile on the activation axis, so the accumulator lands in C's existing [N,M] memory.
+            // the B slot takes A's tensor (the weight, K-major [K,M]); the scale buffers follow.
+            // gl_C and aux_gl are unchanged -- the accumulator lands in C's existing [N,M] memory.
             gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)N, (size_t)K);
             gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
             gl_scale_rt gl_SA_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
@@ -977,10 +960,9 @@ static void dispatch_gemm(
     const void *bias, int bias_dtype, void *aux_gelu,
     int M, int N, int K, OutDtype out_dtype, OutDtype aux_dtype, hipStream_t stream) {
 
-    // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes). CBSZ names the kernel's A-slot
-    // format and BLGP its B-slot, so for NN -- where the slots hold the opposite tensors from the
-    // BLAS operands -- the two codes swap with them. Same-format pairs are unaffected, which is why
-    // only the mixed e4m3/e5m2 cases expose a mistake here.
+    // CBSZ/BLGP: 0 = e4m3, 1 = e5m2. CBSZ names the kernel's A-SLOT format and BLGP its B-slot,
+    // so for NN -- whose slots hold the opposite tensors -- the codes swap with them. Only mixed
+    // e4m3/e5m2 pairs expose a mistake here.
     constexpr bool NN_SLOTS_SWAPPED = !TRANSA && !TRANSB;
     const int a_slot_fp8 = NN_SLOTS_SWAPPED ? b_fp8 : a_fp8;
     const int b_slot_fp8 = NN_SLOTS_SWAPPED ? a_fp8 : b_fp8;
@@ -1068,10 +1050,8 @@ static bool mxfp8_gemm_impl(
     int tiles_M = M / BLOCK_ROW;
     int tiles_N = N / BLOCK_COL;
 
-    // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair). NN has
-    // its operand slots flipped, so the activation (dim N) feeds the A slot and the weight (dim M)
-    // the B slot; every other layout keeps A->A, B->B. If they overflow the caller's budget we
-    // return false and fall back to hipBLASLt.
+    // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair). NN's
+    // slots are flipped, so the activation (dim N) feeds the A slot; every other layout is A->A.
     constexpr bool NN_FLIP = !TRANSA && !TRANSB;
     int a_slot_tiles = NN_FLIP ? tiles_N : tiles_M;
     int b_slot_tiles = NN_FLIP ? tiles_M : tiles_N;
@@ -1178,12 +1158,9 @@ static bool grouped_mxfp8_gemm(
     if (K % BLOCK_K != 0 || K < 256) { warn_fallback("HK-grouped", "K not 128-aligned or < 256"); return false; }
     if (num_experts <= 0) { warn_fallback("HK-grouped", "num_experts <= 0"); return false; }
 
-    // NN has its operand slots flipped (see mxfp8_nn_mainloop.inc): the activation feeds the A
-    // slot and the weight the B slot. Everything the host builds per-slot -- pack geometry,
-    // workspace sizes, scale gl extents, expert pointer arrays -- follows that swap. The expert
-    // partitioning itself does not move: experts still divide the activation (BLAS N) axis, which
-    // both kernels still map to n_tile, so tile_offsets/sb_tile_offsets keep their meaning and
-    // MXFP8GroupedGemmArgs (scalar M, per-expert N_array) needs no change.
+    // NN's operand slots are flipped (see mxfp8_nn_mainloop.inc), so everything the host builds
+    // per-slot follows that swap. The expert partitioning does not move: experts still divide the
+    // activation (BLAS N) axis, so tile_offsets/sb_tile_offsets keep their meaning.
     const bool nn_flip = !transa && !transb;
 
     int tiles_M = M / BLOCK_COL;
@@ -1207,8 +1184,7 @@ static bool grouped_mxfp8_gemm(
     if (grid == 0) return true;
 
     // Slot geometry, not tensor identity: the A slot is <64,4> (256 lane words per 256-wide source
-    // tile), the B slot <32,8> (512 words, a hi/lo tile pair). The weight (uniform extent M) is
-    // packed once per expert, the activation once per expert at its own N_g.
+    // tile), the B slot <32,8> (512 words, a hi/lo tile pair).
     size_t a_slot_words   = nn_flip ? (size_t)k_iters * total_N
                                     : (size_t)k_iters * num_experts * M;
     size_t b_slot_words   = nn_flip ? (size_t)2 * k_iters * num_experts * M
@@ -1242,15 +1218,14 @@ static bool grouped_mxfp8_gemm(
     hipMemcpyAsync((void *)d_sa_ptrs, scale_A_array,
                    num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
 
-    // Which packed buffer each tensor lands in follows its slot. Per-expert stride for the fused
-    // weight pack is in lane words: k_iters * M for <64,4>, twice that for <32,8>'s hi/lo pair.
+    // Per-expert stride for the fused weight pack, in lane words: k_iters*M for the A slot's
+    // <64,4>, twice that for the B slot's <32,8> hi/lo pair.
     uint32_t *weight_pk  = nn_flip ? sb_pk : sa_pk;
     uint32_t *act_cursor = nn_flip ? sa_pk : sb_pk;
     int weight_expert_stride = nn_flip ? 2 * k_iters * M : k_iters * M;
 
-    // sb_tile_offsets is the activation's per-expert cursor in 256-wide scale tiles (k_iters tiles
-    // per 256 columns). It is slot-agnostic: the A slot reads it as-is, the B slot doubles it for
-    // the hi/lo pair, and the kernel already does whichever applies.
+    // The activation's per-expert cursor in 256-wide scale tiles. Slot-agnostic: the kernel reads
+    // it as-is for the A slot and doubles it for the B slot's hi/lo pair.
     std::vector<int> h_sb_tile_offsets(num_experts + 1);
     int sb_tile_cursor = 0;
     KITTENS_BOOL_SWITCH(!transa, COLWISE_A,
@@ -1306,8 +1281,7 @@ static bool grouped_mxfp8_gemm(
 
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr, a1, a2);
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, b1, b2);
-    // B scale buffer is 2 tiles per source tile for the hi/lo group split. NN holds the activation
-    // (total_n_tiles tiles) in the A slot and the weight (num_experts * tiles_M) in the B slot.
+    // B scale buffer is 2 tiles per source tile for the hi/lo group split.
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(sa_pk),
                       nn_flip ? k_iters * total_n_tiles : num_experts * k_iters * tiles_M,
                       nullptr, nullptr, nullptr);
@@ -1326,11 +1300,9 @@ static bool grouped_mxfp8_gemm(
                 (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
                 total_N, K, tiles_M, total_n_tiles);
         } else if (!transa && !transb) {
-            // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N_g, K])
-            // and the B slot takes A's tensor (the weight, K-major [K, M]); the expert pointer
-            // arrays swap with them. The activation view is sized by the widest expert so the
-            // buffer descriptor covers every per-expert base; the weight view is uniform.
-            // gl_C is unchanged -- the accumulator still lands in C's [N, M] memory.
+            // FLIPPED slots: the A slot takes B's tensor (the activation) and the B slot A's (the
+            // weight); the expert pointer arrays swap with them. The activation view is sized by
+            // the widest expert so the buffer descriptor covers every per-expert base.
             gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr,
                               (size_t)max_N, (size_t)K);
             gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr,

@@ -30,10 +30,9 @@ struct TileDesc {
 
 constexpr int BLOCK_K = 128;
 
-// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, chosen per operand. HYBRID recipes quantize
-// backward tensors e5m2 while forward ones stay e4m3, so dgrad/wgrad legitimately mix; the kernel
-// is templated on them and get_persistent_fn() dispatches, as dispatch_gemm() does in
-// mxfp8_gemm.cpp. CBSZ is the A operand (gathered activations), BLGP the B operand (weights).
+// MFMA cbsz/blgp format codes: 0 = e4m3, 1 = e5m2, per operand -- HYBRID recipes mix them, so the
+// kernel is templated and get_persistent_fn() dispatches. CBSZ is the A operand (gathered
+// activations), BLGP the B operand (weights).
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -109,9 +108,8 @@ void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_st
     }
 }
 
-// Epilogue for the AG path: C is [M, N_TOTAL] (row index = A-operand row), the convention
-// fused_ag_gemm_nn.cuh uses. Stores straight from the col_l accumulators via store_c_tile --
-// no transpose, unlike the non-AG mxfp8_gemm.cpp epilogue whose C is [N, M].
+// Epilogue for the AG path: C is [M, N_TOTAL], the convention fused_ag_gemm_nn.cuh uses, so the
+// col_l accumulators store untransposed -- unlike mxfp8_gemm.cpp's epilogue, whose C is [N, M].
 template<typename RT_C>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -131,10 +129,9 @@ __device__ __forceinline__ void gemm_epilogue(
     store_c_tile<bf16>(c_base, cD, rf1, cf1, N_TOTAL, lane_epi);
 }
 
-// BULK=true detaches the all-gather from the GEMM: the gather lands in `gather_dst` instead of
-// the A operand, and the compute never waits on arrivals because it does not read the gathered
-// bytes. The gathered tensor is untyped here -- gather_copy_wg moves bytes and nothing in this
-// kernel interprets them, so its dtype and scales are the caller's business.
+// BULK=true detaches the all-gather from the GEMM: the gather lands in `gather_dst` instead of the
+// A operand, and the compute never waits on arrivals because it does not read the gathered bytes,
+// whose dtype and scales are then the caller's business.
 template <int CBSZ, int BLGP, bool BULK>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m3, 1, 1, -1, -1> B,
@@ -163,14 +160,12 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         char *gb = (char *)&A[{0, 0, 0, 0}];
         if constexpr (BULK) gb = gather_dst;
         if constexpr (BULK) {
-            // The gathered tensor is not a GEMM operand here, so its scales are moved verbatim by
-            // gather_scales and there is nothing to pack. run_bulk_mxfp8 never enables interleave;
-            // this guard keeps the kernel correct if that ever changes.
+            // run_bulk_mxfp8 never enables interleave; this guard keeps the kernel correct if it
+            // ever does, since the gathered tensor is not a GEMM operand here.
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
         } else if (interleave_scales) {
             // scale_A_smem is untouched until this block joins the compute queue, which it cannot
-            // do before the gather below finishes -- so stage the pack there rather than growing
-            // the kernel's LDS footprint. Same reasoning, same staging size as the TN path.
+            // do before the gather finishes -- so stage the pack there rather than grow the LDS.
             static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
                           "scale_A_smem too small to stage KPP=2 scale tiles");
             gather_all_plus_scales<1, true>(

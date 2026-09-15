@@ -265,8 +265,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
              "fused AG+GEMM reached with an unsupported epilogue");
   bool is_bf16 = A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16;
   // Either FP8 format, independently per operand: HYBRID recipes quantize the backward tensors
-  // e5m2 while the forward ones stay e4m3, so dgrad/wgrad legitimately mix. The format reaches the
-  // MFMA through the CBSZ/BLGP codes filled in below.
+  // e5m2 while the forward ones stay e4m3, so dgrad/wgrad legitimately mix.
   auto is_fp8_dt = [](DType dt) {
     return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
   };
@@ -283,8 +282,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
     NVTE_ERROR("fused AG+GEMM with fp8 UB only supports MXFP8_1D_SCALING recipe");
   }
 
-  // MXFP8 supports TN and NN. B is consumed row-wise in both (transb is false either way);
-  // A is row-wise for TN and column-wise for NN, matching the scale selection just below.
+  // B is consumed row-wise in both layouts; A is row-wise for TN and column-wise for NN.
   if (is_fp8) {
     if (transa) {
       NVTE_CHECK(A_tensor->has_data(),
@@ -311,10 +309,8 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
              " tp_size=", tp_size, ")");
 
   const int rank_round_tp = comm->myrank - tp_id;
-  // Row-wise and column-wise MXFP8 data are quantized independently, so the operand buffer has to
-  // come from the same usage as the scales picked above: row-wise for TN, column-wise for NN.
-  // TensorWrapper::dptr() is hard-wired to the row-wise buffer -- see cublaslt_gemm.cu:185 for the
-  // same pairing on the non-overlapped path.
+  // Row-wise and column-wise MXFP8 are quantized independently, so the data must come from the
+  // same usage as the scales picked above; dptr() is hard-wired to the row-wise buffer.
   KittensAgGemmArgs args{
       (is_fp8 && !transa) ? A.columnwise_dptr() : A.dptr(), ubuf.dptr(), D.dptr(), scale_A, scale_B,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
@@ -325,11 +321,9 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. These name TE's operands, not the
-    // kernel's slots: a_fp8_code is the weight's format (A) and b_fp8_code the gathered
-    // activation's (B, with B.dptr() == ubuf.dptr(), checked above). comm_gemm.cpp binds them to
-    // CBSZ/BLGP for the layout it launches -- TN puts the weight in the kernel's A slot, NN the
-    // gathered activation -- so this side stays BLAS-canonical and never re-derives transa.
+    // e4m3 -> 0, e5m2 -> 1, as in mxfp8_gemm.cpp. These name TE's operands, not the kernel's
+    // slots; comm_gemm.cpp binds them to CBSZ/BLGP for the layout it launches, so this side
+    // stays BLAS-canonical and never re-derives transa.
     args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_fused_ag_gemm_mxfp8(args);
@@ -389,8 +383,7 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
   };
   const bool bulk_bf16 = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
                          D.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16;
-  // The GEMM operands are FP8 (either format, independently); the gathered tensor in `ubuf` is
-  // moved as raw bytes, so its dtype is not constrained here.
+  // The gathered tensor in `ubuf` is moved as raw bytes, so its dtype is not constrained here.
   const bool bulk_fp8 = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype()) &&
                         D.dtype() == DType::kBFloat16;
   NVTE_CHECK(bulk_bf16 || bulk_fp8, "fused bulk AG reached with an unsupported operand type");
@@ -418,8 +411,7 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensAgGemmArgs args{
-      // Row-wise and column-wise MXFP8 are quantized independently, so the operand buffer must
-      // come from the same orientation as the scales chosen above: NN takes A column-wise.
+      // NN takes A column-wise, matching the scales chosen above.
       bulk_fp8 ? A.columnwise_dptr() : A.dptr(), B.dptr(), D.dptr(), scale_A, scale_B,
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
@@ -432,8 +424,6 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
       workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
   if (bulk_fp8) {
     if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) return false;
-    // Same as the fused path: these name TE's operands, and comm_gemm.cpp binds them to the
-    // kernel's CBSZ/BLGP slots. Bulk is NN only, so there the A slot holds B and the B slot A.
     args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_bulk_ag_gemm_mxfp8(args);

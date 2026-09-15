@@ -3,21 +3,9 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 //! Main K-loop for the MXFP8 NN GEMM, shared by mxfp8_gemm_nn_kernel (mxfp8_gemm.cpp) and the
-//! fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_nn.cuh): the steady-state loop plus both K-tile
-//! epilogues and the skew-closing barrier, i.e. everything up to the C writeback, matching the
-//! boundary tn_mainloop.inc draws. Included inside the persistent tile loop with the stage/scale
-//! ping-pong state (tic/toc, tic_scales/toc_scales), the LDS handles and the swizzle tables in
-//! scope. Not a header: no include guard, and it is a statement, not a declaration.
-//!
-//! OPERAND SLOTS (flipped experiment): the A slot holds the ACTIVATION, K-contiguous [M,K], read
-//! with subtile_inplace and indexed {0,0,a_half,k}; the B slot holds the WEIGHT, K-major [K,N], so
-//! it takes the ds_read_*_tr path (b_col_off) and is indexed {0,0,k,b_half}. The transposing
-//! operand therefore sits on the N axis, which WARPS_ROW=2 warps replicate, instead of the M axis,
-//! which WARPS_COL=4 warps replicate -- halving the tr traffic. The accumulator comes out in C's
-//! [M,N] orientation, so neither caller transposes on writeback.
-//!
-//! Callers supply a_half0/a_half1 (A-slot tile halves) and b_half0/b_half1 (B-slot tile halves).
-//! What is left in the caller is only the C writeback.
+//! fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_nn.cuh); only the C writeback is left to the caller.
+//! Slots are FLIPPED: the A slot holds the ACTIVATION (K-contiguous, plain subtile_inplace reads),
+//! the B slot the WEIGHT (K-major, so it takes the ds_read_*_tr path via b_col_off).
 #pragma unroll 2
         for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
             if (k + 1 < k_iters) {
@@ -179,8 +167,7 @@
         }
 
 #ifdef MXFP8_AG_SKEW_CLOSE
-        // Closes the warp_m skew the AG prologue opens, so the next queue tile starts even. Only
-        // the fused AG kernels open that skew; the standalone GEMM has no persistent tile loop.
+        // Closes the warp_m skew the AG prologue opens; the standalone GEMM never opens one.
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
         }

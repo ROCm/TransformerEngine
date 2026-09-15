@@ -9,9 +9,8 @@
 #include <cstddef>
 #include <vector>
 
-// Pieces every fused comm+GEMM overlap kernel shares. Each kernel keeps its own namespace
-// and pulls these in with `using namespace hk_overlap;`, so unqualified uses in the kernel
-// bodies keep resolving exactly as they did when each file carried its own copy.
+// Pieces shared by the fused comm+GEMM overlap kernels; each pulls them into its own namespace
+// with `using namespace hk_overlap;`.
 namespace hk_overlap {
 
 constexpr int SCHED_ROUNDS = 2;
@@ -27,22 +26,17 @@ constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
 constexpr int K_STEP       = 64;
 constexpr int NUM_THREADS  = NUM_WARPS * kittens::WARP_THREADS;
 
-// Persistent-grid ceiling shared by the bf16 kernels. The MXFP8 kernels read HK_GRID_CAP at
-// launch instead, so they do not use this.
+// bf16 kernels only; the MXFP8 pair reads HK_GRID_CAP at launch instead.
 constexpr int GRID_CAP     = 256;
 
 using G_group = kittens::group<NUM_WARPS>;
 
-// K_STEP above is the bf16 step. The mxfp8 kernels step 128 and declare their own K_STEP inside
-// their own namespace, which shadows this one for them; it is not a shared constant in the way
-// the tile geometry above is.
+// K_STEP above is the bf16 step; the mxfp8 kernels shadow it with 128 in their own namespace.
 
-// TileDesc is deliberately NOT here: the bf16 NN kernel's descriptor carries an extra split-K
-// index (`ks`) that the other three kernels have no use for. Each kernel declares its own, which
-// is why bucketize_by_xcd below is templated on the descriptor type.
+// TileDesc is deliberately not shared: the bf16 NN descriptor carries an extra split-K index that
+// the other three have no use for, which is why bucketize_by_xcd is templated on the type.
 
-// Per-PE pointer to each peer's operand buffer. The element type is what differs between
-// the bf16 and mxfp8 kernels, so it is the template parameter.
+// Per-PE pointer to each peer's operand buffer; the element type differs per kernel.
 template <typename T>
 struct PeerPtrsT {
     T *base[8];
@@ -123,45 +117,17 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
     }
 }
 
-// ---------------------------------------------------------------------------------------
-// Interleaved scale gather+pack, shared by the MXFP8 TN and NN fused AG+GEMM kernels.
-//
-// These live here rather than in one kernel header because the host side (comm_gemm.cpp,
-// run_mxfp8) hands BOTH layouts the same contract when interleaving is on: it skips
-// gather_scales and packs only the local rank, on the promise that the gatherer blocks pack
-// the peers' rows. A layout that has the flag but not the implementation silently produces
-// garbage -- which is exactly what NN did before these were shared.
-//
-// The activation scales are row-wise in both layouts and packed_sa has the same layout in
-// both (comm_gemm.cpp uses the same launch_pack_scales<false,...> / pack_local_scales_kernel
-// for TN and NN), so this code is genuinely layout-independent.
-// ---------------------------------------------------------------------------------------
-// Packs one 256-row tile of A scales from a peer's buffer into the lane-native layout the GEMM
-// reads. Same transform as pack_scales_kernel (mxfp8_gemm.cpp) for COLWISE=false; called by the
-// gatherer block that is already fetching that tile, so the raw scales never reach global memory.
-// A gather tile is BLOCK_ROW=256 rows, which is also pack_scales_kernel's TILE_WORDS, so the
-// tile <-> cblk mapping is 1:1.
-//
-// Each block handles the contiguous k-range [sub*kpb, +kpb) and writes tile_id = ki*tiles_per_col
-// + cblk, so blocks never touch the same output.
 // Packs one 256-row tile of the gathered operand's scales into the lane-native layout the GEMM
-// reads, straight from the peer's buffer so the raw scales never reach global memory.
+// reads, straight from the peer's buffer so the raw scales never reach global memory. Shared by
+// the MXFP8 TN and NN kernels: the host (run_mxfp8) skips gather_scales when interleaving is on,
+// so a layout declaring SUPPORTS_INTERLEAVE without calling this silently packs garbage.
 //
-// <STEP, NG> selects the operand geometry and must match the pack_scales_kernel<_, STEP, NG>
-// instantiation mxfp8_gemm.cpp uses for that operand, because both write the same buffer layout:
-//     ln[(tile_id * NG + grp) * 64 + lane] = pack_scales(tile, grp * STEP)
-// A side is <64, 4> (256 output words/tile), B side is <32, 8> (512, the hi/lo tile pair).
+// <STEP, NG> must match the pack_scales_kernel<_, STEP, NG> instantiation mxfp8_gemm.cpp uses for
+// that operand -- both write ln[(tile_id * NG + grp) * 64 + lane]. A side <64,4>, B side <32,8>.
+// pack_scales reads 64 words past the last window start, hence the PAD staging stride below.
 //
-// Per k-iter the tile's scales are 256 rows x 4 bytes (BLOCK_K=128 elements / 32 per scale block),
-// i.e. one dword per row. NG waves each emit 64 dwords, one per lane, reading a STEP-strided
-// window of the staged tile. KPP = NUM_WARPS / NG k-iters run at once so all 8 waves stay busy:
-// two for <64,4>, one for <32,8>. pack_scales reads 64 words past the last window start, so the
-// staging stride is PAD = (NG-1)*STEP + 64 words with everything at/after row 256 zero-filled --
-// for <64,4> that is exactly 256, i.e. unchanged.
-//
-// Blocks split the k range: block `sub` takes a contiguous [k0,k1) out of gath_wg. Contiguous
-// rather than strided so each block's reads stay in one span per row. Blocks write disjoint
-// tile_ids, so the only sync is around the staging buffer.
+// Blocks take a contiguous [k0,k1) out of gath_wg and write disjoint tile_ids, so the only sync
+// is around the staging buffer.
 template <int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
@@ -186,9 +152,7 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     if (k0 >= k_iters) return;
 
     // Staging is KPP slots of PAD words. <64,4> lands exactly on KPP*PAD == NUM_THREADS, so it
-    // keeps the original straight-line stage -- one dword per thread, no loop, no bounds test.
-    // That branch is kept verbatim so templating this function is a provable no-op for the A
-    // side; only a geometry that does not tile the block exactly pays for the general path.
+    // stages straight-line: one dword per thread, no loop, no bounds test.
     constexpr bool EXACT = (KPP * PAD == NUM_THREADS);
     static_assert(KPP * PAD <= 2 * 256, "staging exceeds the caller's scale_A_smem budget");
 
@@ -223,8 +187,6 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     }
 }
 
-// STEP/NG select the packed-scale geometry, forwarded to pack_tile_scales_from: <64,4> for an
-// operand with 4 scale groups per tile, <32,8> for one with 8.
 template <int U, bool NT, int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
@@ -243,13 +205,8 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
 
     __syncthreads();
 
-    // Scales for this tile, read straight from the peer. Same ordering guarantee as the data copy
-    // above: ag_ready_kernel has already established that peers finished writing their chunks.
-    //
-    // Split by k-iteration, one contiguous range per block. tile_id = ki*tiles_per_col + cblk, so
-    // blocks write disjoint packed_sa entries and need no coordination. Trip counts differ across
-    // blocks when gath_wg does not divide k_iters; that is fine, __syncthreads() is per block and
-    // every thread within a block runs the same count.
+    // Ordering comes from ag_ready_kernel, same as the data copy above. Trip counts differ across
+    // blocks when gath_wg does not divide k_iters -- fine, __syncthreads() is per block.
     {
         const char *peer_scales = (const char *)peers.base[peer] + scale_base
                                 + (size_t)peer * scale_chunk_bytes
@@ -260,8 +217,8 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
     }
     __syncthreads();
 
-    // Fence AFTER the pack so it covers the packed_sa stores as well as the data copy: a consumer
-    // that sees the arrival count reach gath_wg must see both.
+    // Fence AFTER the pack so it covers the packed_sa stores too, not just the data copy: a
+    // consumer that sees the arrival count reach gath_wg must see both.
     if (NT) {
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
     } else {

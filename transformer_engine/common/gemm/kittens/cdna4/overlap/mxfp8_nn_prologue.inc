@@ -2,11 +2,9 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Kernel setup for the NN fused AG+GEMM: tile types, shared buffers, warp ids, swizzle
-//! tables, buffer SRDs and LDS handles. Included after the operand dims are computed and before
-//! the gather. Not a header: no include guard, and it is a statement sequence, not a declaration.
-//! It DECLARES names the rest of the kernel body uses (As, Bs, sw_A, a_srd, warp_m, ...), so the
-//! include site is where those come into scope. This mirrors upstream tn_prologue.inc.
+//! Kernel setup for the NN fused AG+GEMM, mirroring upstream tn_prologue.inc. It DECLARES the
+//! names the rest of the kernel body uses (As, Bs, sw_A, a_srd, warp_m, ...), so the include site
+//! is where those come into scope.
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N_TOTAL / BLOCK_COL;
 
@@ -35,9 +33,8 @@
     constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
     constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
     uint32_t sw_A[copies_A], sw_B[copies_B];
-    // Ground-truth spelling: mxfp8_gemm.cpp's main loop reads A_local/B_local, which are its
-    // per-expert views of A/B for the grouped path. The AG path has no grouped variant, so these
-    // are plain aliases -- they exist so the main loop text matches mxfp8_gemm.cpp verbatim.
+    // Aliases: the AG path has no grouped variant, but the shared main loop spells its operands
+    // A_local/B_local, which in mxfp8_gemm.cpp are the per-expert views.
     const auto &A_local = A;
     const auto &B_local = B;
 
