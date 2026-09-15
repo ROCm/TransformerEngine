@@ -27,7 +27,6 @@ struct TileDesc {
     int ks;   // split-K slice; only this kernel splits K
 };
 
-constexpr int K_STEP = 64;
 
 template <int U, bool NT>
 __device__ __forceinline__

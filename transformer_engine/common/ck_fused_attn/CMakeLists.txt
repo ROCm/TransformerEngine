@@ -24,6 +24,10 @@ if(NOT _gfx1250_idx EQUAL -1)
 endif()
 
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
+if (DEFINED ENV{NVTE_QOLA_DIR} AND NOT $ENV{NVTE_QOLA_DIR} STREQUAL "")
+  set(__QOLA_DIR $ENV{NVTE_QOLA_DIR})
+  message(STATUS "Using QoLA from NVTE_QOLA_DIR=${__QOLA_DIR}.")
+endif()
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola/third_party/aiter")
 if (DEFINED ENV{NVTE_AITER_SOURCE_DIR} AND NOT $ENV{NVTE_AITER_SOURCE_DIR} STREQUAL "")
   set(__AITER_SOURCE_DIR $ENV{NVTE_AITER_SOURCE_DIR})
@@ -224,7 +228,7 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 #pragma in CK headers which is not supported by the compiler used to build TE.
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=1 -DFAV_NATIVE_ON=1 -Wno-unused-value -Wno-unknown-warning-option)
+    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -Wno-unused-value -Wno-unknown-warning-option)
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the

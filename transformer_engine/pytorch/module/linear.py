@@ -22,7 +22,10 @@ from transformer_engine.pytorch.torch_version import torch_version
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
+    fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
+    fused_bulk_rs_eligible,
+    _ub_is_fused,
     ub_overlap_disabled,
     get_dummy_wgrad,
     get_ub,
@@ -1665,7 +1668,9 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_ag_dgrad = False
                 self.ub_overlap_rs_dgrad = False
                 self.ub_bulk_dgrad = False
-            if ub_overlap_disabled(ub_name + "_wgrad"):
+            if ub_overlap_disabled(ub_name + "_wgrad") or (
+                IS_HIP_EXTENSION and not _ub_is_fused(ub_name + "_wgrad")
+            ):
                 self.ub_bulk_wgrad = False
 
         if any(
@@ -1868,7 +1873,12 @@ class Linear(TransformerEngineBaseModule):
             for weight in self.weight_names:
                 set_tensor_model_parallel_attributes(
                     tensor=getattr(self, weight),
-                    is_parallel=True,
+                    # A weight is only tensor-model-parallel when the layer is. For
+                    # parallel_mode=None the weight is replicated on every TP rank, and
+                    # marking it parallel makes downstream consumers (e.g. Megatron's
+                    # param_is_not_tensor_parallel_duplicate) admit it to the global
+                    # gradient norm once per rank instead of once.
+                    is_parallel=self.parallel_mode is not None,
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
@@ -2015,12 +2025,27 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_dgrad = False
+            if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
+                self.ub_name + "_fprop", weight_tensor, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_overlap_rs_fprop = False
+            if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
+                self.ub_name + "_dgrad", weight_tensor, None,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+            ):
+                ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8,
                 mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_bulk_dgrad = False
+            if ub_bulk_wgrad and not fused_bulk_rs_eligible(
+                self.ub_name + "_wgrad", inp, weight_tensor,
+                self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
+            ):
+                ub_bulk_wgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             fwd_args = LinearFwdArgs(
                 # tensors

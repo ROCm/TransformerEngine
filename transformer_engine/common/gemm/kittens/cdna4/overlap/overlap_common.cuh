@@ -24,12 +24,18 @@ constexpr int HALF_ROW     = BLOCK_ROW / 2;
 constexpr int HALF_COL     = BLOCK_COL / 2;
 constexpr int REG_M        = BLOCK_ROW / WARPS_ROW / 2;
 constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
+constexpr int K_STEP       = 64;
 constexpr int NUM_THREADS  = NUM_WARPS * kittens::WARP_THREADS;
+
+// Persistent-grid ceiling shared by the bf16 kernels. The MXFP8 kernels read HK_GRID_CAP at
+// launch instead, so they do not use this.
+constexpr int GRID_CAP     = 256;
 
 using G_group = kittens::group<NUM_WARPS>;
 
-// K_STEP is deliberately absent: the bf16 kernels step 64 and the mxfp8 kernels step 128,
-// so it stays with each kernel rather than pretending to be shared.
+// K_STEP above is the bf16 step. The mxfp8 kernels step 128 and declare their own K_STEP inside
+// their own namespace, which shadows this one for them; it is not a shared constant in the way
+// the tile geometry above is.
 
 // TileDesc is deliberately NOT here: the bf16 NN kernel's descriptor carries an extra split-K
 // index (`ks`) that the other three kernels have no use for. Each kernel declares its own, which
@@ -61,6 +67,11 @@ struct XcdBuckets {
 
 __host__ __device__ __forceinline__
 int tile_xcd(int chunk_id) { return chunk_id & (NUM_XCDS_AFF - 1); }
+
+__device__ __forceinline__
+__hip_bfloat16 bf16_add(__hip_bfloat16 x, __hip_bfloat16 y) {
+    return __float2bfloat16(__bfloat162float(x) + __bfloat162float(y));
+}
 
 // Stable-partition the queue into one contiguous segment per XCD.
 template <typename TD>

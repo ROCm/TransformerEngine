@@ -224,6 +224,23 @@ These backends are not enabled by default. The following environment variables c
 When none are set, TE uses multi-stream dispatch (one hipBLASLt GEMM per expert).
 
 
+FlyDSL GEMM Backend on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ROCm TE provides an optional FlyDSL GEMM backend for dense (non-grouped) GEMMs, covering BF16, FP16, FP32, tensor-wise FP8, and MXFP8.
+
+Support matrix:
+
+* **Architecture** -- gfx950 (CDNA4) is the targeted architecture for now. On any other architecture the backend is not selected and TE uses its default GEMM path. gfx942 support is planned for a future release.
+* **FlyDSL package** -- requires ``flydsl >= 0.3.0``. FlyDSL is not a declared dependency of TE (similar to flash-attention); install it yourself with ``pip install flydsl``.
+
+The backend is off by default and enabled via an environment variable:
+
+* ``NVTE_GEMM_BACKEND=FLYDSL`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed. (Leave ``NVTE_GEMM_BACKEND`` unset for the default C++/hipBLASLt backend, or set it to ``TRITON`` for the Triton GEMM backend.)
+* ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` -- emit a warning whenever a GEMM that FlyDSL cannot serve (unsupported shape/config) falls back to the default backend. Off by default.
+
+If ``NVTE_GEMM_BACKEND=FLYDSL`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
@@ -296,6 +313,13 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
+
+MXFP4 GEMM support on ROCm (gfx95x only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+MXFP4 GEMM is supported on gfx95x GPUs for a limited number of configurations. A native hipBLASLt MXFP4 (F4F4) path is available when built against hipBLASLt >= 1.3, alongside the default AITER ``a4w4`` backend.
+To select the GEMM backend, use NVTE_ROCM_USE_HIPBLASLT_MXFP4 environment variable which can take the following values:
+* 0 - use the AITER a4w4 backend (default);
+* 1 - use the hipBLASLt MXFP4 GEMM backend.
 
 Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

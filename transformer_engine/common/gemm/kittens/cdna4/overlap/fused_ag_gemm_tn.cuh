@@ -26,7 +26,6 @@ struct TileDesc {
     int tile_n;
 };
 
-constexpr int K_STEP = 64;
 
 template <int U, bool NT>
 __device__ __forceinline__

@@ -21,6 +21,10 @@
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "../gemm/kittens/comm_gemm.h"
+#endif
+
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
@@ -831,11 +835,22 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   int buffer_chunk_bytes = data_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
+  int num_ubuf_view_chunks = _tp_size;
   if (_is_reduce_scatter) {
-    // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
-    // outputs for reduction at the end of the pipelining.
-    data_bytes = data_bytes / _tp_size * (_tp_size * 2 - 1);
-    _num_ubuf_chunks = _tp_size * 2 - 1;
+#ifdef USE_HIPKITTENS_GEMM
+    if (_fused) {
+      // Fused RS holds two stage halves, alternating on epoch parity.
+      _num_ubuf_chunks = _tp_size * 2;
+      data_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
+    } else
+#endif
+    {
+      // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
+      // outputs for reduction at the end of the pipelining.
+      data_bytes = data_bytes / _tp_size * (_tp_size * 2 - 1);
+      _num_ubuf_chunks = _tp_size * 2 - 1;
+      num_ubuf_view_chunks = _num_ubuf_chunks;
+    }
   }
 
   size_t alloc_bytes = data_bytes;
@@ -850,7 +865,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,
-      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_view_chunks, buffer_shape[1]},
       buffer_dtype);
 
   // Create tensor chunks for easy management

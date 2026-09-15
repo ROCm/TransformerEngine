@@ -267,7 +267,7 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 }
 
 int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args){
-#if FAV_NATIVE_ON
+#if FA_WITH_NATIVE_SPLITKV
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
   return QOLA_NS(mha_fwd_calculate_num_splits)(fmha_args);
 #else
@@ -276,7 +276,7 @@ int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args){
 }
 
 size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args){
-#if FAV_NATIVE_ON
+#if FA_WITH_NATIVE_SPLITKV
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
   return QOLA_NS(mha_fwd_workspace_size)(fmha_args);
 #else
