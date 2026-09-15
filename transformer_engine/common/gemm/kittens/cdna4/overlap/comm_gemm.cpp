@@ -400,8 +400,8 @@ struct Mxfp8Tn {
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
     }
-    static hk_mxfp8_ag_tn::persistent_fn_t launch_fn(int M, int N, int K, int a_code, int b_code) {
-        return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K, a_code, b_code);
+    static hk_mxfp8_ag_tn::persistent_fn_t launch_fn(int M, int N, int K, KittensDType a, KittensDType b) {
+        return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K, a, b);
     }
 };
 
@@ -416,8 +416,8 @@ struct Mxfp8Nn {
     static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
         return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
     }
-    static hk_mxfp8_ag_nn::persistent_fn_t launch_fn(int M, int N, int K, int a_code, int b_code) {
-        return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K, a_code, b_code);
+    static hk_mxfp8_ag_nn::persistent_fn_t launch_fn(int M, int N, int K, KittensDType a, KittensDType b) {
+        return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K, a, b);
     }
 };
 
@@ -580,11 +580,11 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
         }
     }
 
-    // CBSZ names the kernel's A-slot format and BLGP its B-slot, so the codes travel with the
-    // pointers; args.a/b_fp8_code stay BLAS-canonical (weight / gathered activation).
-    const int cbsz_code = L::GATHERED_ON_M ? args.b_fp8_code : args.a_fp8_code;
-    const int blgp_code = L::GATHERED_ON_M ? args.a_fp8_code : args.b_fp8_code;
-    auto launch = L::launch_fn(M, N_TOTAL, K, cbsz_code, blgp_code);
+    // CBSZ names the kernel's A-slot format and BLGP its B-slot, so the dtypes travel with the
+    // pointers; args.a/b_dtype stay BLAS-canonical (weight / gathered activation).
+    const KittensDType cbsz_dt = L::GATHERED_ON_M ? args.b_dtype : args.a_dtype;
+    const KittensDType blgp_dt = L::GATHERED_ON_M ? args.a_dtype : args.b_dtype;
+    auto launch = L::launch_fn(M, N_TOTAL, K, cbsz_dt, blgp_dt);
     if (!launch) return false;   // unexpected operand format pair
 
     fp8e4m3 *const d_weight = static_cast<fp8e4m3 *>(const_cast<void *>(args.A));
@@ -770,7 +770,7 @@ bool run_bulk_mxfp8(const KittensAgGemmArgs &args) {
     }
 
     // The A slot holds the gathered activation, so the CBSZ/BLGP codes swap with the pointers.
-    auto bfn = get_persistent_bulk_fn(M, N_TOTAL, K, args.b_fp8_code, args.a_fp8_code);
+    auto bfn = get_persistent_bulk_fn(M, N_TOTAL, K, args.b_dtype, args.a_dtype);
     if (!bfn) return false;   // unexpected operand format pair
 
     std::lock_guard<std::mutex> lock(g_mu);

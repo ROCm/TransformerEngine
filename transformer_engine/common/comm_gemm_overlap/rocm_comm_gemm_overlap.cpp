@@ -324,8 +324,8 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
     // e4m3 -> 0, e5m2 -> 1, as in mxfp8_gemm.cpp. These name TE's operands, not the kernel's
     // slots; comm_gemm.cpp binds them to CBSZ/BLGP for the layout it launches, so this side
     // stays BLAS-canonical and never re-derives transa.
-    args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
-    args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
     return kittens_fused_ag_gemm_mxfp8(args);
   }
   return kittens_fused_ag_gemm_bf16(args);
@@ -424,8 +424,8 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
       workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
   if (bulk_fp8) {
     if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) return false;
-    args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
-    args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
     return kittens_bulk_ag_gemm_mxfp8(args);
   }
   return kittens_bulk_ag_gemm_bf16(args);

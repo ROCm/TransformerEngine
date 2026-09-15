@@ -101,13 +101,13 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
             for (int u = 0; u < U; u++) v[u] = s4[i + (size_t)u * stride];
 #pragma unroll
             for (int u = 0; u < U; u++) {
-                if (NT) __builtin_nontemporal_store(v[u], &d4[i + (size_t)u * stride]);
+                if constexpr (NT) __builtin_nontemporal_store(v[u], &d4[i + (size_t)u * stride]);
                 else    d4[i + (size_t)u * stride] = v[u];
             }
         }
     }
     for (; i < n4; i += stride) {
-        if (NT) __builtin_nontemporal_store(s4[i], &d4[i]);
+        if constexpr (NT) __builtin_nontemporal_store(s4[i], &d4[i]);
         else    d4[i] = s4[i];
     }
 
@@ -187,6 +187,30 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     }
 }
 
+template <int U, bool NT, typename T>
+__device__ __forceinline__
+void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
+                      const PeerPtrsT<T> &peers, size_t chunk_bytes, unsigned int *arrive) {
+    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
+    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
+
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
+
+    __syncthreads();
+    if constexpr (NT) {
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    } else {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+    __syncthreads();
+}
+
 template <int U, bool NT, int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
@@ -219,7 +243,7 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
 
     // Fence AFTER the pack so it covers the packed_sa stores too, not just the data copy: a
     // consumer that sees the arrival count reach gath_wg must see both.
-    if (NT) {
+    if constexpr (NT) {
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
     } else {
         __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
@@ -227,6 +251,18 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
     __syncthreads();
     if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
     __syncthreads();
+}
+
+template <int U, bool NT, typename T>
+__device__ __forceinline__
+void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrsT<T> &peers,
+                size_t chunk_bytes, unsigned int *arrive) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+    }
 }
 
 template <int U, bool NT, int STEP = 64, int NG = 4>
@@ -243,6 +279,36 @@ void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *g
         gather_peer_tile_plus_scales<U, NT, STEP, NG>(
             peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
             scale_base, scale_chunk_bytes, scale_K, packed_sa, tiles_per_col, k_iters, smem_tile);
+    }
+}
+
+template <typename U, typename RT>
+__device__ __forceinline__
+void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
+    using T               = float;
+    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
+    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
+    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
+    const int col_offset  = lane % RT::base_tile_cols;
+
+#pragma unroll
+    for (int i = 0; i < RT::height; i++) {
+#pragma unroll
+        for (int j = 0; j < RT::width; j++) {
+            const int col = j * RT::base_tile_cols + col_offset;
+#pragma unroll
+            for (int k = 0; k < RT::base_tile_num_strides; k++) {
+                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
+#pragma unroll
+                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
+                    const int idx = l + k * RT::base_tile_stride / packing;
+                    dst_ptr[(row + l * 2)     * row_stride + col] =
+                        kittens::base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
+                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
+                        kittens::base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
+                }
+            }
+        }
     }
 }
 

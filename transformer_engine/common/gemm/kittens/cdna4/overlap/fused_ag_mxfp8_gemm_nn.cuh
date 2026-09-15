@@ -42,72 +42,6 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
     return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
 }
 
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
-                      const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive) {
-    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
-    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
-
-    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
-    size_t o         = (size_t)sub * sub_bytes;
-    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
-
-    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
-
-    __syncthreads();
-    if (NT) {
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-    } else {
-        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
-    __syncthreads();
-}
-
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
-                size_t chunk_bytes, unsigned int *arrive) {
-    const int pi   = (int)blockIdx.x / gath_wg;
-    const int sub  = (int)blockIdx.x % gath_wg;
-    const int peer = pi + (pi >= my_pe ? 1 : 0);
-    for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    }
-}
-
-template <typename U, typename RT>
-__device__ __forceinline__
-void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
-    using T               = float;
-    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
-    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
-    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
-    const int col_offset  = lane % RT::base_tile_cols;
-
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const int col = j * RT::base_tile_cols + col_offset;
-#pragma unroll
-            for (int k = 0; k < RT::base_tile_num_strides; k++) {
-                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
-#pragma unroll
-                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
-                    const int idx = l + k * RT::base_tile_stride / packing;
-                    dst_ptr[(row + l * 2)     * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
-                }
-            }
-        }
-    }
-}
-
 // Epilogue for the AG path: C is [M, N_TOTAL], the convention fused_ag_gemm_nn.cuh uses, so the
 // col_l accumulators store untransposed -- unlike mxfp8_gemm.cpp's epilogue, whose C is [N, M].
 template<typename RT_C>
@@ -382,9 +316,9 @@ using persistent_bulk_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 
                                       unsigned int *, int, int, int, int, size_t, int, XcdBuckets,
                                       int *, hipStream_t);
 
-static persistent_bulk_fn_t get_persistent_bulk_fn(int M, int N, int K, int a_fp8_code,
-                                                   int b_fp8_code) {
+static persistent_bulk_fn_t get_persistent_bulk_fn(int M, int N, int K, KittensDType a_dt, KittensDType b_dt) {
     (void)M; (void)N; (void)K;
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
     if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent_bulk<0, 0>;
     if (a_fp8_code == 0 && b_fp8_code == 1) return launch_persistent_bulk<0, 1>;
     if (a_fp8_code == 1 && b_fp8_code == 0) return launch_persistent_bulk<1, 0>;
@@ -393,8 +327,9 @@ static persistent_bulk_fn_t get_persistent_bulk_fn(int M, int N, int K, int a_fp
 }
 
 // 4-way dispatch on the operand formats, mirroring dispatch_gemm() in mxfp8_gemm.cpp.
-static persistent_fn_t get_persistent_fn(int M, int N, int K, int a_fp8_code, int b_fp8_code) {
+static persistent_fn_t get_persistent_fn(int M, int N, int K, KittensDType a_dt, KittensDType b_dt) {
     (void)M; (void)N; (void)K;
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
     if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent<0, 0>;
     if (a_fp8_code == 0 && b_fp8_code == 1) return launch_persistent<0, 1>;
     if (a_fp8_code == 1 && b_fp8_code == 0) return launch_persistent<1, 0>;
