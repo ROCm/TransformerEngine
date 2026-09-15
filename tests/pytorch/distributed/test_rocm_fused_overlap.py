@@ -45,8 +45,9 @@ reason_for_no_fused = (
     "per-rank chunk."
 )
 
-# Both GEMM layouts the fused AG backend implements; the harness shapes the weight per layout.
+# Both GEMM layouts the fused AG backend implements; NN is selected with the harness' --dgrad.
 FUSED_LAYOUTS = ("TN", "NN")
+FUSED_QUANTIZATIONS = ("none", "mxfp8")
 
 
 def _fused_launch_cmd(nprocs: int):
@@ -69,11 +70,11 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
         "--comm-type=AG",
         "--fused",
     ]
-    # The bulk harness pins its GEMM to NN regardless, so --layout only applies to the p2p path.
+    # The bulk harness pins its GEMM to NN regardless, so the layout only applies to the p2p path.
     test_cmd += (
         ["--bulk-overlap", f"--quantization={quantization}"]
         if bulk
-        else ["--p2p", f"--quantization={quantization}", f"--layout={layout}"]
+        else ["--p2p", f"--quantization={quantization}"] + (["--dgrad"] if layout == "NN" else [])
     )
     return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
@@ -133,20 +134,13 @@ def _assert_numerics_passed(result):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("layout", FUSED_LAYOUTS)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_bf16(nprocs, layout):
-    """bf16 at an aligned shape: the fused backend runs and the result is correct."""
-    _assert_numerics_passed(_run_fused_ag(nprocs, layout=layout))
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_mxfp8(nprocs, layout):
-    """mxfp8 at an aligned shape: the fused backend runs and the result is correct."""
-    if not mxfp8_available:
+def test_fused_ag_overlap(nprocs, quantization, layout):
+    """An aligned shape: the fused backend runs and the result is correct."""
+    if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    _assert_numerics_passed(_run_fused_ag(nprocs, quantization="mxfp8", layout=layout))
+    _assert_numerics_passed(_run_fused_ag(nprocs, quantization=quantization, layout=layout))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -175,23 +169,13 @@ def test_fused_ag_overlap_is_deterministic(nprocs):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_bulk_ag_overlap_bf16(nprocs):
+def test_fused_bulk_ag_overlap(nprocs, quantization):
     """The bulk all-gather that rides in an unrelated GEMM's grid."""
-    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True))
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_bulk_ag_overlap_mxfp8(nprocs):
-    """Bulk all-gather riding in an unrelated MXFP8 GEMM's grid.
-
-    The GEMM operands are MXFP8 while the gathered tensor is independent of them -- bulk overlap
-    exists precisely to hide a collective behind a GEMM it has no data dependency on.
-    """
-    if not mxfp8_available:
+    if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True, quantization="mxfp8"))
+    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True, quantization=quantization))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -270,17 +254,6 @@ def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if quantization == "mxfp8":
-        # The RS kernel does reject MXFP8 -- the "non-bf16 operand" assert below passes. What fails
-        # is the fallback's own backward: a row-parallel Linear bulk-all-gathers grad_output for the
-        # wgrad GEMM via `with torch.cuda.stream(dgrad_send_stream)` (module/linear.py:1193), and
-        # torch.cuda.stream -> _get_device_index rejects ROCm's "hip:N" device strings outright.
-        # That is unrelated to RS, to MXFP8 and to the comm+GEMM overlap kernels; MXFP8 is simply
-        # the first configuration that declines the overlap and therefore reaches that code. The
-        # bf16 cases take the RS path and never fall through to it.
-        # TODO: when RS gains an MXFP8 path, this case should assert the overlap HAPPENS rather
-        # than that it is declined, and this skip should go with it.
-        pytest.skip("ROCm: torch.cuda.stream rejects hip:N devices in Linear's bulk-wgrad AG path")
     result = _run_fused_rs_layer(
         nprocs,
         [
