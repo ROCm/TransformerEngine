@@ -26,7 +26,7 @@ from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.jit import jit_fuser, jit_fuser_dynamic
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import (
@@ -184,7 +184,7 @@ def flash_attn_fwd_second_half_out_correction(
     out_.add_(out_corrected)
 
 
-@jit_fuser
+@jit_fuser_dynamic
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
@@ -196,7 +196,7 @@ def flash_attn_fwd_softmax_lse_correction(
     softmax_lse.copy_(new_scale)
 
 
-@jit_fuser
+@jit_fuser_dynamic
 def flash_attn_fwd_second_half_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
