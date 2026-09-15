@@ -160,7 +160,9 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 // Probe whether AITER's v3 (asm) path will run for the given config, without
 // launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
 // the v3 path is selected; false means the CK v2 path (or no support) would run.
+#if !(FA_WITH_SINK || FA_WITH_NATIVE_SPLITKV) //see implementation comments
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
+#endif
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
 
 // Gen the number of splits for split-KV support.

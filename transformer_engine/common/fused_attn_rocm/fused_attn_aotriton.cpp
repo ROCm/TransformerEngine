@@ -54,6 +54,11 @@ bool is_aotriton_backend_supported(
   int64_t window_size_right) {
 
 #ifdef USE_FUSED_ATTN_AOTRITON
+  // AOTriton has no gfx1250 support.
+  if(cuda::sm_arch(cuda::current_device()) == 125){
+    return false;
+  }
+
   //TODO: release after AOTriton support support Multi-latent attention
   if(head_dim_qk != head_dim_v){
     return false;
