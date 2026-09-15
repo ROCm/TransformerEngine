@@ -21,7 +21,7 @@ const CFG = {
 };
 
 const S = {
-  records: [], runs: [], updated: null, runMeta: new Map(),
+  records: [], series: new Map(), runs: [], updated: null, runMeta: new Map(),
   models: [], modelColor: new Map(),   // GPU models present in the data, sorted (discovered at load)
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
@@ -164,6 +164,8 @@ async function loadAll() {
     }
   });
   S.records = records;
+  S.series = buildSeriesIndex(records);
+  _healthRows = null;                  // invalidate the memo for the fresh dataset
   // Discover GPU models (sorted) from the rows; the model is the key for
   // grouping/colors/baselines and is shown directly as the series label.
   S.models = [...new Set(records.map(r => r.model).filter(Boolean))].sort();
@@ -220,12 +222,23 @@ function modelOf(n) { return /mi355/.test(n) ? "MI355X" : /mi325/.test(n) ? "MI3
 /* ----------------------------------------------------------- noise model --- */
 function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "dev" : r.pr == null; }
 
+// One-pass index (built in loadAll): series key -> chronological records, so the
+// per-series lookups below are O(1) instead of re-scanning every record.
+const seriesKey = r => `${r.op}|${r.shape}|${r.dtype}|${r.model}|${r.metric}`;
+function buildSeriesIndex(records) {
+  const m = new Map();
+  for (const r of records) {
+    if (r.source !== "ci" || r.value == null) continue;
+    let arr = m.get(seriesKey(r)); if (!arr) m.set(seriesKey(r), arr = []);
+    arr.push(r);
+  }
+  for (const arr of m.values()) arr.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  return m;
+}
 // chronological main-branch series for one kernel/model/metric
 function mainSeries(op, shape, dtype, model, metric) {
-  return S.records
-    .filter(r => r.source === "ci" && r.op === op && r.shape === shape && r.dtype === dtype &&
-      r.model === model && r.metric === metric && r.value != null && isMainRec(r))
-    .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const arr = S.series.get(`${op}|${shape}|${dtype}|${model}|${metric}`);
+  return arr ? arr.filter(isMainRec) : [];
 }
 function noiseOf(values) {
   const n = values.length;
@@ -355,14 +368,19 @@ function latestMainByKernelModel() {
   return m;
 }
 
-/* one row per latest-main kernel/model: latest value vs PRIOR main history */
+/* one row per latest-main kernel/model: latest value vs PRIOR main history.
+   Memoized (reset on data reload / noise-gate toggle) -- Health, By-type and the
+   kernel rail each recompute this on every render. */
+let _healthRows = null;
 function healthRows() {
-  return [...latestMainByKernelModel().values()].map(r => {
+  if (_healthRows) return _healthRows;
+  _healthRows = [...latestMainByKernelModel().values()].map(r => {
     const noise = mainBaseline(r.op, r.shape, r.dtype, r.model, r.metric);
     const vals = mainSeries(r.op, r.shape, r.dtype, r.model, r.metric).map(s => s.value);
     const { d, real } = regOf(r, noise);
     return { r, vals, noise, d, real, sev: d == null ? "flat" : sev(d, real) };
   });
+  return _healthRows;
 }
 
 /* ----------------------------------------------------------- 1 · HEALTH --- */
@@ -929,7 +947,7 @@ function wire() {
   });
   $("#refresh").addEventListener("click", doRefresh);
   $("#bannerClose").addEventListener("click", hideBanner);
-  $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; renderHealth(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
+  $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; _healthRows = null; renderHealth(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
   $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.model); });
   $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); writeHash(); });
   $("#typeFacets").addEventListener("change", e => { const s = e.target.closest("select[data-facet]"); if (!s) return; S.byType.facets[s.dataset.facet] = s.value; renderByType(); writeHash(); });
