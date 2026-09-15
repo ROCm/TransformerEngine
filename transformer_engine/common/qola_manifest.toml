@@ -37,12 +37,20 @@ group = "ck_fused_attn"
 mode = "cpp_itfs"
 receipt = 700
 
+# QoLA keys its cpp_itfs recipes on AITER's pybind `module_*` names, so the
+# module name below is the recipe key and `md_name` pins the artifact name
+# back to the te_libgemm_a4w4_*.so this build links against.  `md_name` is not
+# a load_manifest key, so it reaches the recipe as an eval'd override -- hence
+# the quoted literal, same as flags_extra_cc above.
+
 [[modules]]
-name = "libgemm_a4w4_blockscale"
+name = "module_gemm_a4w4_blockscale"
+md_name = "'libgemm_a4w4_blockscale'"
 group = "aiter_gemm"
 mode = "cpp_itfs"
 
 [[modules]]
-name = "libgemm_a4w4_asm"
+name = "module_gemm_a4w4_asm"
+md_name = "'libgemm_a4w4_asm'"
 group = "aiter_gemm"
 mode = "cpp_itfs"
