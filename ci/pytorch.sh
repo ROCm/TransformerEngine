@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4' pandas safetensors pytest-timeout
+    pip install 'numpy>=1.22.4' pandas safetensors pyyaml pytest-timeout
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -66,6 +66,7 @@ run_test_config(){
     run_default_fa 1 test_float8_current_scaling_exact.py
     run_default_fa 1 test_float8blockwisetensor.py
     run_default_fa 1 test_float8_blockwise_scaling_exact.py
+    run_default_fa 1 test_float8_blockwise_gemm_exact.py
     run_default_fa 1 test_quantized_tensor.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
@@ -73,8 +74,15 @@ run_test_config(){
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
+    # test_gemm_backends.py self-gates on backend availability and flips
+    # NVTE_GEMM_BACKEND per call, so a single invocation runs every supported
+    # backend (Triton where pytorch-triton-rocm is installed, FlyDSL on gfx950).
+    # NVTE_ROCM_ENABLE_MXFP8=1 enables the MXFP8 coverage for both families.
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "gemm-backends" 1 test_gemm_backends.py
+    NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "triton" 1 triton_kernels/test_gemm_kernel.py
     run 1 test_gqa.py
     run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
@@ -90,6 +98,7 @@ run_test_config(){
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
+    run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
@@ -101,6 +110,15 @@ run_test_config(){
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
+    # NVTE_ROCM_ENABLE_MXFP8=1 opens up MXFP8 recipe parametrizations
+    # (is_mxfp8_available() on ROCm gates on this env var). Restricted to
+    # test_numerics.py for now -- test_fusible_ops.py MXFP8 exercises fused-op
+    # paths that hit dev-side C++ bugs (gated_mxfp8 swizzle assert, grouped
+    # GEMM bias assert) that fail identically under hipBLASLt / HipKittens /
+    # Triton, so leave it alone until dev fixes those.
+    NVTE_ROCM_ENABLE_MXFP8=1 NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "gemm-triton" 3 test_numerics.py
+    NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "gemm-triton" 1 test_fusible_ops.py
+    NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "gemm-triton" 1 test_float8_current_scaling_exact.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
@@ -119,7 +137,7 @@ run_test_config_mgpu(){
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
-    run_default_fa 3 distributed/test_comm_gemm_overlap.py
+    run_default_fa 3 distributed/test_rocm_fused_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py

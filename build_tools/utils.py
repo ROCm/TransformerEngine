@@ -216,15 +216,29 @@ def rocm_build() -> bool:
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 
+def _rocm_sdk_path_root() -> Optional[Path]:
+    """Return rocm-sdk devel root if the pip package is installed."""
+    try:
+        from rocm_sdk._devel import get_devel_root
+
+        return get_devel_root()
+    except (ImportError, ModuleNotFoundError, OSError):
+        return None
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """
     ROCm root path and HIPCC binary path as a tuple
     If ROCm installation is not specified, use default ROCm path
     """
-    hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
+    else:
+        rocm_home = _rocm_sdk_path_root()
+        if rocm_home is not None:
+            os.environ["ROCM_PATH"] = str(rocm_home)
+    hipcc_bin = None
+    if rocm_home is not None:
         hipcc_bin = rocm_home / "bin" / "hipcc"
     if hipcc_bin is None:
         hipcc_bin = shutil.which("hipcc")
@@ -312,7 +326,7 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
-    # Use pip wheels to include all headers.        
+    # Use pip wheels to include all headers.
     try:
         import nvidia
     except ModuleNotFoundError as e:
@@ -327,6 +341,26 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         for subdir in cuda_root.iterdir()
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
+
+
+@functools.lru_cache(maxsize=None)
+def cudnn_frontend_include_path() -> Path:
+    """Return the C++ include directory from nvidia-cudnn-frontend."""
+    package = "nvidia-cudnn-frontend"
+    try:
+        include_dir = Path(distribution(package).locate_file("include")).resolve()
+    except PackageNotFoundError as e:
+        raise RuntimeError(
+            f"{package} is required to build Transformer Engine. "
+            f"Install it with `pip install {package}`."
+        ) from e
+
+    header = include_dir / "cudnn_frontend.h"
+    if not header.is_file():
+        raise RuntimeError(
+            f"The {package} installation does not contain the expected header {header}."
+        )
+    return include_dir
 
 
 @functools.lru_cache(maxsize=None)
@@ -543,6 +577,7 @@ def uninstall_te_wheel_packages():
             "transformer_engine_torch",
             "transformer_engine_jax",
             "transformer_engine_rocm7",
+            "transformer_engine_rocm10",
             "transformer_engine_rocm_jax",
             "transformer_engine_rocm_torch",
         ]

@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +9,7 @@ import argparse
 import functools
 import os
 import pathlib
+import sys
 
 import pytest
 import torch
@@ -16,7 +18,12 @@ from typing import Optional
 
 import transformer_engine.pytorch as te
 
+# Also executed as a script to regenerate the checkpoint files, where sibling imports
+# rely on the interpreter putting this file's directory on sys.path -- which safe-path
+# mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 from utils import make_recipe
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 # Check supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -131,8 +138,18 @@ class TestLoadCheckpoint:
             raise FileNotFoundError(f"Could not find checkpoint file at {checkpoint_file}")
         state_dict = torch.load(checkpoint_file, weights_only=False)
 
-        # Update module from checkpoint
-        module.load_state_dict(state_dict, strict=True)
+        # Update module from checkpoint. Delayed-scaling legacy extra state is unsafe by
+        # default and requires an explicit opt-in for trusted compatibility artifacts.
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        if quantization == "fp8":
+            os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = "1"
+        try:
+            module.load_state_dict(state_dict, strict=True)
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
 
 
 def main() -> None:

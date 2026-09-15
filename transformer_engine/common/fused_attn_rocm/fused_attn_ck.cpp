@@ -542,6 +542,37 @@ void fused_attn_ck_fwd_impl(
     devPtrCuSeqlenPaddedKV = planner.allocate((b+1)*sizeof(int32_t));
   }
 
+  // Common fields filled here; mode-specific fields are overwritten below.
+  ck_fused_attn::CKAttnFwdArgs ck_args;
+  ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
+  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
+  ck_args.is_training = is_training;
+  ck_args.scaling_factor = scaling_factor;
+  ck_args.dropout_probability = dropout_probability;
+  ck_args.philox_seed_ptr = devPtrDropoutSeed;
+  ck_args.philox_offset_ptr = devPtrDropoutOffset;
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.window_size_left = window_size_left;
+  ck_args.window_size_right = window_size_right;
+  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
+  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  //This condition should match actual if/else conditions for group_mode
+  if ((is_SBHD && is_padding) || bshd_to_thd || is_ragged)
+  {
+    //ptr itself is not needed for nsplit calculation but to properly set is_group_mode
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+  }
+
+  ck_args.num_splits = ck_attn_fwd_num_splits(ck_args);
+  if (ck_args.num_splits > 0)
+  {
+    size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
+    if (splitkv_workspace_bytes > 0) {
+      ck_args.splitkv_workspace_ptr = planner.allocate(splitkv_workspace_bytes);
+    }
+  }
+
   // Sizing-only path: report and exit before any kernel/memset.
   if(planner.is_sizing()){
     *workspace_size = planner.total();
@@ -582,6 +613,15 @@ void fused_attn_ck_fwd_impl(
     // reset the final results since padded places need to be 0
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
   }
+  if(devPtrSoftmaxLSEWithoutPadding){
+    // ck only writes the lse of the tokens covered by cu_seqlens, but pad_remap_lse below
+    // copies the whole padded range back into devPtrSoftmaxAux. Prefill the buffer with
+    // 0xF0 (a large negative number, same sentinel the framework layers use) so that the
+    // padded rows end up with a well defined -inf like lse instead of stale workspace data.
+    // Consumers that combine lse across calls, e.g. the jax ring attention softmax
+    // correction, produce NaNs when they read that garbage.
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrSoftmaxLSEWithoutPadding, 0xF0, h*max_tokens_q*sizeof(float), stream));
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";
@@ -616,23 +656,9 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
-    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
+    std::cout<<"num_splits: "<<ck_args.num_splits<<std::endl;
   }
-  // Common fields filled here; mode-specific fields are overwritten below.
-  ck_fused_attn::CKAttnFwdArgs ck_args;
-  ck_args.dtype = nvte_to_ck_dtype(dtype);
-  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
-  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
-  ck_args.is_training = is_training;
-  ck_args.scaling_factor = scaling_factor;
-  ck_args.dropout_probability = dropout_probability;
-  ck_args.philox_seed_ptr = devPtrDropoutSeed;
-  ck_args.philox_offset_ptr = devPtrDropoutOffset;
-  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
-  ck_args.window_size_left = window_size_left;
-  ck_args.window_size_right = window_size_right;
-  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
-  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v

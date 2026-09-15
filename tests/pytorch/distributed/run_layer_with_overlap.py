@@ -11,6 +11,7 @@ import sys
 import socket
 import subprocess
 import argparse
+import hashlib
 import warnings
 import pprint
 import yaml
@@ -88,6 +89,8 @@ def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
         "ub_overlap_ag": not reference,
         "ub_overlap_rs": not reference,
     }
+    if config.no_bias:
+        kwargs["bias"] = False
 
     if config.layer_type in [te.Linear, te.LayerNormLinear]:
         if config.linear_parallel_mode == "row":
@@ -214,6 +217,9 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
     )
+    parser.add_argument(
+        "--no-bias", action="store_true", default=False, help="Build the linear layer without a bias.",
+    )
     parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
     parser.add_argument(
         "--skip-verify",
@@ -317,6 +323,18 @@ def _parse_args(argv=None, namespace=None):
         )
 
     return args
+
+
+def _digest(tensors):
+    """A bit-exact, order-sensitive fingerprint of a tensor list."""
+    digest = hashlib.sha256()
+    for tensor in tensors:
+        if tensor is None:
+            digest.update(b"<none>")
+            continue
+        raw = tensor.detach().contiguous().cpu().flatten().view(torch.uint8)
+        digest.update(raw.numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _compare_tensors(name, test, ref, rtol, atol):
@@ -479,6 +497,9 @@ def _train(opts):
         with_cublasmp=opts.use_cublasmp,
     )
 
+    dist_print("UB FUSED NAMES: " + " ".join(sorted(te.module.base._ub_fused_names)))
+    dist_print("UB DISABLED NAMES: " + " ".join(sorted(te.module.base._ub_disabled_names)))
+
     with te.quantized_model_init(enabled=opts.fp8_init):
         test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
@@ -561,12 +582,20 @@ def _train(opts):
             del test_graph
     else:
         test_out = run_fwd_bwd(test_model, test_x)
+    dist_print(
+        "UB BULK ELIGIBLE: "
+        + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
+    )
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():
         if test_param.requires_grad and "layer_norm" not in test_name:
             test_grads.append(test_param.grad)
             names.append(test_name + ".grad")
+
+    all_digests = [None] * opts.tp
+    dist.all_gather_object(all_digests, _digest(test_grads), group=nccl_world)
+    dist_print("OUTPUT HASH: " + " ".join(all_digests))
 
     torch.set_rng_state(torch_rng_state)
     torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))

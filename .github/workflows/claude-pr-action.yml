@@ -346,7 +346,7 @@ jobs:
           # a needed command being denied — never to `Bash(gh *)`/`Bash(git
           # *)`/`Bash(*)`.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git ls-remote *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(head *),Bash(grep *),Bash(echo *),Bash(ls),Bash(ls *),Read,Grep,Glob" --mcp-config ${{ steps.mcp.outputs.file }}
+            --model claude-opus-5 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git ls-remote *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(head *),Bash(grep *),Bash(echo *),Bash(ls),Bash(ls *),Read,Grep,Glob" --mcp-config ${{ steps.mcp.outputs.file }}
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |
@@ -449,7 +449,7 @@ jobs:
           # Review intentionally does NOT allow POST/PATCH against the issues
           # comments endpoint; it posts inline via the MCP tool instead.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(gh api --method POST repos/*),Bash(gh api --method POST /repos/*),Bash(gh api -X POST repos/*),Bash(gh api -X POST /repos/*),Bash(gh api --method PATCH repos/*),Bash(gh api --method PATCH /repos/*),Bash(gh api -X PATCH repos/*),Bash(gh api -X PATCH /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(echo *),Bash(cat *),Bash(ls),Bash(ls *),Read,Grep,Glob"
+            --model claude-opus-5 --effort xhigh --allowedTools "Skill,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(gh api --method POST repos/*),Bash(gh api --method POST /repos/*),Bash(gh api -X POST repos/*),Bash(gh api -X POST /repos/*),Bash(gh api --method PATCH repos/*),Bash(gh api --method PATCH /repos/*),Bash(gh api -X PATCH repos/*),Bash(gh api -X PATCH /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(echo *),Bash(cat *),Bash(ls),Bash(ls *),Read,Grep,Glob"
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |

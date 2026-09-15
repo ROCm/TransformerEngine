@@ -21,6 +21,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
+
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch import (
     autocast,
@@ -424,6 +428,13 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
+            # FlashAttention path, i.e. no inter-sequence padding. Declare this
+            # explicitly so the sync-free auto-detect (which conservatively
+            # picks True when padded cu_seqlens are present) does not disable FA.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -541,6 +552,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # See note above (non-CP branch): same explicit declaration so
+            # FlashAttention isn't disabled by the conservative sync-free
+            # auto-detect when this test path constructs no inter-seq padding.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:

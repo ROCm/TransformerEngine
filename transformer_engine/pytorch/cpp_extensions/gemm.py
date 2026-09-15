@@ -9,11 +9,12 @@
 from typing import Iterable, Optional, Tuple, Union, List
 import os
 import functools
+import warnings
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor
+from ..utils import get_sm_count, _empty_tensor, get_gemm_backend
 if IS_HIP_EXTENSION:
     from ..utils import get_device_compute_capability
     from ..utils import cast_if_needed
@@ -398,6 +399,11 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+# Warn only once when NVTE_GEMM_BACKEND=FLYDSL but the flydsl package is missing,
+# so a misconfigured run is surfaced without spamming the per-GEMM hot path.
+_flydsl_import_warned = False
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -420,7 +426,14 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
-    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    # "TT" is only supported for MXFP4 (hipBLASLt ships F4F4 kernels for all four layouts); other
+    # backends (FP8/BF16/MXFP8) keep the historical TN/NN/NT restriction. For MXFP4+AITER the
+    # mxfp4_gemm branch below still rejects TT, so a TT request without hipBLASLt errors there.
+    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+
+    is_mxfp4 = isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage)
+    allowed_layouts = ("TN", "NN", "NT", "TT") if is_mxfp4 else ("TN", "NN", "NT")
+    assert layout in allowed_layouts, f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
@@ -491,21 +504,21 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: route to AITER a4w4 ASM kernels
-    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
-
+    # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
+    # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        result = mxfp4_gemm(
-            A,
-            B,
-            layout=layout,
-            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
-            bias=bias,
-            out=out,
-            grad=grad,
-            accumulate=accumulate,
-        )
-        return result, None, None, None
+        if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
+            result = mxfp4_gemm(
+                A,
+                B,
+                layout=layout,
+                out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+                bias=bias,
+                out=out,
+                grad=grad,
+                accumulate=accumulate,
+            )
+            return result, None, None, None
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # FP8 block-scaling requires split accumulator
@@ -556,8 +569,77 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    # ROCm-only backend: the Triton kernels use gfx942/gfx950-specific MFMA
+    # instructions and autotune configs, so refuse to enable on non-HIP builds.
+    # NVFP4 is not supported by the Triton path; when the Triton backend is
+    # opted into, te_generic_gemm_triton raises ValueError for NVFP4 inputs
+    # (surfaced as a pytest.skip via tests/pytorch/conftest.py).
+    gemm_backend = get_gemm_backend()
+    use_gemm_triton = IS_HIP_EXTENSION and gemm_backend == "triton"
+    if use_gemm_triton:
+        # Lazy: only pull in Triton when the backend is opted into. Keeps
+        # `triton` off the module-import path when NVTE_GEMM_BACKEND is not
+        # TRITON (the default), so stacks without pytorch-triton-rocm can
+        # still use the C++ hipBLASLt path.
+        from ..triton_kernels.gemm import te_generic_gemm_triton
+        out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+    elif not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
+        use_gemm_flydsl = (
+            IS_HIP_EXTENSION
+            and get_device_compute_capability() == (9, 5)
+            and gemm_backend == "flydsl"
+        )
+        if use_gemm_flydsl:
+            try:
+                # Lazy import keeps FlyDSL off the normal Transformer Engine
+                # import path. It is done inside the try so a wheel built without
+                # flydsl (NVTE_GEMM_BACKEND!=FLYDSL at build time) degrades to the
+                # default backend instead of raising a bare ImportError.
+                from ..flydsl_kernels.gemm import (
+                    FlyDSLUnsupportedError,
+                    te_generic_gemm_flydsl,
+                )
+
+                out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
+                    *args,
+                    **kwargs,
+                )
+            except ImportError as exc:
+                # NVTE_GEMM_BACKEND=FLYDSL was requested but the flydsl package is
+                # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
+                # is a misconfiguration, not an unsupported GEMM config, so always
+                # warn (once) regardless of the opt-in fallback flag before
+                # degrading to the default backend.
+                global _flydsl_import_warned
+                if not _flydsl_import_warned:
+                    _flydsl_import_warned = True
+                    warnings.warn(
+                        "[FLYDSL WARNING]: NVTE_GEMM_BACKEND=FLYDSL but the flydsl "
+                        "package is unavailable; falling back to the default backend. "
+                        f"Install a supported version (e.g. `pip install flydsl`) to "
+                        f"enable it. Reason: {exc}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+            except FlyDSLUnsupportedError as exc:
+                warn_fallback = os.environ.get(
+                    "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
+                    "0",
+                ).lower() not in ("", "0", "false", "no", "off")
+
+                if warn_fallback:
+                    warnings.warn(
+                        "[FLYDSL WARNING]: FlyDSL GEMM does not support this configuration; "
+                        f"falling back to the default backend. Reason: {exc}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+        else:
+            out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         if _is_nvfp4_row_scaled_tensor(A):
             raise NotImplementedError("Row-scaled NVFP4 GEMM does not support row-scaled A.")

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.21)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 project(ck_fused_attn LANGUAGES HIP CXX)
 
 
@@ -23,12 +23,11 @@ if(NOT _gfx1250_idx EQUAL -1)
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
 endif()
 
-set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
-
-# The AITER source tree is checked out once by the parent scope
-# (transformer_engine/common) and shared by every QoLA module group, so this
-# directory only consumes it -- see qola_checkout_aiter() in
-# 3rdparty/QoLA/cmake/QoLA.cmake for the NVTE_AITER_SOURCE_DIR override.
+# QoLA itself and the AITER source tree are both resolved once by the parent
+# scope (transformer_engine/common) and shared by every QoLA module group, so
+# this directory only consumes them -- see the NVTE_QOLA_DIR override there and
+# qola_checkout_aiter() in QoLA.cmake for the NVTE_AITER_SOURCE_DIR override.
+set(__QOLA_DIR "${TE_QOLA_DIR}")
 if(NOT TE_AITER_SOURCE_DIR)
   message(FATAL_ERROR
           "TE_AITER_SOURCE_DIR is not set; ck_fused_attn expects the shared "
@@ -183,9 +182,11 @@ endforeach()
 
 add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
+#-Wno-unknown-warning-option is to suppress warning about -Wlifetime-safety-lifetimebound-violation
+#pragma in CK headers which is not supported by the compiler used to build TE.
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=1)
+    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -Wno-unused-value -Wno-unknown-warning-option)
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
