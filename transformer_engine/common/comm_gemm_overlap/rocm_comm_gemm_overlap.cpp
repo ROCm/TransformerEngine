@@ -325,9 +325,11 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. The kernel follows the same BLAS
-    // convention as this side: its A operand is the weight (A), its B operand the gathered
-    // activation (B, with B.dptr() == ubuf.dptr(), checked above).
+    // fp8_code() as in mxfp8_gemm.cpp: e4m3 -> 0, e5m2 -> 1. These name TE's operands, not the
+    // kernel's slots: a_fp8_code is the weight's format (A) and b_fp8_code the gathered
+    // activation's (B, with B.dptr() == ubuf.dptr(), checked above). comm_gemm.cpp binds them to
+    // CBSZ/BLGP for the layout it launches -- TN puts the weight in the kernel's A slot, NN the
+    // gathered activation -- so this side stays BLAS-canonical and never re-derives transa.
     args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_fused_ag_gemm_mxfp8(args);
@@ -394,7 +396,8 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
       workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
   if (bulk_fp8) {
     if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) return false;
-    // Same BLAS convention as the fused path: the kernel's A operand is A, its B operand is B.
+    // Same as the fused path: these name TE's operands, and comm_gemm.cpp binds them to the
+    // kernel's CBSZ/BLGP slots. Bulk is NN only, so there the A slot holds B and the B slot A.
     args.a_fp8_code = (A.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     args.b_fp8_code = (B.dtype() == DType::kFloat8E5M2) ? 1 : 0;
     return kittens_bulk_ag_gemm_mxfp8(args);

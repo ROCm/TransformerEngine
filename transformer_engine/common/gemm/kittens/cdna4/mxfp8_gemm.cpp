@@ -144,6 +144,81 @@ __device__ __forceinline__ void gemm_epilogue(
     kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
 }
 
+// Epilogue for the FLIPPED NN kernel. With the activation in the A slot and the weight in the B
+// slot the accumulator already carries C's orientation: its M axis is the activation extent
+// (BLAS N, C's rows) and its N axis is the weight extent (BLAS M, C's cols). So the col_l tiles
+// store straight through kittens::store with a coord<RT_C> -- no RT_C_T and no transposes.
+//
+// The consequence for the epilogue branches is that everything keyed to an output *column* of C
+// moved axis. BLAS bias has length m = the weight extent, which is now the accumulator's N axis,
+// so read_bias() is indexed by the column the lane owns (lane % base_tile_cols, plus the subtile
+// column j) and is CONSTANT across the register index -- the mirror image of the [N,M] epilogue,
+// where bias varied with the register index and was shared by cA/cB. Here it is shared by cA/cC
+// (low weight half) and cB/cD (high weight half), and .x/.y of a data slot get the same value
+// because they differ along M, not N.
+template<GemmEpilogue EPILOGUE, bool ACCUMULATE, typename RT_C, typename OutGL, typename AuxGLType>
+__device__ __forceinline__ void gemm_epilogue_nn(
+    RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
+    const OutGL &C, const AuxGLType &AuxGL,
+    const void *__restrict__ bias, int bias_dtype,
+    int block_m, int block_row, int block_col, int warp_m, int warp_n) {
+
+    constexpr bool HAS_BIAS = EPILOGUE == GemmEpilogue::BIAS || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
+    constexpr bool HAS_GELU = EPILOGUE == GemmEpilogue::GELU_AUX || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
+
+    // coord<RT_C> counts RT_C::rows (REG_M) down and RT_C::cols (REG_N) across.
+    auto out_coord_A = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + warp_m,              block_col * WARPS_COL * 2 + warp_n};
+    auto out_coord_B = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + warp_m,              block_col * WARPS_COL * 2 + WARPS_COL + warp_n};
+    auto out_coord_C = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m,  block_col * WARPS_COL * 2 + warp_n};
+    auto out_coord_D = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m,  block_col * WARPS_COL * 2 + WARPS_COL + warp_n};
+
+    if constexpr (HAS_BIAS) {
+        // block_m is the weight-extent (BLAS m) base of this tile, i.e. the accumulator's N base.
+        int n_base_lo = block_m + warp_n * REG_N;
+        int n_base_hi = block_m + (WARPS_COL + warp_n) * REG_N;
+        int lane      = kittens::laneid();
+        int col_off   = lane % cA.base_tile_cols;
+#pragma unroll
+        for (int j = 0; j < cA.width; j++) {
+            int    n_x   = j * cA.base_tile_cols + col_off;
+            float  b_lo  = read_bias(bias, bias_dtype, n_base_lo + n_x);
+            float  b_hi  = read_bias(bias, bias_dtype, n_base_hi + n_x);
+#pragma unroll
+            for (int i = 0; i < cA.height; i++) {
+#pragma unroll
+                for (int kk = 0; kk < cA.base_tile_num_strides; kk++) {
+#pragma unroll
+                    for (int l = 0; l < cA.base_tile_stride / 2; l++) {
+                        int idx = l + kk * cA.base_tile_stride / 2;
+                        cA.tiles[i][j].data[idx].x += b_lo; cA.tiles[i][j].data[idx].y += b_lo;
+                        cC.tiles[i][j].data[idx].x += b_lo; cC.tiles[i][j].data[idx].y += b_lo;
+                        cB.tiles[i][j].data[idx].x += b_hi; cB.tiles[i][j].data[idx].y += b_hi;
+                        cD.tiles[i][j].data[idx].x += b_hi; cD.tiles[i][j].data[idx].y += b_hi;
+                    }
+                }
+            }
+        }
+    }
+
+    if constexpr (HAS_GELU) {
+        // AuxGL has C's shape, so the pre-GELU accumulators store with C's coords, untransposed.
+        kittens::store(AuxGL, cA, out_coord_A); kittens::store(AuxGL, cB, out_coord_B);
+        kittens::store(AuxGL, cC, out_coord_C); kittens::store(AuxGL, cD, out_coord_D);
+        kittens::gelu(cA, cA); kittens::gelu(cB, cB); kittens::gelu(cC, cC); kittens::gelu(cD, cD);
+    }
+
+    if constexpr (ACCUMULATE) {
+        RT_C eA, eB, eC, eD;
+        kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
+        kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
+        kittens::add(cA, cA, eA); kittens::add(cB, cB, eB);
+        kittens::add(cC, cC, eC); kittens::add(cD, cD, eD);
+    }
+
+    kittens::store(C, cA, out_coord_A); kittens::store(C, cB, out_coord_B);
+    kittens::store(C, cC, out_coord_C); kittens::store(C, cD, out_coord_D);
+}
+
 template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, const AuxGLType AuxGL,
@@ -369,14 +444,17 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
                   "Grouped GEMM only supports DEFAULT epilogue");
 
     int k_iters = K / BLOCK_K;
-    int sa_stride = total_m_tiles;
 
-    using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
-    using ST_B     = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
-    using RT_A     = kittens::rt<kittens::fp8e4m3, REG_M, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
-    using RT_B     = kittens::rt_fp8e4m3<REG_N, BLOCK_K>;
+    // FLIPPED operand slots: the A slot holds the activation (K-contiguous [M,K], plain
+    // subtile_inplace reads) and the B slot the weight (K-major [K,N], ds_read_*_tr via
+    // b_col_off). The transposing operand now sits on the N axis, replicated by WARPS_ROW=2
+    // warps rather than the M axis's WARPS_COL=4, and the accumulator lands already in C's
+    // [M,N] orientation, so the writeback needs no transpose.
+    using ST_A     = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
+    using ST_B     = kittens::st_fp8e4m3<BLOCK_K, HALF_COL, kittens::st_16x128_s>;
+    using RT_A     = kittens::rt_fp8e4m3<REG_M, BLOCK_K>;
+    using RT_B     = kittens::rt<kittens::fp8e4m3, REG_N, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
     using RT_C     = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
-    using RT_C_T   = kittens::rt_fl<REG_N, REG_M, kittens::row_l, kittens::rt_16x16_s>;
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
@@ -398,22 +476,38 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
     int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
 
+    // GROUPED: the slot flip left the blockIdx -> (m_tile, n_tile) mapping alone, so experts still
+    // partition n_tile (the activation / BLAS N axis) exactly as in the TN kernel and the expert
+    // lookup is unchanged. What did move is which *slot* each per-expert array feeds: the host
+    // hands a_expert_ptrs the activation and b_expert_ptrs the weight (see grouped_mxfp8_gemm).
     int expert_id = 0;
     if constexpr (GROUPED) {
         expert_id = hk_upper_bound(tile_offsets, num_experts, n_tile);
         n_tile -= tile_offsets[expert_id];
     }
 
-    int a_row_tile   = m_tile;
-    int block_m      = m_tile * BLOCK_ROW;
-    int block_row    = m_tile;
-    int block_col    = n_tile;
-    [[maybe_unused]] int sa_batch = GROUPED ? expert_id * k_iters * total_m_tiles + m_tile : m_tile;
-    [[maybe_unused]] int sb_batch = n_tile;
-    [[maybe_unused]] int sb_stride = tiles_N;
+    // The blockIdx -> (m_tile, n_tile) mapping above is untouched; only the operand roles move.
+    // m_tile still indexes the weight (BLAS M), n_tile the activation (BLAS N). After the flip the
+    // activation feeds the A slot and the weight the B slot, so the accumulator's M axis is n_tile
+    // and its N axis is m_tile -- which is exactly C's [N_blas, M_blas] memory order.
+    int a_half0      = n_tile * 2;
+    int a_half1      = a_half0 + 1;
+    int b_half0      = m_tile * 2;
+    int b_half1      = b_half0 + 1;
+    int block_m      = m_tile * BLOCK_ROW;   // bias base: bias runs along the accumulator's N axis
+    int block_row    = n_tile;
+    int block_col    = m_tile;
+    // Scale slots follow the operands: scale_A_gl is the activation's <64,4> buffer keyed by
+    // n_tile, scale_B_gl the weight's <32,8> hi/lo pair keyed by m_tile.
+    [[maybe_unused]] int sa_batch  = n_tile;
+    [[maybe_unused]] int sa_stride = tiles_N;
+    [[maybe_unused]] int sb_batch  = GROUPED ? expert_id * k_iters * total_m_tiles + m_tile : m_tile;
+    [[maybe_unused]] int sb_stride = total_m_tiles;
     if constexpr (GROUPED) {
-        sb_batch  = sb_tile_offsets[expert_id] + n_tile;
-        sb_stride = tile_offsets[expert_id + 1] - tile_offsets[expert_id];
+        // Experts partition the activation axis, which is now the A side: sb_tile_offsets carries
+        // the per-expert cursor into the packed activation scales (the roles of sa/sb swapped too).
+        sa_batch  = sb_tile_offsets[expert_id] + n_tile;
+        sa_stride = tile_offsets[expert_id + 1] - tile_offsets[expert_id];
     }
 
     int warp_m = kittens::warpid() / WARPS_COL;
@@ -430,8 +524,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 
     constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
     constexpr int bpm = bpt * NUM_THREADS;
-    constexpr int copies_A = BLOCK_K * HALF_ROW * sizeof(T) / bpm;
-    constexpr int copies_B = HALF_COL * BLOCK_K * sizeof(T) / bpm;
+    constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
+    constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
     uint32_t sw_A[copies_A], sw_B[copies_B];
     G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
     G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
@@ -454,22 +548,22 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
             reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
     }
 
-    int a_col_off = warp_m * REG_M;
+    int b_col_off = warp_n * REG_N;
 
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,     0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1,  0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
+    G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B_local, {0, 0, n_tile * 2,     1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, n_tile * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+    G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
@@ -489,7 +583,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         C_local.raw_ptr = (typename OutGL::dtype *)c_expert_ptrs[expert_id];
     }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue_nn<EPILOGUE, ACCUMULATE, RT_C>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
@@ -817,8 +911,20 @@ static void launch_gemm_typed(
                 nullptr, nullptr, nullptr,
                 N, K, tiles_M, tiles_N);
         } else if constexpr (!TRANSA && !TRANSB) {
+            // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N,K]) and
+            // the B slot takes A's tensor (the weight, K-major [K,M]). The scale buffers follow:
+            // packed_sa carries the activation's <64,4> tiles (one per 256 columns of N) and
+            // packed_sb the weight's <32,8> hi/lo pairs (one pair per 256 columns of M).
+            // gl_C and aux_gl are unchanged: the kernel keeps m_tile on the weight axis and
+            // n_tile on the activation axis, so the accumulator lands in C's existing [N,M] memory.
+            gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)N, (size_t)K);
+            gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
+            gl_scale_rt gl_SA_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
+                                 k_iters * tiles_N, nullptr, nullptr, nullptr);
+            gl_scale_rt gl_SB_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
+                                 2 * k_iters * tiles_M, nullptr, nullptr, nullptr);
             mxfp8_gemm_nn_kernel<false, EPILOGUE, CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
+                gl_A_nn, gl_B_nn, gl_C, aux_gl, gl_SA_nn, gl_SB_nn, bias, bias_dtype,
                 nullptr, nullptr, 0,
                 nullptr, nullptr, nullptr,
                 N, K, tiles_M, tiles_N);
@@ -871,15 +977,22 @@ static void dispatch_gemm(
     const void *bias, int bias_dtype, void *aux_gelu,
     int M, int N, int K, OutDtype out_dtype, OutDtype aux_dtype, hipStream_t stream) {
 
-    // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes)
+    // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes). CBSZ names the kernel's A-slot
+    // format and BLGP its B-slot, so for NN -- where the slots hold the opposite tensors from the
+    // BLAS operands -- the two codes swap with them. Same-format pairs are unaffected, which is why
+    // only the mixed e4m3/e5m2 cases expose a mistake here.
+    constexpr bool NN_SLOTS_SWAPPED = !TRANSA && !TRANSB;
+    const int a_slot_fp8 = NN_SLOTS_SWAPPED ? b_fp8 : a_fp8;
+    const int b_slot_fp8 = NN_SLOTS_SWAPPED ? a_fp8 : b_fp8;
+
     auto dispatch = [&]<GemmEpilogue EPI>() {
-        if (a_fp8 == 0 && b_fp8 == 0) {
+        if (a_slot_fp8 == 0 && b_slot_fp8 == 0) {
             launch_gemm<TRANSA, TRANSB, EPI, 0, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
                 bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 0 && b_fp8 == 1) {
+        } else if (a_slot_fp8 == 0 && b_slot_fp8 == 1) {
             launch_gemm<TRANSA, TRANSB, EPI, 0, 1, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
                 bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 1 && b_fp8 == 0) {
+        } else if (a_slot_fp8 == 1 && b_slot_fp8 == 0) {
             launch_gemm<TRANSA, TRANSB, EPI, 1, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
                 bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
         } else {
@@ -955,17 +1068,29 @@ static bool mxfp8_gemm_impl(
     int tiles_M = M / BLOCK_ROW;
     int tiles_N = N / BLOCK_COL;
 
-    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
-    // caller's budget we return false and fall back to hipBLASLt.
-    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
-    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_N * 512 * sizeof(uint32_t), 256);
+    // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair). NN has
+    // its operand slots flipped, so the activation (dim N) feeds the A slot and the weight (dim M)
+    // the B slot; every other layout keeps A->A, B->B. If they overflow the caller's budget we
+    // return false and fall back to hipBLASLt.
+    constexpr bool NN_FLIP = !TRANSA && !TRANSB;
+    int a_slot_tiles = NN_FLIP ? tiles_N : tiles_M;
+    int b_slot_tiles = NN_FLIP ? tiles_M : tiles_N;
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * a_slot_tiles * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * b_slot_tiles * 512 * sizeof(uint32_t), 256);
     if (workspace_size < sa_bytes + sb_bytes) return false;
 
     auto *packed_sa = (uint32_t *)workspace;
     auto *packed_sb = (uint32_t *)((uint8_t *)workspace + sa_bytes);
 
-    launch_pack_scales<!TRANSA, 64, 4>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream);
-    launch_pack_scales<TRANSB, 32, 8>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream);
+    // COLWISE describes the raw scale buffer's own layout and stays welded to its tensor
+    // (scale_A -> !TRANSA, scale_B -> TRANSB); only the <STEP,NG> geometry follows the slot.
+    if constexpr (NN_FLIP) {
+        launch_pack_scales<TRANSB, 64, 4>((const uint8_t *)scale_B, packed_sa, N, scale_K, k_iters, stream);
+        launch_pack_scales<!TRANSA, 32, 8>((const uint8_t *)scale_A, packed_sb, M, scale_K, k_iters, stream);
+    } else {
+        launch_pack_scales<!TRANSA, 64, 4>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream);
+        launch_pack_scales<TRANSB, 32, 8>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream);
+    }
 
     GemmEpilogue ep = select_epilogue(bias, aux_gelu);
     dispatch_gemm<TRANSA, TRANSB, ACCUMULATE>(ep, a_fp8_code, b_fp8_code,
@@ -1053,6 +1178,14 @@ static bool grouped_mxfp8_gemm(
     if (K % BLOCK_K != 0 || K < 256) { warn_fallback("HK-grouped", "K not 128-aligned or < 256"); return false; }
     if (num_experts <= 0) { warn_fallback("HK-grouped", "num_experts <= 0"); return false; }
 
+    // NN has its operand slots flipped (see mxfp8_nn_mainloop.inc): the activation feeds the A
+    // slot and the weight the B slot. Everything the host builds per-slot -- pack geometry,
+    // workspace sizes, scale gl extents, expert pointer arrays -- follows that swap. The expert
+    // partitioning itself does not move: experts still divide the activation (BLAS N) axis, which
+    // both kernels still map to n_tile, so tile_offsets/sb_tile_offsets keep their meaning and
+    // MXFP8GroupedGemmArgs (scalar M, per-expert N_array) needs no change.
+    const bool nn_flip = !transa && !transb;
+
     int tiles_M = M / BLOCK_COL;
     int k_iters = K / BLOCK_K;
     int scale_K = K / 32;
@@ -1060,19 +1193,28 @@ static bool grouped_mxfp8_gemm(
     std::vector<int> h_tile_offsets(num_experts + 1);
     int total_N = 0;
     int total_n_tiles = 0;
+    int max_N = 0;
     for (int g = 0; g < num_experts; g++) {
         if (N_array[g] % BLOCK_COL != 0) { warn_fallback("HK-grouped", "N_array not 256-aligned"); return false; }
         h_tile_offsets[g] = total_n_tiles;
         total_N += N_array[g];
         total_n_tiles += N_array[g] / BLOCK_COL;
+        max_N = std::max(max_N, N_array[g]);
     }
     h_tile_offsets[num_experts] = total_n_tiles;
 
     int grid = tiles_M * total_n_tiles;
     if (grid == 0) return true;
 
-    size_t sa_pk_bytes    = kittens_align_up((size_t)k_iters * num_experts * M * sizeof(uint32_t), 256);
-    size_t sb_pk_bytes    = kittens_align_up((size_t)2 * k_iters * total_N * sizeof(uint32_t), 256);
+    // Slot geometry, not tensor identity: the A slot is <64,4> (256 lane words per 256-wide source
+    // tile), the B slot <32,8> (512 words, a hi/lo tile pair). The weight (uniform extent M) is
+    // packed once per expert, the activation once per expert at its own N_g.
+    size_t a_slot_words   = nn_flip ? (size_t)k_iters * total_N
+                                    : (size_t)k_iters * num_experts * M;
+    size_t b_slot_words   = nn_flip ? (size_t)2 * k_iters * num_experts * M
+                                    : (size_t)2 * k_iters * total_N;
+    size_t sa_pk_bytes    = kittens_align_up(a_slot_words * sizeof(uint32_t), 256);
+    size_t sb_pk_bytes    = kittens_align_up(b_slot_words * sizeof(uint32_t), 256);
     size_t a_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
     size_t b_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
     size_t c_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
@@ -1100,27 +1242,44 @@ static bool grouped_mxfp8_gemm(
     hipMemcpyAsync((void *)d_sa_ptrs, scale_A_array,
                    num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
 
-    int sa_expert_stride = k_iters * M;
+    // Which packed buffer each tensor lands in follows its slot. Per-expert stride for the fused
+    // weight pack is in lane words: k_iters * M for <64,4>, twice that for <32,8>'s hi/lo pair.
+    uint32_t *weight_pk  = nn_flip ? sb_pk : sa_pk;
+    uint32_t *act_cursor = nn_flip ? sa_pk : sb_pk;
+    int weight_expert_stride = nn_flip ? 2 * k_iters * M : k_iters * M;
 
-    // Pack scale_B per-expert and build sb_tile_offsets
+    // sb_tile_offsets is the activation's per-expert cursor in 256-wide scale tiles (k_iters tiles
+    // per 256 columns). It is slot-agnostic: the A slot reads it as-is, the B slot doubles it for
+    // the hi/lo pair, and the kernel already does whichever applies.
     std::vector<int> h_sb_tile_offsets(num_experts + 1);
     int sb_tile_cursor = 0;
-    uint32_t *sb_cursor = sb_pk;
     KITTENS_BOOL_SWITCH(!transa, COLWISE_A,
         KITTENS_BOOL_SWITCH(transb, COLWISE_B,
             // Pack weight scales: single fused launch for all experts
-            launch_pack_scales_fused<COLWISE_A, 64, 4>(
-                (const uint8_t *const *)d_sa_ptrs, sa_pk,
-                sa_expert_stride, num_experts,
-                M, scale_K, k_iters, stream);
+            if (nn_flip) {
+                launch_pack_scales_fused<COLWISE_A, 32, 8>(
+                    (const uint8_t *const *)d_sa_ptrs, weight_pk,
+                    weight_expert_stride, num_experts,
+                    M, scale_K, k_iters, stream);
+            } else {
+                launch_pack_scales_fused<COLWISE_A, 64, 4>(
+                    (const uint8_t *const *)d_sa_ptrs, weight_pk,
+                    weight_expert_stride, num_experts,
+                    M, scale_K, k_iters, stream);
+            }
             // Pack activation scales per-expert
             for (int g = 0; g < num_experts; g++) {
                 int N_g = N_array[g];
                 h_sb_tile_offsets[g] = sb_tile_cursor;
-                launch_pack_scales<COLWISE_B, 32, 8>((const uint8_t *)scale_B_array[g], sb_cursor,
-                                                     N_g, scale_K, k_iters, stream);
-                sb_cursor += (size_t)2 * k_iters * N_g;  // B: 2 lane tiles per source tile
-
+                if (nn_flip) {
+                    launch_pack_scales<COLWISE_B, 64, 4>((const uint8_t *)scale_B_array[g],
+                                                         act_cursor, N_g, scale_K, k_iters, stream);
+                    act_cursor += (size_t)k_iters * N_g;      // A slot: 1 lane tile per source tile
+                } else {
+                    launch_pack_scales<COLWISE_B, 32, 8>((const uint8_t *)scale_B_array[g],
+                                                         act_cursor, N_g, scale_K, k_iters, stream);
+                    act_cursor += (size_t)2 * k_iters * N_g;  // B slot: 2 lane tiles per source tile
+                }
                 sb_tile_cursor += k_iters * (N_g / BLOCK_COL);
             }
             h_sb_tile_offsets[num_experts] = sb_tile_cursor;
@@ -1147,11 +1306,14 @@ static bool grouped_mxfp8_gemm(
 
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr, a1, a2);
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, b1, b2);
+    // B scale buffer is 2 tiles per source tile for the hi/lo group split. NN holds the activation
+    // (total_n_tiles tiles) in the A slot and the weight (num_experts * tiles_M) in the B slot.
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(sa_pk),
-                      num_experts * k_iters * tiles_M, nullptr, nullptr, nullptr);
-    // B scale buffer is 2 tiles per source tile for the hi/lo group split
+                      nn_flip ? k_iters * total_n_tiles : num_experts * k_iters * tiles_M,
+                      nullptr, nullptr, nullptr);
     gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(sb_pk),
-                      2 * k_iters * total_n_tiles, nullptr, nullptr, nullptr);
+                      nn_flip ? 2 * num_experts * k_iters * tiles_M : 2 * k_iters * total_n_tiles,
+                      nullptr, nullptr, nullptr);
 
     static float dummy_aux = 0.f;
     gl_f32_rt aux_gl(&dummy_aux, nullptr, nullptr, 1, 1);
@@ -1164,10 +1326,19 @@ static bool grouped_mxfp8_gemm(
                 (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
                 total_N, K, tiles_M, total_n_tiles);
         } else if (!transa && !transb) {
+            // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N_g, K])
+            // and the B slot takes A's tensor (the weight, K-major [K, M]); the expert pointer
+            // arrays swap with them. The activation view is sized by the widest expert so the
+            // buffer descriptor covers every per-expert base; the weight view is uniform.
+            // gl_C is unchanged -- the accumulator still lands in C's [N, M] memory.
+            gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr,
+                              (size_t)max_N, (size_t)K);
+            gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr,
+                              (size_t)K, (size_t)M);
             mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
+                gl_A_nn, gl_B_nn, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
+                (const void *const *)d_b_ptrs, d_tile_offsets, num_experts,
+                (const void *const *)d_a_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
                 total_N, K, tiles_M, total_n_tiles);
         }
     };
