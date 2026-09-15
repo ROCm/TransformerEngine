@@ -924,7 +924,11 @@ def fill_userbuffers_buffer_for_all_gather(
         global_scale_inv_shape = [
             process_group_size * local_scale_inv_size[0]
         ] + local_scale_inv_size[1:]
-        if isinstance(comm, tex.CommOverlapP2P) and comm.has_scale_buffer():
+        if (
+            IS_HIP_EXTENSION
+            and isinstance(comm, tex.CommOverlapP2P)
+            and comm.has_scale_buffer()
+        ):
             # Scales live in the Userbuffers allocation; the fused kernel gathers them
             # alongside the data, so no separate collective is needed here.
             comm.copy_scales_into_buffer(local_scale_inv, local_chunk=True)
