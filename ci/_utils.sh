@@ -373,8 +373,22 @@ pytest_run() {
         _sink_plugin="-p te_ci_result_sink"
         _pytest_pythonpath="${TE_PATH}ci${PYTHONPATH:+:$PYTHONPATH}"
     fi
+    # Optional Python execution coverage (TE_COVERAGE=1). Off by default so
+    # a local ci/pytorch.sh run is unchanged. This wraps the same pytest
+    # invocation; a coverage failure to start falls back to plain pytest.
+    # Parallel pytest (sGPU) writes coverage.py shards; CI combines them
+    # after the job. This is not JUnit: it records which installed
+    # transformer_engine functions ran, not which test cases passed.
+    _pytest_launcher="python3 -m"
+    if [ "${TE_COVERAGE:-}" = 1 ]; then
+        if command -v coverage >/dev/null 2>&1; then
+            _pytest_launcher="coverage run --branch --parallel-mode --source=transformer_engine -m"
+        else
+            echo "TE_COVERAGE=1 but coverage is not installed; running pytest without coverage" >&2
+        fi
+    fi
     TE_RESULT_SINK="$_result_sink" PYTHONPATH="$_pytest_pythonpath" \
-        python3 -m pytest -v -rfEs \
+        $_pytest_launcher pytest -v -rfEs \
         --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
         $_sink_plugin $_junitxml_arg $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     _pytest_rc=$?
