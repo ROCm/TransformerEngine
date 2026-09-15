@@ -196,8 +196,6 @@ def _shape_dtype(row, key_cols):
             p[col] = row[col]
     dtype = dtype or "bf16"
     dims = []
-    if p.get("NormType"):                            # RMSNorm/LayerNorm -- not encoded in Case
-        dims.append(p["NormType"])
     if p.get("B"):
         dims.append(f"B{p['B']}")
     if p.get("M") and p.get("N") and p.get("K"):
@@ -206,7 +204,7 @@ def _shape_dtype(row, key_cols):
         dims.append(f"M{p['M']} h{p['hidden_size']}")
     elif p.get("M"):
         dims.append(f"M{p['M']}")
-    handled = {"Case", "B", "M", "N", "K", "hidden_size", "NormType"}
+    handled = {"Case", "B", "M", "N", "K", "hidden_size", "NormType"}  # NormType -> op, not shape
     dims += [f"{k}={v}" for k, v in p.items() if k not in handled]
     body = " ".join(d for d in dims if d)
     case = p.get("Case", "")
@@ -239,6 +237,7 @@ def long_rows_from_csv(path, meta):
                 ts, run_id = meta["ts"], meta["run_id"]
             direction = (row.get("Direction") or "").strip()   # raw: fwd/bwd/quantize/...
             backend = _backend(row)
+            norm_type = (row.get("NormType") or "").strip()    # RMSNorm/LayerNorm: the norm's op identity
             shape, dtype = _shape_dtype(row, key_cols)
             # Group each metric's Wall/Kernel variants under a base label so we
             # can emit one series per config from the right timing source.
@@ -261,7 +260,7 @@ def long_rows_from_csv(path, meta):
                 value = _num(row.get(mcol))
                 label = mcol[: -(len(unit) + 1)].rstrip()
                 ms = _num(row.get(f"{label} Time (ms)"))
-                op = base + (f" {direction}" if direction else "") + (f" \u00b7 {backend}" if backend else "") + meta.get("op_suffix", "")
+                op = (norm_type or base) + (f" {direction}" if direction else "") + (f" \u00b7 {backend}" if backend else "") + meta.get("op_suffix", "")
                 yield "", {
                     "ts": ts, "commit": commit, "run_id": run_id,
                     "model": meta.get("model", ""), "runner": meta["runner"],

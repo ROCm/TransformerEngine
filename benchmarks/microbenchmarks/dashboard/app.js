@@ -528,7 +528,7 @@ function renderByType() {
           <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
           <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
         <div class="table-wrap"><table class="data"><thead><tr>
-          <th>kernel</th><th>shape</th><th>dtype</th><th>model</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
+          <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
         </tr></thead><tbody>${body}</tbody></table></div>
       </details>`;
     }).join("");
@@ -589,7 +589,7 @@ function renderPRCheck() {
   $("#prSummary").innerHTML = `${rows.length} kernels · <b style="color:${nbad ? "var(--bad)" : "var(--good)"}">${nbad} real regression${nbad === 1 ? "" : "s"}</b> · ${nwatch} watch`;
   const runUrl = S.runMeta.get(latestRun)?.url || `https://github.com/${CFG.repo}/actions/runs/${latestRun}`;
   pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>
-    <th>kernel</th><th>shape</th><th>dtype</th><th>model</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
+    <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
     </tr></thead><tbody>${rows.map(({ r, d, sev }) => `<tr class="${sev === "bad" ? "row-bad" : ""}">
       <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td><td class="k-dim">${esc(r.shape)}</td><td>${esc(r.dtype)}</td>
       <td style="color:${modelVar(r.model)}">${esc(r.model)}</td>
