@@ -10,6 +10,7 @@ option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels" ON)
+option(USE_AITER_GEMM "Use AITER a4w4 (FP4) GEMM backend" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -378,6 +379,7 @@ if(USE_ROCM)
       fused_attn_rocm/fused_attn_aotriton.cpp
       fused_attn_rocm/fused_attn_ck.cpp
       fused_attn_rocm/utils.cpp
+      gemm/aiter_a4w4_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
@@ -713,12 +715,77 @@ else() # USE_ROCM
     add_subdirectory(aotriton ${CMAKE_CURRENT_BINARY_DIR}/aotriton)
   endif()
 
+  # AITER a4w4 (FP4) GEMM is gfx950-only; skip cleanly on other arches so a
+  # default-on USE_AITER_GEMM does not break gfx942/gfx1250 builds.  The NVTE
+  # C API in gemm/aiter_a4w4_gemm.cpp keeps stub symbols when disabled.
+  list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _aiter_gemm_gfx950_idx)
+  if(USE_AITER_GEMM AND NOT _aiter_gemm_gfx950_idx EQUAL -1)
+    set(__BUILD_AITER_GEMM TRUE)
+  else()
+    set(__BUILD_AITER_GEMM FALSE)
+    if(USE_AITER_GEMM)
+      message(STATUS "USE_AITER_GEMM requested but no gfx950 target present; a4w4 GEMM backend disabled.")
+    endif()
+  endif()
+
+  # One manifest, one pinned AITER commit, one patch set, one checkout for the
+  # whole build; each consumer then builds only its own module group.  The
+  # checkout runs here rather than inside a per-group build call because
+  # ck_fused_attn reads the AITER/CK sources at configure time, and its CK-JIT
+  # path drives the group's build itself instead of going through
+  # qola_build_modules().
+  set(TE_QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
+  set(TE_QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../3rdparty/QoLA")
+  if(DEFINED ENV{NVTE_QOLA_DIR} AND NOT "$ENV{NVTE_QOLA_DIR}" STREQUAL "")
+    set(TE_QOLA_DIR "$ENV{NVTE_QOLA_DIR}")
+    message(STATUS "Using QoLA from NVTE_QOLA_DIR=${TE_QOLA_DIR}.")
+  endif()
+  if(USE_FUSED_ATTN_CK OR __BUILD_AITER_GEMM)
+    include(${TE_QOLA_DIR}/cmake/QoLA.cmake)
+    # A group served from QOLA_PREBUILT_DIR_<GROUP> is consumed as-is and needs
+    # no sources; ck_fused_attn always does, as it compiles against the tree.
+    set(__QOLA_GROUPS)
+    if(USE_FUSED_ATTN_CK)
+      list(APPEND __QOLA_GROUPS ck_fused_attn)
+    endif()
+    if(__BUILD_AITER_GEMM)
+      qola_prebuilt_dir(aiter_gemm __AITER_GEMM_PREBUILT)
+      if(NOT __AITER_GEMM_PREBUILT)
+        list(APPEND __QOLA_GROUPS aiter_gemm)
+      endif()
+    endif()
+    if(__QOLA_GROUPS)
+      qola_checkout_aiter(
+        MANIFEST  ${TE_QOLA_MANIFEST}
+        AITER_DIR ${CMAKE_CURRENT_BINARY_DIR}/qola/third_party/aiter
+        GROUPS    ${__QOLA_GROUPS}
+        OUT_DIR   TE_AITER_SOURCE_DIR)
+    endif()
+  endif()
+
   if(USE_FUSED_ATTN_CK)
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   endif()
 
   if(USE_HIPKITTENS_GEMM)
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
+  endif()
+
+  # There is no TE-side wrapper library any more: QoLA exports a C ABI that
+  # libtransformer_engine.so links against directly, so all this needs is the
+  # include dir and the built .so files.
+  if(__BUILD_AITER_GEMM)
+    qola_build_modules(
+      GROUP           aiter_gemm
+      MANIFEST        ${TE_QOLA_MANIFEST}
+      BUILD_DIR       ${CMAKE_CURRENT_BINARY_DIR}/aiter_gemm/qola
+      AITER_DIR       ${TE_AITER_SOURCE_DIR}
+      ARCHS           gfx950
+      LIBS            te_libgemm_a4w4_blockscale.so te_libgemm_a4w4_asm.so
+      OUT_INCLUDE_DIR __AITER_GEMM_INCLUDE_DIR
+      OUT_LIB_DIR     __AITER_GEMM_LIB_DIR
+      OUT_LIBS        __AITER_GEMM_LIBS
+      OUT_CONFIG_DIR  __AITER_GEMM_CONFIG_DIR)
   endif()
 
   find_package(hip)
@@ -738,6 +805,26 @@ else() # USE_ROCM
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
+  endif()
+  if(__BUILD_AITER_GEMM)
+    target_compile_definitions(transformer_engine PUBLIC USE_AITER_GEMM)
+    target_include_directories(transformer_engine PRIVATE ${__AITER_GEMM_INCLUDE_DIR})
+    target_link_directories(transformer_engine PUBLIC ${__AITER_GEMM_LIB_DIR})
+    foreach(__lib ${__AITER_GEMM_LIBS})
+      list(APPEND transformer_engine_LINKER_LIBS -l:${__lib})
+    endforeach()
+    set(__AITER_GEMM_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/transformer_engine/lib")
+    if(NOT "${__AITER_GEMM_LIB_DIR}" STREQUAL "${__AITER_GEMM_INSTALL_DIR}")
+      foreach(__lib ${__AITER_GEMM_LIBS})
+        install(FILES ${__AITER_GEMM_LIB_DIR}/${__lib} DESTINATION ${__AITER_GEMM_INSTALL_DIR})
+      endforeach()
+    endif()
+    # Ship the a4w4 tuning table next to the kernels it describes; the Python
+    # layer reads it instead of importing the `aiter` package.
+    if(EXISTS "${__AITER_GEMM_CONFIG_DIR}/a4w4_blockscale_tuned_gemm.csv")
+      install(FILES ${__AITER_GEMM_CONFIG_DIR}/a4w4_blockscale_tuned_gemm.csv
+              DESTINATION ${__AITER_GEMM_INSTALL_DIR}/configs)
+    endif()
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()
@@ -931,7 +1018,10 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
-  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+  # "$ORIGIN" covers QoLA-built kernel libraries (e.g. te_libgemm_a4w4_*.so),
+  # which are installed alongside libtransformer_engine.so rather than under a
+  # nested lib/ directory.
+  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
