@@ -501,6 +501,39 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
+void CommOverlapP2P::copy_scales_into_buffer(const at::Tensor &input, bool local_chunk) {
+  NVTE_CHECK(_scale_chunk_bytes != 0,
+             "Userbuffers buffer was not allocated with an MXFP8 scale region");
+  const auto &input_ = input.contiguous();
+  const size_t input_bytes = input_.numel() * input_.element_size();
+  const size_t region_bytes = local_chunk ? _scale_chunk_bytes : _scale_chunk_bytes * _tp_size;
+  NVTE_CHECK(input_bytes == region_bytes,
+             "Tried to copy an invalid scale tensor into a Userbuffers scale region ",
+             "(input_bytes=", input_bytes, ", region_bytes=", region_bytes, ")");
+
+  char *dst_ptr = reinterpret_cast<char *>(_ubuf.dptr()) + _scale_base_offset;
+  if (local_chunk) dst_ptr += _tp_id * _scale_chunk_bytes;
+
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, input_.data_ptr(), input_bytes,
+                                  cudaMemcpyDeviceToDevice,
+                                  (cudaStream_t)at::cuda::getCurrentCUDAStream()));
+}
+
+at::Tensor CommOverlapP2P::get_scale_buffer(bool local_chunk,
+                                            std::optional<std::vector<int64_t>> shape) {
+  NVTE_CHECK(_scale_chunk_bytes != 0,
+             "Userbuffers buffer was not allocated with an MXFP8 scale region");
+  NVTE_CHECK(shape.has_value(), "get_scale_buffer requires an explicit shape");
+  const size_t region_bytes = local_chunk ? _scale_chunk_bytes : _scale_chunk_bytes * _tp_size;
+  NVTE_CHECK(transformer_engine::pytorch::product(*shape) == region_bytes,
+             "Invalid shape for a Userbuffers scale region (requested shape=", *shape,
+             ", region_bytes=", region_bytes, ")");
+
+  char *ptr = reinterpret_cast<char *>(_ubuf.dptr()) + _scale_base_offset;
+  if (local_chunk) ptr += _tp_id * _scale_chunk_bytes;
+  return torch::from_blob(ptr, *shape, at::dtype(torch::kUInt8).device(torch::kCUDA));
+}
+
 std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
   return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),
           at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};

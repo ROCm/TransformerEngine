@@ -203,7 +203,9 @@ def _parse_args(argv=None, namespace=None):
     if opts.dgrad:
         assert not opts.bulk_overlap, "--dgrad is for the non-bulk overlap"
         assert opts.comm_type == tex.CommOverlapType.AG, "--dgrad requires --comm-type=AG."
-        assert opts.quantization == "none", "--dgrad is bf16 only."
+        assert (
+            opts.quantization == "none" or IS_HIP_EXTENSION
+        ), "--dgrad is bf16 only."
         assert not opts.atomic, "--dgrad does not cover the atomic GEMM path."
 
     if opts.bulk_overlap:
@@ -216,7 +218,7 @@ def _parse_args(argv=None, namespace=None):
         if opts.atomic:
             warnings.warn("Atomic GEMM is not supported with bulk overlap.")
             opts.atomic = False
-        if opts.quantization != "none":
+        if opts.quantization != "none" and not IS_HIP_EXTENSION:
             warnings.warn("Bulk overlap is supported in FP8 but only tested in BF16.")
             opts.quantization = "none"
     elif opts.comm_type == tex.CommOverlapType.AG:
@@ -372,7 +374,7 @@ def _main(opts):
     buffer_dtype = torch.bfloat16
     if (
         opts.quantization != "none"
-        and not opts.bulk_overlap
+        and (IS_HIP_EXTENSION or not opts.bulk_overlap)
         and opts.comm_type == tex.CommOverlapType.AG
     ):
         buffer_dtype = torch.uint8
@@ -636,7 +638,7 @@ def _main(opts):
         fp8_dtype = te.DType.kFloat8E4M3
         inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         ker_quantizer = MXFP8Quantizer(fp8_dtype)
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+        if opts.bulk_overlap and (IS_HIP_EXTENSION or opts.comm_type == tex.CommOverlapType.RS):
             bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         elif ub_obj2 is not None:
             inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
@@ -696,7 +698,7 @@ def _main(opts):
                 bulk_inp_quantizer,
                 tp_group,
             )
-            gemm_inp = inp
+            gemm_inp = inp_fp8 if with_quantized_compute else inp
         elif not opts.use_cublasmp:
             ag_out, _ = fill_userbuffers_buffer_for_all_gather(
                 ub_obj,
@@ -739,6 +741,7 @@ def _main(opts):
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
+            layout=gemm_layout,
         )
 
     def _fp8_gemm2(gemm1_out):
@@ -849,6 +852,8 @@ def _main(opts):
 
                 if bulk_inp_quantizer is None:
                     test_out = ub_obj.get_buffer(False)
+                elif isinstance(bulk_inp_quantizer, MXFP8Quantizer):
+                    test_out = ag_out.dequantize(dtype=torch.bfloat16)
                 else:
                     test_out = Float8Tensor(
                         shape=test_out.shape,

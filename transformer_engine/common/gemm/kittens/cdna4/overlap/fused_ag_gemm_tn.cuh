@@ -14,7 +14,11 @@
 
 namespace hk_ag_tn {
 
+using namespace kittens;
 using namespace hk_overlap;
+
+// Per-PE pointer to each peer's [M,K] A buffer.
+using PeerPtrs = hk_overlap::PeerPtrsT<bf16>;
 
 struct TileDesc {
     int chunk_id;
@@ -22,120 +26,6 @@ struct TileDesc {
     int tile_n;
 };
 
-using namespace kittens;
-
-constexpr int SCHED_ROUNDS = 2;
-
-
-// Per-PE pointer to each peer's [M,K] A buffer.
-struct PeerPtrs {
-    bf16 *base[8];
-};
-
-
-
-
-
-// NT selects nontemporal stores for the gathered shard for performance.
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
-                size_t chunk_bytes, unsigned int *arrive) {
-    const int pi   = (int)blockIdx.x / gath_wg;
-    const int sub  = (int)blockIdx.x % gath_wg;
-    const int peer = pi + (pi >= my_pe ? 1 : 0);
-    for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    }
-}
-
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t nbytes) {
-    typedef int v4i __attribute__((ext_vector_type(4)));
-    v4i       *d4 = (v4i *)dst;
-    const v4i *s4 = (const v4i *)src;
-    size_t n4 = nbytes / sizeof(v4i);
-    const size_t stride = blockDim.x;
-    const size_t step   = stride * U;
-    size_t i = threadIdx.x;
-
-    if (U > 1) {
-        for (; i + (size_t)(U - 1) * stride < n4; i += step) {
-            v4i v[U];
-#pragma unroll
-            for (int u = 0; u < U; u++) v[u] = s4[i + (size_t)u * stride];
-#pragma unroll
-            for (int u = 0; u < U; u++) {
-                if (NT) __builtin_nontemporal_store(v[u], &d4[i + (size_t)u * stride]);
-                else    d4[i + (size_t)u * stride] = v[u];
-            }
-        }
-    }
-    for (; i < n4; i += stride) {
-        if (NT) __builtin_nontemporal_store(s4[i], &d4[i]);
-        else    d4[i] = s4[i];
-    }
-
-    size_t done = n4 * sizeof(v4i);
-    if (threadIdx.x == 0) {
-        for (size_t j = done; j < nbytes; j++) ((char *)dst)[j] = ((const char *)src)[j];
-    }
-}
-
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
-                      const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive) {
-    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
-    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
-
-    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
-    size_t o         = (size_t)sub * sub_bytes;
-    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
-
-    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
-
-    __syncthreads();
-    if (NT) {
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-    } else {
-        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
-    __syncthreads();
-}
-
-template <typename U, typename RT>
-__device__ __forceinline__
-void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
-    using T               = float;
-    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
-    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
-    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
-    const int col_offset  = lane % RT::base_tile_cols;
-
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const int col = j * RT::base_tile_cols + col_offset;
-#pragma unroll
-            for (int k = 0; k < RT::base_tile_num_strides; k++) {
-                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
-#pragma unroll
-                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
-                    const int idx = l + k * RT::base_tile_stride / packing;
-                    dst_ptr[(row + l * 2)     * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
-                }
-            }
-        }
-    }
-}
 
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1, -1, -1> B,
@@ -163,7 +53,7 @@ void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-#include "xcd_steal.inc"
+                #include "xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -289,8 +179,9 @@ static void launch_persistent(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, b
 
     // Gatherers are dedicated (blockIdx < NGATH) and only join the compute queue once their peer's chunk has landed.
     const int NGATH = (tp_size - 1) * gath_wg;
+    static const int grid_cap = getenv("HK_GRID_CAP") ? atoi(getenv("HK_GRID_CAP")) : 256;
     int grid = tiles_M * tiles_N + NGATH;
-    if (grid > GRID_CAP) grid = GRID_CAP;
+    if (grid_cap > 0 && grid > grid_cap) grid = grid_cap;
     if (grid < NGATH) grid = NGATH;
 
     persistent_ag_bf16_gemm<<<grid, NUM_THREADS, 0, stream>>>(

@@ -45,6 +45,10 @@ reason_for_no_fused = (
     "per-rank chunk."
 )
 
+# Both GEMM layouts the fused AG backend implements; NN is selected with the harness' --dgrad.
+FUSED_LAYOUTS = ("TN", "NN")
+FUSED_QUANTIZATIONS = ("none", "mxfp8")
+
 
 def _fused_launch_cmd(nprocs: int):
     """Same form as LAUNCH_CMD, but at a rank count the fused tests choose."""
@@ -53,7 +57,7 @@ def _fused_launch_cmd(nprocs: int):
     return ["torchrun", f"--nproc_per_node={nprocs}"]
 
 
-def _run_fused_ag(nprocs, bulk=False, quantization="none"):
+def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
     """Run the AG overlap harness with the fused backend, returning the completed process."""
     test_cmd = _fused_launch_cmd(nprocs) + [
         str(TEST_ROOT / "run_gemm_with_overlap.py"),
@@ -66,7 +70,12 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none"):
         "--comm-type=AG",
         "--fused",
     ]
-    test_cmd += ["--bulk-overlap"] if bulk else ["--p2p", f"--quantization={quantization}"]
+    # The bulk harness pins its GEMM to NN regardless, so the layout only applies to the p2p path.
+    test_cmd += (
+        ["--bulk-overlap", f"--quantization={quantization}"]
+        if bulk
+        else ["--p2p", f"--quantization={quantization}"] + (["--dgrad"] if layout == "NN" else [])
+    )
     return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
 
@@ -124,24 +133,25 @@ def _assert_numerics_passed(result):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_bf16(nprocs):
-    """bf16 at an aligned shape: the fused backend runs and the result is correct."""
-    _assert_numerics_passed(_run_fused_ag(nprocs))
+def test_fused_ag_overlap(nprocs, quantization, layout):
+    """An aligned shape: the fused backend runs and the result is correct."""
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(nprocs, quantization=quantization, layout=layout))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
-def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is currently outside the backend."""
-    if quantization == "fp8" and not fp8_available:
+def test_fused_ag_overlap_rejects_fp8(nprocs):
+    """Delayed-scaling FP8 is outside the backend; only MXFP8 1D scaling dispatches."""
+    if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    result = _run_fused_ag(nprocs, quantization=quantization)
-    assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
-    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
+    result = _run_fused_ag(nprocs, quantization="fp8")
+    assert result.returncode != 0, "fused AG+GEMM accepted a delayed-scaling FP8 operand"
+    assert "only supports MXFP8_1D_SCALING" in result.stderr.decode(), result.stderr.decode()
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -159,10 +169,13 @@ def test_fused_ag_overlap_is_deterministic(nprocs):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_bulk_ag_overlap_bf16(nprocs):
+def test_fused_bulk_ag_overlap(nprocs, quantization):
     """The bulk all-gather that rides in an unrelated GEMM's grid."""
-    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True))
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_fused_ag(nprocs, bulk=True, quantization=quantization))
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

@@ -825,8 +825,15 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
-  size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
-  int buffer_chunk_bytes = buffer_bytes / _tp_size;
+  size_t data_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
+
+  // The E8M0 scales are carried inside the Userbuffers allocation unconditionally. Without it
+  // base.py falls back to a standalone all_gather_into_tensor for the scales inside the fused
+  // arm's timed window -- a median 12.7% of fused time, up to 40.1% on the smallest shapes.
+  const bool mxfp8_ag_scales = _fused && buffer_dtype == DType::kByte
+                                && comm_type == CommOverlapType::AG;
+
+  int buffer_chunk_bytes = data_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
   int num_ubuf_view_chunks = _tp_size;
   if (_is_reduce_scatter) {
@@ -834,20 +841,27 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     if (_fused) {
       // Fused RS holds two stage halves, alternating on epoch parity.
       _num_ubuf_chunks = _tp_size * 2;
-      buffer_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
+      data_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
     } else
 #endif
     {
       // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
       // outputs for reduction at the end of the pipelining.
-      buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
+      data_bytes = data_bytes / _tp_size * (_tp_size * 2 - 1);
       _num_ubuf_chunks = _tp_size * 2 - 1;
       num_ubuf_view_chunks = _num_ubuf_chunks;
     }
   }
 
+  size_t alloc_bytes = data_bytes;
+  if (mxfp8_ag_scales) {
+    _scale_chunk_bytes = buffer_chunk_bytes / 32;
+    _scale_base_offset = data_bytes;
+    alloc_bytes += _scale_chunk_bytes * _tp_size;
+  }
+
   void *buffer_ptr;
-  _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
+  _ub_reg = register_user_buffer_collective(&buffer_ptr, alloc_bytes, _ub_comm, true);
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,

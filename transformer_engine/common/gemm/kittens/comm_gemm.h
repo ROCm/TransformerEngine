@@ -9,10 +9,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "kittens_common.h"
+
 struct KittensAgGemmArgs {
     const void *A;
     void *ub;
     void *D;
+    const void *scale_A;
+    const void *scale_B;
     const void *peer_ub;
     int peer_first;
     int peer_count;
@@ -25,10 +29,14 @@ struct KittensAgGemmArgs {
     bool transa;
     int rank, nranks;
     size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
     void *gather_dst;     // Bulk all-gather only
+    KittensDType a_dtype;
+    KittensDType b_dtype;
 };
 
 struct KittensRsGemmArgs {
@@ -59,7 +67,11 @@ void kittens_comm_gemm_reset();
 
 bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args);
 
+bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
+
 bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
 
 bool kittens_bulk_rs_gemm_supported(int sm_arch);
 
