@@ -1031,6 +1031,90 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
 static_assert(hk_rs_tn::BLOCK_ROW == 256 && hk_rs_tn::BLOCK_COL == 256 && hk_rs_tn::K_STEP == 64,
               "rs_guards_ok literals are stale against hk_rs_tn geometry");
 
+bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
+    using namespace hk_mxfp8_rs_tn;
+
+    // TN keeps mxfp8_gemm.cpp's BLAS convention (A = weight on M, B = gathered activation on N);
+    const int M       = args.m;
+    const int N_TOTAL = args.n;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+    const int bands   = (N_TOTAL / tp_size) / BLOCK_COL;
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    const PlanKey key{2, M, N_TOTAL, K, tp_size, args.rank, 1};
+    auto it = g_rs_plans.find(key);
+    if (it == g_rs_plans.end()) {
+        RsPlan plan;
+        auto queue = build_rs_work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        if (!upload_plan(plan, queue)) return false;
+        it = g_rs_plans.emplace(key, plan).first;
+    }
+    const RsPlan &plan = it->second;
+
+    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+
+    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair).
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
+
+    int *tile_counter  = static_cast<int *>(ws.take(sizeof(int)));
+    const size_t counter_bytes = ws.used;
+    uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
+    uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
+    if (!ws.fits()) return false;
+
+    launch_pack_scales<L::A_SCALE_COLWISE, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
+
+    const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
+
+    const uint64_t epoch = g_rs_epoch[args.ub]++;
+    const size_t stage_off = (epoch & 1ull) ? lay.recv_off : 0;
+
+    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
+    if (!bases) return false;
+    RsPeers peers{};
+    for (int c = 0; c < tp_size; c++) {
+        char *pb = static_cast<char *>((*bases)[(args.peer_first + c) % args.peer_count]);
+        peers.stage[c]  = reinterpret_cast<bf16 *>(pb + stage_off);
+    }
+    char *lb = static_cast<char *>(args.ub);
+    peers.stage[args.rank]  = reinterpret_cast<bf16 *>(lb + stage_off);
+
+    bf16 *local_stage = peers.stage[args.rank];
+
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
+
+    // Arms the sentinel, which is what orders a peer's stage read against its epilogue store.
+    if (!sentinel_pattern_agrees()) return false;
+    const size_t stage_dw = lay.stage_bytes / sizeof(unsigned int);
+    if (hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_DW, stage_dw,
+                          args.stream) != hipSuccess) {
+        return false;
+    }
+
+    if (!args.arrive_peers || !args.arrive_local) return false;
+    ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+        static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+        static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+        args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+
+    RsLaunchCfg cfg;
+    cfg.comm_wg    = rs_comm_wg_tn(M, N_TOTAL, K);
+    cfg.wb_group   = rs_wb_group(K);
+    cfg.warn_ticks = ag_ready_warn_ticks();
+
+    launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.A)),
+                         static_cast<bf16 *>(const_cast<void *>(args.B)), local_stage,
+                         static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
+                         plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
+                         args.stream);
+    return hipGetLastError() == hipSuccess;
+}
+
 bool rs_guards_ok(const KittensRsGemmArgs &args) {
     const int M       = args.n;
     const int N_TOTAL = args.m;
