@@ -201,16 +201,15 @@ def grouped_gemm_gather_bf16(
     assert K == A.shape[1], f"weight K={K} != A K={A.shape[1]}"
     assert output.shape[1] == N, f"output N={output.shape[1]} != weight N={N}"
 
-    # FlyDSL packs each operand's flat byte view into an int32 launch signature, and the
-    # in-kernel expert-base voffset (``expert_id * N * K``, byte-scaled) is int32 too, so a
-    # >= 2 GiB operand overflows and silently stores to a wrong address instead of crashing.
-    # Reject up front (mirrors the base FlyDSL GEMM backend). The PF path has no fallback, so
-    # this surfaces as a hard error rather than degrading silently.
+    # The kernel computes the per-expert weight offset (``expert_id * N * K``) in 32-bit, and
+    # FlyDSL passes each operand's flattened size to the kernel in 32-bit, so ``weight`` and ``A``
+    # must fit 2^31 -- keep the hard guard (``A`` is also bounded by ``A_ELEMS`` below).
+    # ``output`` is safe: the kernel addresses it in 64-bit, one tile at a time
+    # (``c_base + c_byte_off``), so it stays correct above 2 GiB.
     require_launch_size(
         "permute-free fwd",
         ("A", A),
         ("weight", weight),
-        ("output", output),
     )
 
     # The tile core contracts over K in BLOCK_K=64 steps and needs >= 2 K-tiles. This is

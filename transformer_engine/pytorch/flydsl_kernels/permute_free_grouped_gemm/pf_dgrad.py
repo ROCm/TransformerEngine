@@ -211,13 +211,14 @@ def grouped_gemm_dgrad_bf16(
     c_m = int(dx.shape[0])
     assert grad_y.shape[1] == N, f"grad_y N={grad_y.shape[1]} != weight N={N}"
     assert dx.shape[1] == K, f"dx K={dx.shape[1]} != weight K={K}"
-    # See ``pf_fwd.grouped_gemm_gather_bf16``: reject operands that overflow the int32 launch
-    # signature / expert-base voffset up front (no fallback on the PF path -> hard error).
+    # The kernel computes the per-expert weight offset (``expert_id * N * K``) in 32-bit, so
+    # ``weight`` must fit 2^31 -- keep the hard guard.
+    # ``dx`` and the route-read ``grad_y`` are safe: the kernel addresses them in 64-bit, one tile
+    # at a time, so they stay correct above 2 GiB. The FC2-dgrad gather ``grad_y`` is a flat view,
+    # so it is bounded by the ``grad_y.numel() < 2^31`` check below.
     require_launch_size(
         "permute-free dgrad",
-        ("grad_y", grad_y),
         ("weight", weight),
-        ("dx", dx),
     )
     # The NN dgrad tile contracts over N (out features) in BLOCK_K=64 steps and needs >= 2
     # tiles. Enforced by a bare ``assert`` inside the traced kernel (stripped under
