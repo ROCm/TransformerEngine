@@ -8,16 +8,23 @@ import functools
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from transformer_engine.jax.sparse_attention.indexer import (
     LightningIndexer,
+    _mask_keys,
     _indexer_projections,
     indexer,
     indexer_topk,
 )
 from transformer_engine.jax.triton_extensions.indexer import (
+    _COMPACT_TILE_S,
+    _COMPACT_TILE_T,
+    _compact_enabled,
+    _compact_tiles,
     _score_reduce_autotune_configs,
+    _tile_validity_map,
     _tri_grid_override,
     _tri_grid_params,
     fp8_dtype,
@@ -548,31 +555,92 @@ def test_tri_grid_params_count_every_causal_tile():
             ), f"T={T} BLOCK_T={bt} BLOCK_S={bs}"
 
 
-@pytest.mark.parametrize("fp8", [False, True])
-@pytest.mark.parametrize("mask_type", ["causal", "padding_causal"])
-def test_tri_grid_is_bit_identical_to_rectangular(monkeypatch, mask_type, fp8):
-    """Forcing the triangular grid on changes no output bit.
+def _tile_map_bruteforce(seg_q, key_q, seg_k, key_k):
+    """Per tile, does any (t, s) in it actually satisfy the predicate?"""
+    v = (seg_q[:, :, None] == seg_k[:, None, :]) & (key_q[:, :, None] >= key_k[:, None, :])
+    B, T_t, T_s = v.shape
+    nt, ns = -(-T_t // _COMPACT_TILE_T), -(-T_s // _COMPACT_TILE_S)
+    out = np.zeros((B, nt, ns), bool)
+    v = np.asarray(v)
+    for i in range(nt):
+        for j in range(ns):
+            sl = v[:, i * _COMPACT_TILE_T:(i + 1) * _COMPACT_TILE_T,
+                   j * _COMPACT_TILE_S:(j + 1) * _COMPACT_TILE_S]
+            out[:, i, j] = sl.any(axis=(1, 2))
+    return out
 
-    T is chosen so the triangular *head* actually runs: below roughly
+
+@pytest.mark.parametrize("mask_type", _MASK_TYPES)
+def test_tile_map_never_drops_a_live_tile(mask_type):
+    """The tile map may over-keep, but must never lose a tile that has work.
+
+    A dropped tile is never dispatched and silently reads back as MASK_FILL, so
+    false negatives are the one failure mode that breaks correctness. False
+    positives only cost a wasted tile and are allowed.
+    """
+    B, T = 2, 1024
+    seg, pos = _segments(B, T, [300, 150, 400])
+    kwargs = {"segment_ids_q": seg, "segment_pos_q": pos} if "padding" in mask_type else {}
+    mask = _mask_keys(B, T, T, mask_type,
+                      kwargs.get("segment_ids_q"), kwargs.get("segment_pos_q"),
+                      kwargs.get("segment_ids_q"), kwargs.get("segment_pos_q"))
+
+    got = np.asarray(_tile_validity_map(*mask))
+    want = _tile_map_bruteforce(*[np.asarray(x) for x in mask])
+    assert not (want & ~got).any(), f"{int((want & ~got).sum())} live tiles dropped"
+
+    # Compaction must list exactly the kept tiles, once each, then -1 pad.
+    lst = np.asarray(_compact_tiles(jnp.asarray(got)))
+    for b in range(B):
+        kept = sorted(np.flatnonzero(got[b].reshape(-1)).tolist())
+        assert sorted(lst[b][lst[b] >= 0].tolist()) == kept
+
+
+def test_tile_map_matches_triangular_under_causal():
+    """With one segment the map must reproduce the triangular enumeration.
+
+    The two mechanisms are meant to be the same statement about which tiles can
+    hold work; if they disagree, one of them is wrong.
+    """
+    B = 1
+    for T in (512, 1024, 4096):
+        mask = _mask_keys(B, T, T, "causal")
+        n = int(np.asarray(_tile_validity_map(*mask))[0].sum())
+        assert n == _tri_grid_params(T, T, _COMPACT_TILE_T, _COMPACT_TILE_S)["n_tiles"], T
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("mask_type", _MASK_TYPES)
+def test_launch_paths_are_bit_identical(monkeypatch, mask_type, fp8):
+    """rectangular / TRI_GRID / COMPACT are launch shapes, nothing more.
+
+    All three must agree bit for bit -- this is not a tolerance question. T is
+    chosen so the triangular *head* actually runs: below roughly
     BLOCK_S/BLOCK_T t-tiles every tile lands in the rectangular tail and the
-    tile-id inverse is never exercised.
+    tile-id inverse is never exercised. The segment lengths are unequal and do
+    not tile evenly, so cross-segment tiles appear inside the triangle.
     """
     B, oH, T = 2, 2, 512
     args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=507)
     _, _, _, kwargs = _masked_case(mask_type, B, T, lengths=(300, 150))
 
-    outs = {}
-    for forced in ("0", "1"):
-        monkeypatch.setenv("NVTE_INDEXER_TRI_GRID", forced)
+    def run(tri, compact):
+        monkeypatch.setenv("NVTE_INDEXER_TRI_GRID", tri)
+        monkeypatch.setenv("NVTE_INDEXER_COMPACT", compact)
         _tri_grid_override.cache_clear()
-        # The env var is read during lowering, so a cached trace would silently
-        # reuse the other grid and make this comparison vacuous.
+        _compact_enabled.cache_clear()
+        # Both env vars are read during lowering, so a cached trace would
+        # silently reuse the other path and make this comparison vacuous.
         jax.clear_caches()
-        outs[forced] = indexer(*args, fp8=fp8, **kwargs)
-    _tri_grid_override.cache_clear()
-    jax.clear_caches()
+        return indexer(*args, fp8=fp8, **kwargs)
 
-    assert jnp.array_equal(outs["1"], outs["0"])
+    base = run("0", "0")  # rectangular grid, no tile list
+    for tri, compact in (("1", "0"), ("0", "1"), ("1", "1")):
+        assert jnp.array_equal(run(tri, compact), base), f"tri={tri} compact={compact}"
+
+    _tri_grid_override.cache_clear()
+    _compact_enabled.cache_clear()
+    jax.clear_caches()
 
 
 def test_unsupported_mask_type_is_rejected():

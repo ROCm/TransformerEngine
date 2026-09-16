@@ -109,6 +109,12 @@ def _tri_grid_override():
     return val != "0"
 
 
+@functools.lru_cache(maxsize=None)
+def _compact_enabled():
+    """False when ``NVTE_INDEXER_COMPACT=0`` — A/B knob for the tile list."""
+    return os.environ.get("NVTE_INDEXER_COMPACT", "1") != "0"
+
+
 # --- Causal triangular grid --------------------------------------------------
 #
 # Under a causal-family mask every valid (t, s) pair has t >= s, so roughly half
@@ -167,6 +173,97 @@ def _tri_grid_params(T_t, T_s, BLOCK_T, BLOCK_S):
         "tri_count": tri_count,
         "n_tiles": tri_count + (n_t - i_star) * n_s,
     }
+
+
+# --- Compacted tile list -----------------------------------------------------
+#
+# The triangular grid removes tiles above the diagonal, which is the whole story
+# for a plain causal mask but only part of it for THD: with packed segments most
+# of the tiles *inside* the triangle are cross-segment and also fully masked.
+# Measured at T=8192 / 32 segments, `padding_causal` keeps 1.6% of pairs but
+# still costs 0.15x the unmasked kernel -- 7.7x off proportional.
+#
+# So instead of a closed-form enumeration, precompute which tiles survive the
+# mask and compact them into a launch list the kernel indexes. Unlike the
+# triangular constants, the list is a *tensor* operand, and a primitive operand's
+# aval is fixed before lowering ever sees the autotune configs -- so its tile
+# granularity cannot vary per config. The compacted path therefore pins
+# BLOCK_T/BLOCK_S to the constants below (the _BWD_H_CHUNK precedent: one number
+# that is both a JAX-level tiling granularity and a kernel constexpr) and
+# autotunes only the remaining knobs.
+
+_COMPACT_TILE_T = 32
+_COMPACT_TILE_S = 256
+
+
+def _compact_configs(configs):
+    """Configs at the pinned granularity — warps/stages/hints still vary."""
+    return [
+        c for c in configs
+        if c.kwargs.get("BLOCK_T") == _COMPACT_TILE_T
+        and c.kwargs.get("BLOCK_S") == _COMPACT_TILE_S
+    ]
+
+
+def _tile_summaries(seg, key, tile):
+    """Per-tile (seg_min, seg_max, key_min, key_max) — O(T), not O(T*S)."""
+    B, T = seg.shape
+    n = -(-T // tile)
+    pad = n * tile - T
+    if pad:
+        # Edge padding repeats a real token, so it can only *widen* a tile's
+        # ranges toward values already present -- never narrow them, which is
+        # the direction that would cost us a valid tile.
+        seg = jnp.pad(seg, ((0, 0), (0, pad)), mode="edge")
+        key = jnp.pad(key, ((0, 0), (0, pad)), mode="edge")
+    seg = seg.reshape(B, n, tile)
+    key = key.reshape(B, n, tile)
+    return seg.min(-1), seg.max(-1), key.min(-1), key.max(-1)
+
+
+def _tile_validity_map(SegQ, KeyQ, SegK, KeyK):
+    """(B, NT, NS) bool — tiles that may contain a valid (t, s) pair.
+
+    Reduces each tile to a segment range and a key bound, then tests those
+    instead of the full BLOCK_T x BLOCK_S predicate.
+
+    **Conservative in the safe direction.** If a real pair (t, s) is valid then
+    ``seg_q[t] == seg_k[s]`` lies in both segment ranges and
+    ``key_q_max >= key_q[t] >= key_k[s] >= key_k_min``, so the tile is kept:
+    false negatives are impossible. False positives are possible and harmless --
+    the kernel's own predicate still fills such a tile correctly.
+
+    Under a plain causal mask (one segment, key = position) this reduces to
+    ``(i+1)*TILE_T - 1 >= j*TILE_S``, i.e. exactly the triangular enumeration.
+    The metadata carries no outer-head axis, so the map is shared across oH.
+    """
+    q_smin, q_smax, _, q_kmax = _tile_summaries(SegQ, KeyQ, _COMPACT_TILE_T)
+    k_smin, k_smax, k_kmin, _ = _tile_summaries(SegK, KeyK, _COMPACT_TILE_S)
+    return (
+        (q_smin[:, :, None] <= k_smax[:, None, :])
+        & (k_smin[:, None, :] <= q_smax[:, :, None])
+        & (q_kmax[:, :, None] >= k_kmin[:, None, :])
+    )
+
+
+def _compact_tiles(valid):
+    """(B, NT*NS) int32 flat tile ids of the survivors, ``-1``-padded.
+
+    A sentinel tail rather than a separate count operand, matching the house
+    style in ``common/triton/permutation.py`` (allocate worst case, make the
+    unused slots harmless) -- it costs the kernel one load instead of two.
+    """
+    B, NT, NS = valid.shape
+    n = NT * NS
+    flat = valid.reshape(B, n)
+    # Destination of each surviving tile in the compacted list; non-survivors
+    # are aimed at a dump slot that is sliced off below.
+    dest = jnp.cumsum(flat.astype(jnp.int32), axis=-1) - 1
+    dest = jnp.where(flat, dest, n)
+    ids = jnp.broadcast_to(jnp.arange(n, dtype=jnp.int32), (B, n))
+    rows = jnp.broadcast_to(jnp.arange(B)[:, None], (B, n))
+    out = jnp.full((B, n + 1), -1, jnp.int32).at[rows, dest].set(ids)
+    return out[:, :n]
 
 
 # --- FP8 operand quantization ------------------------------------------------
@@ -277,8 +374,10 @@ def _score_reduce_kernel(
     KeyQ_ptr,     # (B, T_t) int32 — query order key    (unread when HAS_MASK=0)
     SegK_ptr,     # (B, T_s) int32 — key segment id     (unread when HAS_MASK=0)
     KeyK_ptr,     # (B, T_s) int32 — key order key      (unread when HAS_MASK=0)
+    TileList_ptr, # (B, TILE_NT*TILE_NS) int32 — surviving tiles, -1 padded
+                  # (unread unless COMPACT=1; a (1, 1) dummy otherwise)
     OInit_ptr,    # (B, oH, T_t, T_s) MASK_FILL-prefilled, aliased to O_ptr when
-                  # TRI_GRID=1; a (1, 1) dummy otherwise. Never dereferenced.
+                  # TRI_GRID or COMPACT; a (1, 1) dummy otherwise. Never read.
     O_ptr,        # (B, oH, T_t, T_s)
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -290,6 +389,12 @@ def _score_reduce_kernel(
     MASK_FILL: tl.constexpr,
     SKIP_TILES: tl.constexpr,
     TRI_GRID: tl.constexpr,
+    # Compacted-tile-list decode. TILE_NT/TILE_NS are the pinned map granularity
+    # (_COMPACT_TILE_T/_COMPACT_TILE_S), which COMPACT forces BLOCK_T/BLOCK_S to
+    # equal, so a map entry and a kernel tile are the same thing.
+    COMPACT: tl.constexpr,
+    TILE_NT: tl.constexpr,
+    TILE_NS: tl.constexpr,
     # Triangular-grid decode constants. Computed on the host by
     # _tri_grid_params and injected per autotune config, so the launch size and
     # this decode cannot drift apart. All 1 (unused) when TRI_GRID=0.
@@ -352,7 +457,21 @@ def _score_reduce_kernel(
     """
     pid_bh = tl.program_id(2)
 
-    if TRI_GRID:
+    # int64 indexing — Hq alone has B*oH*T*H*d_i = 4.3 B elements at T=S=4096,
+    # exceeds int32 range. Hoisted above the decode because COMPACT indexes its
+    # per-batch tile list by b.
+    b = (pid_bh // oH).to(tl.int64)
+    h_outer = (pid_bh % oH).to(tl.int64)
+
+    if COMPACT:
+        # The grid is sized to a static worst case, so most CTAs find the -1
+        # padding and retire here without touching mask metadata or the output.
+        tile = tl.load(TileList_ptr + b * (TILE_NT * TILE_NS) + tl.program_id(0))
+        if tile < 0:
+            return
+        pid_t = tile // TILE_NS
+        pid_s = tile % TILE_NS
+    elif TRI_GRID:
         pid = tl.program_id(0)
         if pid >= TRI_COUNT:
             # Rectangular tail: these t-tiles meet all TRI_N_S s-tiles.
@@ -381,11 +500,6 @@ def _score_reduce_kernel(
     else:
         pid_s = tl.program_id(0)
         pid_t = tl.program_id(1)
-
-    # int64 indexing — Hq alone has B*oH*T*H*d_i = 4.3 B elements at T=S=4096,
-    # exceeds int32 range.
-    b = (pid_bh // oH).to(tl.int64)
-    h_outer = (pid_bh % oH).to(tl.int64)
 
     rt = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
     rs = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
@@ -458,9 +572,10 @@ _score_reduce_p.multiple_results = True
 
 
 @_score_reduce_p.def_abstract_eval
-def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit, *,
-                           out_dtype, has_mask, tri_grid):
-    del W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, has_mask, tri_grid
+def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                           OInit, *, out_dtype, has_mask, tri_grid, compact):
+    del W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, has_mask, tri_grid, compact
+    del TileList  # read by the kernel, contributes no shape
     del OInit  # carried for input_output_aliases only
     # Hq layout: (B, oH, T_t, H, d_i)
     B, oH, T_t, _H, _d_i = Hq.shape
@@ -471,8 +586,8 @@ def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit, *
 _score_reduce_p.def_impl(functools.partial(xla.apply_primitive, _score_reduce_p))
 
 
-def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit, *,
-                           out_dtype, has_mask, tri_grid):
+def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                           OInit, *, out_dtype, has_mask, tri_grid, compact):
     del out_dtype
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
@@ -491,18 +606,39 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OIn
         # config sets both keys.
         bt = merged_kwargs["BLOCK_T"]
         bs = merged_kwargs["BLOCK_S"]
+        if compact:
+            # Static worst case; the surplus CTAs retire on the -1 sentinel.
+            #
+            # Deliberately NOT bounded by the triangular count, even for the
+            # causal family. _tile_validity_map is conservative, and a false
+            # positive can land *above* the diagonal: a t-tile early in one
+            # segment versus an s-tile straddling two segments passes both the
+            # segment-overlap and the key test while holding no valid pair.
+            # Bounding by the triangle would truncate the list and silently drop
+            # real tiles. A surplus CTA costs ~1 ns; this is not worth shaving.
+            return (triton.cdiv(T_t, bt) * triton.cdiv(T_s, bs), 1, B * oH)
         if tri_grid:
             return (_tri_grid_params(T_t, T_s, bt, bs)["n_tiles"], 1, B * oH)
         # S as grid_x (fastest-dispatching) so per-(B*oH, T-tile) S workgroups
         # cluster in time and hit L2 on the shared Hq slab.
         return (triton.cdiv(T_s, bs), triton.cdiv(T_t, bt), B * oH)
 
-    # Under TRI_GRID the masked region is never visited, so the prefilled buffer
-    # *is* the output. Otherwise OInit is an unused (1, 1) dummy.
-    aliases = {9: 0} if tri_grid else None
+    # Whenever fully-masked tiles go undispatched the masked region is never
+    # visited, so the prefilled buffer *is* the output. Otherwise OInit is an
+    # unused (1, 1) dummy.
+    aliases = {10: 0} if (tri_grid or compact) else None
 
     saved_configs = _score_reduce_kernel.configs
     configs = saved_configs
+    if compact:
+        # The tile map is built at a pinned granularity, so only configs that
+        # tile the same way can consume it. Warps/stages/AMD hints still vary.
+        configs = _compact_configs(configs)
+        if not configs:
+            raise RuntimeError(
+                "no autotune config at the compacted granularity "
+                f"BLOCK_T={_COMPACT_TILE_T}, BLOCK_S={_COMPACT_TILE_S}"
+            )
     if _autotune_disabled():
         configs = configs[:1]
 
@@ -535,7 +671,7 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OIn
         return triton_call_lowering(
             ctx,
             _score_reduce_kernel,
-            Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit,
+            Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList, OInit,
             grid=grid_fn,
             input_output_aliases=aliases,
             constexprs={
@@ -549,6 +685,9 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OIn
                 "MASK_FILL": mask_fill,
                 "SKIP_TILES": _tile_skip_enabled(),
                 "TRI_GRID": tri_grid,
+                "COMPACT": compact,
+                "TILE_NT": triton.cdiv(T_t, _COMPACT_TILE_T),
+                "TILE_NS": triton.cdiv(T_s, _COMPACT_TILE_S),
                 # TRI_N_S / TRI_RATIO / TRI_CASE_A / TRI_I_STAR / TRI_COUNT are
                 # deliberately absent here -- they are per-config, see above.
             },
@@ -799,8 +938,8 @@ mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, pl
 # --- Public score_reduce_triton with custom_vjp ------------------------------
 
 
-def _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                       out_dtype, has_mask, tri_grid):
+def _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                       out_dtype, has_mask, tri_grid, compact):
     """Bind the forward primitive, supplying the aliased output buffer.
 
     Under ``tri_grid`` the kernel never visits the masked region, so the buffer
@@ -808,38 +947,40 @@ def _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
     rectangular path writes every slot itself and gets a (1, 1) dummy, matching
     how the mask operands are handled when ``has_mask`` is False.
     """
-    if tri_grid:
+    if tri_grid or compact:
         B, oH, T_t = Hq.shape[0], Hq.shape[1], Hq.shape[2]
         T_s = Hk.shape[2]
         OInit = jnp.full((B, oH, T_t, T_s), jnp.finfo(out_dtype).min, out_dtype)
     else:
         OInit = jnp.zeros((1, 1), out_dtype)
-    return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit,
+    return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                                TileList, OInit,
                                 out_dtype=out_dtype, has_mask=has_mask,
-                                tri_grid=tri_grid)[0]
+                                tri_grid=tri_grid, compact=compact)[0]
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
-def _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                           out_dtype, has_mask, tri_grid):
-    return _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                              out_dtype, has_mask, tri_grid)
+@functools.partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13))
+def _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                           out_dtype, has_mask, tri_grid, compact):
+    return _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                              out_dtype, has_mask, tri_grid, compact)
 
 
-def _score_reduce_fwd(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                      out_dtype, has_mask, tri_grid):
-    out = _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                             out_dtype, has_mask, tri_grid)
+def _score_reduce_fwd(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                      out_dtype, has_mask, tri_grid, compact):
+    out = _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+                             out_dtype, has_mask, tri_grid, compact)
     return out, (Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK)
 
 
 _BWD_H_CHUNK = 8  # peak (B, oH, T, H_CHUNK, T_s) tile -- bounds materialization
 
 
-def _score_reduce_bwd(out_dtype, has_mask, tri_grid, residuals, dO):
-    # tri_grid is a forward-only launch detail: the backward kernel walks S as an
-    # in-kernel loop rather than a grid axis, so it has no tile grid to remap.
-    del out_dtype, tri_grid
+def _score_reduce_bwd(out_dtype, has_mask, tri_grid, compact, residuals, dO):
+    # tri_grid / compact are forward-only launch details: the backward kernel
+    # walks S as an in-kernel loop rather than a grid axis, so it has no tile
+    # grid to remap or compact.
+    del out_dtype, tri_grid, compact
     Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK = residuals
     B, oH, T, H, d_i = Hq.shape
     # The score recompute inside the Triton kernel consumes Hq / Hk in their
@@ -919,8 +1060,9 @@ def _score_reduce_bwd(out_dtype, has_mask, tri_grid, residuals, dO):
 
     # Sq / Ks are quantization metadata, held constant by every scaling recipe
     # (and by quantize_e4m3's stop_gradient), so they take a zero cotangent. The
-    # four mask operands are integer arrays; JAX takes None as their cotangent
-    # (same convention as permutation.py's row_id_map / pad_offsets).
+    # four mask operands and the compacted tile list are integer arrays; JAX
+    # takes None as their cotangent (same convention as permutation.py's
+    # row_id_map / pad_offsets).
     return (
         dHq,
         dHk,
@@ -931,6 +1073,7 @@ def _score_reduce_bwd(out_dtype, has_mask, tri_grid, residuals, dO):
         None,
         None,
         None,
+        None,  # TileList
     )
 
 
@@ -967,7 +1110,7 @@ def _validate_mask(mask, B, T_t, T_s):
 
 
 def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, mask=None, out_dtype=None,
-                        mask_is_causal=False):
+                        mask_is_causal=False, mask_has_segments=False):
     """Triton fused score-matmul + relu + per-(t, h) weighted H-reduction.
 
     Replaces the pattern:
@@ -1004,6 +1147,11 @@ def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, mask=None, out_dtype=N
             a launch hint: it selects the triangular grid, which skips
             dispatching the fully-masked half instead of dispatching and
             discarding it. Ignored unless a mask is supplied and T_t == T_s.
+        mask_has_segments: caller's statement that the mask carries more than
+            one segment (the padding family). Also purely a launch hint: it
+            selects the compacted tile list, which drops cross-segment tiles the
+            triangular grid cannot see. Safe to leave False -- the result is
+            identical either way, only slower.
 
     Returns:
         O: (B, oH, T_t, T_s)
@@ -1053,7 +1201,19 @@ def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, mask=None, out_dtype=N
     override = _tri_grid_override()
     tri_grid = tri_eligible and (T_t >= _TRI_GRID_MIN_T if override is None else override)
 
+    # Segment masks are where the triangular grid runs out of road: it removes
+    # tiles above the diagonal, but under THD most of the tiles *inside* the
+    # triangle are cross-segment and equally dead. Compaction removes both, so
+    # it takes over whenever segments are in play.
+    compact = has_mask and mask_has_segments and _compact_enabled()
+    if compact:
+        TileList = _compact_tiles(_tile_validity_map(SegQ, KeyQ, SegK, KeyK))
+    else:
+        # Same dummy idiom as the unused mask operands: COMPACT gates every
+        # dereference, so a full-size array would cost HBM for nothing.
+        TileList = jnp.zeros((1, 1), jnp.int32)
+
     return _score_reduce_with_vjp(
-        Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-        jnp.dtype(out_dtype), has_mask, tri_grid,
+        Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
+        jnp.dtype(out_dtype), has_mask, tri_grid, compact,
     )
