@@ -290,7 +290,7 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
-#if !defined(__HIP_DEVICE_COMPILE__) || defined(__gfx1250__)
+#if !defined(__HIP_DEVICE_COMPILE__) || defined(__GFX12__)
 constexpr int THREADS_PER_WAVEFRONT = 32;
 #else
 constexpr int THREADS_PER_WAVEFRONT = 64;
