@@ -29,8 +29,29 @@ come back as e4m3 too. They are the chain-rule cotangents w.r.t. the *quantized*
 operands (``dHq_true * sq``), which renormalizes them into the operand's own
 range rather than leaving a raw unscaled fp8 gradient. ``Sq`` / ``Ks`` are
 quantization metadata and are treated as constants (zero cotangent).
+
+Masking
+-------
+An optional ``mask`` restricts which (t, s) pairs are scored, which is what lets
+the indexer run on packed variable-length (THD) batches without scoring across
+segment boundaries. It is a ``(seg_q, key_q, seg_k, key_k)`` tuple of int32
+arrays and the kernels apply exactly one predicate::
+
+    valid[t, s] = (seg_q[t] == seg_k[s]) and (key_q[t] >= key_k[s])
+
+Every supported attention mask reduces to a choice of key, made by the caller,
+so the kernels carry no mask-type switch. Masked slots in the forward output get
+``finfo(out_dtype).min`` rather than zero: the ReLU sits *inside* the
+H-reduction, ahead of the signed ``W_o`` weighting, so the logits themselves are
+signed and a zero fill would outrank a valid negative logit under a downstream
+top-k. Backward needs no fill -- the mask is ANDed into the ReLU mask, which
+zeroes both ``dscores`` and the ``dW_o`` reduction at a masked pair.
+
+A tile with no valid pair skips its score matmul entirely; under a causal mask
+that is roughly half of them.
 """
 
+import copy
 import functools
 import os
 
@@ -49,6 +70,12 @@ from .utils import triton_call_lowering
 
 
 @functools.lru_cache(maxsize=None)
+def _tile_skip_enabled():
+    """False when ``NVTE_INDEXER_TILE_SKIP=0`` — A/B knob for the tile skip."""
+    return os.environ.get("NVTE_INDEXER_TILE_SKIP", "1") != "0"
+
+
+@functools.lru_cache(maxsize=None)
 def _autotune_disabled():
     """True when ``NVTE_INDEXER_DISABLE_AUTOTUNE=1``.
 
@@ -58,6 +85,88 @@ def _autotune_disabled():
     costs many minutes and only picks the fastest config, not a more correct
     one. Read once at first lowering and cached."""
     return os.environ.get("NVTE_INDEXER_DISABLE_AUTOTUNE", "0") == "1"
+
+
+# Below this T_t the triangular grid loses: the kernel is latency-bound rather
+# than compute-bound, so the tile work it skips was not costing full price,
+# while the MASK_FILL prefill it requires is a real extra pass over the output.
+# Measured crossover on gfx950 (fp8 operands, bf16 out, H=32, d_i=128): 0.94x at
+# T=2048, 1.30x at 4096, 1.60x at 8192. Revisit if the fill stops being a
+# separate pass -- see the note in _score_reduce_kernel.
+_TRI_GRID_MIN_T = 4096
+
+
+@functools.lru_cache(maxsize=None)
+def _tri_grid_override():
+    """``NVTE_INDEXER_TRI_GRID`` — A/B knob for the causal grid.
+
+    Returns True to force the triangular grid on (used by the tests, which run
+    shapes far below _TRI_GRID_MIN_T and would otherwise never exercise it),
+    False to force the rectangular grid, or None to use the size heuristic."""
+    val = os.environ.get("NVTE_INDEXER_TRI_GRID")
+    if val is None:
+        return None
+    return val != "0"
+
+
+# --- Causal triangular grid --------------------------------------------------
+#
+# Under a causal-family mask every valid (t, s) pair has t >= s, so roughly half
+# the rectangular grid's tiles are fully masked. Those tiles are cheap
+# individually but are not free: they interleave with working tiles along the
+# fast-dispatching axis, and measurement shows the resulting imbalance costs
+# nearly the whole benefit of masking (a causal mask runs at ~1.0x the cost of
+# no mask at all, against an available 0.5x). The fix is to not dispatch them:
+# enumerate only the tiles that meet the causal region, on a 1-D grid.
+#
+# Both the host (to size the grid) and the kernel (to invert a linear tile id)
+# must agree exactly on that enumeration, so both derive it from the same four
+# numbers -- T_t, T_s, BLOCK_T, BLOCK_S -- using the identities below.
+#
+# Per t-tile i, the number of s-tiles meeting the causal region is
+#
+#     c(i) = min(n_s, min(i * BT + BT - 1, T_t - 1) // BS + 1)
+#
+# c is nondecreasing and saturates at n_s, which splits the grid into a
+# triangular head (c still growing) and a rectangular tail (c == n_s). Carrying
+# the tail explicitly is what keeps this exact when BS > T_s or when the shapes
+# do not divide evenly.
+
+
+def _tri_grid_params(T_t, T_s, BLOCK_T, BLOCK_S):
+    """Derive the causal tile-grid constants for one (shape, config) pair.
+
+    Mirrored verbatim by ``_score_reduce_kernel`` from its own constexprs.
+    Returns a dict with the launch size in ``n_tiles``.
+    """
+    n_t = -(-T_t // BLOCK_T)
+    n_s = -(-T_s // BLOCK_S)
+
+    if BLOCK_S >= BLOCK_T:
+        # c(i) = i // ratio + 1 -- `ratio` consecutive t-tiles share a count.
+        ratio = BLOCK_S // BLOCK_T
+        case_a = True
+        i_star = min(n_t, (n_s - 1) * ratio)
+        if i_star == n_t:  # saturation never reached within the grid
+            tri_count = sum(i // ratio + 1 for i in range(n_t))
+        else:
+            tri_count = ratio * (n_s - 1) * n_s // 2
+    else:
+        # c(i) = (i + 1) * ratio
+        ratio = BLOCK_T // BLOCK_S
+        case_a = False
+        i_star = min(n_t, max(0, -(-n_s // ratio) - 1))
+        tri_count = ratio * i_star * (i_star + 1) // 2
+
+    return {
+        "n_t": n_t,
+        "n_s": n_s,
+        "ratio": ratio,
+        "case_a": case_a,
+        "i_star": i_star,
+        "tri_count": tri_count,
+        "n_tiles": tri_count + (n_t - i_star) * n_s,
+    }
 
 
 # --- FP8 operand quantization ------------------------------------------------
@@ -164,6 +273,12 @@ def _score_reduce_kernel(
     W_o_ptr,      # (B, oH, T_t, H)
     Sq_ptr,       # (B, oH, T_t, H)  fp32 — Hq row scales (all-ones when bf16)
     Ks_ptr,       # (B, oH, T_s)     fp32 — Hk row scales (all-ones when bf16)
+    SegQ_ptr,     # (B, T_t) int32 — query segment id   (unread when HAS_MASK=0)
+    KeyQ_ptr,     # (B, T_t) int32 — query order key    (unread when HAS_MASK=0)
+    SegK_ptr,     # (B, T_s) int32 — key segment id     (unread when HAS_MASK=0)
+    KeyK_ptr,     # (B, T_s) int32 — key order key      (unread when HAS_MASK=0)
+    OInit_ptr,    # (B, oH, T_t, T_s) MASK_FILL-prefilled, aliased to O_ptr when
+                  # TRI_GRID=1; a (1, 1) dummy otherwise. Never dereferenced.
     O_ptr,        # (B, oH, T_t, T_s)
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -171,6 +286,18 @@ def _score_reduce_kernel(
     T_s: tl.constexpr,
     H: tl.constexpr,
     d_i: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    MASK_FILL: tl.constexpr,
+    SKIP_TILES: tl.constexpr,
+    TRI_GRID: tl.constexpr,
+    # Triangular-grid decode constants. Computed on the host by
+    # _tri_grid_params and injected per autotune config, so the launch size and
+    # this decode cannot drift apart. All 1 (unused) when TRI_GRID=0.
+    TRI_N_S: tl.constexpr,
+    TRI_RATIO: tl.constexpr,
+    TRI_CASE_A: tl.constexpr,
+    TRI_I_STAR: tl.constexpr,
+    TRI_COUNT: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_S: tl.constexpr,
 ):
@@ -182,10 +309,78 @@ def _score_reduce_kernel(
     and vary only in S — they all read the same per-head Hq slab, hitting
     L2 instead of HBM. Hq layout is the natural einsum output
     (..., T, H, d_i); per-head loads are strided in T (stride H*d_i).
+
+    Masking (``HAS_MASK``): a (t, s) pair is scored iff it shares a segment and
+    the query's order key is at or after the key's. Every supported mask type is
+    a choice of key made by the caller, so the kernel has one predicate and no
+    mask-type branching. Masked slots get ``MASK_FILL`` -- a large negative
+    value, not zero, because the logits are signed (the ReLU sits inside the
+    H-reduction, ahead of the signed W_o weighting) and a downstream top-k must
+    not prefer a masked slot to a valid negative one.
+
+    A tile whose every pair is masked skips the Hk load and the whole H loop; it
+    still stores, since the output slots are not otherwise written.
+
+    How much that buys depends on the mask's *shape*, not just how much it masks
+    (gfx950, BLOCK_T=32/BLOCK_S=128, T=4096, measured against the unmasked
+    kernel):
+
+      - masking at all costs ~14%: the metadata loads, the predicate, the select
+      - a block-structured mask (padding) at 49% skipped tiles: 0.90x
+      - a causal mask at the same 48% skipped tiles: 1.12x
+
+    Same tile-skip fraction, very different payoff. With a block mask whole rows
+    of the grid skip together, so slots free up in bulk; a causal mask
+    interleaves skipped and working tiles along ``pid_s`` (the fast-dispatching
+    axis), so co-resident CTAs finish at the working ones' pace and the freed
+    slots are not reclaimed -- which is why the skip alone leaves a causal mask
+    costing about as much as no mask at all.
+    Set ``NVTE_INDEXER_TILE_SKIP=0`` to A/B the skip.
+
+    ``TRI_GRID`` is the answer to that, for the causal family specifically: the
+    grid collapses to 1-D over only the tiles that meet the causal region, so a
+    fully-masked tile is never dispatched and there is nothing to interleave.
+    The tile body below is unchanged -- only the decode differs:
+
+        TRI_GRID=0:  (cdiv(T_s, BLOCK_S), cdiv(T_t, BLOCK_T), B * oH)
+        TRI_GRID=1:  (n_tiles, 1, B * oH), pid inverted to (pid_t, pid_s)
+
+    Because the skipped region is then never visited, ``O`` must already hold
+    ``MASK_FILL`` there; the caller supplies that via ``OInit_ptr``, aliased to
+    ``O_ptr``. Enabled only for causal / padding_causal at T_t == T_s, where
+    every valid pair satisfies t >= s. Set ``NVTE_INDEXER_TRI_GRID=0`` to A/B it.
     """
-    pid_s = tl.program_id(0)
-    pid_t = tl.program_id(1)
     pid_bh = tl.program_id(2)
+
+    if TRI_GRID:
+        pid = tl.program_id(0)
+        if pid >= TRI_COUNT:
+            # Rectangular tail: these t-tiles meet all TRI_N_S s-tiles.
+            rem = pid - TRI_COUNT
+            pid_t = TRI_I_STAR + rem // TRI_N_S
+            pid_s = rem % TRI_N_S
+        else:
+            # Triangular head. Largest n with TRI_RATIO*n*(n+1)/2 <= pid, via an
+            # f32 sqrt plus a correction step -- the estimate only has to land
+            # within one, and pid stays well inside f32's exact-integer range.
+            n = ((tl.sqrt(8.0 * pid / TRI_RATIO + 1.0) - 1.0) * 0.5).to(tl.int32)
+            n = tl.maximum(n, 0)
+            while TRI_RATIO * (n + 1) * (n + 2) // 2 <= pid:
+                n += 1
+            while n > 0 and TRI_RATIO * n * (n + 1) // 2 > pid:
+                n -= 1
+            rem = pid - TRI_RATIO * n * (n + 1) // 2
+            if TRI_CASE_A:
+                # n indexes a group of TRI_RATIO t-tiles sharing a count of n+1.
+                pid_t = n * TRI_RATIO + rem // (n + 1)
+                pid_s = rem % (n + 1)
+            else:
+                # One t-tile per n, meeting (n+1)*TRI_RATIO s-tiles.
+                pid_t = n
+                pid_s = rem
+    else:
+        pid_s = tl.program_id(0)
+        pid_t = tl.program_id(1)
 
     # int64 indexing — Hq alone has B*oH*T*H*d_i = 4.3 B elements at T=S=4096,
     # exceeds int32 range.
@@ -205,32 +400,53 @@ def _score_reduce_kernel(
     ks_base = b * (oH * T_s) + h_outer * T_s
     o_base = b * (oH * T_t * T_s) + h_outer * (T_t * T_s)
 
-    # Load the (BLOCK_S, d_i) Hk slab once — it is loop-invariant over H.
-    hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
-    Hk_tile = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
-    Hk_T = tl.trans(Hk_tile)  # (d_i, BLOCK_S)
-
-    # Hk row scales — also loop-invariant over H, applied once after the loop.
-    ks = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
+    # Segment metadata is (B, T) and broadcasts over the outer-head axis, so it
+    # is indexed by b alone -- no h_outer term. The out-of-range fills are
+    # distinct sentinels (-1 query, -2 key) that match neither each other nor a
+    # real segment id, so a masked-off lane can never read as valid.
+    if HAS_MASK:
+        seg_q = tl.load(SegQ_ptr + b * T_t + rt, mask=rt_mask, other=-1)
+        key_q = tl.load(KeyQ_ptr + b * T_t + rt, mask=rt_mask, other=0)
+        seg_k = tl.load(SegK_ptr + b * T_s + rs, mask=rs_mask, other=-2)
+        key_k = tl.load(KeyK_ptr + b * T_s + rs, mask=rs_mask, other=0)
+        valid = (seg_q[:, None] == seg_k[None, :]) & (key_q[:, None] >= key_k[None, :])
+        if SKIP_TILES:
+            any_valid = tl.max(valid.to(tl.int32)) > 0
+        else:
+            any_valid = True
+    else:
+        any_valid = True
 
     acc = tl.zeros((BLOCK_T, BLOCK_S), dtype=tl.float32)
 
-    for h in range(H):
-        hq_ptrs = (Hq_ptr + hq_base
-                   + rt[:, None] * (H * d_i) + h * d_i + rdi[None, :])
-        Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
+    if any_valid:
+        # Load the (BLOCK_S, d_i) Hk slab once — it is loop-invariant over H.
+        hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
+        Hk_tile = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
+        Hk_T = tl.trans(Hk_tile)  # (d_i, BLOCK_S)
 
-        wo_ptrs = W_o_ptr + wo_base + rt * H + h
-        w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
-        # Fold the Hq row scale into the output weight: relu is
-        # positive-homogeneous, so sq can be pulled out through it.
-        sq_h = tl.load(Sq_ptr + wo_base + rt * H + h, mask=rt_mask, other=0.0)
+        # Hk row scales — also loop-invariant over H, applied once after the loop.
+        ks = tl.load(Ks_ptr + ks_base + rs, mask=rs_mask, other=0.0)
 
-        score = tl.dot(Hq_h, Hk_T)
-        score = tl.maximum(score, 0.0)
-        acc += score * (w_h * sq_h)[:, None]
+        for h in range(H):
+            hq_ptrs = (Hq_ptr + hq_base
+                       + rt[:, None] * (H * d_i) + h * d_i + rdi[None, :])
+            Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
 
-    acc = acc * ks[None, :]
+            wo_ptrs = W_o_ptr + wo_base + rt * H + h
+            w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
+            # Fold the Hq row scale into the output weight: relu is
+            # positive-homogeneous, so sq can be pulled out through it.
+            sq_h = tl.load(Sq_ptr + wo_base + rt * H + h, mask=rt_mask, other=0.0)
+
+            score = tl.dot(Hq_h, Hk_T)
+            score = tl.maximum(score, 0.0)
+            acc += score * (w_h * sq_h)[:, None]
+
+        acc = acc * ks[None, :]
+
+    if HAS_MASK:
+        acc = tl.where(valid, acc, MASK_FILL)
 
     o_ptrs = O_ptr + o_base + rt[:, None] * T_s + rs[None, :]
     tl.store(o_ptrs, acc.to(O_ptr.dtype.element_ty),
@@ -242,8 +458,10 @@ _score_reduce_p.multiple_results = True
 
 
 @_score_reduce_p.def_abstract_eval
-def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, *, out_dtype):
-    del W_o, Sq, Ks
+def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit, *,
+                           out_dtype, has_mask, tri_grid):
+    del W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, has_mask, tri_grid
+    del OInit  # carried for input_output_aliases only
     # Hq layout: (B, oH, T_t, H, d_i)
     B, oH, T_t, _H, _d_i = Hq.shape
     T_s = Hk.shape[2]
@@ -253,29 +471,73 @@ def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, *, out_dtype):
 _score_reduce_p.def_impl(functools.partial(xla.apply_primitive, _score_reduce_p))
 
 
-def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, *, out_dtype):
+def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit, *,
+                           out_dtype, has_mask, tri_grid):
     del out_dtype
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
     B, oH, T_t, H, d_i = Hq_aval.shape
     T_s = Hk_aval.shape[2]
 
+    # Fill for masked slots, in the *output* dtype's range. Finite rather than
+    # -inf so a consumer that does arithmetic on the logits cannot turn a masked
+    # slot into a NaN; still below every representable real logit, which is what
+    # a downstream top-k needs.
+    mask_fill = float(jnp.finfo(ctx.avals_out[0].dtype).min)
+
     def grid_fn(merged_kwargs):
-        bt = merged_kwargs.get("BLOCK_T", 64)
-        bs = merged_kwargs.get("BLOCK_S", 64)
+        # Not .get() with a default: under TRI_GRID a wrong block size would
+        # silently under-cover the output rather than merely over-launch. Every
+        # config sets both keys.
+        bt = merged_kwargs["BLOCK_T"]
+        bs = merged_kwargs["BLOCK_S"]
+        if tri_grid:
+            return (_tri_grid_params(T_t, T_s, bt, bs)["n_tiles"], 1, B * oH)
         # S as grid_x (fastest-dispatching) so per-(B*oH, T-tile) S workgroups
         # cluster in time and hit L2 on the shared Hq slab.
         return (triton.cdiv(T_s, bs), triton.cdiv(T_t, bt), B * oH)
 
+    # Under TRI_GRID the masked region is never visited, so the prefilled buffer
+    # *is* the output. Otherwise OInit is an unused (1, 1) dummy.
+    aliases = {9: 0} if tri_grid else None
+
     saved_configs = _score_reduce_kernel.configs
+    configs = saved_configs
     if _autotune_disabled():
-        _score_reduce_kernel.configs = saved_configs[:1]
+        configs = configs[:1]
+
+    # The decode constants depend on BLOCK_T/BLOCK_S, so they must ride along in
+    # each config's kwargs rather than in the shared constexprs dict. They are
+    # attached unconditionally (trivially when not tri_grid) because the two
+    # launch paths inside triton_call_lowering merge the two dicts in OPPOSITE
+    # orders -- the autotuned path lets config kwargs win, the non-autotuned
+    # fallback lets constexprs win -- so a value that appears in both would mean
+    # something different depending on the JAX version. Deriving them from the
+    # same helper that sizes the grid is what keeps launch and decode in step.
+    tri_configs = []
+    for cfg in configs:
+        if tri_grid:
+            p = _tri_grid_params(T_t, T_s, cfg.kwargs["BLOCK_T"], cfg.kwargs["BLOCK_S"])
+        else:
+            p = {"n_s": 1, "ratio": 1, "case_a": True, "i_star": 0, "tri_count": 0}
+        tri_cfg = copy.copy(cfg)
+        tri_cfg.kwargs = {
+            **cfg.kwargs,
+            "TRI_N_S": p["n_s"],
+            "TRI_RATIO": p["ratio"],
+            "TRI_CASE_A": p["case_a"],
+            "TRI_I_STAR": p["i_star"],
+            "TRI_COUNT": p["tri_count"],
+        }
+        tri_configs.append(tri_cfg)
+    _score_reduce_kernel.configs = tri_configs
     try:
         return triton_call_lowering(
             ctx,
             _score_reduce_kernel,
-            Hq, Hk, W_o, Sq, Ks,
+            Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit,
             grid=grid_fn,
+            input_output_aliases=aliases,
             constexprs={
                 "B": B,
                 "oH": oH,
@@ -283,6 +545,12 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, *, out_dtype):
                 "T_s": T_s,
                 "H": H,
                 "d_i": d_i,
+                "HAS_MASK": has_mask,
+                "MASK_FILL": mask_fill,
+                "SKIP_TILES": _tile_skip_enabled(),
+                "TRI_GRID": tri_grid,
+                # TRI_N_S / TRI_RATIO / TRI_CASE_A / TRI_I_STAR / TRI_COUNT are
+                # deliberately absent here -- they are per-config, see above.
             },
         )
     finally:
@@ -345,6 +613,10 @@ def _score_dscores_chunk_kernel(
     dO_ptr,              # input  (B, oH, T,   T_s)         fp32
     Sq_chunk_ptr,        # input  (B, oH, T,   H_CHUNK)     fp32 — Hq row scales
     Ks_ptr,              # input  (B, oH, T_s)              fp32 — Hk row scales
+    SegQ_ptr,            # input  (B, T)   int32 (unread when HAS_MASK=0)
+    KeyQ_ptr,            # input  (B, T)   int32 (unread when HAS_MASK=0)
+    SegK_ptr,            # input  (B, T_s) int32 (unread when HAS_MASK=0)
+    KeyK_ptr,            # input  (B, T_s) int32 (unread when HAS_MASK=0)
     dscores_chunk_ptr,   # output (B, oH, T,   H_CHUNK, T_s) bf16
     dWo_chunk_ptr,       # output (B, oH, T,   H_CHUNK)     bf16
     B: tl.constexpr,
@@ -353,6 +625,7 @@ def _score_dscores_chunk_kernel(
     T_s: tl.constexpr,
     H_CHUNK: tl.constexpr,
     d_i: tl.constexpr,
+    HAS_MASK: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_S: tl.constexpr,
 ):
@@ -363,6 +636,11 @@ def _score_dscores_chunk_kernel(
     saving vs the original (which spun a separate CTA per head, each re-reading
     dO/Hk). dW_o is reduced in registers (sum over s) per head, so h_relu never
     lands in HBM.
+
+    The mask (same predicate as the forward kernel) is ANDed into the ReLU mask,
+    which zeroes both outputs at a masked pair in one term: dscores directly,
+    and dW_o because the h_relu it reduces is already zero there. No fill value
+    is involved -- these are cotangents, and a masked pair contributes nothing.
     """
     pid_t = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -381,12 +659,24 @@ def _score_dscores_chunk_kernel(
     ks_base = b * (oH * T_s) + h_outer * T_s
     ds_base = b * (oH * T * H_CHUNK * T_s) + h_outer * (T * H_CHUNK * T_s)
 
+    # Query-side mask metadata depends only on rt, so it is loaded once here
+    # rather than per s-chunk. Sentinels match the forward kernel's.
+    if HAS_MASK:
+        seg_q = tl.load(SegQ_ptr + b * T + rt, mask=rt_mask, other=-1)
+        key_q = tl.load(KeyQ_ptr + b * T + rt, mask=rt_mask, other=0)
+
     # Per-head dW_o accumulators packed as (BLOCK_T, H_CHUNK), reduced over s.
     dWo_acc = tl.zeros((BLOCK_T, H_CHUNK), dtype=tl.float32)
 
     for s_start in range(0, T_s, BLOCK_S):
         rs = s_start + tl.arange(0, BLOCK_S)
         rs_mask = rs < T_s
+
+        # Shared across all H_CHUNK heads below, like Hk_chunk / dO_chunk.
+        if HAS_MASK:
+            seg_k = tl.load(SegK_ptr + b * T_s + rs, mask=rs_mask, other=-2)
+            key_k = tl.load(KeyK_ptr + b * T_s + rs, mask=rs_mask, other=0)
+            valid = (seg_q[:, None] == seg_k[None, :]) & (key_q[:, None] >= key_k[None, :])
 
         # Load Hk[..., s_chunk, :] and dO[..., t_tile, s_chunk] ONCE per s-chunk
         # -- shared across all H_CHUNK heads below.
@@ -422,6 +712,8 @@ def _score_dscores_chunk_kernel(
             # the same either way and only the magnitude below needs rescaling.
             scores = tl.dot(Hq_h, Hk_T)  # (BLOCK_T, BLOCK_S)
             relu_mask = scores > 0
+            if HAS_MASK:
+                relu_mask = relu_mask & valid
             h_relu = tl.where(relu_mask, scores, 0.0) * ks_chunk[None, :]
 
             # dW_o[..., h] += sum_s (h_relu * dO); accumulate into column h.
@@ -450,8 +742,9 @@ _score_dscores_chunk_p.multiple_results = True
 
 
 @_score_dscores_chunk_p.def_abstract_eval
-def _score_dscores_chunk_abstract(Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks):
-    del Hk, Sq_chunk, Ks
+def _score_dscores_chunk_abstract(Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks,
+                                  SegQ, KeyQ, SegK, KeyK, *, has_mask):
+    del Hk, Sq_chunk, Ks, SegQ, KeyQ, SegK, KeyK, has_mask
     B, oH, T, H_CHUNK, _ = Hq_chunk.shape
     T_s = dO.shape[-1]
     # Both outputs are cotangents, so they follow W_o's (bf16) dtype -- Hq_chunk
@@ -467,7 +760,8 @@ _score_dscores_chunk_p.def_impl(
 )
 
 
-def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks):
+def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks,
+                                  SegQ, KeyQ, SegK, KeyK, *, has_mask):
     Hq_aval = ctx.avals_in[0]
     dO_aval = ctx.avals_in[3]
     B, oH, T, H_CHUNK, d_i = Hq_aval.shape
@@ -486,11 +780,12 @@ def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks
         return triton_call_lowering(
             ctx,
             _score_dscores_chunk_kernel,
-            Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks,
+            Hq_chunk, Hk, W_o_chunk, dO, Sq_chunk, Ks, SegQ, KeyQ, SegK, KeyK,
             grid=grid_fn,
             constexprs={
                 "B": B, "oH": oH, "T": T, "T_s": T_s,
                 "H_CHUNK": H_CHUNK, "d_i": d_i,
+                "HAS_MASK": has_mask,
             },
         )
     finally:
@@ -504,22 +799,48 @@ mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, pl
 # --- Public score_reduce_triton with custom_vjp ------------------------------
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5,))
-def _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, out_dtype):
-    return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, out_dtype=out_dtype)[0]
+def _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                       out_dtype, has_mask, tri_grid):
+    """Bind the forward primitive, supplying the aliased output buffer.
+
+    Under ``tri_grid`` the kernel never visits the masked region, so the buffer
+    must arrive already holding MASK_FILL and is aliased to the output. The
+    rectangular path writes every slot itself and gets a (1, 1) dummy, matching
+    how the mask operands are handled when ``has_mask`` is False.
+    """
+    if tri_grid:
+        B, oH, T_t = Hq.shape[0], Hq.shape[1], Hq.shape[2]
+        T_s = Hk.shape[2]
+        OInit = jnp.full((B, oH, T_t, T_s), jnp.finfo(out_dtype).min, out_dtype)
+    else:
+        OInit = jnp.zeros((1, 1), out_dtype)
+    return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, OInit,
+                                out_dtype=out_dtype, has_mask=has_mask,
+                                tri_grid=tri_grid)[0]
 
 
-def _score_reduce_fwd(Hq, Hk, W_o, Sq, Ks, out_dtype):
-    out = _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, out_dtype=out_dtype)[0]
-    return out, (Hq, Hk, W_o, Sq, Ks)
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
+def _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                           out_dtype, has_mask, tri_grid):
+    return _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                              out_dtype, has_mask, tri_grid)
+
+
+def _score_reduce_fwd(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                      out_dtype, has_mask, tri_grid):
+    out = _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+                             out_dtype, has_mask, tri_grid)
+    return out, (Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK)
 
 
 _BWD_H_CHUNK = 8  # peak (B, oH, T, H_CHUNK, T_s) tile -- bounds materialization
 
 
-def _score_reduce_bwd(out_dtype, residuals, dO):
-    del out_dtype
-    Hq, Hk, W_o, Sq, Ks = residuals
+def _score_reduce_bwd(out_dtype, has_mask, tri_grid, residuals, dO):
+    # tri_grid is a forward-only launch detail: the backward kernel walks S as an
+    # in-kernel loop rather than a grid axis, so it has no tile grid to remap.
+    del out_dtype, tri_grid
+    Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK = residuals
     B, oH, T, H, d_i = Hq.shape
     # The score recompute inside the Triton kernel consumes Hq / Hk in their
     # stored precision (with Sq / Ks), but the two dscores reductions below are
@@ -567,7 +888,10 @@ def _score_reduce_bwd(out_dtype, residuals, dO):
         Hq_c, Wo_c, Sq_c = chunk
         # Triton: dscores_chunk + dWo_chunk; no full (B,oH,T,H,T_s) tensor
         # ever exists in HBM.
-        dscores_c, dWo_c = _score_dscores_chunk_p.bind(Hq_c, Hk, Wo_c, dO, Sq_c, Ks)
+        dscores_c, dWo_c = _score_dscores_chunk_p.bind(
+            Hq_c, Hk, Wo_c, dO, Sq_c, Ks, SegQ, KeyQ, SegK, KeyK,
+            has_mask=has_mask,
+        )
         # Dequantize only the current chunk, so peak stays at H_CHUNK/H of Hq.
         Hq_c_deq = _dequant(Hq_c, Sq_c)
         dHq_c = jnp.einsum("...ths,...si->...thi", dscores_c, Hk_deq)
@@ -594,20 +918,56 @@ def _score_reduce_bwd(out_dtype, residuals, dO):
     dHk = (dHk.astype(jnp.float32) * Ks[..., None]).astype(Hk.dtype)
 
     # Sq / Ks are quantization metadata, held constant by every scaling recipe
-    # (and by quantize_e4m3's stop_gradient), so they take a zero cotangent.
+    # (and by quantize_e4m3's stop_gradient), so they take a zero cotangent. The
+    # four mask operands are integer arrays; JAX takes None as their cotangent
+    # (same convention as permutation.py's row_id_map / pad_offsets).
     return (
         dHq,
         dHk,
         dWo.astype(W_o.dtype),
         jnp.zeros_like(Sq),
         jnp.zeros_like(Ks),
+        None,
+        None,
+        None,
+        None,
     )
 
 
 _score_reduce_with_vjp.defvjp(_score_reduce_fwd, _score_reduce_bwd)
 
 
-def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, out_dtype=None):
+def _validate_mask(mask, B, T_t, T_s):
+    """Check a ``(seg_q, key_q, seg_k, key_k)`` mask, or build unused dummies.
+
+    Returns ``(arrays, has_mask)``. When no mask is given the four operands are
+    one-element int32 placeholders: the kernel's ``HAS_MASK`` constexpr gates
+    every dereference, so nothing reads them, and passing full-size arrays would
+    cost HBM for data the kernel never touches.
+    """
+    if mask is None:
+        dummy = jnp.zeros((1, 1), jnp.int32)
+        return (dummy, dummy, dummy, dummy), False
+
+    if len(mask) != 4:
+        raise ValueError(
+            "mask must be a 4-tuple (seg_q, key_q, seg_k, key_k); "
+            f"got {len(mask)} entries"
+        )
+    names = ("seg_q", "key_q", "seg_k", "key_k")
+    expected = ((B, T_t), (B, T_t), (B, T_s), (B, T_s))
+    out = []
+    for name, arr, shape in zip(names, mask, expected):
+        if arr is None:
+            raise ValueError(f"mask entry {name} is None; pass mask=None to disable masking")
+        if arr.shape != shape:
+            raise ValueError(f"mask entry {name} has shape {arr.shape}, expected {shape}")
+        out.append(arr.astype(jnp.int32))
+    return tuple(out), True
+
+
+def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, mask=None, out_dtype=None,
+                        mask_is_causal=False):
     """Triton fused score-matmul + relu + per-(t, h) weighted H-reduction.
 
     Replaces the pattern:
@@ -628,7 +988,22 @@ def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, out_dtype=None):
         W_o: (B, oH, T_t, H)
         Sq:  (B, oH, T_t, H) fp32 row scales for Hq, or None for unit scales.
         Ks:  (B, oH, T_s) fp32 row scales for Hk, or None for unit scales.
+        mask: optional ``(seg_q, key_q, seg_k, key_k)`` of int32 arrays shaped
+            (B, T_t), (B, T_t), (B, T_s), (B, T_s). A (t, s) pair is scored iff
+            ``seg_q[t] == seg_k[s] and key_q[t] >= key_k[s]``; every other slot
+            gets ``finfo(out_dtype).min``. The metadata has no outer-head axis —
+            it broadcasts over ``oH``. Each supported attention mask is a choice
+            of key (causal: position; padding: a constant), so the kernel needs
+            no mask-type switch; see
+            ``sparse_attention.indexer._mask_keys`` for the mapping.
         out_dtype: defaults to W_o.dtype.
+        mask_is_causal: caller's promise that every valid pair satisfies
+            ``t >= s`` -- true for the causal family (``causal``,
+            ``padding_causal``), false for ``padding``, whose keys are constant
+            and whose valid set is block-diagonal rather than triangular. Purely
+            a launch hint: it selects the triangular grid, which skips
+            dispatching the fully-masked half instead of dispatching and
+            discarding it. Ignored unless a mask is supplied and T_t == T_s.
 
     Returns:
         O: (B, oH, T_t, T_s)
@@ -666,9 +1041,19 @@ def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, out_dtype=None):
             f"Hq and Hk must share a dtype; got {Hq.dtype} and {Hk.dtype}"
         )
     Sq, Ks = _validate_scales(Hq, Hk, Sq, Ks)
+    (SegQ, KeyQ, SegK, KeyK), has_mask = _validate_mask(mask, B, T_t, T_s)
 
     if out_dtype is None:
         # Not Hq.dtype: that would make an e4m3 operand yield an e4m3 output.
         out_dtype = W_o.dtype
 
-    return _score_reduce_with_vjp(Hq, Hk, W_o, Sq, Ks, jnp.dtype(out_dtype))
+    # T_t == T_s is what lets the tile count saturate cleanly at n_s, which the
+    # kernel's closed-form tile-id inverse relies on.
+    tri_eligible = bool(mask_is_causal) and has_mask and T_t == T_s
+    override = _tri_grid_override()
+    tri_grid = tri_eligible and (T_t >= _TRI_GRID_MIN_T if override is None else override)
+
+    return _score_reduce_with_vjp(
+        Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
+        jnp.dtype(out_dtype), has_mask, tri_grid,
+    )

@@ -17,6 +17,9 @@ from transformer_engine.jax.sparse_attention.indexer import (
     indexer_topk,
 )
 from transformer_engine.jax.triton_extensions.indexer import (
+    _score_reduce_autotune_configs,
+    _tri_grid_override,
+    _tri_grid_params,
     fp8_dtype,
     quantize_e4m3,
     score_reduce_triton,
@@ -31,12 +34,15 @@ def _disable_indexer_autotune(monkeypatch):
 
 
 @functools.partial(jax.jit, static_argnames=("out_dtype",))
-def _indexer_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
+def _indexer_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None, mask=None):
     """Pure-einsum lightning-indexer reference (test oracle).
 
     Materializes the (..., T, H, S) pre-relu score tensor, unlike the hybrid
     Triton op under test. Shapes: Q [..., T, d], K [..., S, d], W_dq [d, d_c],
     W_uq [H, d_c, d_i], W_k [d, d_i], W_w [d, H]. Returns O [..., T, S].
+
+    ``mask``, when given, is a (B, T, S) boolean of *valid* pairs; invalid slots
+    are filled the same way the kernel fills them.
 
     JIT-compiled so its HLO (reduction order / bf16 rounding) is stable — the
     top-k test feeds these reference scores to ``jax.lax.top_k``, whose
@@ -50,7 +56,59 @@ def _indexer_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
     O = jnp.einsum("...ths,...th->...ts", H, W_o)                  # (..., T, S)
     if out_dtype is not None:
         O = O.astype(out_dtype)
+    if mask is not None:
+        # mask is (B, T, S); O is (B, oH, T, S) -- broadcast over the head axis,
+        # matching the kernel, whose segment metadata has no oH axis.
+        O = jnp.where(mask[:, None], O, _mask_fill(O.dtype))
     return O
+
+
+def _mask_fill(dtype):
+    """The value the kernel writes at a masked slot."""
+    return jnp.finfo(dtype).min
+
+
+def _segments(B, T, lengths, seed=0):
+    """Build TE-JAX (segment_ids, segment_pos) for a packed batch.
+
+    ``lengths`` is the per-segment token count, applied identically to every
+    batch row; tokens past ``sum(lengths)`` are padding (segment id 0). Returns
+    int32 arrays of shape (B, T).
+    """
+    del seed
+    assert sum(lengths) <= T, f"segments {lengths} overflow T={T}"
+    ids, pos = [], []
+    for seg, n in enumerate(lengths, start=1):
+        ids.extend([seg] * n)
+        pos.extend(range(n))
+    pad = T - len(ids)
+    ids.extend([0] * pad)
+    pos.extend([0] * pad)
+    ids = jnp.broadcast_to(jnp.asarray(ids, jnp.int32), (B, T))
+    pos = jnp.broadcast_to(jnp.asarray(pos, jnp.int32), (B, T))
+    return ids, pos
+
+
+def _reference_mask(attn_mask_type, B, T_t, T_s, seg_q=None, pos_q=None):
+    """Independent (B, T_t, T_s) bool oracle for the kernel's mask.
+
+    Written from the mask *definitions* (attention.py's AttnMaskType docstrings)
+    rather than from the (seg, key) reduction under test, so a bug in that
+    reduction cannot cancel out against the oracle.
+    """
+    if attn_mask_type == "no_mask":
+        return None
+    causal = "causal" in attn_mask_type
+    padding = "padding" in attn_mask_type
+    if padding:
+        same = seg_q[:, :, None] == seg_q[:, None, :]
+        real = (seg_q != 0)
+        valid = same & real[:, :, None] & real[:, None, :]
+        if causal:
+            valid = valid & (pos_q[:, :, None] >= pos_q[:, None, :])
+        return valid
+    order = jnp.arange(T_t)[:, None] >= jnp.arange(T_s)[None, :]
+    return jnp.broadcast_to(order, (B, T_t, T_s))
 
 
 def _indexer_inputs(B, oH, T_t, T_s, d, d_c, H, d_i, seed):
@@ -290,6 +348,258 @@ def test_lightning_indexer_module_matches_functional():
     p = variables["params"]
     o_fn = indexer(Q, K, p["W_uq"], p["W_dq"], p["W_k"], p["W_w"])
     assert _rel_err(o_mod, o_fn) < 1e-5
+
+
+# --- Masking (variable-length / THD support) ---------------------------------
+#
+# The score kernel applies one predicate, `seg_q == seg_k and key_q >= key_k`,
+# and fills every other slot with finfo(dtype).min. These tests check that
+# predicate against an oracle written from the mask definitions, that gradients
+# are zero at masked pairs, and -- the reason the mask exists -- that top-k can
+# no longer reach across a segment boundary.
+
+_MASK_TYPES = ["padding", "causal", "padding_causal"]
+
+
+def _masked_case(mask_type, B, T, lengths=(40, 16)):
+    """Segment metadata + reference mask for a packed self-attention batch."""
+    seg, pos = _segments(B, T, list(lengths))
+    mask = _reference_mask(mask_type, B, T, T, seg, pos)
+    kwargs = {"attn_mask_type": mask_type}
+    if "padding" in mask_type:
+        kwargs.update(segment_ids_q=seg, segment_pos_q=pos)
+    return seg, pos, mask, kwargs
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("mask_type", _MASK_TYPES)
+def test_mask_matches_reference(mask_type, fp8):
+    """Masked forward matches the einsum reference with the same mask applied."""
+    B, oH, T = 2, 2, 64
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=500)
+    _, _, mask, kwargs = _masked_case(mask_type, B, T)
+
+    o_ref = _indexer_reference(*args, mask=mask)
+    o_out = indexer(*args, fp8=fp8, **kwargs)
+    assert o_out.shape == o_ref.shape
+
+    fill = _mask_fill(o_out.dtype)
+    # Boolean indexing does not broadcast, so widen the mask over the head axis.
+    valid = jnp.broadcast_to(mask[:, None], o_out.shape)
+    # Masked slots must be exactly the fill, not merely close to it.
+    assert jnp.all(o_out[~valid] == fill)
+    # Valid slots are compared on their own, so the fill (which is ~1e38 and
+    # would swamp any norm) cannot hide a real error.
+    assert _rel_err(o_out[valid], o_ref[valid]) < _FWD_TOL[fp8]
+
+
+def test_causal_mask_is_lower_triangular():
+    """``causal`` keeps s <= t and drops s > t — catches a >= / > slip."""
+    B, oH, T_t, T_s = 1, 2, 32, 48
+    args = _indexer_inputs(B, oH, T_t, T_s, d=32, d_c=32, H=8, d_i=32, seed=501)
+    o = indexer(*args, attn_mask_type="causal")
+    fill = _mask_fill(o.dtype)
+
+    lower = jnp.arange(T_t)[:, None] >= jnp.arange(T_s)[None, :]
+    assert jnp.all(o[:, :, ~lower] == fill), "kept a strictly-future key"
+    assert not jnp.any(o[:, :, lower] == fill), "dropped a valid past key"
+
+
+def test_padding_rows_are_entirely_fill():
+    """A padding query matches nothing — including other padding.
+
+    Padding is segment id 0 on both sides; the two sides are mapped to *distinct*
+    sentinels so pad-vs-pad fails too. These rows are also the fully-masked-tile
+    case, so this exercises the kernel's tile-skip path.
+    """
+    B, oH, T = 2, 2, 64
+    lengths = [40, 16]  # 8 trailing padding tokens
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=502)
+    seg, pos = _segments(B, T, lengths)
+    o = indexer(*args, attn_mask_type="padding_causal",
+                segment_ids_q=seg, segment_pos_q=pos)
+
+    pad_rows = o[:, :, sum(lengths):, :]
+    assert pad_rows.size > 0, "degenerate test: no padding tokens"
+    assert jnp.all(pad_rows == _mask_fill(o.dtype))
+
+
+def test_topk_never_selects_masked():
+    """The payoff: top-k cannot reach across a segment or into the future.
+
+    This is what fails without an in-kernel mask — the logits are signed (ReLU
+    sits inside the H-reduction, ahead of the signed W_o weighting), so nothing
+    outside the kernel can keep a cross-segment key from outranking a valid
+    negative one.
+
+    Only rows with at least ``k`` valid keys are checked: a query earlier than
+    ``k`` positions into its segment genuinely has fewer candidates than asked
+    for, and its surplus slots are masked ones by construction.
+    """
+    B, oH, T, k = 2, 2, 64, 4
+    lengths = [40, 16]
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=16, d_i=32, seed=503)
+    seg, pos = _segments(B, T, lengths)
+
+    idx = indexer_topk(*args, k=k, attn_mask_type="padding_causal",
+                       segment_ids_q=seg, segment_pos_q=pos)
+    assert idx.shape == (B, oH, T, k)
+
+    picked_seg = jnp.take_along_axis(seg[:, None, None, :].repeat(oH, 1).repeat(T, 2),
+                                     idx, axis=-1)          # (B, oH, T, k)
+    picked_pos = jnp.take_along_axis(pos[:, None, None, :].repeat(oH, 1).repeat(T, 2),
+                                     idx, axis=-1)
+    # Rows with >= k valid keys: real token, at least k-1 positions into its segment.
+    checkable = ((seg != 0) & (pos >= k - 1))[:, None, :, None]
+
+    same_seg = picked_seg == seg[:, None, :, None]
+    causal = picked_pos <= pos[:, None, :, None]
+    assert jnp.all(jnp.where(checkable, same_seg, True)), "top-k crossed a segment"
+    assert jnp.all(jnp.where(checkable, causal, True)), "top-k selected a future key"
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("mask_type", _MASK_TYPES)
+def test_mask_backward_matches_reference_grad(mask_type, fp8):
+    """Masked pairs contribute no gradient.
+
+    The cotangent is all-ones *including at masked slots*, so the op has to zero
+    them itself; a kernel that only masked the forward would leak gradient here.
+    Using ``jax.vjp`` rather than ``grad(sum(...))`` keeps the fill value out of
+    the loss, where it would otherwise overflow to -inf.
+    """
+    B, oH, T = 2, 2, 32
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=504)
+    _, _, mask, kwargs = _masked_case(mask_type, B, T, lengths=(20, 8))
+
+    def _grads(fn):
+        out, vjp_fn = jax.vjp(fn, *args)
+        return vjp_fn(jnp.ones_like(out))
+
+    grads_ref = _grads(lambda *a: _indexer_reference(*a, mask=mask))
+    grads_out = _grads(lambda *a: indexer(*a, fp8=fp8, **kwargs))
+    for gr, go in zip(grads_ref, grads_out):
+        assert _rel_err(go, gr) < _BWD_TOL[fp8]
+
+
+def test_permissive_mask_is_bit_identical_to_no_mask():
+    """A mask that permits everything changes nothing, bit for bit.
+
+    ``HAS_MASK`` is a ``tl.constexpr``, so ``no_mask`` compiles the mask away
+    entirely and the two paths take different code. Feeding the masked path a
+    predicate that is true everywhere (one segment, constant key) isolates the
+    masking machinery itself: any difference here is the mask perturbing the
+    accumulation, not a genuine masking decision.
+    """
+    B, oH, T = 2, 2, 64
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=505)
+    H_q, H_k, W_o = _indexer_projections(*args)
+
+    permissive = (
+        jnp.zeros((B, T), jnp.int32),  # seg_q — one segment
+        jnp.zeros((B, T), jnp.int32),  # key_q — constant, so key_q >= key_k holds
+        jnp.zeros((B, T), jnp.int32),  # seg_k
+        jnp.zeros((B, T), jnp.int32),  # key_k
+    )
+    assert jnp.array_equal(
+        score_reduce_triton(H_q, H_k, W_o),
+        score_reduce_triton(H_q, H_k, W_o, mask=permissive),
+    )
+
+
+# --- Causal triangular grid ---------------------------------------------------
+#
+# The causal family launches a 1-D grid over only the tiles meeting the causal
+# region, instead of the full rectangle with the fully-masked half skipped
+# in-kernel. It is a launch-shape change and nothing else, so the bar is
+# bit-identity with the rectangular path -- not a tolerance.
+
+
+def _tri_tiles_bruteforce(T_t, T_s, BLOCK_T, BLOCK_S):
+    """Tiles containing at least one causal pair, counted directly."""
+    n_t = -(-T_t // BLOCK_T)
+    n_s = -(-T_s // BLOCK_S)
+    return sum(
+        1
+        for i in range(n_t)
+        for j in range(n_s)
+        if j * BLOCK_S <= min(i * BLOCK_T + BLOCK_T - 1, T_t - 1)
+    )
+
+
+def test_tri_grid_params_count_every_causal_tile():
+    """The launch size matches a brute-force count, for every autotune config.
+
+    Host-only. The kernel derives its tile-id inverse from these same numbers,
+    so an off-by-one here would silently drop or double-cover output tiles --
+    which is exactly what a wrong grid size looks like from the outside.
+    """
+    blocks = sorted(
+        {(c.kwargs["BLOCK_T"], c.kwargs["BLOCK_S"])
+         for c in _score_reduce_autotune_configs()}
+    )
+    # Includes sizes that do not divide the block shapes, and (via BLOCK_S=512)
+    # sizes where every tile falls in the saturated tail.
+    for T in (32, 96, 128, 500, 512, 1024, 4096):
+        for bt, bs in blocks:
+            assert (
+                _tri_grid_params(T, T, bt, bs)["n_tiles"]
+                == _tri_tiles_bruteforce(T, T, bt, bs)
+            ), f"T={T} BLOCK_T={bt} BLOCK_S={bs}"
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("mask_type", ["causal", "padding_causal"])
+def test_tri_grid_is_bit_identical_to_rectangular(monkeypatch, mask_type, fp8):
+    """Forcing the triangular grid on changes no output bit.
+
+    T is chosen so the triangular *head* actually runs: below roughly
+    BLOCK_S/BLOCK_T t-tiles every tile lands in the rectangular tail and the
+    tile-id inverse is never exercised.
+    """
+    B, oH, T = 2, 2, 512
+    args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=507)
+    _, _, _, kwargs = _masked_case(mask_type, B, T, lengths=(300, 150))
+
+    outs = {}
+    for forced in ("0", "1"):
+        monkeypatch.setenv("NVTE_INDEXER_TRI_GRID", forced)
+        _tri_grid_override.cache_clear()
+        # The env var is read during lowering, so a cached trace would silently
+        # reuse the other grid and make this comparison vacuous.
+        jax.clear_caches()
+        outs[forced] = indexer(*args, fp8=fp8, **kwargs)
+    _tri_grid_override.cache_clear()
+    jax.clear_caches()
+
+    assert jnp.array_equal(outs["1"], outs["0"])
+
+
+def test_unsupported_mask_type_is_rejected():
+    """Bottom-right causal is not implemented and must say so, not mis-mask."""
+    args = _indexer_inputs(1, 1, T_t=32, T_s=32, d=32, d_c=32, H=8, d_i=32, seed=506)
+    with pytest.raises(NotImplementedError, match="not supported by the indexer"):
+        indexer(*args, attn_mask_type="causal_bottom_right")
+
+
+def test_lightning_indexer_mask_passthrough():
+    """``LightningIndexer(attn_mask_type=...)`` matches the functional call."""
+    B, oH, T, d, d_c, H, d_i = 2, 2, 64, 32, 32, 8, 32
+    keys = jax.random.split(jax.random.PRNGKey(11), 3)
+    Q = jax.random.normal(keys[0], (B, oH, T, d), dtype=jnp.bfloat16)
+    K = jax.random.normal(keys[1], (B, oH, T, d), dtype=jnp.bfloat16)
+    seg, pos = _segments(B, T, [40, 16])
+
+    mod = LightningIndexer(num_heads=H, d_c=d_c, d_i=d_i,
+                           attn_mask_type="padding_causal")
+    variables = mod.init(keys[2], Q, K, seg, pos)
+    o_mod = mod.apply(variables, Q, K, seg, pos)
+
+    p = variables["params"]
+    o_fn = indexer(Q, K, p["W_uq"], p["W_dq"], p["W_k"], p["W_w"],
+                   attn_mask_type="padding_causal",
+                   segment_ids_q=seg, segment_pos_q=pos)
+    assert jnp.array_equal(o_mod, o_fn)
 
 
 def test_lightning_indexer_topk_mode():
