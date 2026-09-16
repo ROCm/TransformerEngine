@@ -23,9 +23,10 @@ const CFG = {
 const S = {
   records: [], series: new Map(), runs: [], updated: null, runMeta: new Map(),
   models: [], modelColor: new Map(),   // GPU models present in the data, sorted (discovered at load)
+  backends: [], backendColor: new Map(),   // backends present in the data (parsed from op), sorted
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
-  trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits" },
+  trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits", by: "arch" },
   byType: { q: "", facets: { family: "all", mode: "all", dtype: "all", model: "all" } },
   theme: "dark",
 };
@@ -51,6 +52,8 @@ const modelColorFor = i => hslHex((i * 137.508) % 360, S.theme === "light" ? 62 
 const setModelColors = () => { S.modelColor = new Map(S.models.map((m, i) => [m, modelColorFor(i)])); };
 const modelVar = m => S.modelColor.get(m) || cssVal("--ink-2");   // hex; used inline and on <canvas>
 const modelCol = modelVar;                                       // alias kept for <canvas> call sites
+const setBackendColors = () => { S.backendColor = new Map(S.backends.map((b, i) => [b, modelColorFor(i)])); };
+const backendCol = b => S.backendColor.get(b) || cssVal("--ink-2");   // hex; same golden-angle palette as archs
 const commitUrl = sha => sha ? `https://github.com/${CFG.repo}/commit/${sha}` : "#";
 
 function relTime(iso) {
@@ -134,8 +137,10 @@ function _familyFromFile(file) {
 // one long-CSV row -> the record shape the rest of the app consumes
 function toRecord(o) {
   const num = v => (v === "" || v == null) ? null : +v;
+  const op = o.op, sep = op.lastIndexOf(" · ");   // op is "<base> · <backend>"
   return {
-    op: o.op, shape: o.shape, dtype: o.dtype, metric: o.metric,
+    op, base: sep >= 0 ? op.slice(0, sep) : op, backend: sep >= 0 ? op.slice(sep + 3) : "",
+    shape: o.shape, dtype: o.dtype, metric: o.metric,
     value: num(o.value), ts: o.ts, commit: o.commit, run_id: num(o.run_id),
     model: o.model, runner: o.runner, pr: num(o.pr), source: "ci",
     mode: /\[kernel\]/.test(o.op) ? "kernel" : "wall-clock",   // compute-kernel series carry a " [kernel]" op suffix
@@ -170,6 +175,8 @@ async function loadAll() {
   // grouping/colors/baselines and is shown directly as the series label.
   S.models = [...new Set(records.map(r => r.model).filter(Boolean))].sort();
   setModelColors();
+  S.backends = [...new Set(records.map(r => r.backend).filter(Boolean))].sort();
+  setBackendColors();
   computePRDeltas();   // derive vs_main (PR value vs dev baseline) so PR Check works
   S.runs = [];
   S.runMeta = new Map();
@@ -608,7 +615,7 @@ function kernelIndex() {
   for (const r of S.records) {
     if (r.source !== "ci" || r.value == null) continue;
     const k = kkey(r);
-    if (!m.has(k)) m.set(k, { op: r.op, shape: r.shape, dtype: r.dtype, metrics: new Set(), runs: new Set(), reg: false });
+    if (!m.has(k)) m.set(k, { op: r.op, base: r.base, shape: r.shape, dtype: r.dtype, metrics: new Set(), runs: new Set(), reg: false });
     const e = m.get(k); e.metrics.add(r.metric); e.runs.add(r.run_id);
   }
   for (const [k, e] of m) { e.reg = regKeys.has(k); e.n = e.runs.size; }
@@ -638,20 +645,35 @@ function selectKernel(k, rerail = true) {
   const metrics = [...e.metrics];
   // one metric per kernel: auto-select it (the unit is shown in the trend title)
   if (!metrics.includes(S.trend.metric)) S.trend.metric = metrics.find(m => m !== "speedup") || metrics[0];
-  $("#trendModel").innerHTML = ["all", ...S.models].map(a =>
+  const byBackend = S.trend.by === "backend";
+  // backend mode compares backends at one arch, so drop the "all" arch option
+  if (byBackend && (S.trend.model === "all" || !S.models.includes(S.trend.model))) S.trend.model = S.models[0] || "all";
+  $("#trendBy").innerHTML = [["arch", "by arch"], ["backend", "by backend"]].map(([v, t]) =>
+    `<button data-b="${v}" class="${v === S.trend.by ? "is-active" : ""}">${t}</button>`).join("");
+  $("#trendModel").innerHTML = (byBackend ? S.models : ["all", ...S.models]).map(a =>
     `<button data-a="${a}" class="${a === S.trend.model ? "is-active" : ""}">${esc(a)}</button>`).join("");
   $("#trendRange").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
     `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
     `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
-  $("#trendTitle").innerHTML = `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
+  $("#trendTitle").innerHTML = byBackend
+    ? `${esc(e.base)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${esc(S.trend.model)} · ${S.trend.metric} · backends</small>`
+    : `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
   if (rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
   drawTrend(e);
   writeHash();
 }
 function drawTrend(e) {
-  const metric = S.trend.metric, op = e.op, shape = e.shape, dtype = e.dtype;
-  const recs = S.records.filter(r => r.source === "ci" && r.op === op && r.shape === shape && r.dtype === dtype && r.metric === metric);
+  const metric = S.trend.metric, shape = e.shape, dtype = e.dtype;
+  const byBackend = S.trend.by === "backend";
+  const base = e.base, arch = (S.trend.model === "all") ? (S.models[0] || "") : S.trend.model;
+  // Overlay dimension: archs of one exact op (default), or backends of one op-family
+  // (base) at a single arch. opFor() maps a dim value back to its full op for baselines.
+  const dimOf = byBackend ? (r => r.backend) : (r => r.model);
+  const dimCol = byBackend ? backendCol : modelCol;
+  const opFor = byBackend ? (v => `${base} · ${v}`) : (() => e.op);
+  const recs = S.records.filter(r => r.source === "ci" && r.shape === shape && r.dtype === dtype && r.metric === metric &&
+    (byBackend ? (r.base === base && r.model === arch) : r.op === e.op));
   let runIds = [...new Set(recs.map(r => r.run_id))].map(id => {
     const any = recs.find(r => r.run_id === id);
     return { id, ts: any.ts, commit: any.commit, pr: any.pr, main: isMainRec(any) };
@@ -662,8 +684,8 @@ function drawTrend(e) {
     const cutoff = Date.now() - days * 86400000;
     runIds = runIds.filter(ri => !ri.ts || new Date(ri.ts).getTime() >= cutoff);
   }
-  const val = new Map();                       // run_id|model -> value
-  for (const r of recs) val.set(r.run_id + "|" + r.model, r.value);
+  const val = new Map();                       // run_id|dim -> value
+  for (const r of recs) val.set(r.run_id + "|" + dimOf(r), r.value);
 
   // x-axis points: one per commit, or one per day (daily mean) when xmode=daily
   const daily = S.trend.xmode === "daily";
@@ -679,19 +701,23 @@ function drawTrend(e) {
     points = runIds.map(ri => ({ date: (ri.ts || "").slice(0, 10), dateLabel: (ri.ts || "").slice(5, 10), sha: (ri.commit || "").slice(0, 7), commit: ri.commit, pr: ri.pr, main: ri.main, id: ri.id }));
   }
   const labels = points.map((p, i) => p.sha || p.dateLabel || String(i));
-  const valueAt = (p, model) => {
-    if (daily) { const vs = p.runs.map(ri => val.get(ri.id + "|" + model)).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
-    return val.get(p.id + "|" + model) ?? null;
+  const valueAt = (p, dv) => {
+    if (daily) { const vs = p.runs.map(ri => val.get(ri.id + "|" + dv)).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
+    return val.get(p.id + "|" + dv) ?? null;
   };
-  const single = S.trend.model !== "all";
-  const models = single ? [S.trend.model] : S.models;
+  // single-arch mode draws a noise band; multi-arch and backend modes overlay for comparison
+  const single = !byBackend && S.trend.model !== "all";
+  // backend mode lists only backends that actually ran this config+arch (drop absent ones)
+  const dims = single ? [S.trend.model]
+    : byBackend ? [...new Set(recs.map(r => r.backend))].sort()
+    : S.models;
 
   const datasets = [];
   let note = "";
   const span = `${points.length} ${daily ? "day" + (points.length === 1 ? "" : "s") : "commits"}` +
     (S.trend.range === "all" ? "" : ` · last ${days}d`);
   if (single) {
-    const noise = mainBaseline(op, shape, dtype, S.trend.model, metric);
+    const noise = mainBaseline(e.op, shape, dtype, S.trend.model, metric);
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
       datasets.push({ label: "+2σ", data: points.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: cssVal("--band"), order: 20 });
       datasets.push({ label: "-2σ", data: points.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
@@ -702,19 +728,20 @@ function drawTrend(e) {
       note = `${span} · n=${noise.n} prior dev runs — too few for a noise band; fixed <b>${CFG.regressionPct}%</b> gate.`;
     }
   } else {
-    note = `${span} · one line per model.` + (daily ? " Daily mean per model — smooths CI jitter to expose real drift." : " Red = dev below its prior-dev band, or a PR slower than dev.");
+    const unit = byBackend ? "backend" : "model";
+    note = `${span} · one line per ${unit}.` + (daily ? ` Daily mean per ${unit} — smooths CI jitter to expose real drift.` : " Red = dev below its prior-dev band, or a PR slower than dev.");
   }
-  for (const model of models) {
-    const noise = mainBaseline(op, shape, dtype, model, metric);
-    const data = points.map(p => valueAt(p, model));
+  for (const dv of dims) {
+    const noise = mainBaseline(opFor(dv), shape, dtype, byBackend ? arch : dv, metric);
+    const data = points.map(p => valueAt(p, dv));
     if (data.every(v => v == null)) continue;
-    const ptColor = points.map((p, i) => {
-      if (daily) return modelCol(model);        // daily means aren't per-run regression calls
-      const r = recs.find(x => x.run_id === p.id && x.model === model);
-      return (r && regOf(r, noise).real) ? cssVal("--bad") : modelCol(model);
+    const ptColor = points.map(p => {
+      if (daily) return dimCol(dv);             // daily means aren't per-run regression calls
+      const r = recs.find(x => x.run_id === p.id && dimOf(x) === dv);
+      return (r && regOf(r, noise).real) ? cssVal("--bad") : dimCol(dv);
     });
     datasets.push({
-      label: model, data, borderColor: modelCol(model), backgroundColor: modelCol(model) + "22",
+      label: dv, data, borderColor: dimCol(dv), backgroundColor: dimCol(dv) + "22",
       pointBackgroundColor: ptColor, pointBorderColor: ptColor,
       pointRadius: daily ? 4 : points.length > 30 ? 1.5 : 3, pointHoverRadius: 6,
       borderWidth: daily ? 2.4 : 2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
@@ -768,24 +795,26 @@ function drawTrend(e) {
     },
   });
   // status-aware table — always per-commit, with a real link to each commit.
-  // Header model columns are generated from S.models so they stay aligned
-  // with the data cells below (which also map over S.models).
+  // Columns are the overlay dimension (archs, or backends in backend mode) so the
+  // header stays aligned with the data cells below.
+  const cols = byBackend ? dims : S.models;
   $("#trendHeadRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
-    S.models.map(a => `<th class="num">${esc(a)}</th>`).join("");
+    cols.map(c => `<th class="num">${esc(c)}</th>`).join("");
   $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
-    const cell = model => {
-      const r = recs.find(x => x.run_id === ri.id && x.model === model)
-        || S.records.find(x => x.run_id === ri.id && x.model === model && x.op === op && x.shape === shape && x.dtype === dtype);
+    const cell = dv => {
+      const r = recs.find(x => x.run_id === ri.id && dimOf(x) === dv)
+        || S.records.find(x => x.run_id === ri.id && dimOf(x) === dv && x.shape === shape && x.dtype === dtype && x.metric === metric &&
+             (byBackend ? (x.base === base && x.model === arch) : x.op === e.op));
       if (!r) return `<td class="num st-na">—</td>`;
       if (r.value == null) return `<td class="num cell-status ${r.status === "skip" ? "st-skip" : "st-missing"}">${r.status}</td>`;
-      const real = regOf(r, mainBaseline(op, shape, dtype, model, metric)).real;
-      return `<td class="num" style="color:${real ? "var(--bad)" : modelVar(model)}">${fmtVal(r.value, metric)}</td>`;
+      const real = regOf(r, mainBaseline(opFor(dv), shape, dtype, byBackend ? arch : dv, metric)).real;
+      return `<td class="num" style="color:${real ? "var(--bad)" : dimCol(dv)}">${fmtVal(r.value, metric)}</td>`;
     };
     const sha = (ri.commit || "").slice(0, 7);
     return `<tr><td><a class="commit-link" href="${commitUrl(ri.commit)}" target="_blank" rel="noopener">${sha || "—"}</a></td>` +
       `<td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>` +
       `<td class="k-dim">${ri.main ? "dev" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
-      `${S.models.map(cell).join("")}</tr>`;
+      `${cols.map(cell).join("")}</tr>`;
   }).join("");
   // If the chart was built while its container was briefly unsized (view switch or
   // first paint), force a resize on the next frame so it isn't left blank.
@@ -866,6 +895,7 @@ function writeHash() {
     if (S.trend.model && S.trend.model !== "all") p.set("model", S.trend.model);
     if (S.trend.range && S.trend.range !== "all") p.set("r", S.trend.range);
     if (S.trend.xmode && S.trend.xmode !== "commits") p.set("x", S.trend.xmode);
+    if (S.trend.by && S.trend.by !== "arch") p.set("by", S.trend.by);
   } else if (S.view === "bytype") {
     for (const [k, v] of Object.entries(S.byType.facets)) if (v && v !== "all") p.set(k, v);
     if (S.byType.q) p.set("q", S.byType.q);
@@ -888,6 +918,7 @@ function readHash() {
     S.trend.model = p.get("model") || "all";
     S.trend.range = p.get("r") || "all";
     S.trend.xmode = p.get("x") || "commits";
+    S.trend.by = p.get("by") || "arch";
   } else if (S.view === "bytype") {
     S.byType.facets = {
       family: p.get("family") || "all", mode: p.get("mode") || "all",
@@ -957,6 +988,7 @@ function wire() {
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
   $("#kernelSearch").addEventListener("input", e => { S.trend.q = e.target.value; renderKernelRail(); });
   $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k); });
+  $("#trendBy").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.by = b.dataset.b; selectKernel(S.trend.key); });
   $("#trendModel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.model = b.dataset.a; selectKernel(S.trend.key); });
   $("#trendRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.range = b.dataset.r; selectKernel(S.trend.key); });
   $("#trendXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.xmode = b.dataset.x; selectKernel(S.trend.key); });
@@ -975,6 +1007,7 @@ function toggleTheme() {
   applyTheme(S.theme === "light" ? "dark" : "light");
   try { localStorage.setItem("flydsl-theme", S.theme); } catch { /* ignore */ }
   setModelColors();                    // re-tune model hues for the new theme
+  setBackendColors();                  // ...and backend hues
   renderAll();                         // re-render SVG sparklines with theme colors
   if (S.trend.key) selectKernel(S.trend.key);   // redraw the canvas chart
 }
