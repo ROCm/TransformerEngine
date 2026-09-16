@@ -300,12 +300,11 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 #ifdef __HIP_PLATFORM_AMD__
     // gfx1250's shape check needs the declared scale shape padded to a multiple of 4; over-allocate
     // the buffer to match (padding entries are e8m0 identity and never read). Data stays compact.
-    std::vector<size_t> scale_shape_vec = {per_tensor_scales_first_dim[t],
-                                           per_tensor_scales_last_dim[t]};
     const size_t align =
         (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
-    scale_shape_vec = {round_up_to_nearest_multiple(scale_shape_vec[0], align),
-                       round_up_to_nearest_multiple(scale_shape_vec[1], align)};
+    std::vector<size_t> scale_shape_vec = {
+        round_up_to_nearest_multiple(per_tensor_scales_first_dim[t], align),
+        round_up_to_nearest_multiple(per_tensor_scales_last_dim[t], align)};
     const size_t alloc_scales_size = scale_shape_vec[0] * scale_shape_vec[1] * sizeof(fp8e8m0);
     cudaMalloc((void **)&single_scales_d, alloc_scales_size);
     cudaMemset(single_scales_d, 127, alloc_scales_size);  // fill with e8m0 identity
