@@ -93,6 +93,26 @@ def get_device_compute_capability() -> Tuple[int, int]:
     return _get_device_compute_capability(torch.cuda.current_device())
 
 
+def get_gemm_backend() -> str:
+    """Resolve the ``NVTE_GEMM_BACKEND`` env var to a GEMM backend selector.
+
+    Returns ``"default"`` (native C++/hipBLASLt path) when unset or empty,
+    ``"triton"`` for ``"TRITON"``, and ``"flydsl"`` for ``"FLYDSL"``. Any other
+    value is a misconfiguration and raises ``ValueError`` rather than silently
+    degrading to the default backend.
+    """
+    val = os.environ.get("NVTE_GEMM_BACKEND")
+    if val in (None, ""):
+        return "default"
+    if val == "TRITON":
+        return "triton"
+    if val == "FLYDSL":
+        return "flydsl"
+    raise ValueError(
+        f"Invalid NVTE_GEMM_BACKEND={val!r}; expected 'TRITON', 'FLYDSL', or unset."
+    )
+
+
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
     """Convert a block-interleaved GLU fc1 tensor to contiguous gate/linear layout.
 
