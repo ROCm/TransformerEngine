@@ -80,37 +80,6 @@ CdWalk cd_walk_next(CdWalk w, int tiles_N) {
     return w;
 }
 
-template <typename U, typename RT>
-__device__ __forceinline__
-void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
-    using T               = float;
-    constexpr int packing = 2;
-    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
-    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
-    const int col_offset  = lane % RT::base_tile_cols;
-
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const int col = j * RT::base_tile_cols + col_offset;
-#pragma unroll
-            for (int k = 0; k < RT::base_tile_num_strides; k++) {
-                const int row = i * RT::base_tile_rows + row_offset +
-                                k * RT::base_tile_elements_per_stride_group;
-#pragma unroll
-                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
-                    const int idx = l + k * RT::base_tile_stride / packing;
-                    dst_ptr[(row + l * 2)     * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
-                }
-            }
-        }
-    }
-}
-
 typedef int rs_v4i __attribute__((ext_vector_type(4)));
 typedef const volatile __attribute__((address_space(1))) rs_v4i *rs_gvol4;
 

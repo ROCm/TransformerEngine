@@ -42,42 +42,6 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
     return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
 }
 
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
-                      const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive) {
-    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
-    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
-
-    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
-    size_t o         = (size_t)sub * sub_bytes;
-    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
-
-    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
-
-    __syncthreads();
-    if (NT) {
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-    } else {
-        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
-    __syncthreads();
-}
-
-template <int U, bool NT>
-__device__ __forceinline__
-void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
-                size_t chunk_bytes, unsigned int *arrive) {
-    const int pi   = (int)blockIdx.x / gath_wg;
-    const int sub  = (int)blockIdx.x % gath_wg;
-    const int peer = pi + (pi >= my_pe ? 1 : 0);
-    for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    }
-}
-
 // Epilogue for the AG path: C is [N_TOTAL, M], the same orientation mxfp8_gemm.cpp writes, so the
 // col_l accumulators are transposed before the store. No bias/gelu/accumulate on this path.
 template<typename RT_C, typename RT_C_T, typename OutGL>
@@ -300,8 +264,9 @@ using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, ui
                                  XcdBuckets, int *, size_t, size_t, int, hipStream_t);
 
 // 4-way dispatch on the operand formats, mirroring dispatch_gemm() in mxfp8_gemm.cpp.
-static persistent_fn_t get_persistent_fn(int M, int N, int K, int a_fp8_code, int b_fp8_code) {
+static persistent_fn_t get_persistent_fn(int M, int N, int K, KittensDType a_dt, KittensDType b_dt) {
     (void)M; (void)N; (void)K;
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
     if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent<0, 0>;
     if (a_fp8_code == 0 && b_fp8_code == 1) return launch_persistent<0, 1>;
     if (a_fp8_code == 1 && b_fp8_code == 0) return launch_persistent<1, 0>;

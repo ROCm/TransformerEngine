@@ -76,7 +76,13 @@ __device__ __forceinline__ int hk_upper_bound(const T *arr, int n, T val) {
     return lo;
 }
 
-template<GemmEpilogue EPILOGUE, bool ACCUMULATE, typename RT_C, typename RT_C_T, typename OutGL, typename AuxGLType>
+// Shared epilogue. TRANSPOSE_OUT selects the TN/NT form, where C is [N, M] and the col_l
+// accumulators transpose before the store; otherwise (NN, flipped operand slots) the accumulator
+// already carries C's orientation and stores straight through. BLAS bias has length m, which is
+// the accumulator's row axis when transposing and its column axis when not, so the two gathers
+// differ in which register index the bias is constant across.
+template<GemmEpilogue EPILOGUE, bool ACCUMULATE, bool TRANSPOSE_OUT, typename RT_C, typename RT_C_T,
+         typename OutGL, typename AuxGLType>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
     const OutGL &C, const AuxGLType &AuxGL,
@@ -86,106 +92,71 @@ __device__ __forceinline__ void gemm_epilogue(
     constexpr bool HAS_BIAS = EPILOGUE == GemmEpilogue::BIAS || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
     constexpr bool HAS_GELU = EPILOGUE == GemmEpilogue::GELU_AUX || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
 
-    auto out_coord_A = kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + warp_n, block_row * WARPS_ROW * 2 + warp_m};
-    auto out_coord_B = kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + WARPS_COL + warp_n, block_row * WARPS_ROW * 2 + warp_m};
-    auto out_coord_C = kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + warp_n, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m};
-    auto out_coord_D = kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + WARPS_COL + warp_n, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m};
+    const int r_lo = block_row * WARPS_ROW * 2 + warp_m;
+    const int r_hi = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
+    const int c_lo = block_col * WARPS_COL * 2 + warp_n;
+    const int c_hi = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
+    auto mk = [](int r, int c) {
+        if constexpr (TRANSPOSE_OUT) { return kittens::coord<RT_C_T>{0, 0, c, r}; }
+        else                         { return kittens::coord<RT_C_T>{0, 0, r, c}; }
+    };
+    auto out_coord_A = mk(r_lo, c_lo);
+    auto out_coord_B = mk(r_lo, c_hi);
+    auto out_coord_C = mk(r_hi, c_lo);
+    auto out_coord_D = mk(r_hi, c_hi);
 
     if constexpr (HAS_BIAS) {
-        int m_base_lo = block_m + warp_m * REG_M;
-        int m_base_hi = block_m + (WARPS_ROW + warp_m) * REG_M;
-        int lane      = kittens::laneid();
-        int row_off   = cA.base_tile_stride * (lane / cA.base_tile_cols);
-#pragma unroll
-        for (int i = 0; i < cA.height; i++) {
-#pragma unroll
-            for (int j = 0; j < cA.width; j++) {
-#pragma unroll
-                for (int kk = 0; kk < cA.base_tile_num_strides; kk++) {
-#pragma unroll
-                    for (int l = 0; l < cA.base_tile_stride / 2; l++) {
-                        int idx    = l + kk * cA.base_tile_stride / 2;
-                        int m_lo_x = m_base_lo + i * 16 + row_off + l * 2;
-                        int m_hi_x = m_base_hi + i * 16 + row_off + l * 2;
-                        float b_lo_x = read_bias(bias, bias_dtype, m_lo_x);
-                        float b_lo_y = read_bias(bias, bias_dtype, m_lo_x + 1);
-                        float b_hi_x = read_bias(bias, bias_dtype, m_hi_x);
-                        float b_hi_y = read_bias(bias, bias_dtype, m_hi_x + 1);
-                        cA.tiles[i][j].data[idx].x += b_lo_x; cA.tiles[i][j].data[idx].y += b_lo_y;
-                        cB.tiles[i][j].data[idx].x += b_lo_x; cB.tiles[i][j].data[idx].y += b_lo_y;
-                        cC.tiles[i][j].data[idx].x += b_hi_x; cC.tiles[i][j].data[idx].y += b_hi_y;
-                        cD.tiles[i][j].data[idx].x += b_hi_x; cD.tiles[i][j].data[idx].y += b_hi_y;
-                    }
-                }
-            }
-        }
-    }
-
-    if constexpr (HAS_GELU) {
-        RT_C_T tA, tB, tC, tD;
-        kittens::transpose(tA, cA); kittens::transpose(tB, cB); kittens::transpose(tC, cC); kittens::transpose(tD, cD);
-        kittens::store(AuxGL, tA, out_coord_A); kittens::store(AuxGL, tB, out_coord_B);
-        kittens::store(AuxGL, tC, out_coord_C); kittens::store(AuxGL, tD, out_coord_D);
-        kittens::gelu(cA, cA); kittens::gelu(cB, cB); kittens::gelu(cC, cC); kittens::gelu(cD, cD);
-    }
-
-    RT_C_T oA, oB, oC, oD;
-    kittens::transpose(oA, cA); kittens::transpose(oB, cB); kittens::transpose(oC, cC); kittens::transpose(oD, cD);
-
-    if constexpr (ACCUMULATE) {
-        RT_C_T eA, eB, eC, eD;
-        kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
-        kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
-        kittens::add(oA, oA, eA); kittens::add(oB, oB, eB);
-        kittens::add(oC, oC, eC); kittens::add(oD, oD, eD);
-    }
-
-    kittens::store(C, oA, out_coord_A); kittens::store(C, oB, out_coord_B);
-    kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
-}
-
-// Epilogue for the NN kernel, whose operand slots are flipped: the accumulator already carries
-// C's orientation, so the col_l tiles store straight through kittens::store with no transpose.
-// BLAS bias has length m = the accumulator's N axis, so it is CONSTANT across the register index
-// and shared by cA/cC (low weight half) and cB/cD (high) -- the mirror of gemm_epilogue.
-template<GemmEpilogue EPILOGUE, bool ACCUMULATE, typename RT_C, typename OutGL, typename AuxGLType>
-__device__ __forceinline__ void gemm_epilogue_nn(
-    RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
-    const OutGL &C, const AuxGLType &AuxGL,
-    const void *__restrict__ bias, int bias_dtype,
-    int block_m, int block_row, int block_col, int warp_m, int warp_n) {
-
-    constexpr bool HAS_BIAS = EPILOGUE == GemmEpilogue::BIAS || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
-    constexpr bool HAS_GELU = EPILOGUE == GemmEpilogue::GELU_AUX || EPILOGUE == GemmEpilogue::GELU_AUX_BIAS;
-
-    // coord<RT_C> counts RT_C::rows (REG_M) down and RT_C::cols (REG_N) across.
-    auto out_coord_A = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + warp_m,              block_col * WARPS_COL * 2 + warp_n};
-    auto out_coord_B = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + warp_m,              block_col * WARPS_COL * 2 + WARPS_COL + warp_n};
-    auto out_coord_C = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m,  block_col * WARPS_COL * 2 + warp_n};
-    auto out_coord_D = kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m,  block_col * WARPS_COL * 2 + WARPS_COL + warp_n};
-
-    if constexpr (HAS_BIAS) {
-        // block_m is the weight-extent (BLAS m) base of this tile, i.e. the accumulator's N base.
-        int n_base_lo = block_m + warp_n * REG_N;
-        int n_base_hi = block_m + (WARPS_COL + warp_n) * REG_N;
-        int lane      = kittens::laneid();
-        int col_off   = lane % cA.base_tile_cols;
-#pragma unroll
-        for (int j = 0; j < cA.width; j++) {
-            int    n_x   = j * cA.base_tile_cols + col_off;
-            float  b_lo  = read_bias(bias, bias_dtype, n_base_lo + n_x);
-            float  b_hi  = read_bias(bias, bias_dtype, n_base_hi + n_x);
-#pragma unroll
+        if constexpr (TRANSPOSE_OUT) {
+            int m_base_lo = block_m + warp_m * REG_M;
+            int m_base_hi = block_m + (WARPS_ROW + warp_m) * REG_M;
+            int lane      = kittens::laneid();
+            int row_off   = cA.base_tile_stride * (lane / cA.base_tile_cols);
+    #pragma unroll
             for (int i = 0; i < cA.height; i++) {
-#pragma unroll
-                for (int kk = 0; kk < cA.base_tile_num_strides; kk++) {
-#pragma unroll
-                    for (int l = 0; l < cA.base_tile_stride / 2; l++) {
-                        int idx = l + kk * cA.base_tile_stride / 2;
-                        cA.tiles[i][j].data[idx].x += b_lo; cA.tiles[i][j].data[idx].y += b_lo;
-                        cC.tiles[i][j].data[idx].x += b_lo; cC.tiles[i][j].data[idx].y += b_lo;
-                        cB.tiles[i][j].data[idx].x += b_hi; cB.tiles[i][j].data[idx].y += b_hi;
-                        cD.tiles[i][j].data[idx].x += b_hi; cD.tiles[i][j].data[idx].y += b_hi;
+    #pragma unroll
+                for (int j = 0; j < cA.width; j++) {
+    #pragma unroll
+                    for (int kk = 0; kk < cA.base_tile_num_strides; kk++) {
+    #pragma unroll
+                        for (int l = 0; l < cA.base_tile_stride / 2; l++) {
+                            int idx    = l + kk * cA.base_tile_stride / 2;
+                            int m_lo_x = m_base_lo + i * 16 + row_off + l * 2;
+                            int m_hi_x = m_base_hi + i * 16 + row_off + l * 2;
+                            float b_lo_x = read_bias(bias, bias_dtype, m_lo_x);
+                            float b_lo_y = read_bias(bias, bias_dtype, m_lo_x + 1);
+                            float b_hi_x = read_bias(bias, bias_dtype, m_hi_x);
+                            float b_hi_y = read_bias(bias, bias_dtype, m_hi_x + 1);
+                            cA.tiles[i][j].data[idx].x += b_lo_x; cA.tiles[i][j].data[idx].y += b_lo_y;
+                            cB.tiles[i][j].data[idx].x += b_lo_x; cB.tiles[i][j].data[idx].y += b_lo_y;
+                            cC.tiles[i][j].data[idx].x += b_hi_x; cC.tiles[i][j].data[idx].y += b_hi_y;
+                            cD.tiles[i][j].data[idx].x += b_hi_x; cD.tiles[i][j].data[idx].y += b_hi_y;
+                        }
+                    }
+                }
+            }
+        } else {
+            // block_m is the weight-extent (BLAS m) base of this tile, i.e. the accumulator's N base.
+            int n_base_lo = block_m + warp_n * REG_N;
+            int n_base_hi = block_m + (WARPS_COL + warp_n) * REG_N;
+            int lane      = kittens::laneid();
+            int col_off   = lane % cA.base_tile_cols;
+    #pragma unroll
+            for (int j = 0; j < cA.width; j++) {
+                int    n_x   = j * cA.base_tile_cols + col_off;
+                float  b_lo  = read_bias(bias, bias_dtype, n_base_lo + n_x);
+                float  b_hi  = read_bias(bias, bias_dtype, n_base_hi + n_x);
+    #pragma unroll
+                for (int i = 0; i < cA.height; i++) {
+    #pragma unroll
+                    for (int kk = 0; kk < cA.base_tile_num_strides; kk++) {
+    #pragma unroll
+                        for (int l = 0; l < cA.base_tile_stride / 2; l++) {
+                            int idx = l + kk * cA.base_tile_stride / 2;
+                            cA.tiles[i][j].data[idx].x += b_lo; cA.tiles[i][j].data[idx].y += b_lo;
+                            cC.tiles[i][j].data[idx].x += b_lo; cC.tiles[i][j].data[idx].y += b_lo;
+                            cB.tiles[i][j].data[idx].x += b_hi; cB.tiles[i][j].data[idx].y += b_hi;
+                            cD.tiles[i][j].data[idx].x += b_hi; cD.tiles[i][j].data[idx].y += b_hi;
+                        }
                     }
                 }
             }
@@ -193,22 +164,44 @@ __device__ __forceinline__ void gemm_epilogue_nn(
     }
 
     if constexpr (HAS_GELU) {
-        // AuxGL has C's shape, so the pre-GELU accumulators store with C's coords, untransposed.
-        kittens::store(AuxGL, cA, out_coord_A); kittens::store(AuxGL, cB, out_coord_B);
-        kittens::store(AuxGL, cC, out_coord_C); kittens::store(AuxGL, cD, out_coord_D);
+        if constexpr (TRANSPOSE_OUT) {
+            RT_C_T tA, tB, tC, tD;
+            kittens::transpose(tA, cA); kittens::transpose(tB, cB); kittens::transpose(tC, cC); kittens::transpose(tD, cD);
+            kittens::store(AuxGL, tA, out_coord_A); kittens::store(AuxGL, tB, out_coord_B);
+            kittens::store(AuxGL, tC, out_coord_C); kittens::store(AuxGL, tD, out_coord_D);
+        } else {
+            kittens::store(AuxGL, cA, out_coord_A); kittens::store(AuxGL, cB, out_coord_B);
+            kittens::store(AuxGL, cC, out_coord_C); kittens::store(AuxGL, cD, out_coord_D);
+        }
         kittens::gelu(cA, cA); kittens::gelu(cB, cB); kittens::gelu(cC, cC); kittens::gelu(cD, cD);
     }
 
-    if constexpr (ACCUMULATE) {
-        RT_C eA, eB, eC, eD;
-        kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
-        kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
-        kittens::add(cA, cA, eA); kittens::add(cB, cB, eB);
-        kittens::add(cC, cC, eC); kittens::add(cD, cD, eD);
-    }
+    if constexpr (TRANSPOSE_OUT) {
+        RT_C_T oA, oB, oC, oD;
+        kittens::transpose(oA, cA); kittens::transpose(oB, cB); kittens::transpose(oC, cC); kittens::transpose(oD, cD);
 
-    kittens::store(C, cA, out_coord_A); kittens::store(C, cB, out_coord_B);
-    kittens::store(C, cC, out_coord_C); kittens::store(C, cD, out_coord_D);
+        if constexpr (ACCUMULATE) {
+            RT_C_T eA, eB, eC, eD;
+            kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
+            kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
+            kittens::add(oA, oA, eA); kittens::add(oB, oB, eB);
+            kittens::add(oC, oC, eC); kittens::add(oD, oD, eD);
+        }
+
+        kittens::store(C, oA, out_coord_A); kittens::store(C, oB, out_coord_B);
+        kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
+    } else {
+        if constexpr (ACCUMULATE) {
+            RT_C eA, eB, eC, eD;
+            kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
+            kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
+            kittens::add(cA, cA, eA); kittens::add(cB, cB, eB);
+            kittens::add(cC, cC, eC); kittens::add(cD, cD, eD);
+        }
+
+        kittens::store(C, cA, out_coord_A); kittens::store(C, cB, out_coord_B);
+        kittens::store(C, cC, out_coord_C); kittens::store(C, cD, out_coord_D);
+    }
 }
 
 template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL, typename AuxGLType>
@@ -344,7 +337,7 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
         C_local.raw_ptr = (typename OutGL::dtype *)c_expert_ptrs[expert_id];
     }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
@@ -569,7 +562,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         C_local.raw_ptr = (typename OutGL::dtype *)c_expert_ptrs[expert_id];
     }
 
-    gemm_epilogue_nn<EPILOGUE, ACCUMULATE, RT_C>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, false, RT_C, RT_C>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
@@ -863,7 +856,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         C_local.raw_ptr = (typename OutGL::dtype *)c_expert_ptrs[expert_id];
     }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
@@ -1081,16 +1074,6 @@ static bool mxfp8_gemm_impl(
     return true;
 }
 
-// Convert KittensDType to MFMA cbsz/blgp format code.
-// 0 = e4m3, 1 = e5m2 -- hardware-defined by v_mfma_scale_f32_16x16x128_f8f6f4.
-static int fp8_code(int dt) {
-    switch (dt) {
-    case KITTENS_FP8E4M3: return 0;
-    case KITTENS_FP8E5M2: return 1;
-    default: assert(0 && "unexpected FP8 dtype"); return 0;
-    }
-}
-
 static int out_code(int dt) {
     switch (dt) {
     case KITTENS_FLOAT32:  return 0;
@@ -1112,8 +1095,8 @@ static bool mxfp8_gemm(
     void *workspace, size_t workspace_size,
     hipStream_t stream) {
 
-    int a_fp8   = fp8_code(a_dtype);
-    int b_fp8   = fp8_code(b_dtype);
+    int a_fp8   = fp8_code(static_cast<KittensDType>(a_dtype));
+    int b_fp8   = fp8_code(static_cast<KittensDType>(b_dtype));
     int out_dc  = out_code(out_dtype);
     int bias_dc = bias ? out_code(bias_dtype) : 0;
     int aux_dc  = aux_gelu ? out_code(aux_dtype) : 0;
