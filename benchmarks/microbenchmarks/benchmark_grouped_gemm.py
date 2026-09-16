@@ -14,9 +14,14 @@ FP8, and MXFP8, crossed with the selectable kernel backend for each precision
     pytest benchmark_grouped_gemm.py -k "mxfp8 and hipkittens"
 """
 
+import os
+import sys
+import tempfile
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from utils import (
     DTYPE_LIST,
     apply_backend_env,
@@ -29,7 +34,6 @@ from utils import (
 
 BENCHMARK_LABEL = "Grouped GEMM"
 
-# bf16/fp8/mxfp8 grouped GEMM (no grouped MXFP4 kernel yet -- that's a separate PR).
 RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
 
 # Env recipes to force a grouped-GEMM kernel backend (None unsets the var). Per the
@@ -48,16 +52,42 @@ GROUPED_BACKENDS = {
     "triton":     {_CUTLASS: None, _CK: None, _HK: None, _TRITON: "1"},
 }
 
-# Backends with a real choice per precision (the supported-backends table).
 _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "ck_tile", "triton"],
     "fp8": ["hipblaslt", "ck_tile"],
-    "mxfp8": ["hipblaslt", "hipkittens"],
+    "mxfp8": ["hipblaslt", "hipkittens", "ck_tile"],
 }
 
 
 def _backends_for(recipe):
     return _BACKENDS_BY_PRECISION.get(recipe, ["hipblaslt"])
+
+
+def _ck_grouped_fell_back(fn):
+    """Run *fn* once with CK grouped fallback warnings on; True if the CK grouped
+    path fell back to the default backend. The warning is a C++ NVTE_WARN to
+    stderr, so capture at the fd level rather than via ``warnings``."""
+    prev = os.environ.get("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK")
+    os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
+    saved = os.dup(2)
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as tmp:
+            sys.stderr.flush()
+            os.dup2(tmp.fileno(), 2)
+            try:
+                fn()
+            finally:
+                sys.stderr.flush()
+                os.dup2(saved, 2)
+            tmp.seek(0)
+            out = tmp.read().decode(errors="ignore")
+        return "ck_tile" in out and "grouped_gemm" in out
+    finally:
+        os.close(saved)
+        if prev is None:
+            os.environ.pop("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", None)
+        else:
+            os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = prev
 
 def generate_grouped_gemm_group_lens(b, m, balance: bool):
     if balance:
@@ -176,6 +206,11 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
         for param in grouped_linear.parameters():
             param.grad = None
 
+    if os.environ.get(_CK) == "1" and _ck_grouped_fell_back(
+        fwd_bwd_func if Direction == "bwd" else fwd_func
+    ):
+        pytest.skip("CK grouped GEMM fell back to the default backend for this config")
+
     fwd_total_flops = 2 * sum_M * N * K
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
@@ -216,6 +251,8 @@ def test_grouped_gemm(microbench, case, monkeypatch):
         pytest.skip(f"{backend} grouped GEMM needs num_groups > 1")
     if backend == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
         pytest.skip("HipKittens grouped GEMM needs 256-aligned expert dims")
+    if backend == "ck_tile" and case["recipe"] == "mxfp8" and get_device_compute_capability() != (12, 5):
+        pytest.skip("CK MXFP8 grouped GEMM is gfx1250-only")
     # Skip a forced backend when the build doesn't honor the toggles it enables,
     # so old builds show no data instead of silently measuring hipBLASLt.
     required = [k for k, v in GROUPED_BACKENDS[backend].items() if v is not None]
