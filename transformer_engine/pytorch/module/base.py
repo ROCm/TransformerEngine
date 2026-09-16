@@ -777,6 +777,17 @@ def fused_bulk_rs_eligible(
     return eligible
 
 
+def fused_wgrad_ag_eligible(name: Optional[str]) -> bool:
+    """Whether the fused AG+GEMM kernel can carry the wgrad grad-output all-gather.
+
+    The gather rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
+    False off ROCm, where there is no fused backend and upstream's external-AG path is unchanged.
+    """
+    if not IS_HIP_EXTENSION or name is None:
+        return False
+    return _ub_is_fused(name + "_dgrad") and _ub_is_fused(name + "_wgrad")
+
+
 def _ub_is_fused(name: str) -> bool:
     """Whether `name` was configured with the fused overlap method."""
     return name in _ub_fused_names

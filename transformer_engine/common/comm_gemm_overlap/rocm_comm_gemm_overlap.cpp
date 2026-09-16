@@ -250,13 +250,26 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
+// Raw inputs for a second all-gather region, read off the auxiliary communicator by
+// fused_overlap_ag. hk_fused_ag_gemm resolves them into peer pointers and arrival parameters,
+// because it already has the communicator and the GET_*_PTR macros in scope.
+struct AuxAgSource {
+  int reg;
+  void *dst;
+  size_t chunk_bytes;
+  size_t scale_base_offset;
+  size_t scale_chunk_bytes;
+  uint64_t signal;
+};
+
 // Fused all-gather + GEMM, launched by fused_overlap_ag below.
 static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
                              const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
                              const TensorWrapper &ubuf, const TensorWrapper &chunk, communicator *comm,
                              int reg, int tp_id, int tp_size, uint64_t signal, size_t scale_base_offset,
-                             size_t scale_chunk_bytes, cudaStream_t stream) {
+                             size_t scale_chunk_bytes, const AuxAgSource *aux_ag,
+                             cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(B.dptr() == ubuf.dptr(),
              "fused AG+GEMM reached with invalid B tensor!");
@@ -294,6 +307,26 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
     NVTE_CHECK(B_tensor->has_data(), "fused AG+GEMM with MXFP8 reached with B missing row-wise usage");
   }
 
+  // The auxiliary region carries a column-scaled copy of the gathered tensor, which only NN needs:
+  // its wgrad GEMM contracts over the gathered axis, and MXFP8 cannot derive column scales from
+  // row scales. The region reaches us as raw bytes, so what we can prove here is that it is the
+  // same tensor under the other scaling -- identical shard bytes, and scales of its own.
+  if (aux_ag != nullptr) {
+    NVTE_CHECK(!transa, "fused AG+GEMM: an auxiliary all-gather region is NN only");
+    NVTE_CHECK(is_fp8, "fused AG+GEMM: an auxiliary all-gather region requires MXFP8 operands");
+    NVTE_CHECK(aux_ag->dst != nullptr,
+               "fused AG+GEMM: the auxiliary all-gather region has no destination");
+    NVTE_CHECK(aux_ag->scale_chunk_bytes != 0,
+               "fused AG+GEMM: the auxiliary all-gather region carries no scales, so the wgrad "
+               "GEMM would have no column-wise scale-inverses for the gathered tensor");
+    NVTE_CHECK(aux_ag->chunk_bytes == chunk.bytes() &&
+                   aux_ag->scale_chunk_bytes == scale_chunk_bytes,
+               "fused AG+GEMM: the auxiliary region shards ", aux_ag->chunk_bytes, " data and ",
+               aux_ag->scale_chunk_bytes, " scale bytes, but the gathered tensor shards ",
+               chunk.bytes(), " and ", scale_chunk_bytes,
+               "; both hold the same tensor and must agree.");
+  }
+
   const void* scale_A = nullptr;
   const void* scale_B = nullptr;
   if (is_fp8) {
@@ -320,6 +353,26 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
+
+  // Resolved here rather than by the caller so the region plumbing stays next to the primary's.
+  // Lives until the launch below, which reads it synchronously.
+  KittensAuxAgRegion aux_region{};
+  if (aux_ag != nullptr) {
+    aux_region.dst     = aux_ag->dst;
+    aux_region.peer_ub = reinterpret_cast<char *>(comm->gpu_ptrs) +
+                         aux_ag->reg * comm->nvsize * sizeof(void *);
+    aux_region.arrive_local  = GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, aux_ag->reg, 0);
+    aux_region.arrive_offset = static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, aux_ag->reg, 0) -
+                                                  reinterpret_cast<char *>(comm->peer_ptr[0][0]));
+    aux_region.arrive_stride = static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, aux_ag->reg, 0) -
+                                                  GET_RECV_PTR_BY_INDEX(0, comm, aux_ag->reg, 0));
+    aux_region.arrive_value      = aux_ag->signal;
+    aux_region.chunk_bytes       = aux_ag->chunk_bytes;
+    aux_region.scale_base_offset = aux_ag->scale_base_offset;
+    aux_region.scale_chunk_bytes = aux_ag->scale_chunk_bytes;
+    args.aux_ag = &aux_region;
+  }
+
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     // e4m3 -> 0, e5m2 -> 1, as in mxfp8_gemm.cpp. These name TE's operands, not the kernel's
     // slots; comm_gemm.cpp binds them to CBSZ/BLGP for the layout it launches, so this side
@@ -505,13 +558,29 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                                cudaStream_t stream_main) {
+                                CommOverlapCore *aux_ag_comm, cudaStream_t stream_main) {
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
+    // A second region whose all-gather this kernel carries -- the column-scaled grad output the
+    // wgrad GEMM needs. Its own overlap method never runs, so nothing else advances its signal.
+    // Protected members are reachable only through the derived type, hence the cast.
+    AuxAgSource aux_src{};
+    const AuxAgSource *aux_ptr = nullptr;
+    if (aux_ag_comm != nullptr) {
+      auto *aux = static_cast<CommOverlapP2PBase *>(aux_ag_comm);
+      aux_src.reg               = aux->_ub_reg;
+      aux_src.dst               = aux->_ubuf.dptr();
+      aux_src.chunk_bytes       = aux->_ubufs[0].bytes();
+      aux_src.scale_base_offset = aux->_scale_base_offset;
+      aux_src.scale_chunk_bytes = aux->_scale_chunk_bytes;
+      aux_src.signal            = aux->_ag_signal_base + _tp_size;
+      aux->_ag_signal_base += _tp_size;
+      aux_ptr = &aux_src;
+    }
     const bool launched = hk_fused_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, B_copy,
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
                                            _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
-                                           _scale_base_offset, _scale_chunk_bytes,
+                                           _scale_base_offset, _scale_chunk_bytes, aux_ptr,
                                            stream_main);
     NVTE_CHECK(launched, "fused AG+GEMM failed to launch");
     _ag_signal_base += _tp_size;

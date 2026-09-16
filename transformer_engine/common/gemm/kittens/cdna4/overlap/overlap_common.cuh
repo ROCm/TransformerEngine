@@ -187,7 +187,11 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
     }
 }
 
-template <int U, bool NT, typename T>
+// PUBLISH=false gathers without touching `arrive`: for a second, independent all-gather nothing
+// waits on, and whose increments must not land in the primary's flags -- AG_PUBLISH is a
+// fetch_add, so sharing an array lets a fast block satisfy a tile's count before its peers have
+// written their slices.
+template <int U, bool NT, bool PUBLISH = true, typename T>
 __device__ __forceinline__
 void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
                       const PeerPtrsT<T> &peers, size_t chunk_bytes, unsigned int *arrive) {
@@ -207,8 +211,10 @@ void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chun
         __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
     }
     __syncthreads();
-    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
-    __syncthreads();
+    if constexpr (PUBLISH) {
+        if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+        __syncthreads();
+    }
 }
 
 template <int U, bool NT, int STEP = 64, int NG = 4>
@@ -253,7 +259,7 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
     __syncthreads();
 }
 
-template <int U, bool NT, typename T>
+template <int U, bool NT, bool PUBLISH = true, typename T>
 __device__ __forceinline__
 void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrsT<T> &peers,
                 size_t chunk_bytes, unsigned int *arrive) {
@@ -261,7 +267,7 @@ void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const Pee
     const int sub  = (int)blockIdx.x % gath_wg;
     const int peer = pi + (pi >= my_pe ? 1 : 0);
     for (int tn = 0; tn < tiles_per_chunk; tn++) {
-        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        gather_peer_tile<U, NT, PUBLISH>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
     }
 }
 

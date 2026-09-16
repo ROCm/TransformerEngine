@@ -205,8 +205,13 @@ def test_fused_layer_bulk_wgrad_bf16(nprocs):
     assert "qkv_wgrad" in eligible, eligible
 
 
-def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
-    """Run the layer harness on a row-parallel Linear, which is the fused reduce-scatter's path."""
+def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
+    """Run the layer harness on a row-parallel Linear.
+
+    Row-parallel drives both fused paths, so this harness is not reduce-scatter specific: the
+    reduce-scatter sits in forward (proj_fprop) and the grad-output all-gather in backward
+    (proj_dgrad).
+    """
     test_cmd = (
         _fused_launch_cmd(nprocs)
         + [
@@ -234,7 +239,7 @@ def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_rs_overlap_bf16(nprocs):
     """bf16 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
-    result = _run_fused_rs_layer(
+    result = _run_fused_row_parallel_layer(
         nprocs, [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
     )
     _assert_numerics_passed(result)
@@ -247,6 +252,37 @@ def test_fused_rs_overlap_bf16(nprocs):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
+    """Row-parallel MXFP8 backward, where the grad output has to be gathered twice.
+
+    dgrad consumes dY row-scaled while wgrad needs it column-scaled. MXFP8 cannot convert one
+    into the other and Userbuffers carries a single tensor usage per gather, so the fused dgrad
+    kernel has to carry a second, independent all-gather for the wgrad copy.
+
+    Nothing else in this file reaches that path, which is why it went unnoticed: the other layer
+    tests are column-parallel, and ub_overlap_ag_dgrad is row-parallel only, while the MXFP8
+    tests that do exist drive run_gemm_with_overlap.py, which runs no backward at all.
+    """
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_row_parallel_layer(
+        nprocs,
+        [
+            f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
+            "--fp8",
+            "--quantization=mxfp8",
+        ],
+    )
+    _assert_numerics_passed(result)
+    stderr = result.stderr.decode()
+    # The second gather used to be routed to CommOverlapP2PBase::bulk_overlap_external_ag, which
+    # is a stub on every backend.
+    assert "Operation not supported" not in stderr, stderr
+    assert "failed to launch" not in stderr, stderr
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 @pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
 def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
     """A quantized row-parallel Linear must fall back cleanly instead of reaching the bf16 kernel."""
@@ -254,7 +290,7 @@ def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    result = _run_fused_rs_layer(
+    result = _run_fused_row_parallel_layer(
         nprocs,
         [
             f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
@@ -271,7 +307,7 @@ def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_rs_declines_unaligned_region(nprocs):
     """tokens %% (tp * BLOCK_ROW) != 0 has no whole band, so setup must decline."""
-    result = _run_fused_rs_layer(
+    result = _run_fused_row_parallel_layer(
         nprocs,
         [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
         seq_length=UNALIGNED_SEQ_LENGTH,
@@ -286,7 +322,7 @@ def test_fused_rs_declines_unaligned_region(nprocs):
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_rs_declines_ineligible_k(nprocs):
     """A K the fused kernels cannot serve falls back without erroring."""
-    result = _run_fused_rs_layer(
+    result = _run_fused_row_parallel_layer(
         nprocs, [f"--in-features={INELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
     )
     _assert_numerics_passed(result)
@@ -300,7 +336,7 @@ def test_fused_rs_declines_ineligible_k(nprocs):
 def test_fused_rs_overlap_is_deterministic(nprocs):
     """Two runs at the same seed agree: the collective's arrival order must not reach the output."""
     args = [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
-    first, second = (_run_fused_rs_layer(nprocs, args) for _ in range(2))
+    first, second = (_run_fused_row_parallel_layer(nprocs, args) for _ in range(2))
     _assert_numerics_passed(first)
     _assert_numerics_passed(second)
     first_hashes, second_hashes = _output_hashes(first.stdout), _output_hashes(second.stdout)

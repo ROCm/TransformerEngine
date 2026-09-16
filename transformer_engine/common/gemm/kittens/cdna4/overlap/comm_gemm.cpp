@@ -515,6 +515,21 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     }
     peers.base[args.rank] = static_cast<fp8e4m3 *>(args.ub);
 
+    // Second all-gather region, if the caller supplied one. Its own registered region, so its own
+    // peer table; our slot is the destination, as in the bulk path.
+    PeerPtrs aux_peers{};
+    char *aux_dst = nullptr;
+    if (args.aux_ag != nullptr) {
+        const std::vector<void *> *aux_bases = peer_bases(args.aux_ag->peer_ub, args.peer_count);
+        if (!aux_bases) return false;
+        for (int c = 0; c < tp_size; c++) {
+            aux_peers.base[c] =
+                static_cast<fp8e4m3 *>((*aux_bases)[(args.peer_first + c) % args.peer_count]);
+        }
+        aux_peers.base[args.rank] = static_cast<fp8e4m3 *>(args.aux_ag->dst);
+        aux_dst                   = static_cast<char *>(args.aux_ag->dst);
+    }
+
     XcdBuckets buckets{};
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
         buckets.off[b] = plan.off[b];
@@ -528,6 +543,36 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
             static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
             args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    // The aux region has its own signal space -- nothing else advances it, since the communicator
+    // that owns it never runs an overlap method of its own.
+    if (args.aux_ag != nullptr && args.arrive_peers && args.aux_ag->arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)),
+            args.aux_ag->arrive_offset, static_cast<const char *>(args.aux_ag->arrive_local),
+            args.aux_ag->arrive_stride, args.aux_ag->arrive_value, args.peer_first,
+            args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    // Aux scales, up front and unpacked: nothing in this kernel reads them, so there is no
+    // lane-native format to interleave into, and the consumer is a later GEMM in TE layout.
+    if (args.aux_ag != nullptr && args.aux_ag->scale_chunk_bytes) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) {
+            sp.base[c] = reinterpret_cast<const char *>(aux_peers.base[c]);
+        }
+        constexpr int SCALE_GATHER_U       = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        const size_t lines     = args.aux_ag->scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                aux_dst, sp, args.rank, tp_size, args.aux_ag->scale_base_offset,
+                args.aux_ag->scale_chunk_bytes);
     }
 
     // Activation scales live in the userbuffer, so they can only be packed after ag_ready_kernel
@@ -595,7 +640,8 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
         packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
         tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, gath_local, args.chunk_bytes,
         plan.xcd_bucket, buckets, bucket_ctr,
-        args.scale_base_offset, args.scale_chunk_bytes, interleave, args.stream);
+        args.scale_base_offset, args.scale_chunk_bytes, interleave, aux_peers, aux_dst,
+        args.stream);
     return hipGetLastError() == hipSuccess;
 }
 

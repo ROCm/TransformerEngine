@@ -11,6 +11,21 @@
 
 #include "kittens_common.h"
 
+// A second all-gather, carried alongside the GEMM's own but not consumed by it: no compute block
+// waits on these arrivals, so the gathered tensor's dtype and scales are the caller's business.
+// Same contract the BULK path already uses, applied to a region the GEMM never reads.
+struct KittensAuxAgRegion {
+    void *dst;                  // this rank's base for the gathered tensor
+    const void *peer_ub;        // peer base table for this region
+    void *arrive_local;
+    size_t arrive_offset;
+    size_t arrive_stride;
+    uint64_t arrive_value;
+    size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
+};
+
 struct KittensAgGemmArgs {
     const void *A;
     void *ub;
@@ -37,6 +52,7 @@ struct KittensAgGemmArgs {
     void *gather_dst;     // Bulk all-gather only
     KittensDType a_dtype;
     KittensDType b_dtype;
+    const KittensAuxAgRegion *aux_ag;   // Second AG region; nullptr when absent
 };
 
 struct KittensRsGemmArgs {

@@ -79,7 +79,12 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     [[maybe_unused]] uint32_t *__restrict__ packed_sa_raw, [[maybe_unused]] size_t scale_base,
     [[maybe_unused]] size_t scale_chunk_bytes, [[maybe_unused]] int scale_K,
     [[maybe_unused]] int interleave_scales,
-    [[maybe_unused]] char *__restrict__ gather_dst) {
+    [[maybe_unused]] char *__restrict__ gather_dst,
+    // A second all-gather this kernel carries but never reads: no arrivals are published and no
+    // compute block waits, so the gathered tensor's dtype and scales are the caller's business.
+    // aux_dst == nullptr means there is none.
+    [[maybe_unused]] const PeerPtrs aux_peers,
+    [[maybe_unused]] char *__restrict__ aux_dst) {
 
     const int M       = A.rows();
     const int K       = A.cols();
@@ -108,6 +113,17 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
                 reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+        }
+
+        // After the primary round, never before: the aux bytes have no deadline, while the primary
+        // arrivals gate compute. Running them concurrently would only split the link bandwidth and
+        // push those arrivals out. Both regions shard identically, so chunk_bytes and
+        // tiles_per_chunk carry over -- hk_fused_ag_gemm checks that.
+        if constexpr (!BULK) {
+            if (aux_dst != nullptr) {
+                gather_all<1, true, false>(my_pe, gath_wg, tiles_per_chunk, aux_dst, aux_peers,
+                                           chunk_bytes, nullptr);
+            }
         }
     }
 
@@ -245,7 +261,7 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
                               int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
                               XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
                               size_t scale_chunk_bytes, int interleave_scales, char *d_gather_dst,
-                              hipStream_t stream) {
+                              PeerPtrs aux_peers, char *d_aux_dst, hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
@@ -274,7 +290,8 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
         A_gl, B_gl, C_gl, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
         xcd_bucket, buckets, d_bucket_ctr,
-        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales, d_gather_dst);
+        packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales, d_gather_dst,
+        aux_peers, d_aux_dst);
 }
 
 // Fused: gather feeds the A operand, so there is no separate destination.
@@ -285,11 +302,13 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
                               unsigned int *d_arrive, int my_pe, int tp_size, int gath_wg,
                               int m_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
                               int *d_bucket_ctr, size_t scale_base, size_t scale_chunk_bytes,
-                              int interleave_scales, hipStream_t stream) {
+                              int interleave_scales, PeerPtrs aux_peers, char *d_aux_dst,
+                              hipStream_t stream) {
     launch_persistent_impl<CBSZ, BLGP, false>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
         peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
-        d_bucket_ctr, scale_base, scale_chunk_bytes, interleave_scales, nullptr, stream);
+        d_bucket_ctr, scale_base, scale_chunk_bytes, interleave_scales, nullptr, aux_peers,
+        d_aux_dst, stream);
 }
 
 // Bulk: the all-gather is unrelated to this GEMM and lands in d_gather_dst.
@@ -304,12 +323,13 @@ static void launch_persistent_bulk(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
     launch_persistent_impl<CBSZ, BLGP, true>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
         peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
-        d_bucket_ctr, 0, 0, 0, d_gather_dst, stream);
+        d_bucket_ctr, 0, 0, 0, d_gather_dst, PeerPtrs{}, nullptr, stream);
 }
 
 using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int, int *, PeerPtrs,
                                  unsigned int *, int, int, int, int, size_t, int,
-                                 XcdBuckets, int *, size_t, size_t, int, hipStream_t);
+                                 XcdBuckets, int *, size_t, size_t, int, PeerPtrs, char *,
+                                 hipStream_t);
 
 using persistent_bulk_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *,
                                       uint32_t *, TileDesc *, int, int *, PeerPtrs, char *,
