@@ -721,8 +721,8 @@ void fused_attn_ck_fwd_impl(
   if(ck_small_seq_enabled) {
     if(is_BSHD) {
       if(nvte_log_ck_config) {
-        std::cout << std::endl << "attn_fwd(ck small-seq, BSHD self-attn): b: " << b
-                  << ", s: " << s_q << ", flow: ck-smallseq" << std::endl;
+        std::cout << std::endl << "attn_fwd(ck small-seq, BSHD self-attn)"
+                  << std::endl;
       }
       ck_fused_attn::ck_attn_smallseq_fwd_bshd(
           b, h, s_q, s_kv, d_qk, scaling_factor, devPtrQ, devPtrK, devPtrV, devPtrO,
@@ -742,9 +742,8 @@ void fused_attn_ck_fwd_impl(
       const bool run_smallseq =
           is_small_seq_supported_runtime(runtime_max_seqlen_q, runtime_max_seqlen_kv);
       if(nvte_log_ck_config) {
-        std::cout << std::endl << "attn_fwd(ck small-seq, THD): b: " << b
-                  << ", runtime_max_seqlen_q: " << runtime_max_seqlen_q
-                  << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
+        std::cout << std::endl << "attn_fwd(ck small-seq, THD): runtime_max_seqlen_q: "
+                  << runtime_max_seqlen_q << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
                   << ", flow: " << (run_smallseq ? "ck-smallseq" : "regular ck/aiter") << std::endl;
       }
 
@@ -1162,8 +1161,8 @@ void fused_attn_ck_bwd_impl(
   if(ck_small_seq_enabled) {
     if(is_BSHD) {
       if(nvte_log_ck_config) {
-        std::cout << std::endl << "attn_bwd(ck small-seq, BSHD self-attn): b: " << b
-                  << ", s: " << s_q << ", flow: ck-smallseq" << std::endl;
+        std::cout << std::endl << "attn_bwd(ck small-seq, BSHD self-attn)"
+                  << std::endl;
       }
       pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
                                           devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
@@ -1184,9 +1183,8 @@ void fused_attn_ck_bwd_impl(
       const bool run_smallseq =
           is_small_seq_supported_runtime(runtime_max_seqlen_q, runtime_max_seqlen_kv);
       if(nvte_log_ck_config) {
-        std::cout << std::endl << "attn_bwd(ck small-seq, THD): b: " << b
-                  << ", runtime_max_seqlen_q: " << runtime_max_seqlen_q
-                  << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
+        std::cout << std::endl << "attn_bwd(ck small-seq, THD): runtime_max_seqlen_q: "
+                  << runtime_max_seqlen_q << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
                   << ", flow: " << (run_smallseq ? "ck-smallseq" : "regular ck/aiter") << std::endl;
       }
 

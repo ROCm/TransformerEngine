@@ -275,12 +275,13 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 * 3 - standard asm, default;
 * 4 - rta_asm.
 
-Small-Sequence Attention in CK Backend (gfx942/gfx950)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-For workloads with very short sequences (up to 17 tokens), ROCm TE provides dedicated CK small-sequence
+Small-Sequence Attention (gfx942/gfx950)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For workloads with very short sequences (up to 17 tokens), ROCm TE provides dedicated HIP MFMA
 attention kernels that are more efficient than the general fused-attention path for these shapes.
 
-This path is part of the CK backend and is opt-in at runtime:
+This path is opt-in at runtime on the CK fused-attention backend (it replaces the usual CK/AITER
+kernel for eligible problems; otherwise, TE transparently falls back to the regular CK/AITER fused-attention path):
 
 * NVTE_FUSED_ATTN_CK_SMALLSEQ - by default 0 (disabled); set to 1 to route eligible problems through the small-seq kernels.
 
