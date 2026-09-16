@@ -137,9 +137,15 @@ function _familyFromFile(file) {
 // one long-CSV row -> the record shape the rest of the app consumes
 function toRecord(o) {
   const num = v => (v === "" || v == null) ? null : +v;
-  const op = o.op, sep = op.lastIndexOf(" · ");   // op is "<base> · <backend>"
+  // Backend is a first-class column (new schema); legacy shards encode it as a
+  // "<base> · <backend>" op suffix, so fall back to parsing that. The composite op
+  // is kept for identity/display (current UI unchanged); base + backend are exposed
+  // as clean fields so a future de-duplicated/faceted layout is a UI-only change.
+  let base = o.op, backend = (o.backend || "").trim();
+  if (!backend) { const sep = o.op.lastIndexOf(" · "); if (sep >= 0) { base = o.op.slice(0, sep); backend = o.op.slice(sep + 3); } }
+  const op = backend ? `${base} · ${backend}` : base;
   return {
-    op, base: sep >= 0 ? op.slice(0, sep) : op, backend: sep >= 0 ? op.slice(sep + 3) : "",
+    op, base, backend,
     shape: o.shape, dtype: o.dtype, metric: o.metric,
     value: num(o.value), ts: o.ts, commit: o.commit, run_id: num(o.run_id),
     model: o.model, runner: o.runner, pr: num(o.pr), source: "ci",

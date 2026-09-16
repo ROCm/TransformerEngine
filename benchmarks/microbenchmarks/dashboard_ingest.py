@@ -56,7 +56,7 @@ METRIC_UNITS = ("TFLOPS", "GB/s")
 
 # Long-format shard columns (one row per measurement) and the shard catalog.
 SHARD_HEADER = ["ts", "commit", "run_id", "model", "runner",
-                "op", "shape", "dtype", "metric", "value", "time_ms", "pr"]
+                "op", "backend", "shape", "dtype", "metric", "value", "time_ms", "pr"]
 INDEX_HEADER = ["file", "family", "ref", "pr"]
 
 
@@ -260,11 +260,14 @@ def long_rows_from_csv(path, meta):
                 value = _num(row.get(mcol))
                 label = mcol[: -(len(unit) + 1)].rstrip()
                 ms = _num(row.get(f"{label} Time (ms)"))
-                op = (norm_type or base) + (f" {direction}" if direction else "") + (f" \u00b7 {backend}" if backend else "") + meta.get("op_suffix", "")
+                # backend is its own column now; op stays the bare base label so the
+                # viewer composes "<op> · <backend>" for display (unchanged UI) or, later,
+                # treats backend as a standalone facet.
+                op = (norm_type or base) + (f" {direction}" if direction else "") + meta.get("op_suffix", "")
                 yield "", {
                     "ts": ts, "commit": commit, "run_id": run_id,
                     "model": meta.get("model", ""), "runner": meta["runner"],
-                    "op": op, "shape": shape, "dtype": dtype,
+                    "op": op, "backend": backend, "shape": shape, "dtype": dtype,
                     "metric": unit, "value": round(value, 4),
                     "time_ms": "" if ms is None else round(ms, 4),
                     "pr": meta["pr"],
@@ -286,7 +289,7 @@ def emit_rows(args, meta):
         yield {
             "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
             "model": meta.get("model", ""), "runner": meta["runner"],
-            "op": args.op + meta.get("op_suffix", ""),
+            "op": args.op + meta.get("op_suffix", ""), "backend": "",
             "shape": args.shape, "dtype": args.dtype,
             "metric": name.strip(), "value": round(value, 4),
             "time_ms": "", "pr": meta["pr"],
