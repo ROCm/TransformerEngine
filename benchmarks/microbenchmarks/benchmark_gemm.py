@@ -14,14 +14,17 @@ device are skipped automatically.
 
 Examples::
 
-    pytest benchmark_gemm.py --csv                 # -> benchmark_gemm.csv
-    pytest benchmark_gemm.py -k "bf16 and QKV"     # select shapes/precisions
-    pytest benchmark_gemm.py -k triton             # select the triton backend
+    pytest benchmark_gemm.py --csv                   # -> benchmark_gemm.csv
+    pytest benchmark_gemm.py -k "bf16 and QKV"       # select shapes/precisions
+    pytest benchmark_gemm.py -k triton               # select the Triton backend
+    pytest benchmark_gemm.py -k flydsl --run-flydsl  # select the FlyDSL backend
 
 Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """
 
 import functools
+import os
+import warnings
 
 import pytest
 import torch
@@ -40,21 +43,24 @@ RECIPES = build_recipes()
 # Env recipes to force a dense-GEMM kernel backend (None unsets the var). Per the
 # C++ dispatch: bf16 defaults to hipBLASLt, forced to Triton via NVTE_USE_GEMM_TRITON;
 # mxfp8 defaults to HipKittens, forced to hipBLASLt via NVTE_ROCM_USE_HIPBLASLT_MXFP8
-# (rocm_gemm.cu). fp8 has a single backend.
+# (rocm_gemm.cu). fp8 has a single backend. FlyDSL (gfx950-only, BF16/FP8/MXFP8) is
+# the Python dispatch selected by NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
 _GEMM_TRITON = "NVTE_USE_GEMM_TRITON"
 _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
+_GEMM_BACKEND = "NVTE_GEMM_BACKEND"
 
 GEMM_BACKENDS = {
-    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1"},
-    "triton":     {_GEMM_TRITON: "1", _HIPBLASLT_MXFP8: None},
-    "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None},
+    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None},
+    "triton":     {_GEMM_TRITON: "1", _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
+    "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
+    "flydsl":     {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: "FLYDSL"},
 }
 
 # Backends with a real choice per precision (the supported-backends table).
 _BACKENDS_BY_PRECISION = {
-    "bf16": ["hipblaslt", "triton"],
-    "fp8": ["hipblaslt"],
-    "mxfp8": ["hipblaslt", "hipkittens"],
+    "bf16": ["hipblaslt", "triton", "flydsl"],
+    "fp8": ["hipblaslt", "flydsl"],
+    "mxfp8": ["hipblaslt", "hipkittens", "flydsl"],
 }
 
 
@@ -67,6 +73,38 @@ def _triton_gemm_supported():
     # The triton GEMM backend + its NVTE_USE_GEMM_TRITON dispatch landed together
     # in PR #667; older TE builds silently ignore the env and run hipBLASLt.
     return te_honors_env("NVTE_USE_GEMM_TRITON")
+
+
+@functools.lru_cache(maxsize=1)
+def _flydsl_gemm_supported():
+    if not te_honors_env(_GEMM_BACKEND):
+        return False
+    try:
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+        if get_device_compute_capability() != (9, 5):
+            return False
+        from transformer_engine.pytorch.flydsl_kernels.gemm import (  # noqa: F401
+            te_generic_gemm_flydsl,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _flydsl_fell_back(fn):
+    """Run *fn* once with FlyDSL fallback warnings on; True if FlyDSL fell back to C++."""
+    prev = os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK")
+    os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fn()
+        return any("FlyDSL GEMM does not support" in str(w.message) for w in caught)
+    finally:
+        if prev is None:
+            os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
+        else:
+            os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = prev
 
 
 def generate_cases():
@@ -117,6 +155,11 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
         xb.grad = None
         linear.weight.grad = None
 
+    if os.environ.get("NVTE_GEMM_BACKEND") == "FLYDSL" and _flydsl_fell_back(
+        fwd_bwd_func if Direction == "bwd" else fwd_func
+    ):
+        pytest.skip("FlyDSL GEMM fell back to C++ for this shape/direction")
+
     fwd_flops = 2 * M * N * K
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
@@ -127,7 +170,14 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
 def pytest_generate_tests(metafunc):
     if "case" in metafunc.fixturenames:
         cases = generate_cases()
-        metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
+        params = [
+            pytest.param(
+                c, id=_case_id(c),
+                marks=pytest.mark.flydsl if c["Backend"] == "flydsl" else (),
+            )
+            for c in cases
+        ]
+        metafunc.parametrize("case", params)
 
 
 @pytest.mark.benchmark
@@ -140,6 +190,10 @@ def test_gemm(microbench, case, monkeypatch):
         pytest.skip("Triton GEMM backend not available in this TE build")
     if case["Backend"] == "hipkittens" and not te_honors_env(_HIPBLASLT_MXFP8):
         pytest.skip("HipKittens GEMM backend not available in this TE build")
+    if case["Backend"] == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
+        pytest.skip("HipKittens GEMM needs 256-aligned N/K")
+    if case["Backend"] == "flydsl" and not _flydsl_gemm_supported():
+        pytest.skip("FlyDSL GEMM backend not available (needs gfx950 + flydsl package)")
     apply_backend_env(monkeypatch, GEMM_BACKENDS[case["Backend"]])
     microbench.run(
         case,

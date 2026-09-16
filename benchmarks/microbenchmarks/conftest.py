@@ -25,8 +25,7 @@ os.environ.setdefault("NVTE_ROCM_ENABLE_MXFP8", "1")
 # Snapshot GPU neighbors BEFORE importing torch: on ROCm the first CUDA call (which
 # `from utils import` can trigger via `import torch.utils.benchmark`) registers this
 # process on every visible GPU, which would otherwise look like a neighbor. Taken
-# here, the snapshot is free of our own PID. gpu_neighbors has no top-level torch
-# import, so importing it stays CUDA-free.
+# here, the snapshot is free of our own PID.
 import gpu_neighbors
 
 _GPU_SNAPSHOT = gpu_neighbors.snapshot_gpu_neighbors()
@@ -76,10 +75,15 @@ def pytest_addoption(parser):
         "--no-gpu-interference-check", action="store_true", default=False,
         help="Disable the shared-GPU interference check.",
     )
+    group.addoption(
+        "--run-flydsl", action="store_true", default=False,
+        help="Run FlyDSL-backed cases (marked @pytest.mark.flydsl); skipped by default due to long compile times.",
+    )
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "benchmark: TE GPU microbenchmark")
+    config.addinivalue_line("markers", "flydsl: FlyDSL-backed case; opt-in via --run-flydsl")
     configure_rotating(config.getoption("--rotating"), config.getoption("--no-rotating"))
     configure_kernel_profile(config.getoption("--kernel-profile"))
     config._microbench_store = {}
@@ -95,6 +99,17 @@ def pytest_configure(config):
         elif status == "unavailable":
             print("WARNING: GPU interference check skipped -- amdsmi package not available "
                   "(pip install amdsmi, or pass --no-gpu-interference-check to silence).")
+
+
+def pytest_collection_modifyitems(config, items):
+    # FlyDSL cases are opt-in: skip anything marked @pytest.mark.flydsl unless
+    # --run-flydsl is passed.
+    if config.getoption("--run-flydsl"):
+        return
+    skip_flydsl = pytest.mark.skip(reason="FlyDSL is opt-in; pass --run-flydsl")
+    for item in items:
+        if "flydsl" in item.keywords:
+            item.add_marker(skip_flydsl)
 
 
 def pytest_collect_file(parent, file_path):
