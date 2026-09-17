@@ -552,6 +552,9 @@ void fused_attn_ck_fwd_impl(
   ck_args.window_size_right = window_size_right;
   ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  ck_args.has_sink = has_sink;
+  ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
+
   //This condition should match actual if/else conditions for group_mode
   if ((is_SBHD && is_padding) || bshd_to_thd || is_ragged)
   {
@@ -559,7 +562,7 @@ void fused_attn_ck_fwd_impl(
     ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
   }
 
-  ck_args.num_splits = ck_attn_fwd_num_splits(ck_args);
+  ck_args.num_splits = has_sink ? -1 : ck_attn_fwd_num_splits(ck_args);
   if (ck_args.num_splits > 0)
   {
     size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
@@ -660,8 +663,6 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"sink_ptr: "<<(has_sink ? devPtrSoftmaxOffset : nullptr)<<std::endl;
   }
 
-  ck_args.has_sink = has_sink;
-  ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
