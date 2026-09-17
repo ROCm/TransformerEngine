@@ -403,13 +403,17 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
   NVTE_CHECK(!transa, "fused bulk AG is NN only");
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0,
              "fused bulk AG reached with an unsupported epilogue");
-  auto is_fp8_dt = [](DType dt) {
-    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
-  };
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
   const bool bulk_bf16 = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
                          D.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16;
-  const bool bulk_fp8 = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype()) &&
-                        D.dtype() == DType::kBFloat16;
+  // NN consumes A column-wise and B row-wise; both usages and both scale modes are settled here
+  // so the pointer reads below cannot outrun their own validation.
+  const bool bulk_fp8 = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype()) &&
+                        D.dtype() == DType::kBFloat16 &&
+                        A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                        B_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                        A_tensor->has_columnwise_data() && B_tensor->has_data();
   NVTE_CHECK(bulk_bf16 || bulk_fp8, "fused bulk AG reached with an unsupported operand type");
   NVTE_CHECK(ubuf.numel() != 0, "fused bulk AG reached without a gather destination");
 
@@ -423,8 +427,6 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
              "fused bulk AG: the GEMM writes ", D.size(0), " rows but the kernel grid is sized for ",
              n_chunk * tp_size, " from the Userbuffers region.");
 
-  auto A_tensor = convertNVTETensorCheck(A.data());
-  auto B_tensor = convertNVTETensorCheck(B.data());
   const void *scale_A = nullptr;
   const void *scale_B = nullptr;
   if (bulk_fp8) {
@@ -445,7 +447,6 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
       bulk_fp8 ? scale_base_offset : 0, bulk_fp8 ? scale_chunk_bytes : 0,
       workspace.dptr(), workspace.bytes(), stream, ubuf.dptr()};
   if (bulk_fp8) {
-    if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) return false;
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
     return kittens_bulk_ag_gemm_mxfp8(args);
