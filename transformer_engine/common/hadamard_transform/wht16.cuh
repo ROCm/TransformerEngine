@@ -14,12 +14,12 @@
 static constexpr int kHadamardDim     = 16;
 static constexpr int kThreadsPerWHT   = 4;
 static constexpr int kElemsPerThread  = 4;
-// gfx1250 is wave32; gfx942/gfx950 are wave64. __gfx1250__ is only defined in the device
+// gfx12 is wave32; gfx942/gfx950 are wave64. __GFX12__ is only defined in the device
 // compilation pass, so keep the block-level constants (kThreadsPerBlock, kRowsPerBlock) fixed and
 // wave-invariant: the host launch config is then identical across archs and only the intra-wave
 // organisation (used in device code) changes. The invariants kWarpSize*kWarpsPerBlock == 256 and
 // kRowsPerWarp*kWarpsPerBlock == 64 hold for both wave sizes.
-#if defined(__gfx1250__)
+#if defined(__GFX12__)
 static constexpr int kWarpSize        = 32;
 #else
 static constexpr int kWarpSize        = 64;

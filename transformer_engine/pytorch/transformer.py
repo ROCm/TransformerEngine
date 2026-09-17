@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,7 +9,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
@@ -341,10 +338,8 @@ class TransformerLayer(torch.nn.Module):
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
         ub_overlap_rs_dgrad: bool = False,
-        # True on every platform: ROCm narrows this per-call in fused_bulk_ag_eligible(), which
-        # declines unless the layer was registered on the "fused" method -- gfx950 only.
         ub_bulk_dgrad: bool = True,
-        ub_bulk_wgrad: bool = not IS_HIP_EXTENSION,
+        ub_bulk_wgrad: bool = True,
         bias: bool = True,
         activation: str = "gelu",
         activation_params: Optional[dict] = None,

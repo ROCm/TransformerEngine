@@ -558,11 +558,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   const bool has_dbias = built.has_dbias;
   const BiasShape bias_shape = built.bias_shape;
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   auto* log_file = get_ck_log_stream();
   // print kernel name on verbose mode

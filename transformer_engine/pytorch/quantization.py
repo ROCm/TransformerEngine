@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import abc
-import functools
 import dataclasses
 import warnings
 import os
@@ -32,7 +31,7 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type, DType
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, get_gemm_backend
 from .jit import jit_fuser
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -57,6 +56,7 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
+_MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -177,7 +177,7 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5), (12, 5)):
+        if gpu_arch in ((9, 5),): #TODO: enable for gfx1250 when GEMM is available
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
@@ -203,15 +203,25 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
-            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
-        return True, ""
+        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx94x or gfx95x is required for FP8 block scaling execution."
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
         False,
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
+
+
+def _compute_mxfp4_support() -> Tuple[bool, str]:
+    """Return if mxfp4 support is available"""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch in ((9, 5),):  # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx95x is required for MXFP4 execution."
+    return False, "Only ROCm supports MXFP4"
 
 
 @torch.compiler.assume_constant_result
@@ -250,15 +260,13 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     return _FP8_BLOCK_SCALING_SUPPORT
 
 
-@functools.lru_cache(maxsize=None)
+@torch.compiler.assume_constant_result
 def check_mxfp4_support() -> Tuple[bool, str]:
-    """Return if mxfp4 support is available"""
-    if IS_HIP_EXTENSION:
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):  # TODO: enable for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
-    return False, "Only ROCm gfx950 supports MXFP4"
+    """Return if MXFP4 support is available."""
+    global _MXFP4_SUPPORT
+    if _MXFP4_SUPPORT is None:
+        _MXFP4_SUPPORT = _compute_mxfp4_support()
+    return _MXFP4_SUPPORT
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -285,15 +293,15 @@ def check_recipe_support(recipe: Recipe) -> None:
     # PyTorch 2.11). The HYBRID recipe uses e4m3 for forward and e5m2 for backward,
     # producing mixed-type GEMMs during the backward pass. Only Format.E4M3 (which
     # uses e4m3 for both forward and backward) is compatible with the Triton backend.
-    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    use_gemm_triton = IS_HIP_EXTENSION and get_gemm_backend() == "triton"
     if use_gemm_triton and recipe is not None and hasattr(recipe, "fp8_format"):
         if recipe.fp8_format == Format.HYBRID:
             raise ValueError(
-                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                "The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not support "
                 "Format.HYBRID because the backward pass produces mixed FP8 type GEMMs "
                 "(e5m2 x e4m3), which trigger a Triton compiler bug "
                 "(triton-lang/triton#9567). Use Format.E4M3 instead, or disable the "
-                "Triton backend (unset NVTE_USE_GEMM_TRITON)."
+                "Triton backend (unset NVTE_GEMM_BACKEND)."
             )
 
 
