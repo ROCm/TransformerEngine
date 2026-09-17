@@ -33,11 +33,15 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     MXFP4_BLOCK,
     _col_operand,
     _col_operand_grouped_padded,
+    _prefix_offsets,
     _row_operand,
     grouped_gemm_mxfp4_dgrad,
     grouped_gemm_mxfp4_fprop,
     grouped_gemm_mxfp4_wgrad,
     grouped_linear_mxfp4,
+)
+from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4 import (
+    grouped_gemm_a8w4_triton_kernel,
 )
 
 pytestmark = [
@@ -94,6 +98,26 @@ def _dequant_mxfp4(data_u8, scale_u8, feat):
     vals = torch.where((codes & 0x8).bool(), -mag, mag)
     scale = torch.exp2(scale_u8.to(torch.float32) - 127.0)
     return vals * scale.repeat_interleave(MXFP4_BLOCK, dim=1)
+
+
+# MXFP8 (e4m3) activation side, for the a8w4 forward
+def _quant_mxfp8_e4m3(x):
+    """OCP MXFP8 row-wise: ``x`` [R, K] -> (e4m3 [R, K], e8m0 u8 [R, K/32])."""
+    fmax = torch.finfo(torch.float8_e4m3fn).max
+    rows, feat = x.shape
+    xb = x.reshape(rows, feat // MXFP4_BLOCK, MXFP4_BLOCK).float()
+    amax = xb.abs().amax(-1, keepdim=True).clamp_min(1e-30)
+    exp = torch.ceil(torch.log2(amax / fmax)).clamp(-127, 127)
+    q = (xb / torch.exp2(exp)).clamp(-fmax, fmax).to(torch.float8_e4m3fn)
+    return q.reshape(rows, feat).contiguous(), (exp.squeeze(-1) + 127).to(torch.uint8)
+
+
+def _dequant_mxfp8(data_e4m3, scale_u8):
+    """Independent MXFP8 dequant: e4m3 [R, K] + e8m0 [R, K/32] -> fp32 [R, K]."""
+    rows, feat = data_e4m3.shape
+    vals = data_e4m3.float().reshape(rows, feat // MXFP4_BLOCK, MXFP4_BLOCK)
+    scale = torch.exp2(scale_u8.to(torch.float32) - 127.0)
+    return (vals * scale.unsqueeze(-1)).reshape(rows, feat)
 
 
 def test_fprop_precise():
@@ -219,3 +243,68 @@ def test_autograd_matches_ops():
     ref_dw = grouped_gemm_mxfp4_wgrad(a.detach(), grad_out, M_SPLITS, out_dtype=weight.dtype)
     torch.testing.assert_close(a.grad, ref_da)
     torch.testing.assert_close(weight.grad, ref_dw)
+
+
+# a8w4 forward: MXFP8 (e4m3) activation x MXFP4 (e2m1) weight, grouped along M.
+def _run_a8w4(a, weights, m_splits):
+    """Quantize (a->e4m3, weights->e2m1) and run the a8w4 grouped forward kernel."""
+    feat_k = a.shape[1]
+    n = weights[0].shape[0]
+    a_q, a_s = _quant_mxfp8_e4m3(a)
+    b_ops = [_row_operand(w) for w in weights]  # each -> (e2m1 [N,K/2], e8m0 [N,K/32])
+    b_data = torch.stack([d for d, _s in b_ops], dim=0)
+    b_scale = torch.stack([s for _d, s in b_ops], dim=0)
+    offs = _prefix_offsets(m_splits, a.device)
+    out = grouped_gemm_a8w4_triton_kernel(a_q, a_s, b_data, b_scale, offs, n, feat_k, out_dtype=DTYPE)
+    return out, a_q, a_s
+
+
+def _a8w4_reference(a_q, a_s, weights, m_splits):
+    """Per-group fp32 ref on the same operands: dequant(e4m3 A) @ dequant(e2m1 W)^T."""
+    a_deq = _dequant_mxfp8(a_q, a_s)
+    n, feat_k = weights[0].shape
+    ref = torch.empty((a_q.shape[0], n), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, m_splits):
+        w_deq = _dequant_mxfp4(*_row_operand(w), feat_k)  # [N, K]
+        ref[start : start + m] = a_deq[start : start + m] @ w_deq.t()
+        start += m
+    return ref
+
+
+def test_a8w4_fprop_precise():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in M_SPLITS]
+
+    out, a_q, a_s = _run_a8w4(a, weights, M_SPLITS)
+    ref = _a8w4_reference(a_q, a_s, weights, M_SPLITS)
+
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_a8w4_fprop_single_group():
+    # G=1 dense case (Gluon-style): the group scan degenerates to one expert.
+    splits = [512]
+    a = _rand(512, K)
+    weights = [_rand(N, K)]
+
+    out, a_q, a_s = _run_a8w4(a, weights, splits)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_a8w4_fprop_unaligned_total_m():
+    # total_M not a multiple of 32 must still quantize + run (leading dim padded).
+    splits = [100, 130]  # sum = 230
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out, a_q, a_s = _run_a8w4(a, weights, splits)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL

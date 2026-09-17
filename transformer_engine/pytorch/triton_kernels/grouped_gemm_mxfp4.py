@@ -226,7 +226,7 @@ def _prune_vark_by_pad(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=_make_configs(_FWD_CONFIGS),
-    key=["N", "K", "G"],
+    key=["N", "K", "G", "A_PACK", "B_PACK"],
     prune_configs_by={"early_config_prune": _prune_fwd_by_k},
 )
 @triton.jit
@@ -262,6 +262,10 @@ def _grouped_mxfp4_persistent_gemm_kernel(
     CHUNK_SIZE: tl.constexpr,
     CACHE_MODIFIER: tl.constexpr,
     VEC: tl.constexpr,
+    A_PACK: tl.constexpr = 2,  # elems/byte along K: 2 => fp4 (K/2 bytes/iter), 1 => fp8 (K bytes)
+    B_PACK: tl.constexpr = 2,
+    A_FMT: tl.constexpr = "e2m1",  # per-operand tl.dot_scaled format ("e2m1"/"e4m3"/"e5m2")
+    B_FMT: tl.constexpr = "e2m1",
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -276,7 +280,8 @@ def _grouped_mxfp4_persistent_gemm_kernel(
     tl.assume(stride_am > 0)
     tl.assume(stride_cm > 0)
 
-    BK_PACK: tl.constexpr = BLOCK_SIZE_K // 2  # packed bytes per K-iter
+    BK_A: tl.constexpr = BLOCK_SIZE_K // A_PACK  # A bytes per K-iter (fp4=K/2, fp8=K)
+    BK_B: tl.constexpr = BLOCK_SIZE_K // B_PACK  # B bytes per K-iter
     BK_SCALE: tl.constexpr = BLOCK_SIZE_K // VEC  # scale entries per K-iter
 
     for global_tile_id in range(pid, total_tiles, NUM_SMS):
@@ -311,12 +316,13 @@ def _grouped_mxfp4_persistent_gemm_kernel(
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M_g
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rk = tl.arange(0, BK_PACK)  # packed K bytes
+        rk_a = tl.arange(0, BK_A)  # A bytes along K
+        rk_b = tl.arange(0, BK_B)  # B bytes along K
         rks = tl.arange(0, BK_SCALE)  # scale entries
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        A_BASE = A + (m_rd + rm[:, None]) * stride_am + rk[None, :] * stride_ak
-        B_BASE = B + group_idx.to(tl.int64) * stride_bg + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        A_BASE = A + (m_rd + rm[:, None]) * stride_am + rk_a[None, :] * stride_ak
+        B_BASE = B + group_idx.to(tl.int64) * stride_bg + rk_b[:, None] * stride_bk + rn[None, :] * stride_bn
         AS_BASE = A_scale + rks[:, None] * stride_ask + (m_rd + rm[None, :]) * stride_asm
         BS_BASE = (
             B_scale
@@ -328,13 +334,13 @@ def _grouped_mxfp4_persistent_gemm_kernel(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         loop_k = K // BLOCK_SIZE_K
         for ki in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER)  # (BM, BK/2)
-            b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER)  # (BK/2, BN)
+            a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER)  # (BM, BK_A)
+            b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER)  # (BK_B, BN)
             a_s = tl.trans(tl.load(AS_BASE))  # (BK/32, BM) -> (BM, BK/32)
             b_s = tl.trans(tl.load(BS_BASE))  # (BK/32, BN) -> (BN, BK/32)
-            acc = tl.dot_scaled(a, a_s, "e2m1", b, b_s, "e2m1", acc)
-            A_BASE += BK_PACK * stride_ak
-            B_BASE += BK_PACK * stride_bk
+            acc = tl.dot_scaled(a, a_s, A_FMT, b, b_s, B_FMT, acc)
+            A_BASE += BK_A * stride_ak
+            B_BASE += BK_B * stride_bk
             AS_BASE += BK_SCALE * stride_ask
             BS_BASE += BK_SCALE * stride_bsk
 
@@ -418,6 +424,87 @@ def grouped_gemm_mxfp4_triton_kernel(
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
+        A_PACK=2,  # fp4 A; passed explicitly so A_PACK/B_PACK bind into the autotune key
+        B_PACK=2,
+    )
+    return c
+
+
+@_scoped_amd_knobs
+def grouped_gemm_a8w4_triton_kernel(
+    a,  # activation MXFP8 e4m3, (total_M, K) float8_e4m3fn
+    a_scale,  # (total_M, K/32) uint8 e8m0
+    b,  # weight MXFP4 e2m1, (G, N, K/2) uint8-packed
+    b_scale,  # (G, N, K/32) uint8 e8m0
+    group_offs,
+    N,
+    K,
+    group_offs_out=None,
+    out_dtype=torch.bfloat16,
+    num_cu=None,
+):
+    """a8w4 forward: C = A(e4m3) @ B(e2m1)^T, grouped along M (routed experts).
+
+    Same persistent NT kernel as the FP4xFP4 path, but the A operand is MXFP8
+    (1 byte/elem, K bytes/row) instead of packed MXFP4. Both operands carry E8M0
+    (VEC_SIZE=32) scales along K; K is the logical contraction (multiple of 128).
+
+    group_offs:     read offsets along M for A / A_scale.
+    group_offs_out: write offsets along M for C (defaults to group_offs).
+    """
+    if group_offs_out is None:
+        group_offs_out = group_offs
+    G = b.shape[0]
+    c = torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
+    a_s = a_scale.view(torch.uint8)
+    b_s = b_scale.view(torch.uint8)
+    a_e4m3 = a.view(torch.float8_e4m3fn)  # e4m3 operand, unpacked (K bytes/row)
+    b_u8 = b.view(torch.uint8)  # e2m1 packed (K/2 bytes/row)
+    cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(a.device).multi_processor_count
+    BM, BN = 256, 256
+    m_alloc = a.shape[0]
+    avg_m = max(m_alloc // max(G, 1), 1)
+    tiles_n = (N + BN - 1) // BN
+    GM = 8 if min((avg_m + BM - 1) // BM, tiles_n) < 16 else 4
+    total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
+    num_sms = min(total_tiles, cu)
+    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+
+    _grouped_mxfp4_persistent_gemm_kernel[(num_sms,)](
+        a_e4m3,
+        b_u8,
+        c,
+        a_s,
+        b_s,
+        group_offs,
+        group_offs_out,
+        G,
+        N,
+        K,
+        a_e4m3.stride(0),
+        a_e4m3.stride(1),  # stride_ak: 1 e4m3 byte per K element
+        b_u8.stride(0),
+        b_u8.stride(1),
+        b_u8.stride(2),  # stride_bk: packed K/2 bytes
+        c.stride(0),
+        c.stride(1),
+        a_s.stride(0),
+        a_s.stride(1),
+        b_s.stride(0),
+        b_s.stride(1),
+        b_s.stride(2),
+        BLOCK_SIZE_M=BM,
+        BLOCK_SIZE_N=BN,
+        GROUP_SIZE_M=GM,
+        NUM_SMS=num_sms,
+        NUM_XCDS=NUM_XCDS,
+        CHUNK_SIZE=chunk,
+        CACHE_MODIFIER=".ca",
+        VEC=VEC_SIZE,
+        A_PACK=1,  # e4m3: 1 elem/byte -> K bytes per K-iter
+        A_FMT="e4m3",
+        B_PACK=2,  # e2m1: 2 elems/byte -> K/2 bytes
+        B_FMT="e2m1",
     )
     return c
 
