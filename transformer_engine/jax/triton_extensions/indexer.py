@@ -88,13 +88,12 @@ def _autotune_disabled():
 
 # Below this T_t the compacted tile list loses on a *pure causal* mask: it
 # removes only about half the tiles, and at small T the kernel is latency-bound
-# rather than compute-bound, so the tiles it drops were not costing full price
-# while the MASK_FILL prefill it requires is a real extra pass over the output.
-# The value is an empirical crossover; re-measure with NVTE_INDEXER_COMPACT if
-# the shapes, the dtype or the prefill change. Segment masks are block-diagonal
-# and clear the bar at any size, so this gate applies only when the mask carries
-# a single segment. Revisit if the fill stops being a separate pass -- see the
-# note in _score_reduce_kernel.
+# rather than compute-bound, so the tiles it drops were not costing full price,
+# while the tile-list load and the loss of the 2-D grid's dispatch order are
+# paid either way. The value is an empirical crossover; re-measure with
+# NVTE_INDEXER_COMPACT if the shapes or the dtype change. Segment masks are
+# block-diagonal and clear the bar at any size, so this gate applies only when
+# the mask carries a single segment.
 _COMPACT_MIN_T = 4096
 
 
@@ -146,20 +145,54 @@ def _compact_configs(configs):
     ]
 
 
-def _tile_summaries(seg, key, tile):
-    """Per-tile (seg_min, seg_max, key_min, key_max) — O(T), not O(T*S)."""
+def _cross_present(seg_self, seg_other):
+    """(B, T_self) bool — which of ``seg_self``'s ids occur on the other side.
+
+    A token whose segment id occurs nowhere on the opposite side can never be
+    half of a valid pair, so leaving it out of a tile's summary cannot lose a
+    tile. Padding is the case that matters: ``_mask_keys`` maps it to distinct
+    sentinels per side, and a sentinel sits far outside the range of real ids,
+    so one padded token drags a tile's ``[seg_min, seg_max]`` wide enough to
+    overlap everything and the segment test stops discriminating at all.
+
+    Computed rather than assumed, so no convention about sentinel values is
+    required -- a caller packing segments some other way is equally safe, and a
+    segment present on one side only is also caught.
+    """
+    B, T_other = seg_other.shape
+    # Ids are expected in [-2, T_other]; anything outside collapses into a
+    # boundary bin. That can only make *more* tokens look present, which is the
+    # conservative direction, and a self id and its matching other id always
+    # land in the same bin.
+    size = T_other + 3
+    idx = lambda s: jnp.clip(s + 2, 0, size - 1)
+    rows = jnp.broadcast_to(jnp.arange(B)[:, None], seg_other.shape)
+    present = jnp.zeros((B, size), bool).at[rows, idx(seg_other)].set(True)
+    return jnp.take_along_axis(present, idx(seg_self), axis=1)
+
+
+def _tile_summaries(seg, key, tile, keep):
+    """Per-tile (seg_min, seg_max, key_min, key_max, any) — O(T), not O(T*S).
+
+    Reduces over kept tokens only; ``any`` is False for a tile with none, which
+    cannot hold a valid pair.
+    """
     B, T = seg.shape
     n = -(-T // tile)
     pad = n * tile - T
     if pad:
-        # Edge padding repeats a real token, so it can only *widen* a tile's
-        # ranges toward values already present -- never narrow them, which is
-        # the direction that would cost us a valid tile.
-        seg = jnp.pad(seg, ((0, 0), (0, pad)), mode="edge")
-        key = jnp.pad(key, ((0, 0), (0, pad)), mode="edge")
+        # Trailing lanes past T have no token at all, so they are simply not
+        # kept -- the kernel likewise loads them as non-matching sentinels.
+        seg = jnp.pad(seg, ((0, 0), (0, pad)))
+        key = jnp.pad(key, ((0, 0), (0, pad)))
+        keep = jnp.pad(keep, ((0, 0), (0, pad)))
     seg = seg.reshape(B, n, tile)
     key = key.reshape(B, n, tile)
-    return seg.min(-1), seg.max(-1), key.min(-1), key.max(-1)
+    keep = keep.reshape(B, n, tile)
+    big = jnp.int32(jnp.iinfo(jnp.int32).max)
+    lo = lambda x: jnp.where(keep, x, big).min(-1)
+    hi = lambda x: jnp.where(keep, x, -big).max(-1)
+    return lo(seg), hi(seg), lo(key), hi(key), keep.any(-1)
 
 
 def _tile_validity_map(SegQ, KeyQ, SegK, KeyK):
@@ -168,43 +201,67 @@ def _tile_validity_map(SegQ, KeyQ, SegK, KeyK):
     Reduces each tile to a segment range and a key bound, then tests those
     instead of the full BLOCK_T x BLOCK_S predicate.
 
-    **Conservative in the safe direction.** If a real pair (t, s) is valid then
-    ``seg_q[t] == seg_k[s]`` lies in both segment ranges and
-    ``key_q_max >= key_q[t] >= key_k[s] >= key_k_min``, so the tile is kept:
-    false negatives are impossible. False positives are possible and harmless --
-    the kernel's own predicate still fills such a tile correctly.
+    **Conservative in the safe direction.** A valid pair (t, s) has
+    ``seg_q[t] == seg_k[s]``, so each endpoint's id occurs on the other side and
+    neither is dropped by ``_cross_present``; that shared id then lies in both
+    segment ranges, and ``key_q_max >= key_q[t] >= key_k[s] >= key_k_min``. So
+    the tile is kept and false negatives are impossible. False positives are
+    possible and harmless -- the kernel's own predicate still fills such a tile
+    correctly.
 
-    Under a plain causal mask (one segment, key = position) this reduces to
-    ``(i+1)*TILE_T - 1 >= j*TILE_S``, i.e. exactly the triangular enumeration.
+    Tight in practice as well as safe: under a plain causal mask (one segment,
+    key = position) this reduces to ``(i+1)*TILE_T - 1 >= j*TILE_S``, i.e.
+    exactly the triangular enumeration, and under ``padding`` it is exact on
+    packed layouts. ``padding_causal`` still over-keeps on ragged segments,
+    because the key bound is taken over the whole tile rather than per
+    overlapping segment.
+
     The metadata carries no outer-head axis, so the map is shared across oH.
     """
-    q_smin, q_smax, _, q_kmax = _tile_summaries(SegQ, KeyQ, _COMPACT_TILE_T)
-    k_smin, k_smax, k_kmin, _ = _tile_summaries(SegK, KeyK, _COMPACT_TILE_S)
+    keep_q = _cross_present(SegQ, SegK)
+    keep_k = _cross_present(SegK, SegQ)
+    q_smin, q_smax, _, q_kmax, q_any = _tile_summaries(
+        SegQ, KeyQ, _COMPACT_TILE_T, keep_q)
+    k_smin, k_smax, k_kmin, _, k_any = _tile_summaries(
+        SegK, KeyK, _COMPACT_TILE_S, keep_k)
     return (
         (q_smin[:, :, None] <= k_smax[:, None, :])
         & (k_smin[:, None, :] <= q_smax[:, :, None])
         & (q_kmax[:, :, None] >= k_kmin[:, None, :])
+        & q_any[:, :, None]
+        & k_any[:, None, :]
     )
 
 
-def _compact_tiles(valid):
-    """(B, NT*NS) int32 flat tile ids of the survivors, ``-1``-padded.
+def _tile_launch_order(valid):
+    """(B, NT*NS) int32 — every tile id exactly once, live ones first.
 
-    A sentinel tail rather than a separate count operand, matching the house
-    style in ``common/triton/permutation.py`` (allocate worst case, make the
-    unused slots harmless) -- it costs the kernel one load instead of two.
+    A permutation, not a filtered list: a live tile carries its own id, a
+    ruled-out tile carries ``-(id + 1)``. One load therefore tells a CTA both
+    which tile it owns and, by the sign, whether the map found any work in it.
+
+    Carrying the dead tiles instead of dropping them is what removes the
+    separate MASK_FILL prefill. The grid was already sized to the worst case, so
+    those CTAs existed anyway -- they used to load a sentinel and retire, and
+    now they write the fill for their own tile instead. Every output slot ends
+    up written exactly once, by exactly one CTA, where before the whole output
+    was written by the prefill and then written again on every dispatched tile.
+
+    Live-first ordering matters: a compute tile costs orders of magnitude more
+    than a fill tile, so dispatching the long jobs first is what keeps the tail
+    short.
     """
     B, NT, NS = valid.shape
     n = NT * NS
     flat = valid.reshape(B, n)
-    # Destination of each surviving tile in the compacted list; non-survivors
-    # are aimed at a dump slot that is sliced off below.
-    dest = jnp.cumsum(flat.astype(jnp.int32), axis=-1) - 1
-    dest = jnp.where(flat, dest, n)
+    rank_live = jnp.cumsum(flat.astype(jnp.int32), axis=-1) - 1
+    rank_dead = jnp.cumsum((~flat).astype(jnp.int32), axis=-1) - 1
+    n_live = jnp.sum(flat.astype(jnp.int32), axis=-1, keepdims=True)
+    dest = jnp.where(flat, rank_live, n_live + rank_dead)
     ids = jnp.broadcast_to(jnp.arange(n, dtype=jnp.int32), (B, n))
+    payload = jnp.where(flat, ids, -(ids + 1))
     rows = jnp.broadcast_to(jnp.arange(B)[:, None], (B, n))
-    out = jnp.full((B, n + 1), -1, jnp.int32).at[rows, dest].set(ids)
-    return out[:, :n]
+    return jnp.zeros((B, n), jnp.int32).at[rows, dest].set(payload)
 
 
 # --- FP8 operand quantization ------------------------------------------------
@@ -317,8 +374,6 @@ def _score_reduce_kernel(
     KeyK_ptr,     # (B, T_s) int32 — key order key      (unread when HAS_MASK=0)
     TileList_ptr, # (B, TILE_NT*TILE_NS) int32 — surviving tiles, -1 padded
                   # (unread unless COMPACT=1; a (1, 1) dummy otherwise)
-    OInit_ptr,    # (B, oH, T_t, T_s) MASK_FILL-prefilled, aliased to O_ptr when
-                  # COMPACT; a (1, 1) dummy otherwise. Never read.
     O_ptr,        # (B, oH, T_t, T_s)
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -386,9 +441,10 @@ def _score_reduce_kernel(
     The list is built row-major over (t-tile, s-tile), so consecutive live
     entries still vary fastest in S and keep the L2 reuse the 2-D order gives.
 
-    Because the skipped region is never visited, ``O`` must already hold
-    ``MASK_FILL`` there; the caller supplies that via ``OInit_ptr``, aliased to
-    ``O_ptr``. Set ``NVTE_INDEXER_COMPACT=0`` to A/B it.
+    The list is a permutation rather than a filter: ruled-out tiles ride at the
+    back with a negated id and write only ``MASK_FILL``. Each output slot is
+    therefore written exactly once, by exactly one CTA, and no separate prefill
+    pass over ``O`` is needed. Set ``NVTE_INDEXER_COMPACT=0`` to A/B it.
     """
     pid_bh = tl.program_id(2)
 
@@ -399,11 +455,15 @@ def _score_reduce_kernel(
     h_outer = (pid_bh % oH).to(tl.int64)
 
     if COMPACT:
-        # The grid is sized to a static worst case, so most CTAs find the -1
-        # padding and retire here without touching mask metadata or the output.
-        tile = tl.load(TileList_ptr + b * (TILE_NT * TILE_NS) + tl.program_id(0))
-        if tile < 0:
-            return
+        # One load carries both the tile id and, in its sign, whether the host
+        # map found any work in it. A negative payload is a ruled-out tile,
+        # dispatched only so that it writes MASK_FILL over its own slots -- that
+        # is what lets the op drop the separate prefill pass. No decode branch
+        # is needed for it: a ruled-out tile provably holds no valid pair, so
+        # its own predicate comes out all-false below and the masked-tile path
+        # already stores exactly the fill.
+        v = tl.load(TileList_ptr + b * (TILE_NT * TILE_NS) + tl.program_id(0))
+        tile = tl.where(v < 0, -v - 1, v)
         pid_t = tile // TILE_NS
         pid_s = tile % TILE_NS
     else:
@@ -482,10 +542,9 @@ _score_reduce_p.multiple_results = True
 
 @_score_reduce_p.def_abstract_eval
 def _score_reduce_abstract(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
-                           OInit, *, out_dtype, has_mask, compact):
+                           *, out_dtype, has_mask, compact):
     del W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, has_mask, compact
     del TileList  # read by the kernel, contributes no shape
-    del OInit  # carried for input_output_aliases only
     # Hq layout: (B, oH, T_t, H, d_i)
     B, oH, T_t, _H, _d_i = Hq.shape
     T_s = Hk.shape[2]
@@ -496,7 +555,7 @@ _score_reduce_p.def_impl(functools.partial(xla.apply_primitive, _score_reduce_p)
 
 
 def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
-                           OInit, *, out_dtype, has_mask, compact):
+                           *, out_dtype, has_mask, compact):
     del out_dtype
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
@@ -516,26 +575,14 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, Til
         bt = merged_kwargs["BLOCK_T"]
         bs = merged_kwargs["BLOCK_S"]
         if compact:
-            # Static worst case; the surplus CTAs retire on the -1 sentinel.
-            #
-            # Do NOT try to tighten this to a count derived from the mask type
-            # -- in particular, not to the causal tile count for the causal
-            # family. _tile_validity_map is conservative, and a false positive
-            # can land *above* the diagonal: a t-tile early in one segment
-            # versus an s-tile straddling two segments passes both the
-            # segment-overlap and the key test while holding no valid pair. Any
-            # such bound truncates the list and silently drops real tiles, which
-            # read back as MASK_FILL. A surplus CTA loads one int32 and retires,
-            # which measures as negligible; this is not worth shaving.
+            # Exactly one CTA per tile -- the launch list is a permutation, and
+            # every tile either computes or writes its own fill. This is not a
+            # worst-case bound that could be tightened: shrink it and the tiles
+            # that fall off the end are never written at all.
             return (triton.cdiv(T_t, bt) * triton.cdiv(T_s, bs), 1, B * oH)
         # S as grid_x (fastest-dispatching) so per-(B*oH, T-tile) S workgroups
         # cluster in time and hit L2 on the shared Hq slab.
         return (triton.cdiv(T_s, bs), triton.cdiv(T_t, bt), B * oH)
-
-    # Whenever fully-masked tiles go undispatched the masked region is never
-    # visited, so the prefilled buffer *is* the output. Otherwise OInit is an
-    # unused (1, 1) dummy.
-    aliases = {10: 0} if compact else None
 
     saved_configs = _score_reduce_kernel.configs
     configs = saved_configs
@@ -556,9 +603,8 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, Til
         return triton_call_lowering(
             ctx,
             _score_reduce_kernel,
-            Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList, OInit,
+            Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
             grid=grid_fn,
-            input_output_aliases=aliases,
             constexprs={
                 "B": B,
                 "oH": oH,
@@ -822,21 +868,15 @@ mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, pl
 
 def _score_reduce_bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK, TileList,
                        out_dtype, has_mask, compact):
-    """Bind the forward primitive, supplying the aliased output buffer.
+    """Bind the forward primitive.
 
-    Under ``compact`` the kernel never visits the fully-masked tiles, so the
-    buffer must arrive already holding MASK_FILL and is aliased to the output.
-    The rectangular path writes every slot itself and gets a (1, 1) dummy,
-    matching how the mask operands are handled when ``has_mask`` is False.
+    Both launch paths write every output slot themselves -- the rectangular grid
+    because it dispatches every tile, the compacted one because its launch list
+    is a permutation whose tail fills the ruled-out tiles -- so the output needs
+    no prefill and the primitive takes no aliased init buffer.
     """
-    if compact:
-        B, oH, T_t = Hq.shape[0], Hq.shape[1], Hq.shape[2]
-        T_s = Hk.shape[2]
-        OInit = jnp.full((B, oH, T_t, T_s), jnp.finfo(out_dtype).min, out_dtype)
-    else:
-        OInit = jnp.zeros((1, 1), out_dtype)
     return _score_reduce_p.bind(Hq, Hk, W_o, Sq, Ks, SegQ, KeyQ, SegK, KeyK,
-                                TileList, OInit,
+                                TileList,
                                 out_dtype=out_dtype, has_mask=has_mask,
                                 compact=compact)[0]
 
@@ -1090,7 +1130,7 @@ def score_reduce_triton(Hq, Hk, W_o, *, Sq=None, Ks=None, mask=None, out_dtype=N
             mask_has_segments or (bool(mask_is_causal) and T_t >= _COMPACT_MIN_T)
         )
     if compact:
-        TileList = _compact_tiles(_tile_validity_map(SegQ, KeyQ, SegK, KeyK))
+        TileList = _tile_launch_order(_tile_validity_map(SegQ, KeyQ, SegK, KeyK))
     else:
         # Same dummy idiom as the unused mask operands: COMPACT gates every
         # dereference, so a full-size array would cost HBM for nothing.

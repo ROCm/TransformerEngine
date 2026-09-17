@@ -22,7 +22,7 @@ from transformer_engine.jax.triton_extensions.indexer import (
     _COMPACT_TILE_S,
     _COMPACT_TILE_T,
     _compact_override,
-    _compact_tiles,
+    _tile_launch_order,
     _tile_validity_map,
     fp8_dtype,
     quantize_e4m3,
@@ -565,11 +565,17 @@ def test_tile_map_never_drops_a_live_tile(mask_type):
     want = _tile_map_bruteforce(*[np.asarray(x) for x in mask])
     assert not (want & ~got).any(), f"{int((want & ~got).sum())} live tiles dropped"
 
-    # Compaction must list exactly the kept tiles, once each, then -1 pad.
-    lst = np.asarray(_compact_tiles(jnp.asarray(got)))
+    # The launch order must be a *permutation*: every tile exactly once, live
+    # ones (non-negative payload) first, ruled-out ones encoded as -(id + 1).
+    # Anything less and some output slot is written by no CTA at all.
+    lst = np.asarray(_tile_launch_order(jnp.asarray(got)))
+    n = got.shape[1] * got.shape[2]
     for b in range(B):
         kept = sorted(np.flatnonzero(got[b].reshape(-1)).tolist())
-        assert sorted(lst[b][lst[b] >= 0].tolist()) == kept
+        live, dead = lst[b][lst[b] >= 0], lst[b][lst[b] < 0]
+        assert sorted(live.tolist()) == kept
+        assert sorted((-dead - 1).tolist()) == sorted(set(range(n)) - set(kept))
+        assert np.array_equal(lst[b][:len(kept)], live), "live tiles must come first"
 
 
 def test_tile_map_is_exact_under_causal():
