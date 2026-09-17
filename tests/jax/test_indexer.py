@@ -21,12 +21,9 @@ from transformer_engine.jax.sparse_attention.indexer import (
 from transformer_engine.jax.triton_extensions.indexer import (
     _COMPACT_TILE_S,
     _COMPACT_TILE_T,
-    _compact_enabled,
+    _compact_override,
     _compact_tiles,
-    _score_reduce_autotune_configs,
     _tile_validity_map,
-    _tri_grid_override,
-    _tri_grid_params,
     fp8_dtype,
     quantize_e4m3,
     score_reduce_triton,
@@ -514,15 +511,15 @@ def test_permissive_mask_is_bit_identical_to_no_mask():
     )
 
 
-# --- Causal triangular grid ---------------------------------------------------
+# --- Compacted tile list ------------------------------------------------------
 #
-# The causal family launches a 1-D grid over only the tiles meeting the causal
-# region, instead of the full rectangle with the fully-masked half skipped
-# in-kernel. It is a launch-shape change and nothing else, so the bar is
-# bit-identity with the rectangular path -- not a tolerance.
+# Instead of launching the full rectangle and skipping fully-masked tiles
+# in-kernel, the masked path precomputes which tiles survive, compacts them into
+# a list, and launches over that. It is a launch-shape change and nothing else,
+# so the bar is bit-identity with the rectangular path -- not a tolerance.
 
 
-def _tri_tiles_bruteforce(T_t, T_s, BLOCK_T, BLOCK_S):
+def _causal_tiles_bruteforce(T_t, T_s, BLOCK_T, BLOCK_S):
     """Tiles containing at least one causal pair, counted directly."""
     n_t = -(-T_t // BLOCK_T)
     n_s = -(-T_s // BLOCK_S)
@@ -532,27 +529,6 @@ def _tri_tiles_bruteforce(T_t, T_s, BLOCK_T, BLOCK_S):
         for j in range(n_s)
         if j * BLOCK_S <= min(i * BLOCK_T + BLOCK_T - 1, T_t - 1)
     )
-
-
-def test_tri_grid_params_count_every_causal_tile():
-    """The launch size matches a brute-force count, for every autotune config.
-
-    Host-only. The kernel derives its tile-id inverse from these same numbers,
-    so an off-by-one here would silently drop or double-cover output tiles --
-    which is exactly what a wrong grid size looks like from the outside.
-    """
-    blocks = sorted(
-        {(c.kwargs["BLOCK_T"], c.kwargs["BLOCK_S"])
-         for c in _score_reduce_autotune_configs()}
-    )
-    # Includes sizes that do not divide the block shapes, and (via BLOCK_S=512)
-    # sizes where every tile falls in the saturated tail.
-    for T in (32, 96, 128, 500, 512, 1024, 4096):
-        for bt, bs in blocks:
-            assert (
-                _tri_grid_params(T, T, bt, bs)["n_tiles"]
-                == _tri_tiles_bruteforce(T, T, bt, bs)
-            ), f"T={T} BLOCK_T={bt} BLOCK_S={bs}"
 
 
 def _tile_map_bruteforce(seg_q, key_q, seg_k, key_k):
@@ -596,50 +572,46 @@ def test_tile_map_never_drops_a_live_tile(mask_type):
         assert sorted(lst[b][lst[b] >= 0].tolist()) == kept
 
 
-def test_tile_map_matches_triangular_under_causal():
-    """With one segment the map must reproduce the triangular enumeration.
+def test_tile_map_is_exact_under_causal():
+    """With one segment the map must keep exactly the tiles a causal mask needs.
 
-    The two mechanisms are meant to be the same statement about which tiles can
-    hold work; if they disagree, one of them is wrong.
+    The conservative range test admits false positives in general, but under a
+    plain causal mask it should reduce to the triangular enumeration with none
+    at all -- so this pins the tight case, not just the safe one. The sizes
+    below include one that divides neither block size.
     """
     B = 1
-    for T in (512, 1024, 4096):
+    for T in (512, 1000, 1024, 4096):
         mask = _mask_keys(B, T, T, "causal")
         n = int(np.asarray(_tile_validity_map(*mask))[0].sum())
-        assert n == _tri_grid_params(T, T, _COMPACT_TILE_T, _COMPACT_TILE_S)["n_tiles"], T
+        assert n == _causal_tiles_bruteforce(T, T, _COMPACT_TILE_T, _COMPACT_TILE_S), T
 
 
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("mask_type", _MASK_TYPES)
 def test_launch_paths_are_bit_identical(monkeypatch, mask_type, fp8):
-    """rectangular / TRI_GRID / COMPACT are launch shapes, nothing more.
+    """rectangular vs COMPACT is a launch shape, nothing more.
 
-    All three must agree bit for bit -- this is not a tolerance question. T is
-    chosen so the triangular *head* actually runs: below roughly
-    BLOCK_S/BLOCK_T t-tiles every tile lands in the rectangular tail and the
-    tile-id inverse is never exercised. The segment lengths are unequal and do
-    not tile evenly, so cross-segment tiles appear inside the triangle.
+    The two must agree bit for bit -- this is not a tolerance question. T is far
+    below _COMPACT_MIN_T, so the env knob is what forces compaction on for the
+    single-segment causal case. The segment lengths are unequal and do not tile
+    evenly, so partially-live and cross-segment tiles both appear.
     """
     B, oH, T = 2, 2, 512
     args = _indexer_inputs(B, oH, T, T, d=32, d_c=32, H=8, d_i=32, seed=507)
     _, _, _, kwargs = _masked_case(mask_type, B, T, lengths=(300, 150))
 
-    def run(tri, compact):
-        monkeypatch.setenv("NVTE_INDEXER_TRI_GRID", tri)
+    def run(compact):
         monkeypatch.setenv("NVTE_INDEXER_COMPACT", compact)
-        _tri_grid_override.cache_clear()
-        _compact_enabled.cache_clear()
-        # Both env vars are read during lowering, so a cached trace would
-        # silently reuse the other path and make this comparison vacuous.
+        _compact_override.cache_clear()
+        # The env var is read during lowering, so a cached trace would silently
+        # reuse the other path and make this comparison vacuous.
         jax.clear_caches()
         return indexer(*args, fp8=fp8, **kwargs)
 
-    base = run("0", "0")  # rectangular grid, no tile list
-    for tri, compact in (("1", "0"), ("0", "1"), ("1", "1")):
-        assert jnp.array_equal(run(tri, compact), base), f"tri={tri} compact={compact}"
+    assert jnp.array_equal(run("1"), run("0"))
 
-    _tri_grid_override.cache_clear()
-    _compact_enabled.cache_clear()
+    _compact_override.cache_clear()
     jax.clear_caches()
 
 

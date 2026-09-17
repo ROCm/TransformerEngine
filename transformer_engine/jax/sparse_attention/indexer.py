@@ -197,14 +197,15 @@ def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None, fp8=True,
         Q.shape[0], Q.shape[-2], K.shape[-2], attn_mask_type,
         segment_ids_q, segment_pos_q, segment_ids_kv, segment_pos_kv,
     )
-    # The causal family keys on position (``causal``) or segment_pos
-    # (``padding_causal``), so a valid pair always has t >= s and the kernel can
-    # take its triangular grid. ``padding`` keys on a constant -- its valid set
-    # is block-diagonal, not triangular -- so it must not claim this.
+    # Launch hints for score_reduce_triton, which uses the pair to decide
+    # whether compacting the tile list is worth it. The causal family keys on
+    # position (``causal``) or segment_pos (``padding_causal``), so a valid pair
+    # always has t >= s and roughly half the tiles are dead; ``padding`` keys on
+    # a constant -- its valid set is block-diagonal, not triangular -- so it must
+    # not claim this. The padding family is the one that packs several segments
+    # into a row, which is where compaction pays most.
     mask_type = canonicalize_attn_mask_type(attn_mask_type)
     mask_is_causal = mask_type.is_causal()
-    # The padding family is the one that packs several segments into a row, so
-    # it is the one that benefits from compacting the tile list.
     mask_has_segments = mask_type.is_padding()
     H_q, H_k, W_o = _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w)
     H_q, H_k, Sq, Ks = _maybe_quantize(H_q, H_k, fp8)
