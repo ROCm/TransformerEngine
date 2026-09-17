@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 //! Main K-loop for the MXFP8 TN GEMM, shared by mxfp8_gemm_tn_kernel (mxfp8_gemm.cpp) and the
-//! fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_tn.cuh); only the C writeback is left to the caller.
+//! fused AG+GEMM (overlap/fused_ag_gemm_tn.cuh); only the C writeback is left to the caller.
 //! Both operands are K-contiguous, so unlike the NN pair there is no layout mismatch here.
 #pragma unroll 2
         for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {

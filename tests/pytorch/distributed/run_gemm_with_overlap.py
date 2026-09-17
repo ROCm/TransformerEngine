@@ -120,6 +120,12 @@ def _parse_args(argv=None, namespace=None):
         help="Test numerical result against torch.matmul(...)",
     )
     parser.add_argument(
+        "--check-ub-scales",
+        action="store_true",
+        default=False,
+        help="Test the gathered MXFP8 scales in the Userbuffers region against an all-gather",
+    )
+    parser.add_argument(
         "--warmup-iters",
         type=int,
         default=0,
@@ -841,6 +847,30 @@ def _main(opts):
 
     # Compare against standard GEMM
     numerics_failed = False
+
+    # The kernel populates the peers' rows of the Userbuffers scale region, which base.py hands
+    # out as the gathered tensor's scale_inv. Nothing downstream reads it today, so the output
+    # check above cannot catch a stale region.
+    if opts.check_ub_scales:
+        torch.cuda.synchronize()
+        dist.barrier(tp_group)
+        assert ub_obj.has_scale_buffer(), "--check-ub-scales needs a fused MXFP8 AG buffer"
+        local_scales = inp_fp8._rowwise_scale_inv.contiguous()
+        ref_scales = torch.empty(
+            [tp_size * local_scales.size(0)] + list(local_scales.shape[1:]),
+            dtype=local_scales.dtype,
+            device=local_scales.device,
+        )
+        dist.all_gather_into_tensor(ref_scales, local_scales, group=tp_group)
+        ub_scales = ag_out._rowwise_scale_inv
+        mismatched = int((ub_scales != ref_scales).sum().item())
+        numerics_failed = numerics_failed or mismatched != 0
+        scales_info = (
+            f"UB SCALE CHECK PASSED: {ref_scales.numel()} scale bytes match the all-gather"
+            if mismatched == 0
+            else f"UB SCALE CHECK FAILED: {mismatched}/{ref_scales.numel()} scale bytes differ"
+        )
+        dist_print(scales_info, section=True, info=True, error=mismatched != 0, group=tp_group)
     if opts.check_numerics:
         torch.cuda.synchronize()
         dist.barrier(tp_group)

@@ -57,7 +57,15 @@ def _fused_launch_cmd(nprocs: int):
     return ["torchrun", f"--nproc_per_node={nprocs}"]
 
 
-def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
+def _run_fused_ag(
+    nprocs,
+    bulk=False,
+    quantization="none",
+    layout="TN",
+    num_heads=NUM_HEADS,
+    head_dim=HEAD_DIM,
+    extra_args=(),
+):
     """Run the AG overlap harness with the fused backend, returning the completed process."""
     test_cmd = _fused_launch_cmd(nprocs) + [
         str(TEST_ROOT / "run_gemm_with_overlap.py"),
@@ -65,11 +73,12 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
         f"--seed={RNG_SEED}",
         f"--seq-length={SEQ_LENGTH}",
         f"--batch-size={BATCH_SIZE}",
-        f"--num-heads={NUM_HEADS}",
-        f"--head-dim={HEAD_DIM}",
+        f"--num-heads={num_heads}",
+        f"--head-dim={head_dim}",
         "--comm-type=AG",
         "--fused",
     ]
+    test_cmd += list(extra_args)
     # The bulk harness pins its GEMM to NN regardless, so the layout only applies to the p2p path.
     test_cmd += (
         ["--bulk-overlap", f"--quantization={quantization}"]
@@ -82,6 +91,13 @@ def _run_fused_ag(nprocs, bulk=False, quantization="none", layout="TN"):
 ELIGIBLE_OUT_FEATURES_PER_RANK = 1536
 INELIGIBLE_OUT_FEATURES_PER_RANK = 1568
 UNALIGNED_SEQ_LENGTH = 1152
+
+# K = num_heads * head_dim, and the kernel only gathers scales in-flight at K >= 16384
+# (interleave_scales_enabled). ffn_hidden_size is pinned rather than left at 4x to keep the
+# weight at 33 MB per rank.
+INTERLEAVE_NUM_HEADS: int = 128
+INTERLEAVE_HEAD_DIM: int = 128
+INTERLEAVE_FFN_HIDDEN: int = 16384
 
 
 def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
@@ -144,6 +160,42 @@ def test_fused_ag_overlap(nprocs, quantization, layout):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("layout", FUSED_LAYOUTS)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_mxfp8_interleaved_scales(nprocs, layout):
+    """K >= 16384 packs the peers' scales inside the gatherer instead of via gather_scales."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(
+        _run_fused_ag(
+            nprocs,
+            quantization="mxfp8",
+            layout=layout,
+            num_heads=INTERLEAVE_NUM_HEADS,
+            head_dim=INTERLEAVE_HEAD_DIM,
+            extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}"],
+        )
+    )
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_mxfp8_interleaved_ub_scales(nprocs):
+    """Interleaving skips gather_scales, so the kernel must fill the region base.py hands out."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_ag(
+        nprocs,
+        quantization="mxfp8",
+        num_heads=INTERLEAVE_NUM_HEADS,
+        head_dim=INTERLEAVE_HEAD_DIM,
+        extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}", "--check-ub-scales"],
+    )
+    _assert_numerics_passed(result)
+    assert "UB SCALE CHECK PASSED" in result.stdout.decode(), result.stdout.decode()
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_ag_overlap_rejects_fp8(nprocs):
     """Delayed-scaling FP8 is outside the backend; only MXFP8 1D scaling dispatches."""
@@ -151,7 +203,7 @@ def test_fused_ag_overlap_rejects_fp8(nprocs):
         pytest.skip(reason_for_no_fp8)
     result = _run_fused_ag(nprocs, quantization="fp8")
     assert result.returncode != 0, "fused AG+GEMM accepted a delayed-scaling FP8 operand"
-    assert "only supports MXFP8_1D_SCALING" in result.stderr.decode(), result.stderr.decode()
+    assert "fused AG+GEMM failed to launch" in result.stderr.decode(), result.stderr.decode()
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

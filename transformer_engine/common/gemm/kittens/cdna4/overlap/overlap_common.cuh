@@ -26,7 +26,11 @@ constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
 constexpr int K_STEP       = 64;
 constexpr int NUM_THREADS  = NUM_WARPS * kittens::WARP_THREADS;
 
-// bf16 kernels only; the MXFP8 pair reads HK_GRID_CAP at launch instead.
+// The shared MXFP8 scale helpers below walk the gathered axis with one constant, but TN
+// gathers on N and NN on M.
+static_assert(BLOCK_ROW == BLOCK_COL,
+              "pack_tile_scales_from and gather_peer_tile_plus_scales assume one tile extent");
+
 constexpr int GRID_CAP     = 256;
 
 using G_group = kittens::group<NUM_WARPS>;
@@ -118,9 +122,8 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
 }
 
 // Packs one 256-row tile of the gathered operand's scales into the lane-native layout the GEMM
-// reads, straight from the peer's buffer so the raw scales never reach global memory. Shared by
-// the MXFP8 TN and NN kernels: the host (run_mxfp8) skips gather_scales when interleaving is on,
-// so a layout declaring SUPPORTS_INTERLEAVE without calling this silently packs garbage.
+// reads, straight from the peer's buffer. dst_rows mirrors the raw bytes into our own Userbuffers
+// scale region, which the host leaves untouched when interleaving skips gather_scales.
 //
 // <STEP, NG> must match the pack_scales_kernel<_, STEP, NG> instantiation mxfp8_gemm.cpp uses for
 // that operand -- both write ln[(tile_id * NG + grp) * 64 + lane]. A side <64,4>, B side <32,8>.
@@ -132,8 +135,9 @@ template <int STEP = 64, int NG = 4>
 __device__ __forceinline__
 void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
                            int cblk, int tiles_per_col, int k_iters, int scale_K,
-                           uint32_t *__restrict__ smem_tile, int sub, int gath_wg) {
-    constexpr int ROWS     = 256;                  // rows per tile == BLOCK_ROW
+                           uint32_t *__restrict__ smem_tile, int sub, int gath_wg,
+                           uint8_t *__restrict__ dst_rows) {
+    constexpr int ROWS     = BLOCK_ROW;            // tile extent on the gathered axis
     constexpr int PER_WAVE = STEP;                 // window stride one wave packs from
     constexpr int WAVES    = NG;                   // waves per k-iter: 4 (A side) or 8 (B side)
     constexpr int KPP      = NUM_WARPS / WAVES;    // k-iters in flight: 8/4 = 2, or 8/8 = 1
@@ -163,7 +167,11 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
         if constexpr (EXACT) {
             uint32_t p = 0;
             if (kb + slot < k1) {
-                __builtin_memcpy(&p, &src_rows[(size_t)srow * scale_K + (kb + slot) * 4], 4);
+                const size_t off = (size_t)srow * scale_K + (kb + slot) * 4;
+                __builtin_memcpy(&p, &src_rows[off], 4);
+                if (dst_rows != nullptr) {
+                    __builtin_memcpy(&dst_rows[off], &p, 4);
+                }
             }
             smem_tile[threadIdx.x] = p;
         } else {
@@ -172,7 +180,11 @@ void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__res
                 const int wrow  = i % PAD;  // which row; >= ROWS is the zero-filled OOB tail
                 uint32_t p = 0;
                 if (wrow < ROWS && kb + wslot < k1) {
-                    __builtin_memcpy(&p, &src_rows[(size_t)wrow * scale_K + (kb + wslot) * 4], 4);
+                    const size_t off = (size_t)wrow * scale_K + (kb + wslot) * 4;
+                    __builtin_memcpy(&p, &src_rows[off], 4);
+                    if (dst_rows != nullptr) {
+                        __builtin_memcpy(&dst_rows[off], &p, 4);
+                    }
                 }
                 smem_tile[i] = p;
             }
@@ -238,12 +250,13 @@ void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int ti
     // Ordering comes from ag_ready_kernel, same as the data copy above. Trip counts differ across
     // blocks when gath_wg does not divide k_iters -- fine, __syncthreads() is per block.
     {
-        const char *peer_scales = (const char *)peers.base[peer] + scale_base
-                                + (size_t)peer * scale_chunk_bytes
-                                + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
-        pack_tile_scales_from<STEP, NG>((const uint8_t *)peer_scales, packed_sa,
+        // The copy above already relies on gather_dst mirroring peers.base[peer].
+        const size_t soff = scale_base + (size_t)peer * scale_chunk_bytes
+                          + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
+        pack_tile_scales_from<STEP, NG>((const uint8_t *)peers.base[peer] + soff, packed_sa,
                                         peer * tiles_per_chunk + tn, tiles_per_col,
-                                        k_iters, scale_K, smem_tile, sub, gath_wg);
+                                        k_iters, scale_K, smem_tile, sub, gath_wg,
+                                        (uint8_t *)gather_dst + soff);
     }
     __syncthreads();
 
