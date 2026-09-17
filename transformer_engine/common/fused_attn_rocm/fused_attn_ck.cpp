@@ -281,7 +281,7 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
-#if !defined(__HIP_DEVICE_COMPILE__) || defined(__gfx1250__)
+#if !defined(__HIP_DEVICE_COMPILE__) || defined(__GFX12__)
 constexpr int THREADS_PER_WAVEFRONT = 32;
 #else
 constexpr int THREADS_PER_WAVEFRONT = 64;
@@ -562,7 +562,7 @@ void fused_attn_ck_fwd_impl(
     ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
   }
 
-  ck_args.num_splits = has_sink ? -1 : ck_attn_fwd_num_splits(ck_args);
+  ck_args.num_splits = (ck_args.uses_fwd_v3 && !has_sink) ? ck_attn_fwd_num_splits(ck_args) : 0;
   if (ck_args.num_splits > 0)
   {
     size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
