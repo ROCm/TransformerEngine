@@ -58,21 +58,22 @@ if(USE_ROCM)
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
               test_ck_grouped_gemm.cu
+              test_ck_grouped_mxfp8.cu
               test_cast_mxfp4_transpose.cu
               test_multi_quantize_mxfp8.cu)
-
-  list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
-  if(NOT _gfx1250_idx EQUAL -1)
-    list(APPEND test_cuda_sources test_ck_grouped_mxfp8.cu)
-    target_include_directories(test_operator BEFORE PRIVATE
-              ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include)
-  endif()
 
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
   set_target_properties(test_operator PROPERTIES SOURCES "${test_hip_sources}")
+  TE_GetHipifiedSources("test_ck_grouped_mxfp8.cu" ${CMAKE_CURRENT_SOURCE_DIR} ck_mxfp8_hip_source)
+  # -Wno-unknown-warning-option suppresses warning about -Wlifetime-safety-lifetimebound-violation
+  # pragma in CK headers which is not supported by the compiler used to build TE.
+  set_source_files_properties(${ck_mxfp8_hip_source} PROPERTIES
+      INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include"
+      COMPILE_OPTIONS "-Wno-unknown-warning-option")
+
 endif()
 
 # Find required packages
