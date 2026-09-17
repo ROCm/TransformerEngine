@@ -455,12 +455,12 @@ function renderHealth() {
 // fall back to a title-cased version of the raw family name -- so newly ingested
 // benchmark types appear here automatically without code changes.
 const FAMILY_LABELS = {
-  gemm: "GEMM", gemm_fp8: "FP8 GEMM", grouped_gemm: "Grouped GEMM",
+  gemm: "GEMM", grouped_gemm: "Grouped GEMM",
   casting: "Casting", normalization: "Normalization",
 };
 // Display order: known microbenchmark families first, then anything else
 // (e.g. e2e suites) alphabetically.
-const FAMILY_ORDER = ["gemm", "gemm_fp8", "grouped_gemm", "casting", "normalization"];
+const FAMILY_ORDER = ["gemm", "grouped_gemm", "casting", "normalization"];
 const familyLabel = f => FAMILY_LABELS[f] ||
   (f ? f.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Other");
 const familyRank = f => { const i = FAMILY_ORDER.indexOf(f); return i < 0 ? FAMILY_ORDER.length : i; };

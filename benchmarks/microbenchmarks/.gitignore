@@ -5,6 +5,10 @@ benchmark_*.csv
 # Generated single-file bundle (dashboard/dist/dashboard.html embeds the CSV data).
 dashboard/dist/
 
-# Local gh-pages checkout used by dashboard_redeploy.sh / build_bundle.py.
+# Generated dashboard data shards (per-family CSV + index.csv) -- regenerable
+# output; lives only in the TE-dashboard Pages repo (the deploy target).
+dashboard/data/
+
+# Local Pages checkout used by build_bundle.py (e.g. --data-dir te-dash/data).
 # It's a separate repo clone full of generated data -- keep it out of TE.
 te-dash/
