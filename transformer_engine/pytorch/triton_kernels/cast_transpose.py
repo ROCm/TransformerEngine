@@ -1082,6 +1082,17 @@ FP8_BLOCKWISE_1D_BLOCK_LEN = 128
 
 
 @triton.jit
+def _blockwise_floor_to_pow2(scale):
+    """Largest power of two <= scale via a mantissa-clear bitmask.
+
+    Bit-identical to ``exp2(floor(log2(scale)))`` for normal positive floats,
+    but avoids three transcendentals. Ported from blockwise_quantize.py.
+    """
+    bits = scale.to(tl.uint32, bitcast=True) & 0xFF800000
+    return bits.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _fp8_blockwise_1d_rowwise_to_columnwise_triton(
     x_ptr,
     y_ptr,
@@ -1120,61 +1131,44 @@ def _fp8_blockwise_1d_rowwise_to_columnwise_triton(
     pid_n = pid % num_pid_n
 
     offs_n = pid_n.to(tl.int64) * BLOCK_LEN + tl.arange(0, BLOCK_LEN)
+    offs_m = pid_m.to(tl.int64) * BLOCK_LEN + tl.arange(0, BLOCK_LEN)
     col_mask = offs_n < n_cols
+    row_mask = offs_m < n_rows
+    mask = row_mask[:, None] & col_mask[None, :]
     k_block = pid_n
     m_block = pid_m
 
-    amax = tl.zeros([BLOCK_LEN], dtype=tl.float32)
-    num_vec = BLOCK_LEN // VEC_M
-    for it in range(0, num_vec):
-        offs_m = pid_m.to(tl.int64) * BLOCK_LEN + it * VEC_M + tl.arange(0, VEC_M)
-        row_mask = offs_m < n_rows
-        mask = row_mask[:, None] & col_mask[None, :]
-        q = tl.load(
-            x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        rs_offs = k_block * stride_rs0 + offs_m * stride_rs1
-        rs_mask = (k_block < rs0) & (offs_m < rs1)
-        s_row = tl.load(rowwise_scale_inv_ptr + rs_offs, mask=rs_mask, other=1.0)
-        x = q * s_row[:, None]
-        tile_max = tl.max(tl.where(mask, tl.abs(x), 0.0), axis=0)
-        amax = tl.maximum(amax, tile_max)
+    # Single HBM read of the whole BLOCK_LEN x BLOCK_LEN fp8 tile plus its
+    # BLOCK_LEN rowwise scales; the dequantized tile is reused for both the
+    # columnwise amax and the requantized store (no second pass). ``VEC_M`` is
+    # retained for signature compatibility but no longer chunks the load.
+    q = tl.load(
+        x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    rs_offs = k_block * stride_rs0 + offs_m * stride_rs1
+    rs_mask = (k_block < rs0) & (offs_m < rs1)
+    s_row = tl.load(rowwise_scale_inv_ptr + rs_offs, mask=rs_mask, other=1.0)
+    x = q * s_row[:, None]
 
-    a = amax
-    a = tl.where(a < epsilon, epsilon, a)
+    amax = tl.max(tl.where(mask, tl.abs(x), 0.0), axis=0)
+    a = tl.where(amax < epsilon, epsilon, amax)
     bad = (a != a) | (tl.abs(a) == float("inf")) | (a == 0.0)
     s = max_fp8 / a
     s = tl.where(bad, 1.0, s)
     if FORCE_POW_2_SCALES:
-        s = tl.math.exp2(tl.floor(tl.log2(s)))
+        s = _blockwise_floor_to_pow2(s)
     scale_inv = 1.0 / s
 
     cs_offs = m_block * stride_cs0 + offs_n * stride_cs1
     cs_mask = (m_block < cs0) & col_mask
     tl.store(colwise_scale_inv_ptr + cs_offs, scale_inv, mask=cs_mask)
 
-    for it in range(0, num_vec):
-        offs_m = pid_m.to(tl.int64) * BLOCK_LEN + it * VEC_M + tl.arange(0, VEC_M)
-        row_mask = offs_m < n_rows
-        mask = row_mask[:, None] & col_mask[None, :]
-        q = tl.load(
-            x_ptr + offs_m[:, None] * stride_x_m + offs_n[None, :] * stride_x_n,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        rs_offs = k_block * stride_rs0 + offs_m * stride_rs1
-        rs_mask = (k_block < rs0) & (offs_m < rs1)
-        s_row = tl.load(rowwise_scale_inv_ptr + rs_offs, mask=rs_mask, other=1.0)
-        x = q * s_row[:, None]
-        scaled = x * s[None, :]
-        scaled = tl.clamp(scaled, -max_fp8, max_fp8)
-        tl.store(
-            y_ptr + offs_n[None, :] * stride_y_n + offs_m[:, None] * stride_y_m,
-            scaled.to(y_ptr.type.element_ty),
-            mask=mask,
-        )
+    scaled = tl.clamp(x * s[None, :], -max_fp8, max_fp8).to(y_ptr.type.element_ty)
+    # Register-transpose so the contiguous (m) axis is innermost -> coalesced store.
+    y_off = offs_n[:, None] * stride_y_n + offs_m[None, :] * stride_y_m
+    tl.store(y_ptr + y_off, tl.trans(scaled), mask=col_mask[:, None] & row_mask[None, :])
 
 
 def te_fp8_blockwise_1d_rowwise_to_columnwise_triton(tensor):
@@ -1241,7 +1235,7 @@ def te_fp8_blockwise_1d_rowwise_to_columnwise_triton(tensor):
         BLOCK_LEN,
         VEC_M,
         force_pow2,
-        num_warps=8,
+        num_warps=4,
     )
     return tensor
 
