@@ -1,49 +1,25 @@
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Grouped MXFP4 (MX_BLOCKWISE) GEMM Triton persistent kernels (gfx950).
+"""Grouped MXFP4 GEMM Triton persistent kernels (gfx950).
 
-Adapted for TransformerEngine from Primus-Turbo
-(https://github.com/AMD-AGI/Primus-Turbo, MIT) -- the block-scaled grouped FP4
-kernels in ``primus_turbo/triton/grouped_gemm/grouped_gemm_fp4_kernel.py``. The
-kernel bodies are kept faithful to the source; the shared scaffolding
-(``NUM_XCDS``, ``_chiplet_transform_chunked``, the AMD Triton-knob scope) is
-inlined here so the module has no Primus-Turbo
-dependency.
+Adapted for TransformerEngine from Primus-Turbo.
 
-The operands are E2M1 FP4 packed two-values-per-byte along the contraction (K)
-axis, fed to the hardware block-scaled MMA via ``tl.dot_scaled(..., "e2m1", ...)``
-with E8M0 (VEC_SIZE=32) scales.
-
-  - _grouped_mxfp4_persistent_gemm_kernel:      Forward (NT)  C[g] = A[g] @ B[g]^T
-  - grouped_gemm_mxfp4_triton_kernel:           Forward public API
-  - _grouped_mxfp4_variable_k_gemm_kernel:      Backward wgrad C[g] = LHS[g] @ RHS[g]^T
-  - grouped_gemm_mxfp4_variable_k_triton_kernel: Backward (variable-K) public API
-
-FP4 packing notes:
-  * data tensors store K/2 (resp. M/2) bytes along the contraction axis;
-  * scale tensors store K/32 (resp. M/32) E8M0 bytes (one per 1x32 block);
-  * scales are stored free-major (free, K/32) / (G, free, K/32); each K-iter
-    loads a (K/32, free) tile (coalesced) and transposes it back in-reg for
-    tl.dot_scaled.
-
-The reduction loop is unmasked, so the contraction must be a multiple of the
-autotuned BLOCK_K (128 or 256). This always holds: fprop/dgrad require the
-contraction K to be a multiple of 128 (enforced in the impl), the wgrad per-group
-M is padded to a 128-multiple, and config pruning only selects BLOCK_K=256 when
-the contraction is also 256-divisible.
+- _grouped_mxfp4_persistent_gemm_kernel:      Forward (NT)  C[g] = A[g] @ B[g]^T
+- grouped_gemm_mxfp4_triton_kernel:           Forward public API
+- _grouped_mxfp4_variable_k_gemm_kernel:      Backward wgrad C[g] = LHS[g] @ RHS[g]^T
+- grouped_gemm_mxfp4_variable_k_triton_kernel: Backward (variable-K) public API
 """
 
 from __future__ import annotations
 
-import contextlib
 import functools
-import os
-from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
+
+from .blockwise_fp8_grouped_gemm import _amd_compiler_knobs
 
 
 # ===============================================================================
@@ -71,64 +47,21 @@ def _is_gfx950() -> bool:
 # read at compile time and are not part of Triton's compile cache key.
 # ===============================================================================
 
-_AMD_KNOB_ATTRS = ("use_async_copy", "scalarize_packed_fops", "use_block_pingpong")
-_AMD_KNOB_ENVS = (
-    "TRITON_HIP_USE_ASYNC_COPY",
-    "AMDGCN_SCALARIZE_PACKED_FOPS",
-    "TRITON_HIP_USE_BLOCK_PINGPONG",
-)
-
-
-def _amd_knobs_available() -> bool:
-    return hasattr(triton, "knobs") and hasattr(triton.knobs, "amd")
-
-
-@contextlib.contextmanager
-def _scoped_amd_triton_knobs():
-    """Snapshot AMD Triton compiler knobs on entry, restore them on exit.
-
-    On gfx950 the full gfx950 knob set is enabled for the duration of the scope;
-    all changes are restored on exit.
+def _scoped_amd_knobs(*, is_tn):
+    """Decorator applying blockwise_fp8's scoped AMD compiler knobs around a
+    launch. ``is_tn`` selects the layout-gated set (gfx942); on gfx950 the full
+    async_copy / scalarize / block_pingpong set is enabled either way.
     """
-    saved_attrs = {}
-    if _amd_knobs_available():
-        amd = triton.knobs.amd
-        for name in _AMD_KNOB_ATTRS:
-            if hasattr(amd, name):
-                saved_attrs[name] = getattr(amd, name)
-    saved_env = {name: os.environ.get(name) for name in _AMD_KNOB_ENVS}
-    try:
-        if _is_gfx950():
-            if _amd_knobs_available():
-                amd = triton.knobs.amd
-                for name in _AMD_KNOB_ATTRS:
-                    if hasattr(amd, name):
-                        setattr(amd, name, True)
-            else:
-                for name in _AMD_KNOB_ENVS:
-                    os.environ[name] = "1"
-        yield
-    finally:
-        if saved_attrs:
-            amd = triton.knobs.amd
-            for name, val in saved_attrs.items():
-                setattr(amd, name, val)
-        for name, val in saved_env.items():
-            if val is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = val
 
+    def deco(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with _amd_compiler_knobs(is_tn=is_tn):
+                return func(*args, **kwargs)
 
-def _scoped_amd_knobs(func):
-    """Decorator: run ``func`` under :func:`_scoped_amd_triton_knobs`."""
+        return wrapper
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        with _scoped_amd_triton_knobs():
-            return func(*args, **kwargs)
-
-    return wrapper
+    return deco
 
 
 # ===============================================================================
@@ -356,7 +289,7 @@ def _grouped_mxfp4_persistent_gemm_kernel(
         tl.store(C_, c, c_mask)
 
 
-@_scoped_amd_knobs
+@_scoped_amd_knobs(is_tn=False)
 def grouped_gemm_mxfp4_triton_kernel(
     a,
     a_scale,
@@ -433,7 +366,7 @@ def grouped_gemm_mxfp4_triton_kernel(
     return c
 
 
-@_scoped_amd_knobs
+@_scoped_amd_knobs(is_tn=False)
 def grouped_gemm_a8w4_triton_kernel(
     a,  # activation MXFP8 e4m3, (total_M, K) float8_e4m3fn
     a_scale,  # (total_M, K/32) uint8 e8m0
@@ -630,7 +563,7 @@ def _grouped_mxfp4_variable_k_gemm_kernel(
         tl.store(C_, c, cmask)
 
 
-@_scoped_amd_knobs
+@_scoped_amd_knobs(is_tn=True)
 def grouped_gemm_mxfp4_variable_k_triton_kernel(
     lhs, lhs_scale, rhs, rhs_scale, go_pad, OUT_M, OUT_N, G,
     out_dtype=torch.bfloat16, num_cu=None, out=None, accumulate=False, can256=None,

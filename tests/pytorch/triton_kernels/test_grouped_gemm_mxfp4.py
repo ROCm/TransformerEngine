@@ -1,33 +1,14 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Numeric correctness tests for the grouped MXFP4 Triton GEMM (gfx950).
-
-These validate the two layout assumptions of the port: that TE's plain
-E8M0/E2M1 quantizer output is interpreted the same way by
-``tl.dot_scaled(..., "e2m1", ...)``, and that zero-padded rows contribute
-nothing to the variable-K (wgrad) contraction.
-
-Each op is checked against a *precise* reference: the same packed MXFP4 operands
-the kernel consumes are dequantized here by an independent OCP E2M1/E8M0 decoder
-(``_dequant_mxfp4``) and matmul'd in fp32. Kernel and reference start from
-identical fp4 values, so a correct kernel matches to ~bf16-rounding while a
-layout / nibble-order / scale-bias / transpose bug makes them disagree grossly.
-wgrad additionally checks against the true bf16 grouped matmul, which exercises
-the per-group zero-padding (padded rows must contribute nothing).
-"""
+"""Numeric correctness tests for the grouped MXFP4 Triton GEMM (gfx950)."""
 
 import pytest
 import torch
 
-triton = pytest.importorskip("triton")
+from transformer_engine.pytorch.quantization import check_mxfp4_support
 
-try:
-    from transformer_engine.pytorch.quantization import check_mxfp4_support
-
-    _MXFP4_OK, _MXFP4_REASON = check_mxfp4_support()
-except Exception as exc:  # pragma: no cover - import/support probe
-    _MXFP4_OK, _MXFP4_REASON = False, str(exc)
+_MXFP4_OK, _MXFP4_REASON = check_mxfp4_support()
 
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     MXFP4_BLOCK,
@@ -43,7 +24,6 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
 )
 
 pytestmark = [
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/ROCm device required"),
     pytest.mark.skipif(not _MXFP4_OK, reason=f"MXFP4 unsupported: {_MXFP4_REASON}"),
 ]
 
@@ -51,7 +31,9 @@ DTYPE = torch.bfloat16
 # Uneven, non-128-multiple group sizes exercise fprop/dgrad masking and the
 # wgrad per-group zero-padding to 128.
 M_SPLITS = [96, 128, 160, 128]
-N, K = 256, 128
+# K = 256 (>128) so the reduction loop runs multiple iterations (loop_k =
+# K/BLOCK_K), exercising the in-loop operand pointer advance.
+N, K = 256, 256
 # Precise-reference bar: kernel vs dequant-of-the-same-operands differ only by
 # ~bf16 output rounding.
 _TIGHT_TOL = 3.0e-2
@@ -144,6 +126,29 @@ def test_fprop_unaligned_total_m():
         start += m
     assert out.shape == (total_m, N)
     assert _rel_err(out, ref) < _REL_TOL
+
+
+def test_fprop_zero_group():
+    # An expert may receive no tokens (m_split == 0): it must contribute no tiles
+    # and leave the other groups' outputs correct.
+    splits = [96, 0, 160, 0, 128]  # two empty experts
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out = grouped_gemm_mxfp4_fprop(a, weights, splits, out_dtype=DTYPE)
+
+    a_deq = _dequant_mxfp4(*_row_operand(a), K)
+    ref = torch.empty((total_m, N), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, splits):
+        if m == 0:
+            continue
+        w_deq = _dequant_mxfp4(*_row_operand(w), K)
+        ref[start : start + m] = a_deq[start : start + m] @ w_deq.t()
+        start += m
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
 
 
 def test_dgrad_precise():

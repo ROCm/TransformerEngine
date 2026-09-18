@@ -1,34 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950).
-
-This is the glue between TransformerEngine's MXFP4 quantizer and the ported
-Triton block-scaled grouped kernels in ``grouped_gemm_mxfp4.py``. It reuses
-TE's :class:`MXFP4Quantizer` (rather than porting Primus-Turbo's fused grouped
-dual-quant) to produce the packed FP4 operands the kernels consume, then builds
-the per-group offsets and calls the kernels.
-
-Three grouped ops, paired exactly like the dense MXFP4 recipe (all NT):
-
-    fprop : C   = A_row      @ W_row^T        (contract K,  fwd kernel)
-    dgrad : dA  = gradO_row  @ W_col^T        (contract N,  fwd kernel)
-    wgrad : dW  = gradO_col  @ A_col^T        (contract M,  variable-K kernel)
-
-Operand layout the kernels expect (plain, un-swizzled OCP MXFP4):
-  * data  : E2M1 packed two-per-byte along the contraction axis (``uint8``);
-  * scale : one E8M0 (``uint8``) per 1x32 logical-element block, contiguous
-            along the block axis.
-TE's ``MXFP4Quantizer`` emits exactly this in its row-wise ``_rowwise_data`` /
-``_rowwise_scale_inv`` and col-wise ``_columnwise_data`` / ``_columnwise_scale_inv``
-members when the shuffle / GEMM-swizzle flags are all off. The scale buffers are
-over-allocated (rows to 256, block axis to 8); we slice the live ``[:, :F/32]``
-region and make it contiguous so the kernel sees tight strides.
-
-RHT (Hadamard) on the wgrad operands and the ``main_grad`` beta=1 accumulate
-fusion are deferred to the autograd layer; this module runs plain
-MX (``use_hadamard=False``) and returns a fresh weight-gradient tensor.
-"""
+"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950)."""
 
 from __future__ import annotations
 
