@@ -22,6 +22,7 @@
 namespace {
 
 using te_kittens::cdna4::mxfp8::launch_pack_scales;
+using te_kittens::cdna4::mxfp8::launch_pack_scales_sharded;
 
 struct FusedRsLayout {
     size_t stage_bytes;
@@ -69,9 +70,7 @@ struct ScalePeers {
     const char *base[8];
 };
 
-// All-gather of the MXFP8 scale region: each rank copies every peer's scale chunk into the
-// matching offset of its own userbuffer. run_mxfp8 refuses the launch unless base and chunk are
-// 16B multiples, so the vector loop covers the whole copy and there is no scalar tail.
+// The 256-multiple shape guards leave chunk_bytes a multiple of 16, so the loop needs no tail.
 template <int U, bool NT>
 __global__
 void gather_scales(char *__restrict__ ub, ScalePeers peers, int my_pe, int tp_size,
@@ -165,45 +164,6 @@ const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
         return nullptr;
     }
     return &g_peers.emplace(peer_ub, std::move(v)).first->second;
-}
-
-// Packs ONLY the local chunk's scale rows, for the interleaved path: every peer chunk is packed
-// in-kernel by the gatherer block that fetches it, but the local chunk has no gatherer.
-template <int STEP, int NG>
-__global__ void pack_local_scales_kernel(const uint8_t *__restrict__ scales,
-                                         uint32_t *__restrict__ ln, int cblk_off, int tiles_local,
-                                         int tiles_per_col, int scale_K, int k_iters) {
-    constexpr int TILE_WORDS = 256;
-    constexpr int PAD_WORDS  = (NG - 1) * STEP + 64;
-    __shared__ uint32_t tile[PAD_WORDS];
-
-    const int id = blockIdx.x;
-    if (id >= k_iters * tiles_local) return;
-    const int ki      = id / tiles_local;
-    const int lblk    = id % tiles_local;
-    const int kb_base = ki * 4;
-    const int row0    = lblk * TILE_WORDS;
-
-    for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
-        uint32_t p = 0;
-        if (i < TILE_WORDS) {
-            __builtin_memcpy(&p, &scales[(size_t)(row0 + i) * scale_K + kb_base], 4);
-        }
-        tile[i] = p;
-    }
-    __syncthreads();
-    const int lane = threadIdx.x % 64, grp = threadIdx.x / 64;
-    const size_t tile_id = (size_t)ki * tiles_per_col + (cblk_off + lblk);
-    ln[(tile_id * NG + grp) * 64 + lane] =
-        kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
-}
-
-// Gather+pack the activation scales inside the gatherer blocks instead of up front? Only pays at
-// large K: the gatherer reads one contiguous k-range per scale row, worth 8x the cache lines at
-// K=16384 but only 2x at K=4096, below which the per-tile pack inside the arrival gate costs more
-// than the removed prologue saves.
-int interleave_scales_enabled(int K) {
-    return K >= 16384 ? 1 : 0;
 }
 
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
@@ -329,14 +289,13 @@ bool run_tn(const KittensAgGemmArgs &args) {
 }
 
 
-// Per-layout bindings for the shared run_mxfp8 host sequence. The layout is one bit: TN puts the
-// gathered activation in the B slot on N, NN in the A slot on M, per mxfp8_gemm.cpp's BLAS
-// convention. A_SCALE_COLWISE is a separate question that happens to share the answer for both.
 template <bool GATHERED>
 struct Mxfp8Layout {
     using TileDesc = std::conditional_t<GATHERED, hk_mxfp8_ag_nn::TileDesc,
                                                   hk_mxfp8_ag_tn::TileDesc>;
     static constexpr int PLAN_TAG = GATHERED ? 3 : 2;
+    // These two equal GATHERED by coincidence, not because they mean the same thing: one puts A's
+    // raw scales in column-major order, the other puts the gathered operand on the M axis.
     static constexpr bool A_SCALE_COLWISE = GATHERED;
     static constexpr bool GATHERED_ON_M   = GATHERED;
 
@@ -431,16 +390,18 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
 
     const size_t counter_bytes = ws.used;
-    uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
-    uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
+    uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
+    uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
     // Weight scales are rank-local: no dependency on the gather, so pack them up front. scale_A is
     // always the weight's; only the <STEP, NG> geometry and the destination follow the slot.
     if constexpr (L::GATHERED_ON_M) {
-        launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
+        launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K,
+                                                      k_iters, args.stream);
     } else {
-        launch_pack_scales<L::A_SCALE_COLWISE, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters, args.stream);
+        launch_pack_scales<L::A_SCALE_COLWISE, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters,
+                                                      args.stream);
     }
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
@@ -511,11 +472,15 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
                 args.aux_ag->scale_chunk_bytes);
     }
 
-    // Activation scales live in the userbuffer, so they can only be packed after ag_ready_kernel
-    // has established that the peers finished writing their chunks. Row-wise in both layouts.
-    // scale_chunk_bytes != 0 means the peers' raw scales are reachable, which interleaving needs;
-    // it is always true for a fused MXFP8 AG buffer, so the guard is defensive.
-    const int interleave = args.scale_chunk_bytes ? interleave_scales_enabled(K) : 0;
+    // Packing inside the gatherer only pays at large K, where each scale row's k-range is long
+    // enough that reading it contiguously beats a separate prologue pass.
+    const bool interleave = args.scale_chunk_bytes != 0 && K >= 16384;
+
+    // NVTE_AG_DIAG=1 reports which scale path the geometry selected, once per call.
+    if (args.scale_chunk_bytes && std::getenv("NVTE_AG_DIAG")) {
+        std::fprintf(stderr, "[AG_DIAG] M=%d N=%d K=%d tp=%d scales=%s\n",
+            M, N_TOTAL, K, tp_size, interleave ? "interleaved" : "gathered");
+    }
 
     if (args.scale_chunk_bytes && !interleave) {
         ScalePeers sp{};
@@ -539,24 +504,24 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     if (interleave) {
         // Peer rows are packed by their gatherer blocks inside the kernel; only ours is left.
         const int tiles_per_chunk = gath_local / (L::GATHERED_ON_M ? BLOCK_ROW : BLOCK_COL);
+        const uint8_t *local_scales =
+            (const uint8_t *)args.scale_B + (size_t)args.rank * args.scale_chunk_bytes;
         if constexpr (L::GATHERED_ON_M) {
-            pack_local_scales_kernel<64, 4>
-                <<<k_iters * tiles_per_chunk, 4 * 64, 0, args.stream>>>(
-                    (const uint8_t *)args.scale_B + (size_t)args.rank * args.scale_chunk_bytes,
-                    packed_sa, args.rank * tiles_per_chunk, tiles_per_chunk, tiles_gath, scale_K,
-                    k_iters);
+            launch_pack_scales_sharded<false, 64, 4>(local_scales, packed_sa,
+                                                     args.rank * tiles_per_chunk, tiles_per_chunk,
+                                                     tiles_gath, scale_K, k_iters, args.stream);
         } else {
-            pack_local_scales_kernel<32, 8>
-                <<<k_iters * tiles_per_chunk, 8 * 64, 0, args.stream>>>(
-                    (const uint8_t *)args.scale_B + (size_t)args.rank * args.scale_chunk_bytes,
-                    packed_sb, args.rank * tiles_per_chunk, tiles_per_chunk, tiles_gath, scale_K,
-                    k_iters);
+            launch_pack_scales_sharded<false, 32, 8>(local_scales, packed_sb,
+                                                     args.rank * tiles_per_chunk, tiles_per_chunk,
+                                                     tiles_gath, scale_K, k_iters, args.stream);
         }
     } else {
         if constexpr (L::GATHERED_ON_M) {
-            launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters, args.stream);
+            launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
+                                             args.stream);
         } else {
-            launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
+            launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters,
+                                             args.stream);
         }
     }
 

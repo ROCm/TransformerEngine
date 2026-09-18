@@ -65,6 +65,7 @@ def _run_fused_ag(
     num_heads=NUM_HEADS,
     head_dim=HEAD_DIM,
     extra_args=(),
+    env_extra=None,
 ):
     """Run the AG overlap harness with the fused backend, returning the completed process."""
     test_cmd = _fused_launch_cmd(nprocs) + [
@@ -85,19 +86,20 @@ def _run_fused_ag(
         if bulk
         else ["--p2p", f"--quantization={quantization}"] + (["--dgrad"] if layout == "NN" else [])
     )
-    return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    env = os.environ.copy()
+    env.update(env_extra or {})
+    return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
 ELIGIBLE_OUT_FEATURES_PER_RANK = 1536
 INELIGIBLE_OUT_FEATURES_PER_RANK = 1568
 UNALIGNED_SEQ_LENGTH = 1152
 
-# K = num_heads * head_dim, and the kernel only gathers scales in-flight at K >= 16384
-# (interleave_scales_enabled). ffn_hidden_size is pinned rather than left at 4x to keep the
-# weight at 33 MB per rank.
+# K = num_heads * head_dim; the kernel only gathers scales in-flight at K >= 16384.
 INTERLEAVE_NUM_HEADS: int = 128
 INTERLEAVE_HEAD_DIM: int = 128
-INTERLEAVE_FFN_HIDDEN: int = 16384
+# 1x hidden, not the harness' 4x default, which would only grow the weight.
+INTERLEAVE_FFN_HIDDEN: int = INTERLEAVE_NUM_HEADS * INTERLEAVE_HEAD_DIM
 
 
 def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
@@ -166,33 +168,20 @@ def test_fused_ag_overlap_mxfp8_interleaved_scales(nprocs, layout):
     """K >= 16384 packs the peers' scales inside the gatherer instead of via gather_scales."""
     if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    _assert_numerics_passed(
-        _run_fused_ag(
-            nprocs,
-            quantization="mxfp8",
-            layout=layout,
-            num_heads=INTERLEAVE_NUM_HEADS,
-            head_dim=INTERLEAVE_HEAD_DIM,
-            extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}"],
-        )
-    )
-
-
-@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_mxfp8_interleaved_ub_scales(nprocs):
-    """Interleaving skips gather_scales, so the kernel must fill the region base.py hands out."""
-    if not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_ag(
         nprocs,
         quantization="mxfp8",
+        layout=layout,
         num_heads=INTERLEAVE_NUM_HEADS,
         head_dim=INTERLEAVE_HEAD_DIM,
-        extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}", "--check-ub-scales"],
+        extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}"],
+        env_extra={"NVTE_AG_DIAG": "1"},
     )
     _assert_numerics_passed(result)
     assert "UB SCALE CHECK PASSED" in result.stdout.decode(), result.stdout.decode()
+    # A threshold change would otherwise leave the shapes above covering the other path.
+    stderr = result.stderr.decode()
+    assert "scales=interleaved" in stderr, stderr
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -258,12 +247,7 @@ def test_fused_layer_bulk_wgrad_bf16(nprocs):
 
 
 def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
-    """Run the layer harness on a row-parallel Linear.
-
-    Row-parallel drives both fused paths, so this harness is not reduce-scatter specific: the
-    reduce-scatter sits in forward (proj_fprop) and the grad-output all-gather in backward
-    (proj_dgrad).
-    """
+    """Run the layer harness on a row-parallel Linear: RS in proj_fprop, AG in proj_dgrad."""
     test_cmd = (
         _fused_launch_cmd(nprocs)
         + [
@@ -305,16 +289,7 @@ def test_fused_rs_overlap_bf16(nprocs):
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
-    """Row-parallel MXFP8 backward, where the grad output has to be gathered twice.
-
-    dgrad consumes dY row-scaled while wgrad needs it column-scaled. MXFP8 cannot convert one
-    into the other and Userbuffers carries a single tensor usage per gather, so the fused dgrad
-    kernel has to carry a second, independent all-gather for the wgrad copy.
-
-    Nothing else in this file reaches that path, which is why it went unnoticed: the other layer
-    tests are column-parallel, and ub_overlap_ag_dgrad is row-parallel only, while the MXFP8
-    tests that do exist drive run_gemm_with_overlap.py, which runs no backward at all.
-    """
+    """Backward gathers dY twice: row-scaled for dgrad, column-scaled for wgrad."""
     if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_row_parallel_layer(

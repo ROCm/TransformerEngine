@@ -9,20 +9,17 @@
 
 namespace te_kittens::cdna4::mxfp8 {
 
-// Packs raw scales into the lane-native layout the GEMM kernels read: one block per 256-row scale
-// tile packs its words into shared, then NG*64 lane threads emit one fp8e8m0_4 per (group, lane).
-// A: STEP=64,NG=4 (256 words/tile); B: STEP=32,NG=8 (512 words, hi/lo tile pair).
-// COLWISE=false: raw uint8 [dim, K/32] row-major; COLWISE=true: [K/32, dim] col-major.
-// FUSED=1: one launch for all experts (shared k_iters); output at ln + expert * expert_stride.
-// FUSED=2: per-expert k_iters; output at ln + output_offsets[expert]. Grid.x is sized for the
-//          largest expert, so blocks past a given expert's tile count exit early.
-template<bool COLWISE, int STEP, int NG, int FUSED = 0>
+// Packs raw scales into the lane-native layout the GEMM kernels read.
+// A: STEP=64,NG=4; B: STEP=32,NG=8 (hi/lo tile pair).
+// FUSED=2 grids for the largest expert, so smaller ones exit early.
+template<bool COLWISE, int STEP, int NG, int FUSED = 0, bool SHARDED = false>
 __global__ void pack_scales_kernel([[maybe_unused]] const uint8_t *__restrict__ scales,
     uint32_t *__restrict__ ln, int dim, int scale_K, int k_iters, int tiles_per_col,
     [[maybe_unused]] const uint8_t *const *__restrict__ scale_ptrs = nullptr,
     [[maybe_unused]] int expert_stride = 0,
     [[maybe_unused]] const int *__restrict__ k_iters_arr = nullptr,
-    [[maybe_unused]] const int *__restrict__ output_offsets = nullptr) {
+    [[maybe_unused]] const int *__restrict__ output_offsets = nullptr,
+    [[maybe_unused]] int cblk_off = 0, [[maybe_unused]] int tiles_local = 0) {
 
     constexpr int TILE_WORDS = 256;
     constexpr int PAD_WORDS  = (NG - 1) * STEP + 64; // covers OOB pack_scales read
@@ -52,10 +49,19 @@ __global__ void pack_scales_kernel([[maybe_unused]] const uint8_t *__restrict__ 
     }
 
     int tile_id = blockIdx.x;
-    if (tile_id >= my_k_iters * tiles_per_col) return;
-
-    int k_iter  = tile_id / tiles_per_col;
-    int cblk    = tile_id % tiles_per_col;
+    int k_iter, cblk;
+    size_t out_tile;
+    if constexpr (SHARDED) {
+        if (tile_id >= my_k_iters * tiles_local) return;
+        k_iter   = tile_id / tiles_local;
+        cblk     = tile_id % tiles_local;
+        out_tile = (size_t)k_iter * tiles_per_col + cblk_off + cblk;
+    } else {
+        if (tile_id >= my_k_iters * tiles_per_col) return;
+        k_iter   = tile_id / tiles_per_col;
+        cblk     = tile_id % tiles_per_col;
+        out_tile = (size_t)tile_id;
+    }
     int kb_base = k_iter * 4;
     int row0    = cblk * TILE_WORDS;
 
@@ -77,7 +83,7 @@ __global__ void pack_scales_kernel([[maybe_unused]] const uint8_t *__restrict__ 
 
     int tid = threadIdx.x, lane = tid % 64, grp = tid / 64;
     kittens::fp8e8m0_4 out = kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
-    my_ln[((size_t)tile_id * NG + grp) * 64 + lane] = out;
+    my_ln[(out_tile * NG + grp) * 64 + lane] = out;
 }
 
 template<bool COLWISE, int STEP, int NG>
@@ -85,6 +91,16 @@ void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_
     int tiles_per_col = dim / 256;
     pack_scales_kernel<COLWISE, STEP, NG><<<k_iters * tiles_per_col, NG * 64, 0, stream>>>(
         scales, ln, dim, scale_K, k_iters, tiles_per_col);
+}
+
+// Packs only the rank's own chunk into a full-width output, for the overlap path's interleaved
+// case: peer rows are packed by the gatherer block that fetches them, ours has no gatherer.
+template<bool COLWISE, int STEP, int NG>
+void launch_pack_scales_sharded(const uint8_t *scales, uint32_t *ln, int cblk_off, int tiles_local,
+                                int tiles_per_col, int scale_K, int k_iters, hipStream_t stream) {
+    pack_scales_kernel<COLWISE, STEP, NG, 0, true><<<k_iters * tiles_local, NG * 64, 0, stream>>>(
+        scales, ln, 0, scale_K, k_iters, tiles_per_col, nullptr, 0, nullptr, nullptr,
+        cblk_off, tiles_local);
 }
 
 }  // namespace te_kittens::cdna4::mxfp8

@@ -120,12 +120,6 @@ def _parse_args(argv=None, namespace=None):
         help="Test numerical result against torch.matmul(...)",
     )
     parser.add_argument(
-        "--check-ub-scales",
-        action="store_true",
-        default=False,
-        help="Test the gathered MXFP8 scales in the Userbuffers region against an all-gather",
-    )
-    parser.add_argument(
         "--warmup-iters",
         type=int,
         default=0,
@@ -848,13 +842,18 @@ def _main(opts):
     # Compare against standard GEMM
     numerics_failed = False
 
-    # The kernel populates the peers' rows of the Userbuffers scale region, which base.py hands
-    # out as the gathered tensor's scale_inv. Nothing downstream reads it today, so the output
-    # check above cannot catch a stale region.
-    if opts.check_ub_scales:
+    # The peers' rows of the scale region base.py hands out are kernel output that no GEMM reads
+    # back, so only this check catches a stale one.
+    check_ub_scales = (
+        opts.check_numerics
+        and ag_out is not None
+        and not opts.bulk_overlap
+        and isinstance(ub_obj, tex.CommOverlapP2P)
+        and ub_obj.has_scale_buffer()
+    )
+    if check_ub_scales:
         torch.cuda.synchronize()
         dist.barrier(tp_group)
-        assert ub_obj.has_scale_buffer(), "--check-ub-scales needs a fused MXFP8 AG buffer"
         local_scales = inp_fp8._rowwise_scale_inv.contiguous()
         ref_scales = torch.empty(
             [tp_size * local_scales.size(0)] + list(local_scales.shape[1:]),

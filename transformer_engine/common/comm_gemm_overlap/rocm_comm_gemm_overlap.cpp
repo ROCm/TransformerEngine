@@ -262,13 +262,11 @@ struct AuxAgSource {
 
 // Fused all-gather + GEMM, launched by fused_overlap_ag below.
 static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
-                             const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-                             const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
-                             const TensorWrapper &ubuf, DType ubuf_elt_dtype,
-                             const TensorWrapper &chunk, communicator *comm,
-                             int reg, int tp_id, int tp_size, uint64_t signal, size_t scale_base_offset,
-                             size_t scale_chunk_bytes, const AuxAgSource *aux_ag,
-                             cudaStream_t stream) {
+                             const TensorWrapper &bias, const TensorWrapper &pre_gelu_out, const TensorWrapper &B_copy,
+                             TensorWrapper &workspace, bool accumulate, const TensorWrapper &ubuf, DType ubuf_elt_dtype,
+                             const TensorWrapper &chunk, communicator *comm, int reg, int tp_id, int tp_size,
+                             uint64_t signal, size_t scale_base_offset, size_t scale_chunk_bytes,
+                             const AuxAgSource *aux_ag, cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
              "fused AG+GEMM reached with an unsupported epilogue");
@@ -304,8 +302,8 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
                "; both hold the same tensor and must agree.");
   }
 
-  const void* scale_A = nullptr;
-  const void* scale_B = nullptr;
+  const void *scale_A = nullptr;
+  const void *scale_B = nullptr;
   if (is_fp8) {
     scale_A = transa ? A_tensor->scale_inv.dptr : A_tensor->columnwise_scale_inv.dptr;
     scale_B = reinterpret_cast<char *>(ubuf.dptr()) + scale_base_offset;
@@ -407,8 +405,7 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
   auto B_tensor = convertNVTETensorCheck(B.data());
   const bool bulk_bf16 = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
                          D.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16;
-  // NN consumes A column-wise and B row-wise; both usages and both scale modes are settled here
-  // so the pointer reads below cannot outrun their own validation.
+  // Folded into the predicate so the scale pointer reads below cannot outrun their validation.
   const bool bulk_fp8 = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype()) &&
                         D.dtype() == DType::kBFloat16 &&
                         A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&

@@ -62,10 +62,14 @@ void persistent_ag_bf16_gemm_body(
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
     const uintptr_t lds_warp_off = wid * elem_per_warp * sizeof(T);
 
-    uint32_t a_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + lds_warp_off));
-    uint32_t a_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][1].data[0]) + lds_warp_off));
-    uint32_t a_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][0].data[0]) + lds_warp_off));
-    uint32_t a_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][1].data[0]) + lds_warp_off));
+    uint32_t a_lds_00 = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + lds_warp_off));
+    uint32_t a_lds_01 = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][1].data[0]) + lds_warp_off));
+    uint32_t a_lds_10 = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][0].data[0]) + lds_warp_off));
+    uint32_t a_lds_11 = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][1].data[0]) + lds_warp_off));
 
     uint32_t sw_A[copies_A];
     G_group::prefill_swizzled_offsets(As[0][0], A, sw_A);
@@ -827,12 +831,13 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 }
 
 template <int CBSZ, int BLGP, bool BULK>
-static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c, uint32_t* packed_sa, uint32_t* packed_sb,
-                              TileDesc *d_queue, int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive,
-                              int my_pe, int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
-                              XcdBuckets buckets, int *d_bucket_ctr, size_t scale_base,
-                              size_t scale_chunk_bytes, int interleave_scales, char *d_gather_dst,
-                              PeerPtrs aux_peers, char *d_aux_dst, hipStream_t stream) {
+static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b, bf16 *d_c,
+                                   uint32_t *packed_sa, uint32_t *packed_sb, TileDesc *d_queue, int num_tiles,
+                                   int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe, int tp_size,
+                                   int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
+                                   int *d_bucket_ctr, size_t scale_base, size_t scale_chunk_bytes,
+                                   int interleave_scales, char *d_gather_dst, PeerPtrs aux_peers, char *d_aux_dst,
+                                   hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
@@ -896,10 +901,9 @@ static void launch_persistent_bulk(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
         d_bucket_ctr, 0, 0, 0, d_gather_dst, PeerPtrs{}, nullptr, stream);
 }
 
-using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int, int *, PeerPtrs,
-                                 unsigned int *, int, int, int, int, size_t, int,
-                                 XcdBuckets, int *, size_t, size_t, int, PeerPtrs, char *,
-                                 hipStream_t);
+using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int,
+                              int *, PeerPtrs, unsigned int *, int, int, int, int, size_t, int, XcdBuckets, int *,
+                              size_t, size_t, int, PeerPtrs, char *, hipStream_t);
 
 using persistent_bulk_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *,
                                       uint32_t *, TileDesc *, int, int *, PeerPtrs, char *,
