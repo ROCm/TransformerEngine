@@ -34,6 +34,22 @@ message(STATUS "ROCM_PATH: ${ROCM_PATH}")
 #Configure target GPU architectures
 if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
     SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
+    # gfx1250 is not in the default set; when building natively on such a machine
+    # add it so it is targeted without having to set NVTE_ROCM_ARCH. Skipped
+    # silently if rocminfo or a GPU is unavailable.
+    find_program(NVTE_ROCMINFO_EXECUTABLE rocminfo HINTS "${ROCM_PATH}/bin")
+    if(NVTE_ROCMINFO_EXECUTABLE)
+        execute_process(
+            COMMAND "${NVTE_ROCMINFO_EXECUTABLE}"
+            OUTPUT_VARIABLE _rocminfo_output
+            ERROR_QUIET
+            RESULT_VARIABLE _rocminfo_result
+        )
+        if(_rocminfo_result EQUAL 0 AND _rocminfo_output MATCHES "gfx1250")
+            message(STATUS "Detected gfx1250; adding to CMAKE_HIP_ARCHITECTURES")
+            list(APPEND CMAKE_HIP_ARCHITECTURES gfx1250)
+        endif()
+    endif()
 else()
     # Accept comma separated list for NVTE_ROCM_ARCH
     string(REPLACE "," ";" HIP_ARCH_LIST "$ENV{NVTE_ROCM_ARCH}")
