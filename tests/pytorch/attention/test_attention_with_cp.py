@@ -535,7 +535,7 @@ def test_cp_with_fused_attention(
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
-    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+    if not IS_HIP_EXTENSION and config.head_dim_qk == 256 and config.head_dim_v == 256:
         # D=256 uses this generic CP runner, but only a subset of its axes is supported.
         if get_device_compute_capability() not in ((10, 0), (10, 3)):
             pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
