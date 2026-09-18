@@ -163,44 +163,47 @@ VEC_SIZE = 32
 
 # ###########################################################################
 #  Launch-param autotuning. Each shape is swept over a few (BLOCK_K, num_warps,
-#  num_stages, waves_per_eu) tiles via @triton.autotune and the fastest is cached.
-#  Set TRITON_PRINT_AUTOTUNING=1 to log the winner. BLOCK_K is a reduction-loop
-#  tile, so sweeping it doesn't change the grid.
+#  num_stages, nonkdim, waves_per_eu) configs via @triton.autotune and the
+#  fastest is cached. Set TRITON_PRINT_AUTOTUNING=1 to log the winner. Neither
+#  BLOCK_K nor nonkdim (the scaled-MFMA size) changes the grid.
 # ###########################################################################
 
-# (BLOCK_K, num_warps, num_stages, waves_per_eu).
+# (BLOCK_K, num_warps, num_stages, matrix_instr_nonkdim, waves_per_eu).
+# The nonkdim=32 rows use the 32x32 scaled-MFMA, which is faster for a8w4
+# (e4m3 x e2m1); fp4 x fp4 stays on the 16x16 op the tuner already prefers.
 _FWD_CONFIGS = [
-    (128, 8, 2, 0),
-    (128, 8, 3, 2),
-    (128, 8, 4, 2),
-    (128, 4, 2, 0),
-    (256, 8, 2, 0),
-    (256, 8, 3, 2),
+    (128, 8, 2, 16, 0),
+    (128, 8, 3, 16, 2),
+    (128, 8, 4, 16, 2),
+    (128, 4, 2, 16, 0),
+    (256, 8, 2, 16, 0),
+    (256, 8, 3, 16, 2),
+    (128, 8, 2, 32, 0),
+    (128, 8, 3, 32, 2),
 ]
 _VARK_CONFIGS = [
-    (128, 8, 3, 2),
-    (128, 8, 2, 0),
-    (128, 8, 4, 2),
-    (128, 4, 3, 2),
-    (128, 8, 3, 0),
-    (256, 8, 2, 0),
-    (256, 8, 3, 2),
+    (128, 8, 3, 16, 2),
+    (128, 8, 2, 16, 0),
+    (128, 8, 4, 16, 2),
+    (128, 4, 3, 16, 2),
+    (128, 8, 3, 16, 0),
+    (256, 8, 2, 16, 0),
+    (256, 8, 3, 16, 2),
 ]
 
 
 def _make_configs(specs):
-    """Build a ``triton.Config`` list from (BLOCK_K, warps, stages, waves) tuples.
-
-    ``kpack=1`` is deprecated on gfx950; ``matrix_instr_nonkdim=16`` pins the
-    16x16 scaled-MFMA.
+    """Build a ``triton.Config`` list from (BLOCK_K, warps, stages, nonkdim,
+    waves) tuples. ``kpack=1`` is deprecated on gfx950; ``matrix_instr_nonkdim``
+    selects the scaled-MFMA size (16 or 32).
     """
     return [
         triton.Config(
-            {"BLOCK_SIZE_K": bk, "waves_per_eu": wpe, "matrix_instr_nonkdim": 16, "kpack": 1},
+            {"BLOCK_SIZE_K": bk, "waves_per_eu": wpe, "matrix_instr_nonkdim": nonk, "kpack": 1},
             num_warps=nw,
             num_stages=ns,
         )
-        for (bk, nw, ns, wpe) in specs
+        for (bk, nw, ns, nonk, wpe) in specs
     ]
 
 

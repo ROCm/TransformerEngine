@@ -33,15 +33,13 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     MXFP4_BLOCK,
     _col_operand,
     _col_operand_grouped_padded,
-    _prefix_offsets,
     _row_operand,
+    _row_operand_mxfp8,
+    grouped_gemm_a8w4_fprop,
     grouped_gemm_mxfp4_dgrad,
     grouped_gemm_mxfp4_fprop,
     grouped_gemm_mxfp4_wgrad,
     grouped_linear_mxfp4,
-)
-from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4 import (
-    grouped_gemm_a8w4_triton_kernel,
 )
 
 pytestmark = [
@@ -100,18 +98,8 @@ def _dequant_mxfp4(data_u8, scale_u8, feat):
     return vals * scale.repeat_interleave(MXFP4_BLOCK, dim=1)
 
 
-# MXFP8 (e4m3) activation side, for the a8w4 forward
-def _quant_mxfp8_e4m3(x):
-    """OCP MXFP8 row-wise: ``x`` [R, K] -> (e4m3 [R, K], e8m0 u8 [R, K/32])."""
-    fmax = torch.finfo(torch.float8_e4m3fn).max
-    rows, feat = x.shape
-    xb = x.reshape(rows, feat // MXFP4_BLOCK, MXFP4_BLOCK).float()
-    amax = xb.abs().amax(-1, keepdim=True).clamp_min(1e-30)
-    exp = torch.ceil(torch.log2(amax / fmax)).clamp(-127, 127)
-    q = (xb / torch.exp2(exp)).clamp(-fmax, fmax).to(torch.float8_e4m3fn)
-    return q.reshape(rows, feat).contiguous(), (exp.squeeze(-1) + 127).to(torch.uint8)
-
-
+# MXFP8 (e4m3) activation side, for the a8w4 forward: the quantizer lives in the
+# impl module (_row_operand_mxfp8); here we only need the independent decoder.
 def _dequant_mxfp8(data_e4m3, scale_u8):
     """Independent MXFP8 dequant: e4m3 [R, K] + e8m0 [R, K/32] -> fp32 [R, K]."""
     rows, feat = data_e4m3.shape
@@ -246,19 +234,8 @@ def test_autograd_matches_ops():
 
 
 # a8w4 forward: MXFP8 (e4m3) activation x MXFP4 (e2m1) weight, grouped along M.
-def _run_a8w4(a, weights, m_splits):
-    """Quantize (a->e4m3, weights->e2m1) and run the a8w4 grouped forward kernel."""
-    feat_k = a.shape[1]
-    n = weights[0].shape[0]
-    a_q, a_s = _quant_mxfp8_e4m3(a)
-    b_ops = [_row_operand(w) for w in weights]  # each -> (e2m1 [N,K/2], e8m0 [N,K/32])
-    b_data = torch.stack([d for d, _s in b_ops], dim=0)
-    b_scale = torch.stack([s for _d, s in b_ops], dim=0)
-    offs = _prefix_offsets(m_splits, a.device)
-    out = grouped_gemm_a8w4_triton_kernel(a_q, a_s, b_data, b_scale, offs, n, feat_k, out_dtype=DTYPE)
-    return out, a_q, a_s
-
-
+# The op (grouped_gemm_a8w4_fprop) does the quantize + call; each test re-derives
+# the same e4m3 operands via _row_operand_mxfp8 to build the precise reference.
 def _a8w4_reference(a_q, a_s, weights, m_splits):
     """Per-group fp32 ref on the same operands: dequant(e4m3 A) @ dequant(e2m1 W)^T."""
     a_deq = _dequant_mxfp8(a_q, a_s)
@@ -277,7 +254,8 @@ def test_a8w4_fprop_precise():
     a = _rand(total_m, K)
     weights = [_rand(N, K) for _ in M_SPLITS]
 
-    out, a_q, a_s = _run_a8w4(a, weights, M_SPLITS)
+    out = grouped_gemm_a8w4_fprop(a, weights, M_SPLITS, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
     ref = _a8w4_reference(a_q, a_s, weights, M_SPLITS)
 
     assert out.shape == (total_m, N)
@@ -290,7 +268,8 @@ def test_a8w4_fprop_single_group():
     a = _rand(512, K)
     weights = [_rand(N, K)]
 
-    out, a_q, a_s = _run_a8w4(a, weights, splits)
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
     ref = _a8w4_reference(a_q, a_s, weights, splits)
 
     assert _rel_err(out, ref) < _TIGHT_TOL
@@ -303,8 +282,45 @@ def test_a8w4_fprop_unaligned_total_m():
     a = _rand(total_m, K)
     weights = [_rand(N, K) for _ in splits]
 
-    out, a_q, a_s = _run_a8w4(a, weights, splits)
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
     ref = _a8w4_reference(a_q, a_s, weights, splits)
 
     assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+# Kimi-K3 MoE expert-GEMM shapes: fc1 gate-up and fc2 down, G=28 experts.
+# Small per-group M keeps the check light while still exercising the K3 N/K
+# tiling (deep K, multi-tile N) and the 28-group scan under balanced and
+# imbalanced (~4:1 routing skew) token distributions.
+_K3_SHAPES = {"gateup": (6144, 3584), "down": (3584, 3072)}  # (N, K)
+
+
+def _k3_splits(kind, G=28, per=8):
+    total = G * per
+    if kind == "balanced":
+        return [per] * G
+    # deterministic ~4:1 max:min skew, integer, exact sum
+    w = [1.0 + 3.0 * i / (G - 1) for i in range(G)]
+    s = sum(w)
+    sp = [max(1, round(total * wi / s)) for wi in w]
+    sp[-1] += total - sum(sp)
+    return sp
+
+
+@pytest.mark.parametrize("shape", list(_K3_SHAPES), ids=list(_K3_SHAPES))
+@pytest.mark.parametrize("split", ["balanced", "imbalanced"])
+def test_a8w4_fprop_k3(shape, split):
+    n, k = _K3_SHAPES[shape]
+    splits = _k3_splits(split)
+    total_m = sum(splits)
+    a = _rand(total_m, k)
+    weights = [_rand(n, k) for _ in splits]
+
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert out.shape == (total_m, n)
     assert _rel_err(out, ref) < _TIGHT_TOL

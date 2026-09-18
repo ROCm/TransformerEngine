@@ -42,6 +42,7 @@ from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..utils import round_up_to_nearest_multiple
 from .grouped_gemm_mxfp4 import (
     _is_gfx950,
+    grouped_gemm_a8w4_triton_kernel,
     grouped_gemm_mxfp4_triton_kernel,
     grouped_gemm_mxfp4_variable_k_triton_kernel,
 )
@@ -171,6 +172,27 @@ def _row_col_operand(
     return row_data, row_scale, col_data, col_scale
 
 
+def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Row-wise MXFP8 (e4m3): ``x`` [M, K] -> (data [M, K] e4m3, scale [M, K/32] u8).
+
+    Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block,
+    with the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. This is a
+    reference cast matching the a8w4 kernel's tested operand layout; the GATE-2
+    quantizer-parity pass swaps in the recipe quantizer for exact QAT parity.
+    ``K`` (the contraction) is already a 32-multiple; ``M`` needs no padding since
+    the scale is per-row.
+    """
+    fmax = torch.finfo(torch.float8_e4m3fn).max
+    M, K = x.shape
+    xb = x.reshape(M, K // MXFP4_BLOCK, MXFP4_BLOCK).float()
+    amax = xb.abs().amax(-1, keepdim=True).clamp_min(1e-30)
+    exp = torch.ceil(torch.log2(amax / fmax)).clamp(-127, 127)
+    q = (xb / torch.exp2(exp)).clamp(-fmax, fmax).to(torch.float8_e4m3fn)
+    data = q.reshape(M, K).contiguous()
+    scale = (exp.squeeze(-1) + 127).to(torch.uint8)
+    return data, scale
+
+
 def _quantize_weights_row_col(
     weights: Sequence[torch.Tensor],
 ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
@@ -268,6 +290,66 @@ def grouped_gemm_mxfp4_fprop(
     a_data, a_scale = _row_operand(a)  # (total_M, K/2), (total_M, K/32)
     group_offs = _prefix_offsets(m_splits, a.device)
     return grouped_gemm_mxfp4_triton_kernel(
+        a_data,
+        a_scale,
+        b_data,
+        b_scale,
+        group_offs,
+        N,
+        K,
+        group_offs_out=group_offs,
+        out_dtype=out_dtype,
+        num_cu=num_cu,
+    )
+
+
+def grouped_gemm_a8w4_fprop(
+    a: torch.Tensor,
+    weights: List[torch.Tensor],
+    m_splits: Sequence[int],
+    *,
+    out_dtype: torch.dtype = torch.bfloat16,
+    num_cu: Optional[int] = None,
+    weight_row: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+) -> torch.Tensor:
+    """Grouped a8w4 forward: ``C[g] = A[g] @ W[g]^T`` (contract K).
+
+    Same as :func:`grouped_gemm_mxfp4_fprop`, but the activation is cast to MXFP8
+    (e4m3) instead of MXFP4; the weight stays MXFP4 (e2m1). Forward-only, per the
+    Kimi-K3 QAT recipe (no a8w4 dgrad/wgrad).
+
+    Args:
+        a: [total_M, K] activations, grouped along M by ``m_splits``.
+        weights: list of G per-expert weight tensors, each [N, K].
+        m_splits: per-group token counts (len G).
+        weight_row: optional pre-quantized row-wise MXFP4 weights
+            ``(data [G, N, K/2], scale [G, N, K/32])`` -- skips the weight cast.
+
+    Returns:
+        [total_M, N] output in ``out_dtype``.
+    """
+    K = a.shape[1]
+    _require_gfx950()
+    _check_contract(K, "K")
+
+    if weight_row is not None:
+        b_data, b_scale = weight_row
+        N = b_data.shape[1]
+        _check_splits(m_splits, a.shape[0], b_data.shape[0])
+    else:
+        N = weights[0].shape[0]
+        _check_splits(m_splits, a.shape[0], len(weights))
+        b_datas, b_scales = [], []
+        for w in weights:
+            d, s = _row_operand(w)  # (N, K/2), (N, K/32)
+            b_datas.append(d)
+            b_scales.append(s)
+        b_data = torch.stack(b_datas, dim=0)  # (G, N, K/2)
+        b_scale = torch.stack(b_scales, dim=0)  # (G, N, K/32)
+
+    a_data, a_scale = _row_operand_mxfp8(a)  # (total_M, K) e4m3, (total_M, K/32) e8m0
+    group_offs = _prefix_offsets(m_splits, a.device)
+    return grouped_gemm_a8w4_triton_kernel(
         a_data,
         a_scale,
         b_data,
