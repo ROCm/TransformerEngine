@@ -655,7 +655,8 @@ struct GroupedTensor {
 
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
-  float amax_epsilon = 0.0f;
+  // Floor the block/tensor amax so a degenerate input cannot send the scale to inf
+  float amax_epsilon = 1e-4f;
   NVTETensor noop_tensor = nullptr;
   NVTETensor rng_state = nullptr;
   bool nvfp4_2d_quantization = false;

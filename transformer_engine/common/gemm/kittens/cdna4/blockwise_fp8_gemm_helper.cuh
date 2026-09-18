@@ -19,13 +19,17 @@ struct ColScale { float v[WIDTH]; };
 template <int HEIGHT>
 struct RowRatio { float v[HEIGHT][4]; };
 
+constexpr float kMinScaleInv = 1e-30f;
+
+__device__ __forceinline__ float floor_scale_inv(float s) { return fmaxf(s, kMinScaleInv); }
+
 __device__ inline float load_scaleB_scalar(const float *p, int i) {
     float v;
     asm volatile("s_load_dword %0, %1, %2\n"
                  : "=s"(v)
                  : "s"(p), "s"(i * 4)
                  : "memory");
-    return v;
+    return floor_scale_inv(v);
 }
 
 __device__ inline kittens::fp8e8m0_4 load_scaleB_scalar_u32(const kittens::fp8e8m0_4 *p, int i) {
@@ -78,19 +82,13 @@ __device__ inline void store_output(OType *c_ptr, const AccType &acc,
     }
 }
 
-// Deliberate: the reference rounds to the output type before the beta*C add
-// (blockwise_fp8_gemm_reference.py::qgemm). This TU is built with -ffast-math, which folds
-// fpext(fptrunc(x)) back to x, so the empty asm is required to keep the conversion.
 template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
         return v;
     } else if constexpr (std::is_same_v<OType, kittens::bf16>) {
-        uint16_t bits = __builtin_bit_cast(uint16_t, __float2bfloat16(v));
-        asm volatile("" : "+v"(bits));
-        return __bfloat162float(__builtin_bit_cast(kittens::bf16, bits));
+        return __bfloat162float(__float2bfloat16(v));
     } else {
-        // fp16 is not parametrized in test_float8_blockwise_gemm_exact.py; left unchanged.
         return __half2float(__float2half(v));
     }
 }
@@ -202,7 +200,7 @@ __device__ inline ColScale<AccType::width> load_scaleB_col(
     #pragma unroll
     for (int j = 0; j < AccType::width; j++) {
         const int n0 = local_n_base + j * 16 + col_g;
-        cs.v[j] = n0 < n_valid ? sb_col_k[n0] : 0.f;
+        cs.v[j] = n0 < n_valid ? floor_scale_inv(sb_col_k[n0]) : 1.0f;
     }
     return cs;
 }
@@ -364,6 +362,8 @@ __device__ __forceinline__ void compute_a_ratios_and_promote(
         int e = g * (BLOCK_M / 4) + lt;
         float2 p = reinterpret_cast<const float2 *>(smem_sa_prev)[e];
         float2 c = reinterpret_cast<const float2 *>(smem_sa_curr)[e];
+        c.x = floor_scale_inv(c.x);
+        c.y = floor_scale_inv(c.y);
         float2 r = {p.x / c.x, p.y / c.y};
         reinterpret_cast<float2 *>(smem_a_ratio_dst)[e] = r;
         reinterpret_cast<float2 *>(smem_sa_prev)[e] = c;
