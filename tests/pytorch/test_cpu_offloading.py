@@ -779,17 +779,9 @@ class TestTELayers:
                 "Fused attention + cuda graphs is temporarily broken, not because of cpu offloading"
             )
 
-        # ROCm (IFU v2.19): CPU activation offload combined with HIP-graph capture
-        # corrupts a parameter gradient (garbage-scale values) for transformer_layer,
-        # independent of the quantization recipe (it fails for recipe=None / bf16 too).
-        # The offload/reload copies into the retained pinned CPU buffer are synchronized
-        # with cross-stream events that are not correctly ordered under HIP graph replay,
-        # so a replay can read a stale/garbage buffer. This is a latent, pre-existing bug:
-        # the v2.18 test compared parameter *values* (unchanged within one fwd/bwd) instead
-        # of gradients, so it went unnoticed until the 2.19 rewrite added an exact param-grad
-        # check. Non-graph CPU offload is correct on ROCm and stays fully asserted. Scoped to
-        # use_cuda_graphs only (all such runs reaching here have retain_pinned_cpu_buffers=True).
-        # Tracked for a follow-up ROCm fix in cpu_offload.py (HIP-graph cross-stream ordering).
+        # ROCm: CPU offload + HIP-graph capture corrupts a parameter gradient via
+        # mis-ordered cross-stream offload/reload copies under graph replay. Non-graph
+        # offload is correct. TODO(rocm): fix cross-stream ordering in cpu_offload.py.
         if IS_HIP_EXTENSION and use_cuda_graphs:
             pytest.xfail(
                 "ROCm: CPU offload + HIP-graph capture corrupts a parameter gradient "
@@ -908,24 +900,11 @@ class TestTELayers:
         # CPU offload is byte-preserving transport. It must not alter forward
         # results, input gradients, or any parameter gradient.
         #
-        # ROCm (IFU v2.18): the bf16 forward output can diverge from the no-offload
-        # path for UnfusedAttention + cuda_graphs + Float8CurrentScaling, and ONLY
-        # for that config. It reproduces only under the full test matrix, never in
-        # isolation: a prior non-graphed case leaves GPU memory resident, so when
-        # make_graphed_callables captures this case's graph its private mempool lands
-        # over a different allocator state and hipBLASLt selects a different (but
-        # equally valid) GEMM algorithm at capture time. The two algorithms accumulate
-        # in a different order, so the bf16 output rounds differently. This is
-        # GEMM-algorithm nondeterminism, not a correctness regression.
-        #
-        # Measured worst case across 6 full-matrix runs: max |a-b| = 0.09375
-        # (1.5 bf16 ULP at O(1)); the input and parameter gradients stay bit-identical
-        # in every case/run. So the relaxed tolerance is scoped as tightly as the
-        # divergence: ROCm only, forward output only, atol=1.5e-1 (~1.6x over the
-        # 0.09375 worst case). The gradients keep the exact (rtol=0, atol=0)
-        # comparison on both ROCm and CUDA, so a real grad corruption or a CUDA
-        # offload regression still fails.
-        # See the IFU v2.18 handoff notes for the full bisection + root cause.
+        # ROCm: the bf16 forward output can diverge by a few ULP from the no-offload path
+        # (UnfusedAttention + cuda_graphs + Float8CurrentScaling only) due to hipBLASLt
+        # GEMM-algorithm nondeterminism at graph-capture time, not a correctness regression.
+        # Relax the forward-output tolerance on ROCm only; gradients keep the exact (0, 0)
+        # comparison on both backends so a real grad corruption still fails.
         if IS_HIP_EXTENSION:
             torch.testing.assert_close(offload_out, no_offload_out, rtol=2e-2, atol=1.5e-1)
         else:

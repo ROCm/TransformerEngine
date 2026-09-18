@@ -586,9 +586,7 @@ def test_cp_with_fused_attention(
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    # ROCm: upstream v2.19 lifted the a2a+p2p (Hierarchical A2A) THD skip after
-    # implementing cuDNN support for it. ROCm's CK fused-attn backend has no
-    # equivalent path, so keep the skip gated to ROCm until CK gains support.
+    # ROCm: CK fused-attn has no Hierarchical A2A (a2a+p2p) THD path yet.
     if IS_HIP_EXTENSION and qkv_format == "thd" and cp_comm_type == "a2a+p2p":
         pytest.skip(
             "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"

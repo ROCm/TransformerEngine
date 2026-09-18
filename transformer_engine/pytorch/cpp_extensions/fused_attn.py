@@ -118,9 +118,6 @@ class FusedAttnBackend(IntEnum):
 
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
     if not IS_HIP_EXTENSION:
-        # The ROCm fork retains the (implementation-less) max512 enumerator on the
-        # CUDA C++ side for binding/consumer compile compatibility; mirror it here
-        # so the import-time sync assertion below matches the C++ enum.
         F16_max512_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen)
         F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
         FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)

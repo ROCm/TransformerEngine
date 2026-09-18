@@ -1818,12 +1818,14 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   auto stream = at::cuda::getCurrentCUDAStream();
 #endif
 
+#ifndef USE_ROCM
   // The grouped Hadamard transform kernels are implemented for the SM100 family
   // only. On other architectures, where
   // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
   // each split on its own instead. That takes the generic unfused RHT path.
   const int sm = transformer_engine::cuda::sm_arch();
   const bool grouped_rht_supported = sm >= 100 && sm <= 110;
+#endif
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({

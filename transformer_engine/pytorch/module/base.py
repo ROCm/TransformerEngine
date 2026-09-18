@@ -1520,7 +1520,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return True
         if isinstance(quantizer, NVFP4Quantizer):
             rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
-            arch_supported = get_device_compute_capability() >= (10, 0)
+            arch_supported = not IS_HIP_EXTENSION and get_device_compute_capability() >= (10, 0)
             if quantizer.with_rht:
                 return arch_supported and rows % 64 == 0 and cols % 128 == 0
             return (

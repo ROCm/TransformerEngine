@@ -824,13 +824,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         def custom_forward(*input_args, **input_kwargs):
             return attention_func(*input_args, **input_kwargs)
 
-        # ROCm: the fused-attention autograd Function leaks its recompute subgraph into
-        # the outer autograd graph under *reentrant* activation recompute, which drives the
-        # upstream QKV LayerNormLinear backward twice. That double-restore is fatal with the
-        # saved-tensor machinery (restore_from_func_ctx nulls ctx.tensor_objects after the
-        # first restore) and silently double-counts gradients otherwise. Non-reentrant
-        # checkpointing isolates the recompute (and is the torch-recommended default), so
-        # force it on ROCm.
+        # ROCm: force non-reentrant recompute. Under *reentrant* checkpointing the fused-attn
+        # backward drives the upstream QKV LayerNormLinear backward twice, corrupting grads.
+        # TODO(rocm): drop once the CK fused-attn path is safe under reentrant recompute.
         if IS_HIP_EXTENSION:
             forward_kwargs.setdefault("use_reentrant", False)
         hidden_states = checkpoint(

@@ -351,11 +351,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       // Refuse the fast-math error path rather than silently scoring with the exact one.
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
                  "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
-      // Row-scaled NVFP4 backward is not supported on ROCm; keep refusing it here even though the
-      // upstream CUDA path below now handles it.
-      NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
+      // Row-scaled NVFP4 backward is not supported on ROCm; refuse it up front. The whole
+      // row-scaled path below is therefore CUDA-only.
+      NVTE_CHECK(!row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
-#endif
+#else
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
@@ -371,13 +371,10 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             "multiples of 32.");
         nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
         if (output_tensor->has_columnwise_data()) {
-#ifndef __HIP_PLATFORM_AMD__
           nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-#else
-          NVTE_ERROR("Row-scaled NVFP4 columnwise output is not supported on ROCm.");
-#endif
         }
       }
+#endif
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
       // quantize_transpose_vector_blockwise_fp4.
