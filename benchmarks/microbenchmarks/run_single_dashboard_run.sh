@@ -6,9 +6,7 @@
 #
 # Single-shot microbenchmark run for the dashboard: runs each microbenchmark once
 # against the CURRENT TE build and collects annotated CSVs ready for
-# dashboard_ingest.py. One data point -- not a weekly series.
-#
-# Run this inside the TE GPU container (the benchmarks need a real GPU).
+# dashboard_ingest.py.
 #
 # Usage: bash run_single_dashboard_run.sh [OUTDIR]
 #   KERNEL_PROFILE=0   skip GPU kernel timing (wall time only)
@@ -44,8 +42,7 @@ for f in "${files[@]}"; do
     || echo "  (${f} returned non-zero; continuing)"
 done
 
-# Collect + tag each CSV with run_week/commit_sha/commit_date -- the per-row
-# metadata dashboard_ingest.py reads for the point's timestamp/commit.
+# Collect + tag each CSV with run_week/commit_sha/commit_date
 shopt -s nullglob
 for csv in "${MB_DIR}"/benchmark_*.csv; do
   base="$(basename "${csv}")"
