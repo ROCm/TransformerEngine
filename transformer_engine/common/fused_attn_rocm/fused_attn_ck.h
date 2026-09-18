@@ -22,7 +22,6 @@ bool is_ck_backend_supported(
   NVTE_QKV_Layout qkv_layout,
   NVTE_Bias_Type bias_type,
   NVTE_Mask_Type attn_mask_type,
-  NVTE_Softmax_Type softmax_type,
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -30,14 +29,37 @@ bool is_ck_backend_supported(
   size_t head_dim_v,
   int64_t window_size_left,
   int64_t window_size_right);
+
+constexpr size_t kSmallSeqMaxSeqlen = 17;
+
+// Small-seq eligibility is split into static and runtime checks:
+// - Static: config known at call time (dtype, head dims, heads, bias, dropout, mask).
+//   Used during workspace sizing to reserve THD probe buffers and to gate the small-seq path
+//   before any device data is read.
+// - Runtime: actual per-batch max seqlen for THD/ragged inputs (from cu_seqlens on device).
+//   Even when static config matches, individual batches may exceed kSmallSeqMaxSeqlen; probe
+//   at execute time and fall back to regular CK when out of range.
+bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_Bias_Type bias_type,
+                                   NVTE_Mask_Type mask_type,
+                                   float dropout,
+                                   size_t head_dim_qk,
+                                   size_t head_dim_v,
+                                   size_t num_attn_heads,
+                                   size_t num_gqa_groups);
+
+bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
+                                    size_t runtime_max_seqlen_kv);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias,
+  const Tensor* input_SoftmaxOffset,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
@@ -51,12 +73,15 @@ void fused_attn_ck_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_SoftmaxOffset,
   const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
   Tensor* output_dBias,
+  Tensor* output_dSoftmaxOffset,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_cu_seqlens_q_padded,

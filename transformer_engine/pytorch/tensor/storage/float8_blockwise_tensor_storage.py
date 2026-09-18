@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -126,6 +128,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool
+    # ROCm-only: padded per-segment (MoE group) offsets for the variable-K grouped
+    # wgrad. Set only when the columnwise operand is segment-padded (columnwise data
+    # is [M_pad, N] rather than the standard transposed [N, M]); otherwise None.
+    _vk_group_offs: Optional[torch.Tensor]
 
     def __new__(
         cls,
@@ -138,6 +144,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         is_2D_scaled: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        vk_group_offs: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if cls is Float8BlockwiseQTensorStorage:
@@ -152,6 +159,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._vk_group_offs = vk_group_offs
 
         return instance
 
