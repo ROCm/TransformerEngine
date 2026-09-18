@@ -1018,10 +1018,7 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
-  # "$ORIGIN" covers QoLA-built kernel libraries (e.g. te_libgemm_a4w4_*.so),
-  # which are installed alongside libtransformer_engine.so rather than under a
-  # nested lib/ directory.
-  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
