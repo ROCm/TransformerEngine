@@ -249,6 +249,10 @@ tr.row-bad { background: var(--bad-bg); } tr.row-bad:hover { background: rgba(24
 .arch-body .type-panel { background: var(--bg-3); }
 .type-panel .table-wrap { border: 0; border-radius: 0; max-height: none; }
 #typeSections table.data tbody tr { cursor: pointer; }
+/* aggregate (Σwork/Σtime) summary rows pinned atop each family table */
+.agg-row td { background: var(--bg-3); border-top: 1px solid var(--brand); }
+.agg-row td:first-child { font-weight: 600; }
+.metric-tag.agg-tag { color: var(--brand); font-weight: 700; }
 #typeSections td.spark-cell { padding: 2px 12px; }
 .cell-status { font-size: 11px; }
 .st-skip { color: var(--ink-4); } .st-missing { color: var(--warn); } .st-na { color: var(--ink-4); }

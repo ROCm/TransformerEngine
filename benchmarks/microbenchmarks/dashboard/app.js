@@ -26,7 +26,7 @@ const S = {
   backends: [], backendColor: new Map(),   // backends present in the data (parsed from op), sorted
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
-  trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits", by: "arch" },
+  trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits", by: "arch", railMode: "kernels" },
   byType: { q: "", facets: { family: "all", mode: "all", dtype: "all", model: "all" } },
   theme: "dark",
 };
@@ -174,9 +174,9 @@ async function loadAll() {
       if ((r.ts || "") > latest) latest = r.ts;
     }
   });
-  S.records = records;
-  S.series = buildSeriesIndex(records);
-  _healthRows = null;                  // invalidate the memo for the fresh dataset
+  S.records = records.concat(buildAggregateRecords(records));   // append synthetic Σwork/Σtime rollup series
+  S.series = buildSeriesIndex(S.records);
+  _healthRows = null; _aggRows = null;   // invalidate the memos for the fresh dataset
   // Discover GPU models (sorted) from the rows; the model is the key for
   // grouping/colors/baselines and is shown directly as the series label.
   S.models = [...new Set(records.map(r => r.model).filter(Boolean))].sort();
@@ -234,6 +234,36 @@ function modelOf(n) { return /mi355/.test(n) ? "MI355X" : /mi325/.test(n) ? "MI3
 
 /* ----------------------------------------------------------- noise model --- */
 function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "dev" : r.pr == null; }
+
+// Work-weighted harmonic mean of throughput == Σwork/Σtime == Σ(value·time_ms)/Σ(time_ms).
+// Emitted as synthetic "kernel" records (shape = AGG_SHAPE) so a per-(op,dtype,model,metric)
+// rollup trends through the chart like any config -- tagged aggregate:true with a per-run
+// config count (n) and shape signature (sig) to flag when the set of shapes changed.
+const AGG_SHAPE = "\u03a3 aggregate";
+const AGG_METRICS = new Set(["TFLOPS", "GB/s"]);   // value·time is meaningful "work" only for throughput
+const AGG_WARN = "#e0a94f";                         // amber: point where the config set changed
+function buildAggregateRecords(records) {
+  const g = new Map();   // op|dtype|model|metric|run_id -> {wt, t, shapes, any}
+  for (const r of records) {
+    const t = r.extra && r.extra.median_ms;
+    if (r.source !== "ci" || !AGG_METRICS.has(r.metric) || !(t > 0) || !(r.value > 0)) continue;
+    const k = `${r.op}|${r.dtype}|${r.model}|${r.metric}|${r.run_id}`;
+    let e = g.get(k); if (!e) g.set(k, e = { wt: 0, t: 0, shapes: new Set(), any: r });
+    e.wt += r.value * t; e.t += t; e.shapes.add(r.shape);
+  }
+  const out = [];
+  for (const e of g.values()) {
+    if (!(e.t > 0)) continue;
+    const r = e.any;
+    out.push({
+      op: r.op, base: r.base, backend: r.backend, shape: AGG_SHAPE, dtype: r.dtype, metric: r.metric,
+      value: e.wt / e.t, ts: r.ts, commit: r.commit, run_id: r.run_id, model: r.model, runner: r.runner,
+      pr: r.pr, source: "ci", mode: r.mode, status: "ok", regression: false, vs_main: null, vs_tag: null,
+      family: r.family, extra: { median_ms: e.t }, aggregate: true, n: e.shapes.size, sig: [...e.shapes].sort().join("|"),
+    });
+  }
+  return out;
+}
 
 // One-pass index (built in loadAll): series key -> chronological records, so the
 // per-series lookups below are O(1) instead of re-scanning every record.
@@ -374,7 +404,7 @@ function sparkline(values, noise, lastReal) {
 function latestMainByKernelModel() {
   const m = new Map();
   for (const r of S.records) {
-    if (r.source !== "ci" || r.metric === "speedup" || r.value == null || !isMainRec(r)) continue;
+    if (r.source !== "ci" || r.aggregate || r.metric === "speedup" || r.value == null || !isMainRec(r)) continue;
     const k = `${r.model}|${kkey(r)}`; const ex = m.get(k);
     if (!ex || (r.ts || "") > (ex.ts || "")) m.set(k, r);
   }
@@ -394,6 +424,28 @@ function healthRows() {
     return { r, vals, noise, d, real, sev: d == null ? "flat" : sev(d, real) };
   });
   return _healthRows;
+}
+
+// same, but for the synthetic aggregate rollups (excluded from the per-shape rows above)
+function latestMainAggByModel() {
+  const m = new Map();
+  for (const r of S.records) {
+    if (r.source !== "ci" || !r.aggregate || r.value == null || !isMainRec(r)) continue;
+    const k = `${r.model}|${kkey(r)}`; const ex = m.get(k);
+    if (!ex || (r.ts || "") > (ex.ts || "")) m.set(k, r);
+  }
+  return m;
+}
+let _aggRows = null;
+function aggRows() {
+  if (_aggRows) return _aggRows;
+  _aggRows = [...latestMainAggByModel().values()].map(r => {
+    const noise = mainBaseline(r.op, r.shape, r.dtype, r.model, r.metric);
+    const vals = mainSeries(r.op, r.shape, r.dtype, r.model, r.metric).map(s => s.value);
+    const { d, real } = regOf(r, noise);
+    return { r, vals, noise, d, real, sev: d == null ? "flat" : sev(d, real) };
+  });
+  return _aggRows;
 }
 
 /* ----------------------------------------------------------- 1 · HEALTH --- */
@@ -517,13 +569,42 @@ function renderByType() {
     ? `${rows.length} kernel × arch · <b>${models.length}</b> arch${models.length === 1 ? "" : "es"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
     : "no results in snapshot";
 
+  // aggregate (Σwork/Σtime) summary rows, filtered by the same facets, indexed by model|family
+  const aggByMF = new Map();
+  for (const x of aggRows()) {
+    const r = x.r;
+    if (f.family !== "all" && (r.family || "other") !== f.family) continue;
+    if (f.mode !== "all" && r.mode !== f.mode) continue;
+    if (f.dtype !== "all" && r.dtype !== f.dtype) continue;
+    if (f.model !== "all" && r.model !== f.model) continue;
+    if (q && !`${r.op} ${r.dtype} ${r.family || ""} ${r.model || ""}`.toLowerCase().includes(q)) continue;
+    const key = `${r.model}|${r.family || "other"}`;
+    (aggByMF.get(key) || aggByMF.set(key, []).get(key)).push(x);
+  }
+
   // one collapsible <details> per benchmark family, for a given model's family-map
   const familyPanels = fm => {
     const fams = [...fm.keys()].sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
-    return fams.map(f => {
-      const list = fm.get(f).slice().sort((a, b) =>
+    return fams.map(fam => {
+      const list = fm.get(fam).slice().sort((a, b) =>
         a.r.op.localeCompare(b.r.op) || a.r.shape.localeCompare(b.r.shape));
+      const model = list[0].r.model;
+      const aggs = (aggByMF.get(`${model}|${fam}`) || []).slice()
+        .sort((a, b) => a.r.op.localeCompare(b.r.op) || a.r.dtype.localeCompare(b.r.dtype));
       const units = [...new Set(list.map(x => x.r.metric))].join(", ");
+      // Σwork/Σtime rollups pinned atop the table -- clickable through to the aggregate trend
+      const aggBody = aggs.map(({ r, vals, noise, d, real, sev }) => {
+        const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
+        return `<tr class="agg-row" data-k="${esc(kkey(r))}" data-model="${r.model}" title="work-weighted harmonic mean (Σwork ÷ Σtime) over ${r.n} configs">
+          <td>${esc(r.op)} <span class="metric-tag agg-tag">Σ</span></td>
+          <td class="k-dim">Σ aggregate · n=${r.n}</td>
+          <td>${esc(r.dtype)}</td>
+          <td style="color:${modelVar(r.model)}">${esc(r.model)}</td>
+          <td class="spark-cell">${sparkline(vals, noise, real)}</td>
+          <td class="num">${fmtVal(r.value, r.metric)}</td>
+          ${dcell}
+        </tr>`;
+      }).join("");
       const body = list.map(({ r, vals, noise, d, real, sev }) => {
         const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
         return `<tr data-k="${esc(kkey(r))}" data-model="${r.model}">
@@ -537,12 +618,12 @@ function renderByType() {
         </tr>`;
       }).join("");
       return `<details class="panel type-panel"${openAttr}>
-        <summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span><span class="t">${esc(familyLabel(f))}</span>
+        <summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span><span class="t">${esc(familyLabel(fam))}</span>
           <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
           <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
         <div class="table-wrap"><table class="data"><thead><tr>
           <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
-        </tr></thead><tbody>${body}</tbody></table></div>
+        </tr></thead><tbody>${aggBody}${body}</tbody></table></div>
       </details>`;
     }).join("");
   };
@@ -621,7 +702,7 @@ function kernelIndex() {
   for (const r of S.records) {
     if (r.source !== "ci" || r.value == null) continue;
     const k = kkey(r);
-    if (!m.has(k)) m.set(k, { op: r.op, base: r.base, shape: r.shape, dtype: r.dtype, metrics: new Set(), runs: new Set(), reg: false });
+    if (!m.has(k)) m.set(k, { op: r.op, base: r.base, shape: r.shape, dtype: r.dtype, metrics: new Set(), runs: new Set(), reg: false, aggregate: !!r.aggregate });
     const e = m.get(k); e.metrics.add(r.metric); e.runs.add(r.run_id);
   }
   for (const [k, e] of m) { e.reg = regKeys.has(k); e.n = e.runs.size; }
@@ -629,7 +710,10 @@ function kernelIndex() {
 }
 function renderKernelRail() {
   const idx = kernelIndex();
-  let keys = [...idx.keys()];
+  const agg = S.trend.railMode === "aggregates";
+  $("#railMode").innerHTML = [["kernels", "kernels"], ["aggregates", "\u03a3 aggregates"]].map(([v, t]) =>
+    `<button data-rm="${v}" class="${v === S.trend.railMode ? "is-active" : ""}">${t}</button>`).join("");
+  let keys = [...idx.keys()].filter(k => !!idx.get(k).aggregate === agg);
   if (S.trend.q) { const q = S.trend.q.toLowerCase(); keys = keys.filter(k => k.toLowerCase().includes(q)); }
   keys.sort();
   // default to a regressed kernel, else the best-sampled one (so the chart isn't a lone point)
@@ -640,9 +724,10 @@ function renderKernelRail() {
   }
   $("#kernelList").innerHTML = keys.map(k => {
     const e = idx.get(k);
+    const sub = e.aggregate ? `\u03a3 ${esc(e.dtype)} · work-weighted H-mean` : `${esc(e.shape)} · ${esc(e.dtype)}`;
     return `<button class="kitem ${k === S.trend.key ? "is-active" : ""} ${e.reg ? "has-reg" : ""}" data-k="${esc(k)}">
-      ${esc(e.op)}<span class="ks">${esc(e.shape)} · ${esc(e.dtype)}</span></button>`;
-  }).join("") || `<div class="empty" style="padding:20px">no match</div>`;
+      ${esc(e.op)}<span class="ks">${sub}</span></button>`;
+  }).join("") || `<div class="empty" style="padding:20px">no ${agg ? "aggregates" : "match"}</div>`;
 }
 let trendChart = null;
 function selectKernel(k, rerail = true) {
@@ -663,8 +748,10 @@ function selectKernel(k, rerail = true) {
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
     `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendTitle").innerHTML = byBackend
-    ? `${esc(e.base)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${esc(S.trend.model)} · ${S.trend.metric} · backends</small>`
-    : `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
+    ? `${esc(e.base)} <small>${esc(e.aggregate ? "\u03a3 aggregate" : e.shape)} · ${esc(e.dtype)} · ${esc(S.trend.model)} · ${S.trend.metric} · backends</small>`
+    : e.aggregate
+      ? `${esc(e.op)} <small>\u03a3 work-weighted H-mean · ${esc(e.dtype)} · ${S.trend.metric}</small>`
+      : `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
   if (rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
   drawTrend(e);
   writeHash();
@@ -680,6 +767,9 @@ function drawTrend(e) {
   const opFor = byBackend ? (v => `${base} · ${v}`) : (() => e.op);
   const recs = S.records.filter(r => r.source === "ci" && r.shape === shape && r.dtype === dtype && r.metric === metric &&
     (byBackend ? (r.base === base && r.model === arch) : r.op === e.op));
+  // aggregate rollups carry a per-run config count (n) + shape signature (sig); used below to
+  // annotate points and flag config-set changes (single-arch only; skipped in backend overlay).
+  const aggInfo = (e.aggregate && !byBackend) ? new Map(recs.map(r => [r.run_id, { n: r.n, sig: r.sig }])) : null;
   let runIds = [...new Set(recs.map(r => r.run_id))].map(id => {
     const any = recs.find(r => r.run_id === id);
     return { id, ts: any.ts, commit: any.commit, pr: any.pr, main: isMainRec(any) };
@@ -717,6 +807,15 @@ function drawTrend(e) {
   const dims = single ? [S.trend.model]
     : byBackend ? [...new Set(recs.map(r => r.backend))].sort()
     : S.models;
+  if (aggInfo) {                              // tag points with config count + set-change flag
+    let prev = null;
+    for (const p of points) {
+      const info = aggInfo.get(p.id) || (p.runs && aggInfo.get(p.runs[p.runs.length - 1].id));
+      p.aggN = info ? info.n : null;
+      p.aggChanged = single && !!info && prev != null && info.sig !== prev;
+      if (info) prev = info.sig;
+    }
+  }
 
   const datasets = [];
   let note = "";
@@ -737,11 +836,19 @@ function drawTrend(e) {
     const unit = byBackend ? "backend" : "model";
     note = `${span} · one line per ${unit}.` + (daily ? ` Daily mean per ${unit} — smooths CI jitter to expose real drift.` : " Red = dev below its prior-dev band, or a PR slower than dev.");
   }
+  if (aggInfo) {
+    const nNow = points.length ? points[points.length - 1].aggN : null;
+    const changes = points.filter(p => p.aggChanged).length;
+    note = `${span} · work-weighted harmonic mean (Σwork ÷ Σtime)${nNow != null ? `, n=${nNow} configs` : ""}.` +
+      (single ? (changes ? ` Amber = config set changed (${changes}×) — values across a change aren't directly comparable.` : " Config set stable across this range.")
+              : " Select a single arch to flag config-set changes.");
+  }
   for (const dv of dims) {
     const noise = mainBaseline(opFor(dv), shape, dtype, byBackend ? arch : dv, metric);
     const data = points.map(p => valueAt(p, dv));
     if (data.every(v => v == null)) continue;
     const ptColor = points.map(p => {
+      if (aggInfo && p.aggChanged) return AGG_WARN;   // config set changed at this point
       if (daily) return dimCol(dv);             // daily means aren't per-run regression calls
       const r = recs.find(x => x.run_id === p.id && dimOf(x) === dv);
       return (r && regOf(r, noise).real) ? cssVal("--bad") : dimCol(dv);
@@ -786,7 +893,8 @@ function drawTrend(e) {
               const it = items && items[0];
               const p = it && points[it.dataIndex];
               if (!p) return "";
-              return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "dev" : "#" + p.pr} · click to open`;
+              const head = daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "dev" : "#" + p.pr} · click to open`;
+              return (aggInfo && p.aggN != null) ? `${head} · n=${p.aggN}${p.aggChanged ? " · config set changed" : ""}` : head;
             },
             label: i => (i && i.dataset && i.parsed && i.parsed.y != null) ? ` ${i.dataset.label}: ${fmtVal(i.parsed.y, metric)} ${metric}` : "",
           },
@@ -902,6 +1010,7 @@ function writeHash() {
     if (S.trend.range && S.trend.range !== "all") p.set("r", S.trend.range);
     if (S.trend.xmode && S.trend.xmode !== "commits") p.set("x", S.trend.xmode);
     if (S.trend.by && S.trend.by !== "arch") p.set("by", S.trend.by);
+    if (S.trend.railMode && S.trend.railMode !== "kernels") p.set("rail", S.trend.railMode);
   } else if (S.view === "bytype") {
     for (const [k, v] of Object.entries(S.byType.facets)) if (v && v !== "all") p.set(k, v);
     if (S.byType.q) p.set("q", S.byType.q);
@@ -925,6 +1034,7 @@ function readHash() {
     S.trend.range = p.get("r") || "all";
     S.trend.xmode = p.get("x") || "commits";
     S.trend.by = p.get("by") || "arch";
+    S.trend.railMode = p.get("rail") || "kernels";
   } else if (S.view === "bytype") {
     S.byType.facets = {
       family: p.get("family") || "all", mode: p.get("mode") || "all",
@@ -959,8 +1069,12 @@ function showView(v) {
   if (v === "health" && trendChart) requestAnimationFrame(() => { if (trendChart) trendChart.resize(); });
 }
 function goTrend(k, model) {
-  S.trend.key = null; S.trend.model = model || "all";
+  S.trend.model = model || "all";
+  const e = kernelIndex().get(k);
+  S.trend.railMode = (e && e.aggregate) ? "aggregates" : "kernels";   // match the rail to the target
+  S.trend.key = k;
   if (S.view !== "health") showView("health");
+  renderKernelRail();          // rebuild the rail for the (possibly switched) mode + highlight k
   selectKernel(k);
   const el = document.getElementById("trendsSection");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -984,7 +1098,7 @@ function wire() {
   });
   $("#refresh").addEventListener("click", doRefresh);
   $("#bannerClose").addEventListener("click", hideBanner);
-  $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; _healthRows = null; renderHealth(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
+  $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; _healthRows = null; _aggRows = null; renderHealth(); renderByType(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
   $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.model); });
   $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); writeHash(); });
   $("#typeFacets").addEventListener("change", e => { const s = e.target.closest("select[data-facet]"); if (!s) return; S.byType.facets[s.dataset.facet] = s.value; renderByType(); writeHash(); });
@@ -992,6 +1106,7 @@ function wire() {
   $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) goTrend(tr.dataset.k, tr.dataset.model); });
   $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); writeHash(); });
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
+  $("#railMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.railMode = b.dataset.rm; S.trend.key = null; renderKernelRail(); });
   $("#kernelSearch").addEventListener("input", e => { S.trend.q = e.target.value; renderKernelRail(); });
   $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k); });
   $("#trendBy").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.by = b.dataset.b; selectKernel(S.trend.key); });
