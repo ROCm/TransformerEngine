@@ -9,15 +9,14 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCK_RELEASE_VERSION=7.14.0
+ARG ROCK_RELEASE_VERSION=10.0.0
 ARG PYTHON_VERSION=3.12
-ARG PYTHON_ABI=cp312
-ARG TORCH_VERSION=2.12.0
-ARG TORCHVISION_VERSION=0.27.0
-# triton 3.7.1 ships as a git snapshot: triton-3.7.1+<TRITON_LOCAL>.rocm<rel>
-ARG TRITON_VERSION=3.7.1
-ARG TRITON_LOCAL=git0263a6a6
-ARG JAX_VERSION=0.11.0
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
+# triton 3.8.0 ships as a git snapshot: triton-3.8.0+<TRITON_LOCAL>.rocm<rel>
+ARG TRITON_VERSION=3.8.0
+ARG TRITON_LOCAL=git4cff872c
+ARG JAX_VERSION=0.11.1
 ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 ARG GPU_ARCH=gfx950;gfx942
@@ -42,27 +41,23 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN python -m pip install --upgrade pip setuptools wheel pyyaml \
     && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
-# Python ROCm SDK + torch from https://repo.amd.com/rocm/whl-multi-arch/
-# Multi-arch layout: arch-agnostic wheels (rocm-sdk-libraries, torch, torchvision,
-# triton) installed once, then a per-GPU device wheel (rocm-sdk-device-<arch>,
-# amd_torch_device_<arch>, amd_torchvision_device_<arch>) for every arch in
-# GPU_ARCH (semicolon-separated, overridable via --build-arg).
-RUN W="https://repo.amd.com/rocm/whl-multi-arch" \
+# Python ROCm SDK + torch from https://stable.repo.amd.com/rocm/whl-next/
+RUN W="https://stable.repo.amd.com/rocm/whl-next" \
     && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
     && pip install --no-cache-dir \
         --extra-index-url "${W}" \
+        "rocm==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-core==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-devel==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-libraries==${ROCK_RELEASE_VERSION}" \
-        "${W}/rocm-${ROCK_RELEASE_VERSION}.tar.gz" \
-        "${W}/torch-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
-        "${W}/torchvision-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
-        "${W}/triton-${TRITON_VERSION}%2B${TRITON_LOCAL}.${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+        "torch==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
+        "torchvision==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" \
+        "triton==${TRITON_VERSION}+${TRITON_LOCAL}.${ROCM_WHEEL_TAG}" \
     && for arch in ${GPU_ARCH//;/ }; do \
          pip install --no-cache-dir --extra-index-url "${W}" \
            "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" \
-           "${W}/amd_torch_device_${arch}-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
-           "${W}/amd_torchvision_device_${arch}-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" ; \
+           "amd-torch-device-${arch}==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
+           "amd-torchvision-device-${arch}==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" ; \
        done
 
 # Install Jax
