@@ -6,13 +6,102 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <vector>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
+
+#if FA_WITH_SINK
+namespace {
+// D64 gfx1250 fmha_fwd_with_sink_asm (ENABLE_SINK=1): requires non-null sink_ptr
+// of shape [nhead] fp32 in "AITER post-scale domain".  The kernel adds
+// exp(sink_val[h]) to every row's softmax denominator.  We initialize to
+// -1e30f so expf(-1e30f)=0.0f in fp32 — zero contribution, matching the
+// UnfusedDotProductAttention reference which has no sink term.
+// D128 (ENABLE_SINK=0): dispatch guard rejects sink_ptr!=nullptr; leave null.
+//
+// The buffer is read-only to the kernel (an input logit vector, never written
+// back), so a single immutable buffer can be shared safely by any number of
+// concurrent kernel launches / host threads.
+//
+// We keep one buffer *per device*, allocated lazily and kept for the process
+// lifetime.
+constexpr int kSinkBufMaxHeads = 256;
+static std::mutex                      s_sink_mutex;
+static std::unordered_map<int, float*> s_sink_bufs;  // device id -> device buffer
+
+// Resolve the device a kernel launched on `stream` will execute on.
+int device_for_stream(hipStream_t stream){
+  hipDevice_t hip_dev = 0;
+  if(stream != nullptr) {
+    if (hipStreamGetDevice(stream, &hip_dev) == hipSuccess){
+      return static_cast<int>(hip_dev);
+    }
+  }
+  // Default/null stream, or query unsupported/failed: use the current device.
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){
+    throw std::runtime_error(
+      "ck_fused_attn fwd: hipGetDevice failed while resolving gfx1250 sink buffer device.");
+  }
+  return dev;
+}
+
+const void* get_gfx1250_sink_buf(int dev){
+  std::lock_guard<std::mutex> lock(s_sink_mutex);
+
+  auto it = s_sink_bufs.find(dev);
+  if(it != s_sink_bufs.end()){
+    return it->second;
+  }
+
+  // Allocate on the intended device regardless of the current device, then
+  // restore the previous current device so we don't perturb the caller.
+  int prev_dev = 0;
+  bool switched = false;
+  if(hipGetDevice(&prev_dev) == hipSuccess && prev_dev != dev){
+    if(hipSetDevice(dev) == hipSuccess){
+      switched = true;
+    }
+  }
+
+  float* buf = nullptr;
+  hipError_t err = hipMalloc(&buf, kSinkBufMaxHeads * sizeof(float));
+  if(err == hipSuccess && buf != nullptr){
+    std::vector<float> fill(kSinkBufMaxHeads, -1e30f);
+    err = hipMemcpy(buf, fill.data(),
+                    kSinkBufMaxHeads * sizeof(float), hipMemcpyHostToDevice);
+    if(err != hipSuccess){
+      hipFree(buf);
+      buf = nullptr;
+    }
+  } else {
+    buf = nullptr;
+  }
+
+  if(switched){
+    hipSetDevice(prev_dev);
+  }
+
+  if(buf == nullptr){
+    throw std::runtime_error(
+      std::string("ck_fused_attn fwd: failed to allocate/initialize gfx1250 sink "
+                  "buffer on device ") + std::to_string(dev)
+      + " (" + hipGetErrorString(err) + ").");
+  }
+
+  s_sink_bufs.emplace(dev, buf);
+  return buf;
+}
+}  // namespace
+#endif  //FA_WITH_SINK
 
 // print the fmha traits and fmha_args when calling ck apis
 void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, std::ostream* log_file){
@@ -90,6 +179,10 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
 
   log_value(log_file, "dropout_seed_ptr", std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
   log_value(log_file, "dropout_offset_ptr", std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
+
+  log_value(log_file, "num_splits", fmha_args.num_splits);
+  log_value(log_file, "splitkv_workspace_ptr", fmha_args.splitkv_workspace_ptr);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
 }
 
 void dump_fwd_timings(const char* dump_path, float average_runtime){
@@ -101,8 +194,8 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
 // Populate the AITER mha_fwd_args from TE's CKAttnFwdArgs. Shared by ck_attn_fwd
 // (real launch) and ck_attn_fwd_uses_v3 (v3 availability probe) so the probe can
 // never disagree with the launch. v3_api_check is left false here; callers flip it.
-// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
-// by ck_attn_fwd after this returns; it does not affect v3 kernel selection.
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) and sink_ptr
+// are applied by ck_attn_fwd after this returns; they do not affect v3 kernel selection.
 aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   bias_enum bias_type = bias_enum::no_bias;
@@ -215,6 +308,10 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   return fmha_args;
 }
 
+//Split-KV and Sink dispatchers do not honor v3_api_check
+//so we cannot rely on the AITER backend to tell us whether v3 is available.
+//Currently this method is not used so just opt it out.
+#if !(FA_WITH_SINK || FA_WITH_NATIVE_SPLITKV)
 // Probe whether AITER's v3 (asm) forward path will run for this config, without
 // launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
 // v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
@@ -225,16 +322,12 @@ bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
   ck_tile::stream_config stream_config{nullptr, false, false};
   return QOLA_NS(mha_fwd)(fmha_args, stream_config) == 1;
 }
+#endif
 
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   auto* log_file = get_ck_log_stream();
   // print kernel name on verbose mode
@@ -250,6 +343,12 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, args.cu_seqlen_q_padded_ptr, args.lse_ptr, stream);
     }
   }
+#if FA_WITH_SINK
+  if (args.uses_fwd_v3 && args.h <= kSinkBufMaxHeads &&
+      QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
+    fmha_args.sink_ptr = get_gfx1250_sink_buf(device_for_stream(stream));
+  }
+#endif
 
   // print ck traits and fmha_args when needed
   if(log_file){
@@ -285,4 +384,3 @@ size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args){
 }
 
 }//namespace ck_fused_attn
-

@@ -8,21 +8,6 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/transformer_engine/lib")
 
-#Corresponding runtime check is in nvte_get_fused_attn_backend()
-list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
-if(NOT _gfx1250_idx EQUAL -1)
-  message(WARNING
-    "Removing unsupported gfx1250 from CMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
-  list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
-  list(LENGTH CMAKE_HIP_ARCHITECTURES _hip_arch_count)
-  if(_hip_arch_count EQUAL 0)
-    message(FATAL_ERROR
-            "No supported architectures remain for the ck_fused_attn build. "
-            "Re-run the build with FUSED_ATTN_CK backend disabled.")
-  endif()
-  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
-endif()
-
 # QoLA itself and the AITER source tree are both resolved once by the parent
 # scope (transformer_engine/common) and shared by every QoLA module group, so
 # this directory only consumes them -- see the NVTE_QOLA_DIR override there and
@@ -173,7 +158,8 @@ set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
        src/ck_fused_attn_bwd.cpp
-       src/ck_fused_attn_utils.cpp)
+       src/ck_fused_attn_utils.cpp
+       src/ck_fused_attn_smallseq.cpp)
 
 message(STATUS "Found the following fused attention files:")
 foreach(file ${ck_fused_attn_SOURCES})
@@ -186,7 +172,7 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 #pragma in CK headers which is not supported by the compiler used to build TE.
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -Wno-unused-value -Wno-unknown-warning-option)
+    -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -DFA_WITH_SINK=1 -Wno-unused-value -Wno-unknown-warning-option)
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
@@ -199,6 +185,7 @@ target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inc
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 target_include_directories(ck_fused_attn PRIVATE ${__QOLA_INCLUDE_DIR})
+target_include_directories(ck_fused_attn PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/small_seq_kernels")
 
 find_package(hip)
 target_link_directories(ck_fused_attn PUBLIC ${__AITER_MHA_PATH})
@@ -207,6 +194,7 @@ target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
+# In CK_JIT mode the AITER libs are emitted directly into AITER_MHA_INSTALL_DIR
 if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
   install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${AITER_MHA_INSTALL_DIR})
 endif()
