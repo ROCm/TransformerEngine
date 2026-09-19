@@ -446,12 +446,10 @@ class Float8BlockScaling(Recipe):
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
-    amax_epsilon = 1e-4
-
     fp8_format: Format = Format.E4M3
-    fp8_quant_fwd_inp = QParams(power_2_scale=not use_f32_scales, amax_epsilon=amax_epsilon)
-    fp8_quant_fwd_weight = QParams(power_2_scale=not use_f32_scales, amax_epsilon=amax_epsilon)
-    fp8_quant_bwd_grad = QParams(power_2_scale=not use_f32_scales, amax_epsilon=amax_epsilon)
+    fp8_quant_fwd_inp = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1

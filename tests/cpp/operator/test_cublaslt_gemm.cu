@@ -1313,7 +1313,17 @@ struct BlockwiseParams {
   bool fp32_scales;
   float amax_epsilon;
   bool degenerate;
+  float src_scale;
 };
+
+void scale_source(Tensor* src, size_t n_elems, float factor) {
+  src->to_cpu();
+  bf16* p = src->rowwise_cpu_dptr<bf16>();
+  for (size_t i = 0; i < n_elems; ++i) {
+    p[i] = static_cast<bf16>(static_cast<float>(p[i]) * factor);
+  }
+  src->from_cpu();
+}
 
 // k-block 1 quantizes to a subnormal scale_inv and k-block 2 to ~22, so prev/curr spans >1e39.
 void inject_degenerate_kblocks(Tensor* src, size_t rows, size_t cols) {
@@ -1329,9 +1339,10 @@ void inject_degenerate_kblocks(Tensor* src, size_t rows, size_t cols) {
 
 Tensor make_blockwise_operand(const std::string& name, const std::vector<size_t>& shape,
                               NVTEScalingMode mode, bool force_pow2, float amax_epsilon,
-                              bool degenerate) {
+                              bool degenerate, float src_scale) {
   Tensor src(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&src);
+  if (src_scale != 0.0f) scale_source(&src, shape[0] * shape[1], src_scale);
   if (degenerate) inject_degenerate_kblocks(&src, shape[0], shape[1]);
 
   Tensor out(name, shape, DType::kFloat8E4M3, /*rowwise=*/true, /*columnwise=*/false, mode);
@@ -1372,9 +1383,9 @@ void performBlockwiseTest(const BlockwiseParams& p) {
       p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
 
   Tensor A = make_blockwise_operand("A", {p.m, p.k}, a_mode, force_pow2, p.amax_epsilon,
-                                    p.degenerate);
+                                    p.degenerate, p.src_scale);
   Tensor B = make_blockwise_operand("B", {p.n, p.k}, NVTE_BLOCK_SCALING_1D, force_pow2,
-                                    p.amax_epsilon, /*degenerate=*/false);
+                                    p.amax_epsilon, p.degenerate, /*src_scale=*/0.0f);
 
   Tensor D("D", TShape{p.n, p.m}, DType::kBFloat16);
   Tensor RefD("RefD", TShape{p.n, p.m}, DType::kBFloat16);
@@ -1420,23 +1431,27 @@ static std::string BlockwiseTestName(
                      (p.fp32_scales ? "fp32scales" : "pow2scales");
   name += p.amax_epsilon > 0.0f ? "xeps" : "xnoeps";
   if (p.degenerate) name += "xdegenerate";
+  if (p.src_scale != 0.0f) name += "xsmallmagnitude";
   return name;
 }
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTestBlockwise, BlockwiseGEMMTestSuite,
     ::testing::Values(
-        BlockwiseParams{256, 256, 256, false, false, 1e-4f, false},
-        BlockwiseParams{256, 256, 256, false, true,  1e-4f, false},
-        BlockwiseParams{256, 256, 256, true,  false, 1e-4f, false},
-        BlockwiseParams{256, 256, 256, true,  true,  1e-4f, false},
-        BlockwiseParams{320, 512, 336, false, false, 1e-4f, false},
-        BlockwiseParams{320, 512, 336, false, true,  1e-4f, false},
-        BlockwiseParams{1024, 4096, 1024, false, true, 1e-4f, false},
-        // Extreme dynamic range across K.
-        BlockwiseParams{256, 512, 256, false, true,  1e-4f, true},
-        BlockwiseParams{256, 512, 256, false, true,  0.0f,  true},
-        BlockwiseParams{256, 512, 256, false, false, 0.0f,  true}),
+        BlockwiseParams{256, 256, 256, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  true,  1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{1024, 4096, 1024, false, true, 1e-4f, false, 0.0f},
+        // Extreme dynamic range across K: pins kMinScaleInv from below.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  true,  0.0f},
+        // Real-wgrad magnitudes: pins kMinScaleInv from above.
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  false, 1e-9f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  false, 1e-9f}),
     BlockwiseTestName);
 
 #endif  // __HIP_PLATFORM_AMD__

@@ -19,7 +19,7 @@ struct ColScale { float v[WIDTH]; };
 template <int HEIGHT>
 struct RowRatio { float v[HEIGHT][4]; };
 
-constexpr float kMinScaleInv = 1e-30f;
+constexpr float kMinScaleInv = 1e-13f;
 
 __device__ __forceinline__ float floor_scale_inv(float s) { return fmaxf(s, kMinScaleInv); }
 
