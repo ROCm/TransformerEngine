@@ -796,7 +796,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Newton-Schulz matrix orthogonalization", py::arg("ctx_ptr"), py::arg("m"), py::arg("n"),
         py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
         py::call_guard<py::gil_scoped_release>());
-
+#endif
 
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",
@@ -804,9 +804,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
-#else
-  m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
-        "Dummy function for python side annotations");
   m.def(
       "reset_comm_gemm_cache",
       []() {
@@ -815,7 +812,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
       },
       "Drop every cached comm+GEMM plan");
-#endif
 
   // Experimental fused grouped MLP
   auto grouped_mlp_experimental = m.def_submodule(

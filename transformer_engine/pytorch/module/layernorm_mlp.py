@@ -26,6 +26,7 @@ from .base import (
     _ub_communicators,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
+    as_cuda_stream,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
     fused_wgrad_ag_eligible,
@@ -1656,6 +1657,8 @@ def _layernorm_mlp_backward_impl(
 
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_obj_fc2_dgrad.get_communication_stream()
+                dgrad_send_stream = as_cuda_stream(dgrad_send_stream)
+                dgrad_recv_stream = as_cuda_stream(dgrad_recv_stream)
 
                 ub_obj_fc2_wgrad = get_ub("fc2_wgrad", args.fp8)
 
@@ -2871,11 +2874,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 ub_overlap_ag = False
             if ub_overlap_rs and is_grad_enabled and not fused_rs_gemm_eligible(
                 "fc2_fprop", fc2_weight, fc2_bias_tensor, self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs = False
             if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
                 "fc1_dgrad", fc1_weight, None, self.activation_dtype, self.tp_size, self.fp8,
-                is_dgrad=True,
+                is_dgrad=True, mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
