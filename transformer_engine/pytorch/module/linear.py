@@ -23,6 +23,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
+    as_cuda_stream,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
     _ub_is_fused,
@@ -1181,6 +1182,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
+                dgrad_send_stream = as_cuda_stream(dgrad_send_stream)
+                dgrad_recv_stream = as_cuda_stream(dgrad_recv_stream)
 
                 # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
                 ub_obj_overlap_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)

@@ -205,7 +205,7 @@ def test_fused_layer_bulk_wgrad_bf16(nprocs):
     assert "qkv_wgrad" in eligible, eligible
 
 
-def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
+def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
     """Run the layer harness on a row-parallel Linear, which is the fused reduce-scatter's path."""
     test_cmd = (
         _fused_launch_cmd(nprocs)
@@ -223,6 +223,10 @@ def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
         ]
         + extra_args
     )
+    # "none" deliberately omits --fp8: that flag is what puts the UB in FP8 quantization mode and
+    # makes recipe.mxfp8() true, so passing it unconditionally would hide the bf16 path entirely.
+    if quantization != "none":
+        test_cmd += ["--fp8", f"--quantization={quantization}"]
     env = os.environ.copy()
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
@@ -231,39 +235,42 @@ def _run_fused_rs_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_rs_overlap_bf16(nprocs):
-    """bf16 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
+def test_fused_rs_overlap(nprocs, quantization):
+    """bf16 or mxfp8 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_rs_layer(
-        nprocs, [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
+        nprocs,
+        [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization=quantization,
     )
     _assert_numerics_passed(result)
     stderr = result.stderr.decode()
     assert "failed to launch" not in stderr, stderr
     disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
     assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
+    # Not disabled at setup, and no launch failure above: the fused RS kernel served this call
+    # rather than the generic path quietly standing in for it.
     assert "proj_fprop" not in disabled, disabled
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
-def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
-    """A quantized row-parallel Linear must fall back cleanly instead of reaching the bf16 kernel."""
-    if quantization.startswith("fp8") and not fp8_available:
+def test_fused_rs_overlap_rejects_delayed_scaling(nprocs):
+    """Delayed-scaling FP8 is outside the backend -- only MXFP8 1D scaling dispatches -- so a
+    row-parallel Linear on that recipe must fall back cleanly rather than reach the kernel."""
+    if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_rs_layer(
         nprocs,
-        [
-            f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
-            "--fp8",
-            f"--quantization={quantization}",
-        ],
+        [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization="fp8_delayed_scaling",
     )
     stderr = result.stderr.decode()
     assert "non-bf16 operand" not in stderr, f"a non-bf16 operand reached the kernel\n{stderr}"
+    assert "only supports MXFP8_1D_SCALING" not in stderr, f"the kernel was reached\n{stderr}"
     _assert_numerics_passed(result)
 
 

@@ -341,9 +341,38 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
   // TODO: Add bias support
   NVTE_CHECK(!accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0,
              "fused GEMM+RS reached with an unsupported epilogue");
-  NVTE_CHECK(A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 && rs_output.dtype() == DType::kBFloat16,
-             "fused GEMM+RS reached with a non-bf16 operand");
+  NVTE_CHECK(rs_output.dtype() == DType::kBFloat16, "fused GEMM+RS reached with a non-bf16 output");
   NVTE_CHECK(transa, "fused GEMM+RS is TN only");
+
+  bool is_bf16_input = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
+  auto is_fp8_dt = [](DType dt) {
+    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
+  };
+  bool is_fp8_input = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype());
+  NVTE_CHECK(is_bf16_input || is_fp8_input,
+             "fused GEMM+RS reached with unsupported operand types");
+
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
+
+  NVTE_CHECK(A_tensor->scaling_mode == B_tensor->scaling_mode,
+             "fused GEMM+RS expects A and B tensors to have the same scaling mode");
+  if (is_fp8_input  && A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
+    NVTE_ERROR("fused GEMM+RS with fp8 UB only supports MXFP8_1D_SCALING recipe");
+  }
+
+  // require row-wise for both operands for TN
+  if (is_fp8_input) {
+      NVTE_CHECK(A_tensor->has_data(), "fused GEMM+RS with MXFP8 reached with A missing row-wise usage");
+      NVTE_CHECK(B_tensor->has_data(), "fused GEMM+RS with MXFP8 reached with B missing row-wise usage");
+  }
+
+  const void* scale_A = nullptr;
+  const void* scale_B = nullptr;
+  if (is_fp8_input) {
+    scale_A =  A_tensor->scale_inv.dptr;
+    scale_B =  B_tensor->scale_inv.dptr;
+  }
 
   const size_t m       = (transa) ? A.size(0) : A.size(1);
   const size_t k       = (transa) ? A.size(1) : A.size(0);
@@ -356,7 +385,7 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      B.dptr(), A.dptr(), rs_output.dptr(), ubuf.dptr(),
+      A.dptr(), B.dptr(), rs_output.dptr(), scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -364,6 +393,11 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(tokens), static_cast<int>(k),
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
+  if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
+    return kittens_fused_rs_gemm_mxfp8(args);
+  }
   return kittens_fused_rs_gemm_bf16(args);
 }
 
@@ -470,7 +504,7 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      A.dptr(), B.dptr(), D.dptr(), ubuf.dptr(),
+      A.dptr(), B.dptr(), D.dptr(), nullptr, nullptr, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,

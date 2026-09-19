@@ -26,55 +26,82 @@ struct TileDesc {
 
 using namespace kittens;
 
-constexpr int RS_MAX_TP = 8;
-
 #ifndef COMM_WG
 #define COMM_WG 8
 #endif
 
-// Arrival poison, a comm workgroup still reading it knows the producing GEMM has not stored there yet
-// NOTE: These are signalling NaNs, so while hardware should never output them, if a user initializes their 
-// data or pads with this specific value, they will see hangs until the timeout is hit.
-#define RS_SENT_BF16 0xFFAAu
-#define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
+// RS_MAX_TP, the RS_SENT_* poison, RsPeers and pull_reduce_all_sent come from hk_overlap; this is
+// the device-side copy of the poison, mirroring the bf16 RS path.
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
 
-struct RsPeers {
-    bf16 *stage[RS_MAX_TP];
-};
+using G = kittens::group<NUM_WARPS>;
+
+// The MXFP8 K step, 128 rather than hk_overlap::K_STEP's bf16 64.
+constexpr int BLOCK_K = 128;
+
+// Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
+using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
+
+// Reads the pre-packed lane-native scale for group lg on this lane
+__device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg) {
+    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
+}
+
+// C is [N_TOTAL, M], the orientation mxfp8_gemm.cpp writes, so the col_l accumulators are
+// transposed before the store. Identical to the AG TN epilogue; the RS path just aims it at the
+// staging buffer instead of the caller's output.
+template<typename RT_C, typename RT_C_T, typename OutGL>
+__device__ __forceinline__ void gemm_epilogue(
+    RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
+    const OutGL &C, int block_row, int block_col, int warp_m, int warp_n) {
+
+    auto oc = [&](int n_off, int m_off) {
+        return kittens::coord<RT_C_T>{0, 0, block_col * WARPS_COL * 2 + n_off,
+                                            block_row * WARPS_ROW * 2 + m_off};
+    };
+
+    RT_C_T oA, oB, oC, oD;
+    kittens::transpose(oA, cA); kittens::transpose(oB, cB);
+    kittens::transpose(oC, cC); kittens::transpose(oD, cD);
+
+    kittens::store(C, oA, oc(warp_n, warp_m));
+    kittens::store(C, oB, oc(WARPS_COL + warp_n, warp_m));
+    kittens::store(C, oC, oc(warp_n, WARPS_ROW + warp_m));
+    kittens::store(C, oD, oc(WARPS_COL + warp_n, WARPS_ROW + warp_m));
+}
 
 struct CdWalk {
-    int q, tn, dq, dr;
+    int q, tf, dq, dr;   // tf indexes the free axis: M, now that the bands run along N
 };
 
 __host__ __device__ __forceinline__
-CdWalk cd_walk_init(int pos, int stride, int tiles_N) {
+CdWalk cd_walk_init(int pos, int stride, int tiles_free) {
     CdWalk w;
-    w.q  = pos / tiles_N;
-    w.tn = pos - w.q * tiles_N;
-    w.dq = stride / tiles_N;
-    w.dr = stride - w.dq * tiles_N;
+    w.q  = pos / tiles_free;
+    w.tf = pos - w.q * tiles_free;
+    w.dq = stride / tiles_free;
+    w.dr = stride - w.dq * tiles_free;
     return w;
 }
 
 template <int TP>
 __host__ __device__ __forceinline__
 TileDesc cd_walk_desc(CdWalk w, int my_pe, int bands) {
-    const int j  = w.q % TP;
-    const int tm = w.q / TP;
+    const int j   = w.q % TP;
+    const int tnb = w.q / TP;
     TileDesc td;
     td.chunk_id = (j == 0) ? my_pe : ((j - 1 < my_pe) ? j - 1 : j);
-    td.tile_m   = td.chunk_id * bands + tm;
-    td.tile_n   = w.tn;
+    td.tile_n   = td.chunk_id * bands + tnb;
+    td.tile_m   = w.tf;
     return td;
 }
 
 __host__ __device__ __forceinline__
-CdWalk cd_walk_next(CdWalk w, int tiles_N) {
+CdWalk cd_walk_next(CdWalk w, int tiles_free) {
     w.q  += w.dq;
-    w.tn += w.dr;
-    if (w.tn >= tiles_N) {
-        w.tn -= tiles_N;
+    w.tf += w.dr;
+    if (w.tf >= tiles_free) {
+        w.tf -= tiles_free;
         w.q  += 1;
     }
     return w;
@@ -83,24 +110,24 @@ CdWalk cd_walk_next(CdWalk w, int tiles_N) {
 // Grid layout: [0, ncomm) communication workgroups, the rest draining the tile queue.
 template <int TP, int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
-void persistent_rs_mxfp8_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1, -1, -1> B,
+void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m3, 1, 1, -1, -1> B,
                              bf16 *__restrict__ local_stage, bf16 *__restrict__ out,
+                             const gl<bf16, 1, 1, -1, -1> C_stage,
                              const gl<fp8e8m0, -1, 1, 16, 64> scale_A_gl,
                              const gl<fp8e8m0, -1, 1, 16, 64> scale_B_gl,
                              const TileDesc *__restrict__ work_queue, int num_tiles,
                              int *__restrict__ tile_counter, const RsPeers peers,
                              int my_pe, int ncomm,
-                             int bands, int tiles_N,
-                             int wb_group, uint64_t warn_ticks) {
+                             int bands, int wb_group, 
+                             uint64_t warn_ticks) {
     const int M       = A.rows();
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
-    const int k_tiles = K / K_STEP;
-    (void)M;
+    const int k_iters = K / BLOCK_K;
 
     const size_t band_elems = (size_t)BLOCK_COL * M;
 
-#include "tn_prologue.inc"
+    #include "mxfp8_tn_prologue.inc"
 
     if ((int)blockIdx.x < ncomm) {
         // The comm workgroups are the reduce-scatter: they read all eight sources and write `out` once.
@@ -115,7 +142,7 @@ void persistent_rs_mxfp8_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 
     int hy_left      = (hy_vid >= 0) ? hy_R : 0;
     int hy_tick      = hy_vid;
     int wb_tick      = 0;
-    CdWalk hy_cd     = cd_walk_init((hy_vid >= 0) ? hy_vid : 0, (hy_ncw > 0) ? hy_ncw : 1, tiles_N);
+    CdWalk hy_cd     = cd_walk_init((hy_vid >= 0) ? hy_vid : 0, (hy_ncw > 0) ? hy_ncw : 1, tiles_M);
     while (true) {
         __shared__ int s_tile_idx;
         const bool hy_static = (hy_left > 0);
@@ -133,61 +160,64 @@ void persistent_rs_mxfp8_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 
         TileDesc desc;
         if (hy_static) {
             desc    = cd_walk_desc<TP>(hy_cd, my_pe, bands);
-            hy_cd   = cd_walk_next(hy_cd, tiles_N);
+            hy_cd   = cd_walk_next(hy_cd, tiles_M);
             hy_tick += hy_ncw;
             hy_left -= 1;
         } else {
             desc = work_queue[tile_idx];
         }
 
-        const int owner = desc.chunk_id;
-        const int lrow  = desc.tile_m - owner * bands;
-
         int block_row = desc.tile_m;
         int block_col = desc.tile_n;
 
-        RT_A a_tile;
-        RT_B b_tile_0, b_tile_1;
-        RT_C c00, c01, c10, c11;
-        zero(c00); zero(c01); zero(c10); zero(c11);
+        int a_half0 = block_row * 2;
+        int a_half1 = a_half0 + 1;
+        int b_half0 = block_col * 2;
+        int b_half1 = b_half0 + 1;
+
+        int sa_stride = tiles_M;
+        int sb_stride = tiles_N;
+        int sa_batch = block_row;
+        int sb_batch = block_col;
+
+        RT_A a;
+        RT_B b0, b1;
+        RT_C cA, cB, cC, cD;
+        kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
         int tic = 0, toc = 1;
+        int tic_scales = 0, toc_scales = 1;
 
-        G_group::load(Bs[tic][0], B, {0, 0, block_col * 2,     0}, sw_B, b_srd, b_base, b_lds_00);
-        G_group::load(As[tic][0], A, {0, 0, block_row * 2,     0}, sw_A, a_srd, a_base, a_lds_00);
-        G_group::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, 0}, sw_B, b_srd, b_base, b_lds_01);
-        G_group::load(As[tic][1], A, {0, 0, block_row * 2 + 1, 0}, sw_A, a_srd, a_base, a_lds_01);
+        G::load(Bs[tic][0], B_local, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A);
+        G::load(Bs[tic][1], B_local, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
+        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A);
 
-        if (warp_m == 1) {
-            __builtin_amdgcn_s_barrier();
-        }
-
-        asm volatile("s_waitcnt vmcnt(4)");
+        if (warp_m == 1) __builtin_amdgcn_s_barrier();
+        asm volatile("s_waitcnt vmcnt(4)"); // wait for tic[0] halves; tic[1] halves still in flight
         __builtin_amdgcn_s_barrier();
 
-        G_group::load(Bs[toc][0], B, {0, 0, block_col * 2,     1}, sw_B, b_srd, b_base, b_lds_10);
-        G_group::load(As[toc][0], A, {0, 0, block_row * 2,     1}, sw_A, a_srd, a_base, a_lds_10);
-        G_group::load(Bs[toc][1], B, {0, 0, block_col * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds_11);
-
-        asm volatile("s_waitcnt vmcnt(4)");
+        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A);
+        G::load(Bs[toc][0], B_local, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
+        G::load(Bs[toc][1], B_local, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        asm volatile("s_waitcnt vmcnt(6)"); // wait for tic[1] halves; 3 toc loads + scales in flight
         __builtin_amdgcn_s_barrier();
 
-#pragma unroll 1
-#include "tn_mainloop.inc"
+        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
+        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
+        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
+        asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM before first MMA
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
 
-        bf16 *sbase = local_stage + ((size_t)owner * bands + lrow) * band_elems;
+        #define MXFP8_AG_SKEW_CLOSE 1
+        #include "../mxfp8_tn_mainloop.inc"
+        #undef MXFP8_AG_SKEW_CLOSE
 
-        const int rf0 = __builtin_amdgcn_readfirstlane(warp_m);
-        const int rf1 = __builtin_amdgcn_readfirstlane(WARPS_ROW + warp_m);
-        const int cf0 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + warp_n);
-        const int cf1 = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL * 2 + WARPS_COL + warp_n);
-        int lane_epi  = kittens::laneid();
-        asm volatile("" : "+v"(lane_epi));
-
-        store_c_tile<bf16>(sbase, c00, rf0, cf0, N_TOTAL, lane_epi);
-        store_c_tile<bf16>(sbase, c01, rf0, cf1, N_TOTAL, lane_epi);
-        store_c_tile<bf16>(sbase, c10, rf1, cf0, N_TOTAL, lane_epi);
-        store_c_tile<bf16>(sbase, c11, rf1, cf1, N_TOTAL, lane_epi);
+        // The stage is [dest_rank][band][BLOCK_COL x M]; destination `chunk_id` owns a contiguous
+        // run of N tiles, so chunk_id*bands + (tile_n - chunk_id*bands) == tile_n == block_col and
+        // the whole stage indexes as one [N_TOTAL, M] array -- the AG path's C, verbatim.
+        gemm_epilogue<RT_C, RT_C_T>(cA, cB, cC, cD, C_stage, block_row, block_col, warp_m, warp_n);
 
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
         __syncthreads();
@@ -243,7 +273,7 @@ struct RsLaunchCfg {
 };
 
 template <int CBSZ, int BLGP>
-static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b,
+static void launch_persistent_rs(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b,
                                  bf16 *d_local_stage, bf16 *d_out, uint32_t* packed_sa,
                                  uint32_t* packed_sb, TileDesc *d_queue, int num_tiles,
                                  int *d_tile_counter, RsPeers peers,
@@ -251,10 +281,14 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b
                                  hipStream_t stream) {
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N_TOTAL / BLOCK_COL;
-    const int bands   = (M / tp_size) / BLOCK_ROW;
+    const int bands   = (N_TOTAL / tp_size) / BLOCK_COL;
+    const int k_iters = K / BLOCK_K;
 
-    gl<bf16, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M,       (size_t)K);
-    gl<bf16, 1, 1, -1, -1> B_gl(d_b, nullptr, nullptr, (size_t)N_TOTAL, (size_t)K);
+    gl<fp8e4m3, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M,       (size_t)K);
+    gl<fp8e4m3, 1, 1, -1, -1> B_gl(d_b, nullptr, nullptr, (size_t)N_TOTAL, (size_t)K);
+
+    // The staging buffer in full is exactly the [N_TOTAL, M] output the AG TN path writes.
+    gl<bf16, 1, 1, -1, -1> C_stage(d_local_stage, nullptr, nullptr, (size_t)N_TOTAL, (size_t)M);
 
     gl<fp8e8m0, -1, 1, 16, 64> SA_gl(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
                                      k_iters * tiles_M, nullptr, nullptr, nullptr);
@@ -268,10 +302,10 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b
     int grid = tiles_M * tiles_N + ncomm;
     if (grid > GRID_CAP) grid = GRID_CAP;
     if (grid < ncomm + 1) grid = ncomm + 1;
-#define RS_LAUNCH(TPV, CBSZ, BLGP)                                                                         \
+#define RS_LAUNCH(TPV)                                                                                     \
     persistent_rs_mxfp8_gemm<TPV, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(                            \
-        A_gl, B_gl, d_local_stage, d_out, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter, peers,           \
-        my_pe, ncomm, bands, tiles_N, cfg.wb_group, cfg.warn_ticks)
+        A_gl, B_gl, d_local_stage, d_out, C_stage, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter,        \
+        peers, my_pe, ncomm, bands, cfg.wb_group, cfg.warn_ticks)
 
     switch (tp_size) {
         case 8: RS_LAUNCH(8); break;
@@ -281,4 +315,20 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b
 #undef RS_LAUNCH
 }
 
-}  // namespace hk_rs_mxfp8_tn
+using persistent_rs_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, bf16 *, uint32_t *,
+                                    uint32_t *, TileDesc *, int, int *, RsPeers, int, int,
+                                    const RsLaunchCfg &, hipStream_t);
+
+// MFMA cbsz/blgp operand format codes: 0 = e4m3, 1 = e5m2, per operand. HYBRID recipes quantize
+// backward tensors e5m2 while forward ones stay e4m3, so the pair genuinely mixes. Unlike the AG
+// side there is no layout dimension to dispatch on: fused RS is TN only.
+static persistent_rs_fn_t get_persistent_rs_fn(KittensDType a_dt, KittensDType b_dt) {
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
+    if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent_rs<0, 0>;
+    if (a_fp8_code == 0 && b_fp8_code == 1) return launch_persistent_rs<0, 1>;
+    if (a_fp8_code == 1 && b_fp8_code == 0) return launch_persistent_rs<1, 0>;
+    if (a_fp8_code == 1 && b_fp8_code == 1) return launch_persistent_rs<1, 1>;
+    return nullptr;
+}
+
+}  // namespace hk_mxfp8_rs_tn

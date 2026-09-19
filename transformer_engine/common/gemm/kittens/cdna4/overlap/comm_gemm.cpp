@@ -12,6 +12,7 @@
 #include "../../kittens_kernel_common.cuh"
 #include "bulk_rs_gemm_nt.cuh"
 #include "fused_rs_gemm_tn.cuh"
+#include "fused_rs_mxfp8_gemm_tn.cuh"
 
 #include <array>
 #include <cstdio>
@@ -1019,8 +1020,10 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();
 
-    launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.A)),
-                         static_cast<bf16 *>(const_cast<void *>(args.B)), local_stage,
+    // Operands arrive BLAS-canonical (A = weight, B = activation). This kernel puts tokens on its
+    // M axis, so the activation goes in the A slot -- the same swap run_bulk_rs makes.
+    launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.B)),
+                         static_cast<bf16 *>(const_cast<void *>(args.A)), local_stage,
                          static_cast<bf16 *>(args.D), static_cast<TileDesc *>(plan.queue),
                          plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
                          args.stream);
@@ -1030,6 +1033,11 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
 // Shape and pointer requirements shared by rs entry points
 static_assert(hk_rs_tn::BLOCK_ROW == 256 && hk_rs_tn::BLOCK_COL == 256 && hk_rs_tn::K_STEP == 64,
               "rs_guards_ok literals are stale against hk_rs_tn geometry");
+// The MXFP8 RS path shares the 256x256 tile but steps K by BLOCK_K, not the bf16 K_STEP; ok_k's
+// "% 128" literal is that step, so it has to be pinned here as well.
+static_assert(hk_mxfp8_rs_tn::BLOCK_ROW == 256 && hk_mxfp8_rs_tn::BLOCK_COL == 256 &&
+              hk_mxfp8_rs_tn::BLOCK_K == 128,
+              "rs_guards_ok literals are stale against hk_mxfp8_rs_tn geometry");
 
 bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     using namespace hk_mxfp8_rs_tn;
@@ -1040,10 +1048,14 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     const int K       = args.k;
     const int tp_size = args.nranks;
     const int bands   = (N_TOTAL / tp_size) / BLOCK_COL;
+    const int tiles_m = M / BLOCK_ROW;
+    const int tiles_n = N_TOTAL / BLOCK_COL;
+    const int k_iters = K / BLOCK_K;
+    const int scale_K = K / 32;
 
     std::lock_guard<std::mutex> lock(g_mu);
 
-    const PlanKey key{2, M, N_TOTAL, K, tp_size, args.rank, 1};
+    const PlanKey key{3, M, N_TOTAL, K, tp_size, args.rank, 1};
     auto it = g_rs_plans.find(key);
     if (it == g_rs_plans.end()) {
         RsPlan plan;
@@ -1066,7 +1078,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
-    launch_pack_scales<L::A_SCALE_COLWISE, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters, args.stream);
     launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
@@ -1103,45 +1115,80 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
         args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
 
     RsLaunchCfg cfg;
-    cfg.comm_wg    = rs_comm_wg_tn(M, N_TOTAL, K);
+    // rs_comm_wg_tn is (tokens, hidden, k_local); under this path's BLAS roles N_TOTAL is the
+    // token axis and M the hidden one, the opposite of run_fused_rs's naming.
+    cfg.comm_wg    = rs_comm_wg_tn(N_TOTAL, M, K);
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();
 
-    launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.A)),
-                         static_cast<bf16 *>(const_cast<void *>(args.B)), local_stage,
-                         static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
-                         plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
-                         args.stream);
+    // 4. Operands are MXFP8, not bf16; CBSZ/BLGP travel with them.
+    auto launch = get_persistent_rs_fn(args.a_dtype, args.b_dtype);
+    if (!launch) return false;   // unexpected operand format pair
+
+    launch(M, N_TOTAL, K, static_cast<fp8e4m3 *>(const_cast<void *>(args.A)),
+           static_cast<fp8e4m3 *>(const_cast<void *>(args.B)), local_stage,
+           static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
+           plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
+           args.stream);
     return hipGetLastError() == hipSuccess;
 }
 
+// Named by role rather than by either kernel's M/N spelling, because the two RS kernels disagree
+// on that spelling and the difference is pure naming: run_fused_rs swaps m/n so tokens land on its
+// M axis, run_fused_rs_mxfp8 keeps mxfp8_gemm.cpp's BLAS roles so tokens stay on its N axis. Both
+// read args.n as tokens and args.m as hidden, and BLOCK_ROW == BLOCK_COL == 256, so every predicate
+// below is value-identical for the two -- only `bands` moves axis, not extent.
 bool rs_guards_ok(const KittensRsGemmArgs &args) {
-    const int M       = args.n;
-    const int N_TOTAL = args.m;
+    const int tokens  = args.n;
+    const int hidden  = args.m;
     const int K       = args.k;
     const int tp_size = args.nranks;
-    const int bands   = (M / tp_size) / 256;
+    const int bands   = (tokens / tp_size) / 256;
 
     // Order matters here
-    const bool ok_tp    = (tp_size == 4 || tp_size == 8) && tp_size <= args.peer_count;
-    const bool ok_rank  = args.rank >= 0 && args.rank < tp_size;
-    const bool ok_m     = M % (tp_size * 256) == 0;
-    const bool ok_n     = N_TOTAL % 256 == 0;
-    const bool ok_k     = K % 128 == 0 && K >= 256;
-    const bool ok_bands = bands >= 1;
-    const bool ok_shard = args.shard_bytes != 0 &&
-        args.shard_bytes == static_cast<size_t>(M) / tp_size * N_TOTAL * sizeof(uint16_t);
-    const bool ok_ptrs  = args.workspace && args.ub && args.A && args.B && args.D && args.peer_ub;
-    const bool ok = ok_tp && ok_rank && ok_m && ok_n && ok_k && ok_bands && ok_shard && ok_ptrs;
+    const bool ok_tp     = (tp_size == 4 || tp_size == 8) && tp_size <= args.peer_count;
+    const bool ok_rank   = args.rank >= 0 && args.rank < tp_size;
+    const bool ok_tokens = tokens % (tp_size * 256) == 0;
+    const bool ok_hidden = hidden % 256 == 0;
+    const bool ok_k      = K % 128 == 0 && K >= 256;
+    const bool ok_bands  = bands >= 1;
+    const bool ok_shard  = args.shard_bytes != 0 &&
+        args.shard_bytes == static_cast<size_t>(tokens) / tp_size * hidden * sizeof(uint16_t);
+    const bool ok_ptrs   = args.workspace && args.ub && args.A && args.B && args.D && args.peer_ub;
+    const bool ok = ok_tp && ok_rank && ok_tokens && ok_hidden && ok_k && ok_bands && ok_shard &&
+                    ok_ptrs;
 
     // NVTE_RS_DIAG=1 reports which guard rejected a shape, and the geometry, once per call.
     if (!ok && std::getenv("NVTE_RS_DIAG")) {
         const FusedRsLayout l = fused_rs_layout(args.shard_bytes, tp_size);
         std::fprintf(stderr,
-            "[RS_DIAG] M=%d N=%d K=%d tp=%d bands=%d shard=%zu stage=%zu total=%zu "
-            "tp:%d rank:%d m:%d n:%d k:%d bands:%d shard:%d ptrs:%d\n",
-            M, N_TOTAL, K, tp_size, bands, args.shard_bytes, l.stage_bytes, l.total_bytes,
-            ok_tp, ok_rank, ok_m, ok_n, ok_k, ok_bands, ok_shard, ok_ptrs);
+            "[RS_DIAG] tokens=%d hidden=%d K=%d tp=%d bands=%d shard=%zu stage=%zu total=%zu "
+            "tp:%d rank:%d tokens:%d hidden:%d k:%d bands:%d shard:%d ptrs:%d\n",
+            tokens, hidden, K, tp_size, bands, args.shard_bytes, l.stage_bytes, l.total_bytes,
+            ok_tp, ok_rank, ok_tokens, ok_hidden, ok_k, ok_bands, ok_shard, ok_ptrs);
+    }
+    return ok;
+}
+
+// The MXFP8 RS path adds the operand preconditions the shape core cannot see: both operands are
+// FP8 (either format per operand, as HYBRID recipes mix them) and each carries a scale buffer that
+// launch_pack_scales dereferences unconditionally.
+bool rs_guards_ok_mxfp8(const KittensRsGemmArgs &args) {
+    if (!rs_guards_ok(args)) return false;
+
+    const auto is_fp8 = [](KittensDType dt) {
+        return dt == KITTENS_FP8E4M3 || dt == KITTENS_FP8E5M2;
+    };
+    const bool ok_dtype = is_fp8(args.a_dtype) && is_fp8(args.b_dtype);
+    const bool ok_scale = args.scale_A && args.scale_B;
+    // MXFP8 scales one e8m0 per 32 elements along K; ok_k's "% 128" already implies "% 32", so the
+    // scale rows divide evenly and no separate predicate is needed here.
+    const bool ok = ok_dtype && ok_scale;
+
+    if (!ok && std::getenv("NVTE_RS_DIAG")) {
+        std::fprintf(stderr, "[RS_DIAG] mxfp8 a_dtype=%d b_dtype=%d dtype:%d scale:%d\n",
+                     static_cast<int>(args.a_dtype), static_cast<int>(args.b_dtype),
+                     ok_dtype, ok_scale);
     }
     return ok;
 }
@@ -1282,4 +1329,9 @@ bool kittens_fused_rs_gemm_shape_ok_cdna4(int tokens, int hidden, int k, int tp_
 bool kittens_fused_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
     if (!rs_guards_ok(args)) return false;
     return run_fused_rs(args);
+}
+
+bool kittens_fused_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args) {
+    if (!rs_guards_ok_mxfp8(args)) return false;
+    return run_fused_rs_mxfp8(args);
 }

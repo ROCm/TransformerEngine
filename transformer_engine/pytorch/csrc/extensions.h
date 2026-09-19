@@ -777,14 +777,14 @@ void rocshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_
 void rocshmem_finalize();
 #endif
 
-#ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
-                                        at::Stream recv_stream);
-#endif // !USE_ROCM
+// Takes CommOverlapCore, where bulk_overlap_external_ag is declared virtual: on ROCm every
+// "fused" overlap name is backed by CommOverlapP2P, which does not derive from CommOverlap.
+void bulk_overlap_ag_with_external_gemm(transformer_engine::CommOverlapCore &allgather_communicator,
+                                        at::Stream send_stream, at::Stream recv_stream);
 
 /***************************************************************************************************
  * Newton-Schulz (cuSolverMp)

@@ -539,11 +539,10 @@ std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
           at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};
 }
 
-#ifndef USE_ROCM
 void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
-    CommOverlap &allgather_communicator, at::Stream send_stream, at::Stream recv_stream) {
+    transformer_engine::CommOverlapCore &allgather_communicator, at::Stream send_stream,
+    at::Stream recv_stream) {
   auto main_stream = at::cuda::getCurrentCUDAStream();
   allgather_communicator.bulk_overlap_external_ag(at::cuda::CUDAStream(send_stream),
                                                   at::cuda::CUDAStream(recv_stream), main_stream);
 }
-#endif

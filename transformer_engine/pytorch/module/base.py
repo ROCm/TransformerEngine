@@ -701,6 +701,22 @@ def fused_ag_gemm_eligible(
     return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
 
 
+def as_cuda_stream(stream: torch.Stream) -> torch.cuda.Stream:
+    """Retype a Userbuffers communication stream so torch.cuda.stream() accepts it.
+
+    get_communication_stream() returns a generic torch.Stream. On ROCm its device reports as
+    "hip", and torch.cuda.stream() -> _get_device_index() rejects anything whose device.type is
+    not "cuda". The underlying handle is fine, so rebuild it as a torch.cuda.Stream.
+    """
+    if isinstance(stream, torch.cuda.Stream):
+        return stream
+    return torch.cuda.Stream(
+        stream_id=stream.stream_id,
+        device_index=stream.device_index,
+        device_type=torch.cuda.Stream().device_type,
+    )
+
+
 def fused_rs_gemm_eligible(
     name: str,
     weight: torch.Tensor,
@@ -710,14 +726,17 @@ def fused_rs_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether the fused GEMM+RS backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
     if is_dgrad:
         return False
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
+    if gelu or bias is not None:
+        return False
+    if fp8 and not mxfp8:
         return False
     if dtype != torch.bfloat16:
         return False

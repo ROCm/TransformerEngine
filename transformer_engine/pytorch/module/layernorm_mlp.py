@@ -27,6 +27,7 @@ from .base import (
     _ub_communicators,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
+    as_cuda_stream,
     fused_bulk_ag_eligible,
     get_ub,
     get_ub_is_fp8,
@@ -417,10 +418,12 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_overlap_ag = False
         if ub_overlap_rs and not fused_rs_gemm_eligible(
             "fc2_fprop", fc2_weight, fc2_bias, activation_dtype, tp_size, fp8,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_overlap_rs = False
         if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
             "fc1_dgrad", fc1_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_overlap_rs_dgrad = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
@@ -1401,6 +1404,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     dgrad_send_stream, dgrad_recv_stream = (
                         ub_obj_fc2_dgrad.get_communication_stream()
                     )
+                    dgrad_send_stream = as_cuda_stream(dgrad_send_stream)
+                    dgrad_recv_stream = as_cuda_stream(dgrad_recv_stream)
 
                     ub_obj_fc2_wgrad = get_ub("fc2_wgrad", ctx.fp8)
 

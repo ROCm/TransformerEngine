@@ -79,7 +79,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
     const int k_iters = K / BLOCK_K;
-#include "mxfp8_tn_prologue.inc"
+    #include "mxfp8_tn_prologue.inc"
 
     const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {

@@ -26,22 +26,13 @@ struct TileDesc {
 
 using namespace kittens;
 
-constexpr int RS_MAX_TP = 8;
-
 #ifndef COMM_WG
 #define COMM_WG 8
 #endif
 
-// Arrival poison, a comm workgroup still reading it knows the producing GEMM has not stored there yet
-// NOTE: These are signalling NaNs, so while hardware should never output them, if a user initializes their 
-// data or pads with this specific value, they will see hangs until the timeout is hit.
-#define RS_SENT_BF16 0xFFAAu
-#define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
+// RS_MAX_TP, the RS_SENT_* poison and RsPeers come from hk_overlap; this is the device-side copy of
+// the poison that comm_gemm.cpp's sentinel_pattern_agrees() reads back to confirm host/device agree.
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
-
-struct RsPeers {
-    bf16 *stage[RS_MAX_TP];
-};
 
 struct CdWalk {
     int q, tn, dq, dr;
@@ -78,94 +69,6 @@ CdWalk cd_walk_next(CdWalk w, int tiles_N) {
         w.q  += 1;
     }
     return w;
-}
-
-typedef int rs_v4i __attribute__((ext_vector_type(4)));
-typedef const volatile __attribute__((address_space(1))) rs_v4i *rs_gvol4;
-
-__device__ __forceinline__
-rs_v4i sent_load16(const rs_v4i *p) {
-    return *(rs_gvol4)(size_t)p;
-}
-
-// NOTE: a dword compare can match a half of a real value that happens to equal the poison half.
-__device__ __forceinline__
-unsigned int sent_slot_pending(const int *__restrict__ v) {
-    unsigned int hit = 0u;
-#pragma unroll
-    for (int j = 0; j < 4; j++) {
-        const unsigned int y = (unsigned int)v[j] ^ RS_SENT_DW;
-        hit |= (y - 0x00010001u) & ~y & 0x80008000u;
-    }
-    return hit;
-}
-
-template <int TP, bool NT>
-__device__ __forceinline__
-void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
-                          const bf16 *__restrict__ local_stage, const RsPeers &peers,
-                          bf16 *__restrict__ out, size_t band_elems, uint64_t warn_ticks) {
-    const int w = (int)blockIdx.x;
-    const size_t lines = band_elems / 8;
-    typedef int v4i __attribute__((ext_vector_type(4)));
-
-    const uint64_t deadline = warn_ticks ? wall_clock64() + warn_ticks : 0;
-    bool warned = (warn_ticks == 0);
-
-    const size_t per_g = (lines + (size_t)ncomm - 1) / (size_t)ncomm;
-    const size_t g0    = (size_t)w * per_g;
-    if (g0 >= lines) return;
-    const size_t g1    = (g0 + per_g < lines) ? (g0 + per_g) : lines;
-
-    for (int b0 = 0; b0 < bands; b0++) {
-        const size_t soff = ((size_t)my_pe * bands + b0) * band_elems;
-        v4i *dst          = (v4i *)(out + (size_t)b0 * band_elems);
-
-        for (size_t l = g0 + threadIdx.x; l < g1; ) {
-            float acc[8];
-            unsigned int pend = 0u;
-#pragma unroll 1
-            for (int s = 0; s < TP; s++) {
-                const bf16 *base = (s == my_pe) ? local_stage : peers.stage[s];
-                const v4i v = sent_load16((const rs_v4i *)(base + soff) + l);
-                pend |= sent_slot_pending((const int *)&v);
-                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
-                if (s == 0) {
-#pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
-                } else {
-#pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
-                }
-            }
-            if (pend != 0u) {
-                if (!warned && wall_clock64() > deadline) {
-                    unsigned int srcs = 0u;
-#pragma unroll 1
-                    for (int s = 0; s < TP; s++) {
-                        const bf16 *b = (s == my_pe) ? local_stage : peers.stage[s];
-                        const v4i pv = sent_load16((const rs_v4i *)(b + soff) + l);
-                        if (sent_slot_pending((const int *)&pv)) srcs |= (1u << s);
-                    }
-                    printf("[fused GEMM+RS] fold still waiting: my_pe=%d block=%d band=%d "
-                           "line=%llu pending_srcs=0x%02x\n",
-                           my_pe, (int)blockIdx.x, b0, (unsigned long long)l, srcs);
-                    warned = true;
-                }
-                continue;
-            }
-            v4i res;
-            __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&res);
-#pragma unroll
-            for (int j = 0; j < 8; j++) a[j] = __float2bfloat16(acc[j]);
-            if (NT) {
-                __builtin_nontemporal_store(res, &dst[l]);
-            } else {
-                dst[l] = res;
-            }
-            l += blockDim.x;
-        }
-    }
 }
 
 // Grid layout: [0, ncomm) communication workgroups, the rest draining the tile queue.
