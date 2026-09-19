@@ -29,6 +29,8 @@ from .base import (
     fused_rs_gemm_eligible,
     as_cuda_stream,
     fused_bulk_ag_eligible,
+    fused_bulk_rs_eligible,
+    fused_wgrad_ag_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -431,6 +433,13 @@ class _LayerNormMLP(torch.autograd.Function):
             mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_bulk_dgrad = False
+        # The bulk reduce-scatter kernel is bf16 only and declines anything else, which trips the
+        # NVTE_CHECK in fused_overlap_bulk_rs rather than falling back. linear.py and
+        # layernorm_linear.py already gate on this; LayerNormMLP did not.
+        if ub_bulk_wgrad and not fused_bulk_rs_eligible(
+            "fc1_wgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+        ):
+            ub_bulk_wgrad = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -1318,6 +1327,27 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 fc2_weight.update_usage(columnwise_usage=True)
 
+            # ROCm fused backend: the fc2 dgrad kernel can carry a second all-gather for the
+            # column-scaled grad output, so upstream's external AG on borrowed dgrad streams is
+            # not needed. It rides inside this GEMM, so the region is staged before it launches.
+            ub_obj_fc2_wgrad_ag = None
+            grad_output_wgrad = None
+            ub_fused_wgrad_ag = (
+                ctx.fc2_weight_requires_grad
+                and ctx.ub_overlap_ag
+                and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
+                and fused_wgrad_ag_eligible("fc2")
+            )
+            if ub_fused_wgrad_ag:
+                ub_obj_fc2_wgrad_ag = get_ub("fc2_wgrad", ctx.fp8)
+                ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                    ub_obj_fc2_wgrad_ag,
+                    grad_outputs[0],
+                    ctx.fc2_grad_output_quantizer,
+                    ctx.tp_group,
+                )
+
             # Perform GEMM
             gemm_output, *_ = general_gemm(
                 fc2_weight,
@@ -1334,6 +1364,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 gelu_in=fc1_out if fc2_dgrad_gemm_gelu_fusion else None,
                 use_split_accumulator=dgrad_use_split_accumulator,
                 ub=ub_obj_fc2_dgrad,
+                ub2=ub_obj_fc2_wgrad_ag,
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
 
@@ -1392,7 +1423,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                if ub_fused_wgrad_ag:
+                    # The fc2 dgrad kernel carried the column-scaled gather into the fc2_wgrad
+                    # region, so the view staged above that GEMM is already complete.
+                    grad_output = grad_output_wgrad
+                elif ctx.ub_overlap_ag and isinstance(
+                    ctx.fc2_grad_output_quantizer, MXFP8Quantizer
+                ):
                     # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we

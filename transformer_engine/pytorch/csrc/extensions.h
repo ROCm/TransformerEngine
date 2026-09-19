@@ -151,6 +151,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
+                             CommOverlapCore *comm_overlap2 = nullptr,
                              std::optional<CommOverlapType> comm_type = std::nullopt,
                              MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
                              float alpha = 1.0f, std::optional<float> beta = std::nullopt);

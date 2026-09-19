@@ -841,6 +841,35 @@ def _main(opts):
 
     # Compare against standard GEMM
     numerics_failed = False
+
+    # The peers' rows of the scale region base.py hands out are kernel output that no GEMM reads
+    # back, so only this check catches a stale one.
+    check_ub_scales = (
+        opts.check_numerics
+        and ag_out is not None
+        and not opts.bulk_overlap
+        and isinstance(ub_obj, tex.CommOverlapP2P)
+        and ub_obj.has_scale_buffer()
+    )
+    if check_ub_scales:
+        torch.cuda.synchronize()
+        dist.barrier(tp_group)
+        local_scales = inp_fp8._rowwise_scale_inv.contiguous()
+        ref_scales = torch.empty(
+            [tp_size * local_scales.size(0)] + list(local_scales.shape[1:]),
+            dtype=local_scales.dtype,
+            device=local_scales.device,
+        )
+        dist.all_gather_into_tensor(ref_scales, local_scales, group=tp_group)
+        ub_scales = ag_out._rowwise_scale_inv
+        mismatched = int((ub_scales != ref_scales).sum().item())
+        numerics_failed = numerics_failed or mismatched != 0
+        scales_info = (
+            f"UB SCALE CHECK PASSED: {ref_scales.numel()} scale bytes match the all-gather"
+            if mismatched == 0
+            else f"UB SCALE CHECK FAILED: {mismatched}/{ref_scales.numel()} scale bytes differ"
+        )
+        dist_print(scales_info, section=True, info=True, error=mismatched != 0, group=tp_group)
     if opts.check_numerics:
         torch.cuda.synchronize()
         dist.barrier(tp_group)

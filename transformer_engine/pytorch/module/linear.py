@@ -26,6 +26,7 @@ from .base import (
     as_cuda_stream,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
+    fused_wgrad_ag_eligible,
     _ub_is_fused,
     ub_overlap_disabled,
     get_dummy_wgrad,
@@ -1011,6 +1012,19 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # Compute grad input tensor
         # --------------------------------------------------
 
+        # ROCm fused backend: the dgrad kernel can carry a second all-gather for the column-scaled
+        # grad output, so upstream's external AG on borrowed dgrad streams is not needed. It rides
+        # inside the dgrad GEMM, so the region has to be staged before that GEMM launches.
+        ub_obj_overlap_wgrad = None
+        grad_output_wgrad = None
+        ub_fused_wgrad_ag = (
+            bwd_args.requires_dgrad
+            and bwd_args.requires_wgrad
+            and bwd_args.ub_overlap_ag
+            and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            and fused_wgrad_ag_eligible(bwd_args.ub_name)
+        )
+
         dgrad = None
         dgrad_work = None
         if bwd_args.requires_dgrad:
@@ -1060,6 +1074,16 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             # dgrad GEMM
             # Note: dx = dy * w
 
+            if ub_fused_wgrad_ag:
+                ub_obj_overlap_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
+                grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                    ub_obj_overlap_wgrad,
+                    grad_output_arg,
+                    grad_output_quantizer,
+                    bwd_args.tp_group,
+                )
+
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight_fp8
             if bwd_args.backward_override == "dequantized":
@@ -1081,6 +1105,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 out_dtype=bwd_args.activation_dtype,
                 use_split_accumulator=use_split_accumulator,
                 ub=ub_obj_dgrad,
+                ub2=ub_obj_overlap_wgrad,
                 ub_type=ub_type_dgrad,
                 extra_output=reduce_scatter_out,
                 bulk_overlap=bwd_args.ub_bulk_dgrad,
@@ -1172,7 +1197,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             # Prepare grad output tensor
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
-            if bwd_args.ub_overlap_ag and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            if ub_fused_wgrad_ag:
+                # The dgrad kernel carried the column-scaled gather into the _wgrad region, so the
+                # view staged above that GEMM is complete. No streams to borrow, no external AG.
+                grad_output = grad_output_wgrad
+            elif bwd_args.ub_overlap_ag and isinstance(grad_output_quantizer, MXFP8Quantizer):
                 # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we

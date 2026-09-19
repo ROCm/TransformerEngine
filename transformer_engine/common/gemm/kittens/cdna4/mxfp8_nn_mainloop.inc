@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 //! Main K-loop for the MXFP8 NN GEMM, shared by mxfp8_gemm_nn_kernel (mxfp8_gemm.cpp) and the
-//! fused AG+GEMM (overlap/fused_ag_mxfp8_gemm_nn.cuh); only the C writeback is left to the caller.
+//! fused AG+GEMM (overlap/fused_ag_gemm_nn.cuh); only the C writeback is left to the caller.
 //! Slots are FLIPPED: the A slot holds the ACTIVATION (K-contiguous, plain subtile_inplace reads),
 //! the B slot the WEIGHT (K-major, so it takes the ds_read_*_tr path via b_col_off).
 #pragma unroll 2
