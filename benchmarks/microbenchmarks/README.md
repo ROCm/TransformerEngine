@@ -5,11 +5,11 @@ Transformer Engine kernels and helper scripts for comparing benchmark CSVs.
 
 ## Benchmarks
 
-- `benchmark_gemm.py`: dense BF16 GEMM benchmark
-- `benchmark_gemm_fp8.py`: dense FP8 GEMM benchmark using `fp8_autocast`
+- `benchmark_gemm.py`: dense GEMM benchmark sweeping BF16 plus the supported
+  low-precision recipes (FP8, MXFP8, MXFP4, NVFP4) via `autocast`
 - `benchmark_grouped_gemm.py`: grouped GEMM benchmark for MoE-style shapes
-- `benchmark_casting.py`: BF16 `<->` FP8 casting benchmark
-- `benchmark_normalization.py`: LayerNorm and RMSNorm benchmark
+- `benchmark_casting.py`: quantize / dequantize benchmark across FP8, MXFP8, NVFP4, and MXFP4
+- `benchmark_normalization.py`: LayerNorm / RMSNorm forward benchmark across BF16 and quantized (FP8, MXFP8) output
 
 Run a benchmark directly from this directory. Pass `--csv` to write results.
 When no filename is provided, `run_benchmarks` derives the CSV name from the

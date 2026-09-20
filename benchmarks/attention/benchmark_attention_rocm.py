@@ -35,8 +35,6 @@ warmup_iters = 20
 num_iters = 10
 # Checkpointing attention
 ckpt_attn = False
-# Workspace optimization for attention
-workspace_opt = True
 # QKV memory layout
 qkv_layout = "bshd_bshd_bshd"
 # Padding between sequences for qkv_format=thd
@@ -211,7 +209,6 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
                 attention,
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -232,7 +229,6 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
                 attention,
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )

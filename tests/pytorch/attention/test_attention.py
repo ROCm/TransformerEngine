@@ -76,6 +76,9 @@ if fp8_available and (device_compute_capability < (9, 0) or device_compute_capab
         "FP8 attention is not supported for compute capability ="
         f" sm{device_compute_capability[0] * 10 + device_compute_capability[1]}"
     )
+if IS_HIP_EXTENSION and fp8_available:
+    fp8_attn_available = False
+    reason_for_no_fp8_attn = "FP8 Fused attention is not supported on ROCm"
 
 
 # Get determinism
@@ -168,16 +171,17 @@ def test_gqa_mla_thd():
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True)
+    test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, qkv_layout, False, True)
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
-def test_dot_product_mem_calc():
+@pytest.mark.skipif(device_compute_capability == (12, 5),
+                    reason="This test causes GPU VM fault on GFX1250.")
+@pytest.mark.skipif(not is_bf16_available(), reason="This test requires bf16 support.")
+def test_dot_product_mem_calc(monkeypatch):
     """Non-regression test for memory workspace calculation integer overflow issue."""
     ckpt_attn = False
     pad_between_seqs = False
-    if not is_bf16_available():
-        pytest.skip("This test requires bf16 support.")
     dtype = torch.bfloat16
     # b, sq, q, dqk
     config = ModelConfig(16, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal")
@@ -193,20 +197,18 @@ def test_dot_product_mem_calc():
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    os.environ["NVTE_FUSED_ATTN_CK"] = "1"
-    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
     _run_dot_product_attention(
         dtype,
         config,
         "FusedAttention",
         ckpt_attn,
         qkv_layout,
-        False, #workspace_opt
         pad_between_seqs,
         is_training,
     )
-    del os.environ["NVTE_FUSED_ATTN_CK"]
-    del os.environ["NVTE_FUSED_ATTN_AOTRITON"]
+    torch.cuda.synchronize()
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -214,7 +216,6 @@ def test_dot_product_mem_calc():
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("workspace_opt", [False] if IS_HIP_EXTENSION else [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -223,7 +224,6 @@ def test_dot_product_attention(
     model_configs,
     model,
     ckpt_attn,
-    workspace_opt,
     qkv_layout,
     swa,
     pad_between_seqs,
@@ -324,7 +324,6 @@ def test_dot_product_attention(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -338,7 +337,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -352,7 +350,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -367,7 +364,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -382,7 +378,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -395,7 +390,6 @@ def test_dot_product_attention(
             "FlashAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -437,7 +431,7 @@ def test_dot_product_attention(
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
 
 
 model_configs_max_logit = {
@@ -464,7 +458,7 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
     config.return_max_logit = True
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 model_configs_num_splits = {
@@ -485,7 +479,6 @@ def test_dpa_num_splits(dtype, model_configs, model):
         model_configs,
         model,
         False,
-        True,
         None,
         False,
         False,
@@ -519,7 +512,7 @@ model_configs_fa4_base = {
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
 def test_dpa_fa4_base(dtype, model_configs, model):
     """Test DotProductAttention with FA4: base configs, GQA, num_splits"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 # head_dim=256 is supported only on SM100 via FA4's dedicated kernel
@@ -544,7 +537,7 @@ model_configs_fa4_hdim256 = {
 @pytest.mark.parametrize("model", model_configs_fa4_hdim256.keys())
 def test_dpa_fa4_hdim256(dtype, model_configs, model):
     """Test DotProductAttention with FA4: head_dim=256 dedicated kernel on SM100"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 model_configs_fa4_mla = {
@@ -568,9 +561,7 @@ model_configs_fa4_mla = {
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
 def test_dpa_fa4_mla(dtype, model_configs, model):
     """Test DotProductAttention with FA4: MLA (head_dim_qk != head_dim_v)"""
-    test_dot_product_attention(
-        dtype, model_configs, model, False, True, "bshd_bshd_bshd", False, False
-    )
+    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
 
 
 model_configs_fa4_swa = {
@@ -595,7 +586,7 @@ model_configs_fa4_swa = {
 @pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "bshd_bshd_bshd"])
 def test_dpa_fa4_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention with FA4: sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
 model_configs_fa4_varlen = {
@@ -618,7 +609,7 @@ model_configs_fa4_varlen = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "bshd_bshd_bshd"])
 def test_dpa_fa4_varlen(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention with FA4: variable-length sequences (varlen/thd)"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 model_configs_fa4_mask = {
@@ -642,7 +633,7 @@ model_configs_fa4_mask = {
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())
 def test_dpa_fa4_mask(dtype, model_configs, model):
     """Test DotProductAttention with FA4: various attention mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 model_configs_softmax = {
@@ -719,9 +710,7 @@ model_configs_softmax = {
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
-    test_dot_product_attention(
-        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False
-    )
+    test_dot_product_attention(dtype, model_configs, model, True, "bshd_bshd_bshd", False, False)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 18, 0), reason="cuDNN 9.18.0+ is required.")
@@ -730,7 +719,7 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, "thd_thd_thd", False, False)
+    test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
 model_configs_mla = {
@@ -759,7 +748,7 @@ model_configs_mla = {
 @pytest.mark.parametrize("model", model_configs_mla.keys())
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
-    test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
 
 
 model_configs_mask = {
@@ -814,7 +803,7 @@ model_configs_mask = {
 @pytest.mark.parametrize("model", model_configs_mask.keys())
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 model_configs_bias = {
@@ -920,7 +909,7 @@ model_configs_bias = {
 @pytest.mark.parametrize("model", model_configs_bias.keys())
 def test_dpa_bias(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 model_configs_bias_shapes = {
@@ -959,7 +948,7 @@ model_configs_bias_shapes = {
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
 def test_dpa_bias_shapes(dtype, model_configs, model):
     """Test DotProductAttention module with different bias types and shapes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 model_configs_swa = {
@@ -1000,7 +989,7 @@ model_configs_swa = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
 def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
 model_configs_alibi_slopes = {
@@ -1040,7 +1029,7 @@ model_configs_alibi_slopes = {
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
 def test_dpa_alibi_slopes(dtype, model_configs, model):
     """Test DotProductAttention module with ALiBi slopes"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
 qkv_layouts = [
@@ -1104,7 +1093,7 @@ model_configs_layout = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
@@ -1182,7 +1171,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
     test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+        dtype, model_configs, model, False, qkv_layout, False, pad_between_seqs
     )
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
@@ -1208,7 +1197,7 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
         if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
             continue
         test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+            dtype, model_configs, model, False, qkv_layout, False, pad_between_seqs
         )
 
 
@@ -1218,7 +1207,6 @@ def _run_dot_product_attention(
     backend: str,
     ckpt_attn: bool,
     qkv_layout: str,
-    workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -1232,7 +1220,6 @@ def _run_dot_product_attention(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
@@ -1636,7 +1623,6 @@ def test_transformer_layer(
     # Get configs
     config = model_configs[model]
     tols = dict(atol=5e-2, rtol=5e-2)
-    workspace_opt = True
 
     # Test backend availability
     is_training = True
@@ -1684,7 +1670,6 @@ def test_transformer_layer(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_format,
-            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1699,7 +1684,6 @@ def test_transformer_layer(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_format,
-                workspace_opt,
                 fused_qkv_params,
                 RoPE,
                 is_training,
@@ -1713,7 +1697,6 @@ def test_transformer_layer(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_format,
-                workspace_opt,
                 fused_qkv_params,
                 RoPE,
                 is_training,
@@ -1726,7 +1709,6 @@ def test_transformer_layer(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_format,
-                workspace_opt,
                 fused_qkv_params,
                 RoPE,
                 is_training,
@@ -1743,12 +1725,10 @@ def test_transformer_layer(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_format,
-                workspace_opt,
                 fused_qkv_params,
                 RoPE,
                 is_training,
             )
-
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -1758,7 +1738,6 @@ def test_transformer_layer(
             "FlashAttention",
             ckpt_attn,
             qkv_format,
-            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1839,7 +1818,6 @@ def _run_transformer_layer(
     backend: str,
     ckpt_attn: bool,
     qkv_format: str,
-    workspace_opt: bool,
     fused_qkv_params: bool,
     RoPE: bool,
     is_training: bool,
@@ -2225,7 +2203,6 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2484,7 +2461,6 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2826,7 +2802,6 @@ model_configs_fp8 = {
 param_types_fp8 = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(
     get_cudnn_version() < (9, 2, 1),
     reason="cuDNN 9.2.1+ is required for FP8 fused attention.",
@@ -3333,7 +3308,6 @@ def test_deterministic_bwd_ck(
         backend="FusedAttention",
         ckpt_attn=False,
         qkv_layout=qkv_layout,
-        workspace_opt=False,
         pad_between_seqs=False,
         is_training=True,
     )

@@ -14,6 +14,7 @@ import setuptools
 from .utils import rocm_build, rocm_path
 from .utils import (
     get_cuda_include_dirs,
+    cudnn_frontend_include_path,
     all_files_in_dir,
     debug_build_enabled,
     setup_mpi_flags,
@@ -97,20 +98,9 @@ def setup_jax_extension(
         include_dirs = [hip_root / "include"]
     else:
         include_dirs = get_cuda_include_dirs()
-        cudnn_frontend_include_dir = None
-        for base_path in (Path(common_header_files), *Path(common_header_files).parents):
-            candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
-            if candidate.exists():
-                cudnn_frontend_include_dir = candidate
-                break
-        if cudnn_frontend_include_dir is None:
-            for base_path in Path(__file__).resolve().parents:
-                candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
-                if candidate.exists():
-                    cudnn_frontend_include_dir = candidate
-                    break
-        if cudnn_frontend_include_dir is not None:
-            include_dirs.append(cudnn_frontend_include_dir)
+        # Upstream v2.18 removed the 3rdparty/cudnn-frontend submodule in favor of
+        # the nvidia-cudnn-frontend pip package. Source the include dir from it.
+        include_dirs.append(cudnn_frontend_include_path())
     include_dirs.extend(
         [
             common_header_files,

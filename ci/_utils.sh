@@ -303,11 +303,13 @@ get_ctest_junitxml() {
 
 check_test_filter() {
     test -z "$TEST_FILTER" && return 0
+    set -f # disable globbing so patterns in masks are used as-is 
     for _tf in $TEST_FILTER; do
         case "$1" in
-        $_tf) return 0
+        $_tf) set +f; return 0
         esac
     done
+    set +f
     return 1
 }
 
