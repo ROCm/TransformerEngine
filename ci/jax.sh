@@ -66,18 +66,13 @@ run_test_config() {
     # group-mode per-segment dq_acc layout matters (see the equal-dim-128 RAGGED_SELF config).
     NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 3 test_fused_attn.py -k "test_backward and RAGGED"
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
-<<<<<<< HEAD
-    run_default_fa 1 test_recipe_characteristics.py # renamed upstream from test_helper.py
     run_default_fa 1 test_fused_router.py
-    run_default_fa 1 test_sanity_import.py
-    run_default_fa 1 test_softmax.py
     run_default_fa 1 test_misc.py
-=======
     run_default_fa 1 test_permutation.py
+    run_default_fa 1 test_recipe_characteristics.py # renamed upstream from test_helper.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
     run_default_fa 1 test_triton_custom_calls.py
->>>>>>> origin/dev
 }
 
 run_test_config_mgpu() {
