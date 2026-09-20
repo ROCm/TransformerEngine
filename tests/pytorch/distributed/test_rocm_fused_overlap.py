@@ -272,6 +272,7 @@ def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, qua
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    env["NVTE_RS_DIAG"] = "1"
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
@@ -292,9 +293,15 @@ def test_fused_rs_overlap(nprocs, quantization):
     assert "failed to launch" not in stderr, stderr
     disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
     assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
-    # Not disabled at setup, and no launch failure above: the fused RS kernel served this call
-    # rather than the generic path quietly standing in for it.
     assert "proj_fprop" not in disabled, disabled
+    ran_mxfp8 = "[RS_DIAG] launched mxfp8" in stderr
+    ran_bf16 = "[RS_DIAG] launched bf16" in stderr
+    if quantization == "mxfp8":
+        assert ran_mxfp8, f"the fused RS MXFP8 kernel never ran\n{stderr}"
+        assert not ran_bf16, f"the fused RS fell back to the bf16 kernel\n{stderr}"
+    else:
+        assert ran_bf16, f"the fused RS bf16 kernel never ran\n{stderr}"
+        assert not ran_mxfp8, f"a bf16 call ran the MXFP8 kernel\n{stderr}"
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

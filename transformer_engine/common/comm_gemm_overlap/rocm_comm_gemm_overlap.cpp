@@ -4,6 +4,9 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -419,7 +422,17 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
+    static bool traced_mxfp8 = false;
+    if (!traced_mxfp8 && std::getenv("NVTE_RS_DIAG")) {
+      traced_mxfp8 = true;
+      std::fprintf(stderr, "[RS_DIAG] launched mxfp8\n");
+    }
     return kittens_fused_rs_gemm_mxfp8(args);
+  }
+  static bool traced_bf16 = false;
+  if (!traced_bf16 && std::getenv("NVTE_RS_DIAG")) {
+    traced_bf16 = true;
+    std::fprintf(stderr, "[RS_DIAG] launched bf16\n");
   }
   return kittens_fused_rs_gemm_bf16(args);
 }
