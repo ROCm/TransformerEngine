@@ -2260,7 +2260,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = False
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 self.ub_name + "_wgrad", inp, weight_tensor,
-                self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor, mxfp8=is_mxfp8,
             ):
                 ub_bulk_wgrad = False
             fwd_args = LayerNormLinearFwdArgs(

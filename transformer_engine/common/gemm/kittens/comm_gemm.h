@@ -97,6 +97,8 @@ bool kittens_bulk_rs_gemm_supported(int sm_arch);
 
 bool kittens_bulk_rs_gemm_bf16(const KittensRsGemmArgs &args);
 
+bool kittens_bulk_rs_gemm_mxfp8(const KittensRsGemmArgs &args);
+
 bool kittens_fused_rs_gemm_supported(int sm_arch);
 
 bool kittens_fused_rs_gemm_shape_ok(int tokens, int hidden, int k, int tp_size);
