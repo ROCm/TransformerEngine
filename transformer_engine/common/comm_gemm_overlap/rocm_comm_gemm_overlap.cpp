@@ -508,12 +508,35 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
   if (transa || !transb || accumulate || bias.numel() != 0 || pre_gelu_out.numel() != 0) {
     return false;
   }
-  if (A.dtype() != DType::kBFloat16 || B.dtype() != DType::kBFloat16 ||
-      D.dtype() != DType::kBFloat16 || ubuf.dtype() != DType::kBFloat16) {
+  auto is_fp8_dt = [](DType dt) {
+    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
+  };
+  const bool is_bf16_input = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
+  const bool is_fp8_input  = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype());
+  if (!is_bf16_input && !is_fp8_input) {
+    return false;
+  }
+  if (D.dtype() != DType::kBFloat16 || ubuf.dtype() != DType::kBFloat16) {
     return false;
   }
   if (rs_output.numel() != 0 || ubuf.numel() == 0) {
     return false;
+  }
+
+  const void *scale_A = nullptr;
+  const void *scale_B = nullptr;
+  if (is_fp8_input) {
+    auto A_tensor = convertNVTETensorCheck(A.data());
+    auto B_tensor = convertNVTETensorCheck(B.data());
+    if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING ||
+        B_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
+      return false;
+    }
+    if (!A_tensor->has_data() || !B_tensor->has_data()) {
+      return false;
+    }
+    scale_A = A_tensor->scale_inv.dptr;
+    scale_B = B_tensor->scale_inv.dptr;
   }
   if (tp_size != 4 && tp_size != 8) {
     return false;
@@ -537,7 +560,7 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      A.dptr(), B.dptr(), D.dptr(), nullptr, nullptr, ubuf.dptr(),
+      A.dptr(), B.dptr(), D.dptr(), scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -545,6 +568,11 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), tp_id, tp_size,
       tokens / tp_size * hidden * ubuf.element_size(), workspace.dptr(), workspace.bytes(), stream};
+  if (is_fp8_input) {
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
+    return kittens_bulk_rs_gemm_mxfp8(args);
+  }
   return kittens_bulk_rs_gemm_bf16(args);
 }
 #endif

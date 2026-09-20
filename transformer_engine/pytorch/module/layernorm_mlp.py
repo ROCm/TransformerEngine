@@ -438,6 +438,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # layernorm_linear.py already gate on this; LayerNormMLP did not.
         if ub_bulk_wgrad and not fused_bulk_rs_eligible(
             "fc1_wgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_bulk_wgrad = False
 

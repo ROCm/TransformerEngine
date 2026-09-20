@@ -783,6 +783,7 @@ def fused_bulk_rs_eligible(
     tp_size: int,
     fp8: bool,
     bias: Optional[torch.Tensor] = None,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether this call may use the bulk reduce-scatter overlap."""
     if not IS_HIP_EXTENSION:

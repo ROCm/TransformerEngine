@@ -245,6 +245,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_bulk_dgrad = False
         if ub_bulk_wgrad and not fused_bulk_rs_eligible(
             ub_name + "_wgrad", inp, weight, activation_dtype, tp_size, fp8, bias,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_bulk_wgrad = False
         if ub_overlap_rs_fprop:

@@ -875,6 +875,11 @@ bool run_bulk_rs(const KittensRsGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
+bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
+    static_cast<void>(args);
+    return false;
+}
+
 // Fused TN GEMM + reduce-scatter
 struct RsPlan {
     void *queue = nullptr;
@@ -1226,7 +1231,7 @@ bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args) {
     return run_bulk_nn(args);
 }
 
-bool kittens_bulk_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
+bool bulk_rs_guards_ok(const KittensRsGemmArgs &args) {
     const int tp_size = args.nranks;
     if ((tp_size != 4 && tp_size != 8) || tp_size > args.peer_count) return false;
     if (args.rank < 0 || args.rank >= tp_size) return false;
@@ -1236,7 +1241,26 @@ bool kittens_bulk_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
         return false;
     }
 
+    return true;
+}
+
+bool bulk_rs_guards_ok_mxfp8(const KittensRsGemmArgs &args) {
+    if (!bulk_rs_guards_ok(args)) return false;
+
+    const auto is_fp8 = [](KittensDType dt) {
+        return dt == KITTENS_FP8E4M3 || dt == KITTENS_FP8E5M2;
+    };
+    return is_fp8(args.a_dtype) && is_fp8(args.b_dtype) && args.scale_A && args.scale_B;
+}
+
+bool kittens_bulk_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
+    if (!bulk_rs_guards_ok(args)) return false;
     return run_bulk_rs(args);
+}
+
+bool kittens_bulk_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args) {
+    if (!bulk_rs_guards_ok_mxfp8(args)) return false;
+    return run_bulk_rs_mxfp8(args);
 }
 
 size_t kittens_fused_rs_region_bytes_cdna4(size_t chunk_bytes, int tp_size) {
