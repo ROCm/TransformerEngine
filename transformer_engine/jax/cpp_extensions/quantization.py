@@ -1379,7 +1379,8 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
 
     Args:
         grad: jnp.ndarray of shape (M, N)
-        group_sizes: jnp.ndarray of shape(num_groups,), sum(group_sizes) == M
+        group_sizes: jnp.ndarray of shape(num_groups,), sum(group_sizes) <= M.
+            Rows past the routed prefix are padding and are not reduced.
 
     Returns:
         dbias: jnp.ndarray of shape (num_groups, N)
@@ -1387,10 +1388,13 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     assert grad.ndim == 2, "Input grad must be a 2D tensor."
     assert group_sizes.ndim == 1, "group_sizes must be a 1D tensor."
 
-    segment_ids = jnp.repeat(
-        jnp.arange(group_sizes.size), group_sizes, total_repeat_length=grad.shape[0]
-    )
+    n_rows = grad.shape[0]
+    n_groups = group_sizes.shape[0]
+    segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes, total_repeat_length=n_rows)
+    # jnp.repeat pads leftover rows with the last group id when
+    # sum(group_sizes) < M. Those rows are ragged-buffer padding, not the last group.
+    segment_ids = jnp.where(jnp.arange(n_rows) < jnp.sum(group_sizes), segment_ids, n_groups)
     grad_fp32 = grad.astype(jnp.float32)
-    dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
+    dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=n_groups)
     dbias = dbias_fp32.astype(grad.dtype)
     return dbias

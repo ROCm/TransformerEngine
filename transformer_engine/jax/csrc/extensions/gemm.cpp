@@ -1260,6 +1260,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
   std::vector<int32_t> dim_list_host(num_gemms);
+  size_t sum_group_sizes = 0;
   if (any_ragged) {
     size_t host_num_gemms = 0;
     if (use_async_d2h_group_sizes) {
@@ -1274,12 +1275,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       // Note: This may break cudaGraph.
       cudaStreamSynchronize(stream);
     }
-    size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+    sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+    // The loop below walks the ragged dimension one group at a time, advancing the
+    // pointers by that group's own size, so it only ever touches sum(group_sizes)
+    // rows. A buffer larger than the routed token count is therefore fine: the GEMM
+    // does not pay for the padding. Output rows past that point are zeroed below so
+    // downstream ops cannot observe uninitialized memory. Only an overflow would run
+    // past the buffer.
     if (!is_rhs_ragged) {
-      NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
+      NVTE_CHECK(sum_group_sizes <= m, "Unexpected group_sizes! M = ", m,
                  ", got sum(group_sizes)=", sum_group_sizes);
     } else {
-      NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
+      NVTE_CHECK(sum_group_sizes <= k, "Unexpected group_sizes! K = ", k,
                  ", got sum(group_sizes)=", sum_group_sizes);
     }
   }
@@ -1442,6 +1449,15 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     bias_list.push_back(bias_wrapper_list.back().data());
     pre_gelu_list.push_back(pre_gelu_wrapper_list.back().data());
     out_list.push_back(out_wrapper_list.back().data());
+  }
+  
+  // Fwd/dgrad write [M, N] with a ragged M. Rows past sum(group_sizes) are not
+  // produced by any GEMM; leaving them untouched leaks NaNs into GLU / dgrad of
+  // the other grouped GEMM / grouped_dbias (which pads leftover rows onto the
+  // last expert via jnp.repeat). Zero only the leftover, not the computed prefix.
+  if (any_ragged && !is_rhs_ragged && sum_group_sizes < m) {
+    zero_out_dptr_list.push_back(out_ptr);
+    zero_out_size_list.push_back((m - sum_group_sizes) * n * out_dtype_bytes);
   }
 
   auto workspace_shape = std::vector<size_t>{workspace_size};
