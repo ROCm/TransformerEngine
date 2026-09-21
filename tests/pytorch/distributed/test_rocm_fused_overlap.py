@@ -102,7 +102,7 @@ INTERLEAVE_HEAD_DIM: int = 128
 INTERLEAVE_FFN_HIDDEN: int = INTERLEAVE_NUM_HEADS * INTERLEAVE_HEAD_DIM
 
 
-def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
+def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
     """Run the layer harness on a column-parallel LayerNormLinear with the fused backend live."""
     test_cmd = (
         _fused_launch_cmd(nprocs)
@@ -122,10 +122,13 @@ def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
         ]
         + extra_args
     )
+    if quantization != "none":
+        test_cmd += ["--fp8", f"--quantization={quantization}"]
     env = os.environ.copy()
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    env["NVTE_RS_DIAG"] = "1"
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
@@ -141,6 +144,18 @@ def _output_hashes(stdout):
     """The per-rank digests the harness printed, in rank order."""
     prefix = "OUTPUT HASH: "
     return [ln.split(prefix, 1)[1].strip() for ln in stdout.decode().splitlines() if prefix in ln]
+
+
+def _assert_bulk_rs_precision(result, quantization):
+    stderr = result.stderr.decode()
+    ran_mxfp8 = "[RS_DIAG] bulk launched mxfp8" in stderr
+    ran_bf16 = "[RS_DIAG] bulk launched bf16" in stderr
+    if quantization == "mxfp8":
+        assert ran_mxfp8, f"the bulk RS MXFP8 kernel never ran\n{stderr}"
+        assert not ran_bf16, f"the bulk RS fell back to the bf16 kernel\n{stderr}"
+    else:
+        assert ran_bf16, f"the bulk RS bf16 kernel never ran\n{stderr}"
+        assert not ran_mxfp8, f"a bf16 call ran the MXFP8 bulk RS kernel\n{stderr}"
 
 
 def _assert_numerics_passed(result):
@@ -220,10 +235,17 @@ def test_fused_bulk_ag_overlap(nprocs, quantization):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_layer_bulk_dgrad_bf16(nprocs):
+def test_fused_layer_bulk_dgrad(nprocs, quantization):
     """A column-parallel layer whose dgrad dimensions clear the fused contract."""
-    result = _run_fused_layer(nprocs, [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"])
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_layer(
+        nprocs,
+        [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization=quantization,
+    )
     _assert_numerics_passed(result)
     fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
     assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
@@ -234,9 +256,17 @@ def test_fused_layer_bulk_dgrad_bf16(nprocs):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_layer_bulk_wgrad_bf16(nprocs):
-    result = _run_fused_layer(nprocs, [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"])
+def test_fused_layer_bulk_wgrad(nprocs, quantization):
+    """The bulk reduce-scatter that carries qkv's dgrad behind the wgrad GEMM."""
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_layer(
+        nprocs,
+        [f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization=quantization,
+    )
     _assert_numerics_passed(result)
     fused = _reported_names(result.stdout, "UB FUSED NAMES: ")
     assert fused is not None, f"harness printed no fused name set\n{result.stdout.decode()}"
@@ -244,6 +274,7 @@ def test_fused_layer_bulk_wgrad_bf16(nprocs):
     eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
     assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
     assert "qkv_wgrad" in eligible, eligible
+    _assert_bulk_rs_precision(result, quantization)
 
 
 def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
