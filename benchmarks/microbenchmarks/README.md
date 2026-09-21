@@ -58,12 +58,39 @@ python benchmark_gemm.py -k triton           # select the Triton backend
 
 ### Other options
 
-- `--kernel-profile`: also measure GPU kernel (device) time, adding
-  `Kernel Time (ms)` / `Kernel <unit>` columns.
-- `--run-flydsl`: include FlyDSL-backed cases (skipped by default; long compile times).
+- `--kernel-profile`: also measure GPU kernel (device) time (see
+  [Kernel profiling](#kernel-profiling)).
+- `--run-flydsl`: include FlyDSL-backed cases (skipped by default due to long compile times).
 - `--no-gpu-interference-check` / `--abort-on-gpu-interference`: control the
   shared-GPU neighbor check, which warns (or aborts) when another process is
   using the benchmark GPU (requires the `amdsmi` package).
+
+### Kernel profiling
+
+Pass `--kernel-profile` to report GPU kernel (device) time alongside the default
+host wall-clock time. It adds `Kernel Time (ms)` / `Kernel <unit>` columns to the
+console table and the CSV:
+
+```bash
+python benchmark_gemm.py --kernel-profile --csv
+```
+
+- **Wall time** is the end-to-end host-side time per call (`torch.utils.benchmark.Timer`,
+  reported as the median): Python dispatch + kernel launch/queue latency + GPU
+  execution.
+- **Kernel time** is the GPU device time only (`torch.profiler`, summing
+  `self_device_time_total`, reported as the mean over a separate profiling pass),
+  so it excludes host and launch overhead.
+
+Because kernel time drops the launch/dispatch overhead, kernel throughput is
+normally at least as high as wall throughput. A large gap means the case is
+launch/dispatch-bound rather than compute-bound (common at small sizes or with
+higher-overhead backends such as Triton); when the two nearly match, the op is
+compute-bound and any sub-percent difference is just noise between the two
+independent measurement passes.
+
+Because it runs an extra warmup plus a profiled loop under `torch.profiler`,
+`--kernel-profile` makes each benchmark take longer.
 
 ### Rotating input buffers
 

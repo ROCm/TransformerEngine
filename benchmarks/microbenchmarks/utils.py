@@ -785,3 +785,97 @@ def format_results_table(store):
     return "\n".join(
         [caption, "", row(headers), "| " + " | ".join(align) + " |", *(row(r) for r in body)]
     )
+
+
+_THROUGHPUT_UNITS = frozenset({"TFLOPS", "GB/s"})
+_AGG_COLLAPSE_ALWAYS = frozenset({"Case", "dtype"})
+
+
+def _aggregate_rows(store):
+    """Work-weighted harmonic-mean throughput per (suite, group), collapsing shape/size axes."""
+    import numpy as np
+
+    agg = {}
+    order = []
+    for family, fam in store.items():
+        suite = family[len("benchmark_"):] if family.startswith("benchmark_") else family
+        params = fam.param_columns or []
+        for case_params, records, _node in fam.case_metrics:
+            group_cols = [
+                c for c in params
+                if c not in _AGG_COLLAPSE_ALWAYS and isinstance(case_params.get(c), str)
+            ]
+            group = tuple((c, case_params[c]) for c in group_cols)
+            for m in records:
+                if m.get("samples_only") or m["unit"] not in _THROUGHPUT_UNITS:
+                    continue
+                thr = m["throughput"]
+                times = _times_ms(m.get("measurement"))
+                wall_ms = float(np.median(np.asarray(times))) if times else m["ms"]
+                if thr is None or not (thr > 0) or not (wall_ms > 0):
+                    continue
+                key = (suite, m["label"], group, m["unit"])
+                a = agg.get(key)
+                if a is None:
+                    a = agg[key] = {"wall_work": 0.0, "wall_time": 0.0,
+                                    "kern_work": 0.0, "kern_time": 0.0, "n": 0}
+                    order.append(key)
+                a["wall_work"] += thr * wall_ms
+                a["wall_time"] += wall_ms
+                a["n"] += 1
+                k_ms, k_thr = m.get("kernel_ms"), m.get("kernel_throughput")
+                if k_ms and k_thr and k_ms > 0:
+                    a["kern_work"] += k_thr * k_ms
+                    a["kern_time"] += k_ms
+    return agg, order
+
+
+def format_aggregate_table(store):
+    """Render per-group aggregate throughput (work-weighted harmonic mean) below the table."""
+    agg, order = _aggregate_rows(store)
+    if not agg:
+        return ""
+    # Include the metric label in the group text only when a suite emits more than one.
+    labels_per_suite = {}
+    for suite, label, _group, _unit in order:
+        labels_per_suite.setdefault(suite, set()).add(label)
+
+    has_kernel = any(a["kern_time"] > 0 for a in agg.values())
+
+    def thr_cell(work, time, unit):
+        return f"{work / time:.2f} {unit}" if time > 0 else "-"
+
+    headers = ["Benchmark", "Group", "n", "Wall Throughput"]
+    if has_kernel:
+        headers += ["Kernel Throughput"]
+    body = []
+    for key in order:
+        suite, label, group, unit = key
+        a = agg[key]
+        parts = [f"{c}={v}" for c, v in group]
+        if len(labels_per_suite[suite]) > 1:
+            parts.insert(0, label)
+        group_text = "  ".join(parts) or "all"
+        cells = [suite, group_text, str(a["n"]), thr_cell(a["wall_work"], a["wall_time"], unit)]
+        if has_kernel:
+            cells.append(thr_cell(a["kern_work"], a["kern_time"], unit))
+        body.append(cells)
+    body.sort(key=lambda r: (r[0], r[1]))
+    widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
+
+    def row(cells):
+        # Left-align the text columns (Benchmark, Group); right-align n / throughputs.
+        padded = [
+            c.ljust(widths[i]) if i <= 1 else c.rjust(widths[i]) for i, c in enumerate(cells)
+        ]
+        return "| " + " | ".join(padded) + " |"
+
+    align = [
+        ":" + "-" * (widths[i] - 1) if i <= 1 else "-" * (widths[i] - 1) + ":"
+        for i in range(len(headers))
+    ]
+    caption = (f"aggregate throughput (work-weighted harmonic mean over shapes): "
+               f"{len(body)} groups")
+    return "\n".join(
+        [caption, "", row(headers), "| " + " | ".join(align) + " |", *(row(r) for r in body)]
+    )

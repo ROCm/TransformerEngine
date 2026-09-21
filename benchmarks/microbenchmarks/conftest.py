@@ -38,6 +38,7 @@ import pytest
 from utils import (
     configure_kernel_profile,
     configure_rotating,
+    format_aggregate_table,
     format_results_table,
     print_case,
     record_bench,
@@ -157,6 +158,11 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if table:
         terminalreporter.write_line("")
         for row in table.splitlines():
+            terminalreporter.write_line(row)
+    aggregate = format_aggregate_table(store)
+    if aggregate:
+        terminalreporter.write_line("")
+        for row in aggregate.splitlines():
             terminalreporter.write_line(row)
 
 
