@@ -128,6 +128,7 @@ def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="no
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    env["NVTE_RS_DIAG"] = "1"
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
@@ -143,6 +144,18 @@ def _output_hashes(stdout):
     """The per-rank digests the harness printed, in rank order."""
     prefix = "OUTPUT HASH: "
     return [ln.split(prefix, 1)[1].strip() for ln in stdout.decode().splitlines() if prefix in ln]
+
+
+def _assert_bulk_rs_precision(result, quantization):
+    stderr = result.stderr.decode()
+    ran_mxfp8 = "[RS_DIAG] bulk launched mxfp8" in stderr
+    ran_bf16 = "[RS_DIAG] bulk launched bf16" in stderr
+    if quantization == "mxfp8":
+        assert ran_mxfp8, f"the bulk RS MXFP8 kernel never ran\n{stderr}"
+        assert not ran_bf16, f"the bulk RS fell back to the bf16 kernel\n{stderr}"
+    else:
+        assert ran_bf16, f"the bulk RS bf16 kernel never ran\n{stderr}"
+        assert not ran_mxfp8, f"a bf16 call ran the MXFP8 bulk RS kernel\n{stderr}"
 
 
 def _assert_numerics_passed(result):
@@ -260,12 +273,8 @@ def test_fused_layer_bulk_wgrad(nprocs, quantization):
     assert "qkv_wgrad" in fused, fused
     eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
     assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
-    if quantization == "none":
-        assert "qkv_wgrad" in eligible, eligible
-    else:
-        # The fused bulk reduce-scatter is bf16-only here: fused_bulk_rs_eligible gates on
-        # "not fp8", so MXFP8 must decline and fall back rather than run a wrong kernel.
-        assert "qkv_wgrad" not in eligible, eligible
+    assert "qkv_wgrad" in eligible, eligible
+    _assert_bulk_rs_precision(result, quantization)
 
 
 def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
