@@ -7,6 +7,9 @@
 """
 Low-precision casting micro-benchmark.
 
+Run with ``python benchmark_casting.py`` (a pytest module under the hood; see
+conftest.py).
+
 Benchmarks quantization (BF16 -> low precision) and dequantization
 (low precision -> BF16) for the formats used by TE training recipes:
 

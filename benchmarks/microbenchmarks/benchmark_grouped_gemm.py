@@ -6,12 +6,13 @@
 ###############################################################################
 """Grouped GEMM micro-benchmark using te.GroupedLinear across precisions and backends.
 
-Runs under pytest (see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16,
-FP8, and MXFP8, crossed with the selectable kernel backend for each precision
-(hipBLASLt / CK_Tile / Triton / HipKittens) and forward/backward direction.
+Run with ``python benchmark_grouped_gemm.py`` (a pytest module under the hood;
+see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16, FP8, and MXFP8,
+crossed with the selectable kernel backend for each precision (hipBLASLt /
+CK_Tile / Triton / HipKittens) and forward/backward direction.
 
-    pytest benchmark_grouped_gemm.py --csv
-    pytest benchmark_grouped_gemm.py -k "mxfp8 and hipkittens"
+    python benchmark_grouped_gemm.py --csv
+    python benchmark_grouped_gemm.py -k "mxfp8 and hipkittens"
 """
 
 import os

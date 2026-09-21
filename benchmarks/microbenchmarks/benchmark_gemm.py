@@ -6,18 +6,19 @@
 ###############################################################################
 """Dense GEMM micro-benchmark using te.Linear across precisions and backends.
 
-Runs under pytest (see conftest.py). Sweeps the shared model GEMM shapes over
-BF16 (the high-precision baseline) plus every supported low-precision recipe
-(FP8, MXFP8, MXFP4, NVFP4) via te.autocast, crossed with a selectable kernel
-Backend. Precisions whose hardware/runtime support is unavailable on the current
-device are skipped automatically.
+Run with ``python benchmark_gemm.py`` (a pytest module under the hood; see
+conftest.py). Sweeps the shared model GEMM shapes over BF16 (the high-precision
+baseline) plus every supported low-precision recipe (FP8, MXFP8, MXFP4, NVFP4)
+via te.autocast, crossed with a selectable kernel Backend. Precisions whose
+hardware/runtime support is unavailable on the current device are skipped
+automatically.
 
 Examples::
 
-    pytest benchmark_gemm.py --csv                   # -> benchmark_gemm.csv
-    pytest benchmark_gemm.py -k "bf16 and QKV"       # select shapes/precisions
-    pytest benchmark_gemm.py -k triton               # select the Triton backend
-    pytest benchmark_gemm.py -k flydsl --run-flydsl  # select the FlyDSL backend
+    python benchmark_gemm.py --csv                   # -> benchmark_gemm.csv
+    python benchmark_gemm.py -k "bf16 and QKV"       # select shapes/precisions
+    python benchmark_gemm.py -k triton               # select the Triton backend
+    python benchmark_gemm.py -k flydsl --run-flydsl  # select the FlyDSL backend
 
 Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """

@@ -4,9 +4,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Shared utilities for microbenchmarks: model configs, timing, throughput, runner."""
+"""Shared utilities for microbenchmarks: model configs, timing, throughput, CSV output."""
 
-import argparse
 import functools
 import importlib.util
 import itertools
@@ -199,7 +198,7 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
 
 
 # Dual wall + GPU-kernel timing. Off by default; enabled per run by
-# --kernel-profile (set via configure_kernel_profile from run_benchmarks / conftest).
+# --kernel-profile (set via configure_kernel_profile from conftest).
 _KERNEL_PROFILE = False
 
 
@@ -247,7 +246,7 @@ def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECO
 # ---------------------------------------------------------------------------
 # Benchmark inputs are cycled through a ring of buffers so that back-to-back
 # kernel launches read different input memory and don't benefit from artificial
-# cache residency.  Populated by run_benchmarks() from the parsed CLI args.
+# cache residency.  Configured from the CLI options via conftest.
 _ROTATE_BUFFERS = True
 _ROTATE_MB = 0  # rotation memory budget in MB; 0 => auto-size to exceed the LLC
 # Ceiling on the rotation ring size. hipBLASLt-bench caps its rotating block
@@ -369,7 +368,7 @@ def make_metric_record(label, ms, unit, throughput, derived=False,
     """Create a structured metric record for stdout and CSV generation.
 
     Each record describes one benchmark line item such as "GEMM Forward".
-    ``run_benchmarks`` formats these records for stdout and expands them into
+    The harness formats these records for stdout and expands them into
     ``<label> Wall Time (ms)`` / ``<label> Wall <unit>`` columns, plus
     ``<label> Kernel Time (ms)`` / ``<label> Kernel <unit>`` when kernel timing
     is enabled (``kernel_ms`` is not None).
@@ -554,178 +553,13 @@ def _print_metric_records(metric_records):
         print(line)
 
 
-def _default_csv_name(bench_fn):
-    import inspect
-    from pathlib import Path
-    return Path(inspect.getfile(bench_fn)).with_suffix(".csv").name
-
-
-# ---------------------------------------------------------------------------
-# Benchmark runner
-# ---------------------------------------------------------------------------
-
-def make_parser(**kwargs):
-    """Return an :class:`~argparse.ArgumentParser` with ``--csv``, ``--csv-samples``, and ``--kernel-profile`` flags.
-
-    Any *kwargs* are forwarded to the ``ArgumentParser`` constructor, so
-    callers can set ``description``, ``parents``, etc.
-    """
-    parser = argparse.ArgumentParser(**kwargs)
-    parser.add_argument(
-        "--csv", nargs="?", const=True, default=None, metavar="FILE",
-        help="Write results to CSV. Optional filename; default derived from script name.",
-    )
-    parser.add_argument(
-        "--csv-samples", nargs="?", const=True, default=None, metavar="FILE",
-        help=(
-            "Write per-sample timing data to a CSV for downstream analysis. "
-            "Optional filename; default derived from script name."
-        ),
-    )
-    parser.add_argument(
-        "--kernel-profile", action="store_true", default=False,
-        help=(
-            "Also measure GPU kernel (device) time alongside wall time, adding "
-            "Kernel Time / Kernel <unit> columns to the CSV."
-        ),
-    )
-    rotating_group = parser.add_mutually_exclusive_group()
-    rotating_group.add_argument(
-        "--rotating", nargs="?", type=int, const=0, default=None, metavar="MB",
-        help=(
-            "Rotate benchmark inputs through a ring of buffers so back-to-back "
-            "launches touch different memory (avoids artificial cache "
-            "residency), like hipBLASLt-bench --rotating. Optionally pass the "
-            "rotating memory budget in MB; omit it to auto-size the ring to "
-            "exceed the last-level cache (the 256 MB Infinity Cache on "
-            "gfx942/gfx950, not just L2). On by default; disable with "
-            "--no-rotating."
-        ),
-    )
-    rotating_group.add_argument(
-        "--no-rotating", action="store_true", default=False,
-        help=(
-            "Disable input buffer rotation (see --rotating) and time a single "
-            "cached input buffer."
-        ),
-    )
-    return parser
-
-
-def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
-                   args=None):
-    """Iterate *test_cases*, call *bench_fn*, and optionally write a CSV.
-
-    Parameters
-    ----------
-    test_cases : list[dict]
-        Each dict has at least the keys in *param_columns* plus any extra
-        keys the bench_fn needs (passed as **case).
-    bench_fn : callable
-        Called as ``bench_fn(**case)`` and must return a list of metric
-        records created by ``make_metric_record``. Each record corresponds to
-        one stdout line and expands to a time column plus a throughput column in
-        the CSV output.
-    param_columns : list[str]
-        Column names to pull from each test case into the output row.
-    default_csv : str or None
-        Default CSV filename used when ``--csv`` is passed without a
-        filename. If omitted, the CSV name is derived from the caller's
-        file name. CSV output is only written when the caller passes
-        ``--csv`` on the command line.
-    args : argparse.Namespace or None
-        Pre-parsed arguments.  When a benchmark script needs its own CLI
-        flags it can call ``parser = make_parser()``, add custom
-        arguments, run ``args = parser.parse_args()``, and then pass
-        *args* here.  If *None*, a default parser with only
-        ``--csv`` / ``--csv-samples`` is created and ``parse_args()``
-        is called automatically.
-    """
-    if args is None:
-        args = make_parser().parse_args()
-
-    configure_rotating(getattr(args, "rotating", None), getattr(args, "no_rotating", False))
-    configure_kernel_profile(getattr(args, "kernel_profile", False))
-
-    rows = []
-    all_case_metrics = []
-    resolved_metric_columns = None
-
-    for case in test_cases:
-        label = "  ".join(f"{k}={case[k]}" for k in param_columns)
-        print(f"\n{'='*60}")
-        print(f"Testing: {label}")
-        print(f"{'='*60}")
-
-        metric_records = bench_fn(**case)
-        metric_row = _metric_row_from_records(metric_records)
-        _print_metric_records(metric_records)
-        current_metric_columns = list(metric_row.keys())
-
-        if resolved_metric_columns is None:
-            resolved_metric_columns = current_metric_columns
-        elif current_metric_columns != resolved_metric_columns:
-            raise ValueError(
-                f"Inconsistent metric columns for case {case}: "
-                f"expected {resolved_metric_columns}, got {current_metric_columns}"
-            )
-
-        case_params = {k: (str(case[k]) if isinstance(case[k], torch.dtype) else case[k])
-                       for k in param_columns}
-        row = dict(case_params)
-        row.update(metric_row)
-        rows.append(row)
-        all_case_metrics.append((case_params, metric_records))
-
-    if args.csv is not None:
-        import pandas as pd
-        out_csv = args.csv if isinstance(args.csv, str) else (
-            default_csv or _default_csv_name(bench_fn)
-        )
-        columns = param_columns + (resolved_metric_columns or [])
-        results = pd.DataFrame(rows, columns=columns)
-        results.to_csv(out_csv, index=False)
-        print(f"\nResults saved to {out_csv}")
-
-    if args.csv_samples is not None:
-        import pandas as pd
-        from pathlib import Path
-        base = default_csv or _default_csv_name(bench_fn)
-        samples_csv = args.csv_samples if isinstance(args.csv_samples, str) else (
-            Path(base).stem + "_samples.csv"
-        )
-        sample_rows = []
-        for case_params, records in all_case_metrics:
-            for metric in records:
-                measurement = metric.get("measurement")
-                if measurement is None:
-                    continue
-                lbl = metric["label"]
-                for i, t in enumerate(measurement.times):
-                    sr = dict(case_params)
-                    sr["label"] = lbl
-                    sr["sample_idx"] = i
-                    # measurement.times is already per-iteration (raw block time
-                    # divided by number_per_run); convert seconds -> ms only.
-                    sr["time_ms"] = t * 1e3
-                    sample_rows.append(sr)
-        if sample_rows:
-            df = pd.DataFrame(
-                sample_rows,
-                columns=param_columns + ["label", "sample_idx", "time_ms"],
-            )
-            df.to_csv(samples_csv, index=False)
-            print(f"Samples saved to {samples_csv}")
-
-
 # ---------------------------------------------------------------------------
 # pytest-based execution support
 # ---------------------------------------------------------------------------
-# The microbenchmarks can also run under pytest; conftest.py is a thin shim over
-# the framework-agnostic helpers below (no pytest import here, so importing
-# utils.py never requires pytest). Results are collected per family (test module)
-# and written with the same CSV / samples schema run_benchmarks produces, so
-# downstream tooling (e.g. the dashboard ingest) is unaffected.
+# conftest.py drives the microbenchmarks under pytest via the framework-agnostic
+# helpers below (no pytest import here, so importing utils.py never requires it).
+# Results are collected per family (test module) and written with the CSV / samples
+# schema the dashboard ingest consumes.
 
 def configure_rotating(rotating, no_rotating):
     """Set module-level input-rotation state from parsed options."""

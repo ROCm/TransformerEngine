@@ -7,12 +7,13 @@
 """pytest glue for the microbenchmarks.
 
 Thin shim: the option/CSV/timing logic lives in utils.py; this file only wires
-those helpers into pytest hooks and exposes the ``microbench`` fixture.  Run a
-family with, e.g.::
+those helpers into pytest hooks and exposes the ``microbench`` fixture.  Each
+benchmark is run canonically with ``python benchmark_gemm.py`` (the file
+forwards to pytest), e.g.::
 
-    pytest benchmark_gemm.py --csv                 # write benchmark_gemm.csv
-    pytest benchmark_gemm.py -k "bf16 and QKV"     # select by parametrize id
-    pytest benchmark_gemm.py -k triton             # select the triton backend
+    python benchmark_gemm.py --csv                 # write benchmark_gemm.csv
+    python benchmark_gemm.py -k "bf16 and QKV"     # select by parametrize id
+    python benchmark_gemm.py -k triton             # select the triton backend
 """
 
 import os

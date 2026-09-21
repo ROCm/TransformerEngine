@@ -7,6 +7,9 @@
 """
 Normalization micro-benchmark using the fusible-ops LayerNorm / RMSNorm.
 
+Run with ``python benchmark_normalization.py`` (a pytest module under the hood;
+see conftest.py).
+
 Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8) that TE training
 recipes produce. In FP8/FP4 training the norm is fused with the following
 Linear (LayerNormLinear / LayerNormMLP) and writes its output already
