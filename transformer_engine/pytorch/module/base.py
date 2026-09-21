@@ -789,7 +789,9 @@ def fused_bulk_rs_eligible(
     if not IS_HIP_EXTENSION:
         return True
     # TODO: Add bias support
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16 and bias is None
+    eligible = (
+        _ub_is_fused(name) and (not fp8 or mxfp8) and dtype == torch.bfloat16 and bias is None
+    )
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)

@@ -446,3 +446,162 @@ static inline void dispatch(rs_globals g) {
 }
 
 }  // namespace hk_rs_nt
+
+namespace hk_mxfp8_rs_nt {
+
+using namespace kittens;
+using namespace hk_overlap;
+
+// The MXFP8 K step, 128 rather than hk_overlap::K_STEP's bf16 64.
+constexpr int BLOCK_K = 128;
+
+using G = kittens::group<NUM_WARPS>;
+
+using gl_fp8_rt   = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
+using gl_scale_rt = kittens::gl<kittens::fp8e8m0, -1, 1, 16, 64>;
+using gl_bf16_rt  = kittens::gl<kittens::bf16, 1, 1, -1, -1>;
+
+// Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
+using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
+
+// Reads the pre-packed lane-native scale for group lg on this lane
+__device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg) {
+    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
+}
+
+// dW is [M, N], not the [N, M] mxfp8_gemm.cpp's NT path writes, so the col_l accumulator already
+// carries C's orientation and stores straight through -- that file's NN epilogue, not its NT one.
+template<typename RT_C, typename OutGL>
+__device__ __forceinline__ void gemm_epilogue(
+    RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
+    const OutGL &C, int block_row, int block_col, int warp_m, int warp_n) {
+
+    auto oc = [&](int m_off, int n_off) {
+        return kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + m_off,
+                                          block_col * WARPS_COL * 2 + n_off};
+    };
+
+    kittens::store(C, cA, oc(warp_m, warp_n));
+    kittens::store(C, cB, oc(warp_m, WARPS_COL + warp_n));
+    kittens::store(C, cC, oc(WARPS_ROW + warp_m, warp_n));
+    kittens::store(C, cD, oc(WARPS_ROW + warp_m, WARPS_COL + warp_n));
+}
+
+struct mxfp8_rs_globals {
+    gl_fp8_rt a;                   // dY, stored [K=tokens, M=out_local]
+    gl_fp8_rt b;                   // X,  stored [K=tokens, N=hidden]
+    gl_bf16_rt c;                  // dW,        [M=out_local, N=hidden]
+    gl_scale_rt sa;                // lane-native scales for the a slot
+    gl_scale_rt sb;                // lane-native scales for the b slot, hi/lo tile pair
+    int nred;
+    int bands;
+    int gband;                     // bands folded per cycle; gband == bands is one pass
+    int tp_size;
+    int my_pe;
+    hk_rs_nt::PeerPtrs peers;
+    size_t shard_elems;            // (tokens/tp) * hidden
+    size_t band_elems;             // RS_BAND_ROWS * hidden
+    hipStream_t stream;
+    int M = c.rows();
+    int N = c.cols();
+    int K = a.rows();
+    dim3 grid()  { return dim3((N / BLOCK_COL) * (M / BLOCK_ROW) + nred); }
+    dim3 block() { return dim3(NUM_THREADS); }
+};
+
+template <int CBSZ, int BLGP>
+__global__ __launch_bounds__(NUM_THREADS, 2)
+void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
+    if ((int)blockIdx.x < g.nred) {
+        hk_rs_nt::rs_pull_fold((int)blockIdx.x, g.nred, g.bands, g.gband, g.tp_size, g.my_pe,
+                               g.peers, g.shard_elems, g.band_elems);
+        return;
+    }
+
+    const int k_iters = K / BLOCK_K;
+    const int tiles_M = M / BLOCK_ROW;
+    const int tiles_N = N / BLOCK_COL;
+
+    const int NUM_XCDS = 8;
+    const int WGM      = 8;
+    int wgid = kittens::chiplet_transform_chunked((int)blockIdx.x - g.nred,
+                                                  (int)gridDim.x - g.nred, NUM_XCDS, WGM * WGM);
+    int num_wgid_in_group = WGM * tiles_N;
+    int group_id     = wgid / num_wgid_in_group;
+    int first_pid_m  = group_id * WGM;
+    int group_size_m = min(tiles_M - first_pid_m, WGM);
+    int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+    int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+
+    int a_row_tile = m_tile;
+    int block_row  = m_tile;
+    int block_col  = n_tile;
+    int sa_batch   = m_tile;
+    int sa_stride  = tiles_M;
+    int sb_batch   = n_tile;
+    int sb_stride  = tiles_N;
+
+    const gl_fp8_rt   A          = g.a;
+    const gl_fp8_rt   B          = g.b;
+    const gl_scale_rt scale_A_gl = g.sa;
+    const gl_scale_rt scale_B_gl = g.sb;
+
+#include "mxfp8_nt_prologue.inc"
+
+    RT_A a;
+    RT_B b0, b1;
+    RT_C cA, cB, cC, cD;
+    kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
+
+    int tic = 0, toc = 1;
+    int tic_scales = 0, toc_scales = 1;
+
+    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2        }, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1    }, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
+
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2}, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
+    asm volatile("s_waitcnt vmcnt(0)");
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    if (warp_m == 1) {
+        __builtin_amdgcn_s_barrier();
+    }
+
+#include "../mxfp8_nt_mainloop.inc"
+
+    gemm_epilogue<RT_C>(cA, cB, cC, cD, g.c, block_row, block_col, warp_m, warp_n);
+}
+
+template <int CBSZ, int BLGP>
+static void dispatch(mxfp8_rs_globals g) {
+    mxfp8_wgrad_rs_tk<CBSZ, BLGP><<<g.grid(), g.block(), 0, g.stream>>>(g, g.M, g.N, g.K);
+}
+
+using bulk_rs_mxfp8_fn_t = void (*)(mxfp8_rs_globals);
+
+// MFMA cbsz/blgp operand format codes: 0 = e4m3, 1 = e5m2, per operand. The arguments are the
+// kernel's A and B slots, which the host fills from args.B and args.A respectively.
+static bulk_rs_mxfp8_fn_t get_bulk_rs_mxfp8_fn(KittensDType a_dt, KittensDType b_dt) {
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
+    if (a_fp8_code == 0 && b_fp8_code == 0) return dispatch<0, 0>;
+    if (a_fp8_code == 0 && b_fp8_code == 1) return dispatch<0, 1>;
+    if (a_fp8_code == 1 && b_fp8_code == 0) return dispatch<1, 0>;
+    if (a_fp8_code == 1 && b_fp8_code == 1) return dispatch<1, 1>;
+    return nullptr;
+}
+
+}  // namespace hk_mxfp8_rs_nt

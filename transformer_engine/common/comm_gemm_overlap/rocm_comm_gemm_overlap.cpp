@@ -523,6 +523,8 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
     return false;
   }
 
+  const void *a_ptr   = A.dptr();
+  const void *b_ptr   = B.dptr();
   const void *scale_A = nullptr;
   const void *scale_B = nullptr;
   if (is_fp8_input) {
@@ -532,11 +534,16 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
         B_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
       return false;
     }
-    if (!A_tensor->has_data() || !B_tensor->has_data()) {
+    if (!A_tensor->has_columnwise_data() || !B_tensor->has_columnwise_data()) {
       return false;
     }
-    scale_A = A_tensor->scale_inv.dptr;
-    scale_B = B_tensor->scale_inv.dptr;
+    a_ptr   = A_tensor->columnwise_data.dptr;
+    b_ptr   = B_tensor->columnwise_data.dptr;
+    scale_A = A_tensor->columnwise_scale_inv.dptr;
+    scale_B = B_tensor->columnwise_scale_inv.dptr;
+    if (!a_ptr || !b_ptr || !scale_A || !scale_B) {
+      return false;
+    }
   }
   if (tp_size != 4 && tp_size != 8) {
     return false;
@@ -560,7 +567,7 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      A.dptr(), B.dptr(), D.dptr(), scale_A, scale_B, ubuf.dptr(),
+      a_ptr, b_ptr, D.dptr(), scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -571,7 +578,17 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
   if (is_fp8_input) {
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
+    static bool traced_bulk_mxfp8 = false;
+    if (!traced_bulk_mxfp8 && std::getenv("NVTE_RS_DIAG")) {
+      traced_bulk_mxfp8 = true;
+      std::fprintf(stderr, "[RS_DIAG] bulk launched mxfp8\n");
+    }
     return kittens_bulk_rs_gemm_mxfp8(args);
+  }
+  static bool traced_bulk_bf16 = false;
+  if (!traced_bulk_bf16 && std::getenv("NVTE_RS_DIAG")) {
+    traced_bulk_bf16 = true;
+    std::fprintf(stderr, "[RS_DIAG] bulk launched bf16\n");
   }
   return kittens_bulk_rs_gemm_bf16(args);
 }
