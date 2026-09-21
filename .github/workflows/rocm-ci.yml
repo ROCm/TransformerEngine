@@ -185,7 +185,26 @@ jobs:
           EOF
           )"
 
-      - name: Run sGPU tests in parallel (pytorch, jax, examples, core)
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of *this* run. The restore key is
+      # anchored to run_id, so it can only match an earlier attempt of the same
+      # run -- a first attempt finds nothing and the queue runs in full. That is
+      # the whole trigger: "Re-run failed jobs" already picks which jobs come
+      # back, and the presence of this file is what tells the scheduler why.
+      - name: Restore the previous attempt's failed items
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
+
+      - name: Run sGPU tests as one queue (pytorch, jax, examples, core)
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
@@ -196,7 +215,19 @@ jobs:
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
-          rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
+          rm -rf test-results
+
+          mkdir -p ci-weights
+          wc -l ci-weights/*.txt 2>/dev/null \
+            || echo "no weight table restored; this run will be unordered"
+
+          mkdir -p ci-rerun
+          wc -l ci-rerun/*.tsv 2>/dev/null \
+            || echo "no failed-item list restored; this run queues every suite"
+          # Present only for items the last attempt could narrow to single
+          # tests; the rest of the failed list re-runs whole.
+          wc -l ci-rerun/tests/*.txt 2>/dev/null \
+            || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
             -e TEST_SGPU=1 \
@@ -204,10 +235,26 @@ jobs:
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash /workspace/.github/scripts/run_parallel_sgpu.sh \
-              --first-gpu 0 \
-              --log-dir /workspace/ \
-              /workspace/.github/scripts/ci_sgpu_jobs.conf
+            -e GITHUB_ACTIONS \
+            te-runner bash /workspace/ci/run_queue_sgpu.sh \
+              --log-dir /workspace/test-results/logs
+
+      - name: Save learned test weights
+        if: always() && hashFiles('ci-weights/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Saved under this attempt's number so the next one restores it by prefix.
+      # Saved even when the queue passed: the file is then empty, and restoring
+      # an empty list is what stops a third attempt re-running the second's work.
+      - name: Save this attempt's failed items
+        if: always() && hashFiles('ci-rerun/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
@@ -222,26 +269,33 @@ jobs:
             --title "sGPU JAX (${{ matrix.arch_label }})"
           python3 ci/junit_report.py test-results/core \
             --title "sGPU Core (${{ matrix.arch_label }})"
+          if [ -f test-results/logs/report/schedule.md ]; then
+            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
 
       - name: Check suite failure status
         if: always()
         run: |
           EXIT_STATUS=0
-          for config in .github/scripts/ci_sgpu_jobs.conf; do
-            while IFS= read -r line || [[ -n "$line" ]]; do
-              [[ "$line" =~ ^[[:space:]]*# ]] && continue
-              [[ -z "${line//[[:space:]]/}" ]] && continue
-              read -r label logfile rest <<< "$line"
-              rc=$(cat "${logfile}.rc" 2>/dev/null || echo "missing")
-              if [[ "$rc" != "0" ]]; then
-                echo "::group::[FAILED] ${label} Log (rc=${rc})"
-                cat "$logfile" 2>/dev/null || echo "(log not found)"
-                echo "::endgroup::"
-                echo "::error::${label} tests FAILED."
-                EXIT_STATUS=1
-              fi
-            done < "$config"
-          done
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < ci/ci_sgpu_queue.conf
           exit $EXIT_STATUS
 
       - name: Upload logs
@@ -250,10 +304,16 @@ jobs:
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
-            *.log
-            test-results/**/*.xml
+            test-results/**
+            ci-weights/*.txt
+            ci-rerun/*.tsv
+            ci-rerun/tests/*.txt
           if-no-files-found: ignore
           retention-days: 5
+          # A re-run uploads under a name the first attempt already used, which
+          # v4 rejects as a duplicate. Replace it: the logs of the attempt being
+          # re-run are the ones nobody wants.
+          overwrite: true
 
       - name: Cleanup container
         if: always()
