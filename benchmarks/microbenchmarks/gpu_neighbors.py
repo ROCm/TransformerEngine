@@ -4,8 +4,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""GPU interference detection (AMD/ROCm): warn when another process shares the
-benchmark GPU(s), so timings aren't silently skewed by a neighbor.
+"""GPU interference detection: warn when another process shares the
+benchmark GPU, so timings aren't silently skewed by a neighbor.
 
 This module is deliberately free of a top-level ``torch`` import. On ROCm the
 first CUDA call in a process (e.g. importing ``torch.utils.benchmark`` or
@@ -19,8 +19,6 @@ genuine neighbor and there is no self to exclude across the PID namespace.
 :func:`detect_gpu_interference` then maps torch's ``cuda:0`` to its amdsmi
 handle by PCI address and reports the pre-existing processes on that GPU.
 """
-
-import os
 
 
 def _proc_cmdline(pid):
@@ -40,36 +38,8 @@ def _proc_cmdline(pid):
         return None
 
 
-def _own_pids():
-    """Our PID plus all descendant PIDs (so worker processes aren't flagged)."""
-    me = os.getpid()
-    children = {}
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return {me}
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            with open(f"/proc/{entry}/stat") as fh:
-                data = fh.read()
-            # comm (field 2) may contain spaces/parens; ppid is field 4, after the last ')'.
-            ppid = int(data[data.rfind(")") + 2:].split()[1])
-        except (OSError, IndexError, ValueError):
-            continue
-        children.setdefault(ppid, []).append(int(entry))
-    own, stack = set(), [me]
-    while stack:
-        pid = stack.pop()
-        if pid in own:
-            continue
-        own.add(pid)
-        stack.extend(children.get(pid, []))
-    return own
-
-
 # Monitoring tools open every GPU but aren't real compute interference.
+# Matched after stripping non-alphanumerics, so e.g. "rocm-smi" -> "rocmsmi".
 _IGNORED_PROC_NAMES = ("nvtop", "amdsmi", "rocmsmi")
 
 
@@ -168,14 +138,14 @@ def _torch_cuda_bdf(index=0):
 
 
 def detect_gpu_interference(snapshot):
-    """AMD/ROCm only: find foreign compute processes on *our* GPU.
+    """Find foreign compute processes on *our* GPU.
 
     Uses the pre-CUDA *snapshot* from :func:`snapshot_gpu_neighbors` (genuine
     neighbors only, no self), then maps torch's ``cuda:0`` to its amdsmi handle
-    by matching PCI addresses -- deterministic and immune to both the
-    amdsmi<->HIP index mismatch and VRAM races -- and reports the pre-existing
-    processes on that GPU, dropping monitoring tools (nvtop/amd-smi/rocm-smi). If
-    we can't locate our GPU we report nothing rather than risk a false positive.
+    by matching PCI addresses (immune to the amdsmi<->HIP index mismatch), and 
+    reports the pre-existing processes on that GPU, filtering out monitoring tools 
+    (nvtop/amd-smi/rocm-smi). If we can't locate our GPU we report nothing rather 
+    than risk a false positive.
     Returns ``(status, foreign)`` with *status* in ``"ok"`` / ``"unavailable"`` /
     ``"not_amd"`` and *foreign* a list of ``(gpu, pid, cmdline)``.
     """
@@ -196,12 +166,11 @@ def detect_gpu_interference(snapshot):
                 our_idx = idx
                 break
 
-    if our_idx is None:  # couldn't locate our GPU -> stay silent, never false-positive
+    if our_idx is None:  # couldn't locate our GPU -> stay silent
         return "ok", []
-    own = _own_pids()
     foreign = []
     for pid, name in sorted(neighbors.get(our_idx, {}).items()):
-        if pid in own or _is_ignored_proc(name):
+        if _is_ignored_proc(name):
             continue
         foreign.append((our_idx, pid, _proc_cmdline(pid) or name or f"pid {pid}"))
     return "ok", foreign
@@ -210,12 +179,13 @@ def detect_gpu_interference(snapshot):
 def format_gpu_interference(foreign):
     """Render the foreign-process list as a warning banner."""
     bar = "=" * 74
+    gpu = foreign[0][0] if foreign else "?"
     lines = ["", bar,
-             f"GPU INTERFERENCE: {len(foreign)} other process(es) on the benchmark GPU(s)",
+             f"GPU INTERFERENCE: {len(foreign)} other process(es) on benchmark GPU {gpu}",
              "-" * 74]
-    for gpu, pid, cmd in foreign:
+    for _gpu, pid, cmd in foreign:
         if len(cmd) > 150:
             cmd = cmd[:147] + "..."
-        lines.append(f"  GPU {gpu}  PID {pid:<8}  {cmd}")
+        lines.append(f"  PID {pid:<8}  {cmd}")
     lines.append(bar)
     return "\n".join(lines)
