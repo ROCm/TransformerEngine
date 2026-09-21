@@ -875,9 +875,89 @@ bool run_bulk_rs(const KittensRsGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
+static_assert(hk_mxfp8_rs_nt::BLOCK_ROW == 256 && hk_mxfp8_rs_nt::BLOCK_COL == 256 &&
+              hk_mxfp8_rs_nt::BLOCK_K == 128,
+              "bulk_rs_shape_ok_mxfp8 literals are stale against hk_mxfp8_rs_nt geometry");
+
+bool bulk_rs_shape_ok_mxfp8(int M, int N, int K, int nred) {
+    // Order matters here
+    return M % 256 == 0 && N % 256 == 0 && K % 128 == 0 && K >= 256 &&
+           nred >= 0 && nred % 8 == 0;
+}
+
 bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
-    static_cast<void>(args);
-    return false;
+    using namespace hk_mxfp8_rs_nt;
+
+    const int M       = args.n;               // out_local
+    const int N       = args.m;               // hidden
+    const int K       = args.k;               // tokens
+    const int tp_size = args.nranks;
+
+    const int wgs  = (tp_size - 1) * rs_comm_wg_bulk(M, tp_size);
+    const int nred = (wgs + hk_rs_nt::NUM_XCDS - 1) / hk_rs_nt::NUM_XCDS * hk_rs_nt::NUM_XCDS;
+
+    if (!bulk_rs_shape_ok_mxfp8(M, N, K, nred)) return false;
+
+    const int tiles_M = M / BLOCK_ROW;
+    const int tiles_N = N / BLOCK_COL;
+    const int k_iters = K / BLOCK_K;
+    const int scale_K = K / 32;
+
+    const size_t shard_elems = args.shard_bytes / sizeof(bf16);
+    const size_t band_elems  = static_cast<size_t>(hk_rs_nt::RS_BAND_ROWS) * N;
+    const int    bands       = static_cast<int>(shard_elems / band_elems);
+    if (!hk_rs_nt::bands_tile_shard(shard_elems, bands, band_elems)) return false;
+
+    auto launch = get_bulk_rs_mxfp8_fn(args.b_dtype, args.a_dtype);
+    if (!launch) return false;   // unexpected operand format pair
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+
+    // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair).
+    const size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
+    const size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_N * 512 * sizeof(uint32_t), 256);
+    uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
+    uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
+    if (!ws.fits()) return false;
+
+    // The A slot holds args.B and the B slot args.A, so the scale buffers follow them across that
+    // swap. Both operands are K-major here, which is what COLWISE packs.
+    launch_pack_scales<true, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
+                                    args.stream);
+    launch_pack_scales<true, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N, scale_K, k_iters,
+                                    args.stream);
+
+    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
+    if (!bases) return false;
+    hk_rs_nt::PeerPtrs peers{};
+    for (int c = 0; c < tp_size; c++) {
+        peers.base[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+    }
+    peers.base[args.rank] = static_cast<bf16 *>(args.ub);
+
+    if (args.arrive_peers && args.arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    mxfp8_rs_globals g{
+        gl_fp8_rt(static_cast<fp8e4m3 *>(const_cast<void *>(args.B)), nullptr, nullptr,
+                  static_cast<size_t>(K), static_cast<size_t>(M)),
+        gl_fp8_rt(static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), nullptr, nullptr,
+                  static_cast<size_t>(K), static_cast<size_t>(N)),
+        gl_bf16_rt(static_cast<bf16 *>(args.D), nullptr, nullptr,
+                   static_cast<size_t>(M), static_cast<size_t>(N)),
+        gl_scale_rt(reinterpret_cast<fp8e8m0 *>(packed_sa), k_iters * tiles_M,
+                    nullptr, nullptr, nullptr),
+        gl_scale_rt(reinterpret_cast<fp8e8m0 *>(packed_sb), 2 * k_iters * tiles_N,
+                    nullptr, nullptr, nullptr),
+        nred, bands, bands, tp_size, args.rank, peers, shard_elems, band_elems, args.stream};
+    launch(g);
+    return hipGetLastError() == hipSuccess;
 }
 
 // Fused TN GEMM + reduce-scatter
