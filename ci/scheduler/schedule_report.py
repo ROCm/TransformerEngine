@@ -76,8 +76,9 @@ def render_md(rows):
             out.append("|" + "---|" * len(row))
     return out
 
-def calculate_efficiency_table(frame, wall, n_gpus):
-    """What the run cost, and how much of the GPU-time it bought was used."""
+def calculate_efficiency_table(frame, wall, n_gpus, clock):
+    """What the run cost, and how much of the GPU-time it bought was used.
+    """
     work = int(frame["secs"].sum())
     if len(frame):
         biggest = frame.loc[frame["secs"].idxmax()]
@@ -87,10 +88,10 @@ def calculate_efficiency_table(frame, wall, n_gpus):
     # Once one item exceeds the per-GPU average there is no ordering that
     # finishes sooner than that item, so it becomes the thing to split.
     floor = " -- floor: splitting it would now pay" if big > work / n_gpus else ""
-    return [
+    rows = [
         ["Metric", "Value", "Meaning"],
         ["total work", f"{work}s", f"sum of all {len(frame)} item durations"],
-        ["actual run time", f"{wall}s", "wall clock, first item start to last item finish"],
+        ["queue run time", f"{wall}s", "wall clock, first item start to last item finish"],
         [
             "utilisation",
             f"{work * 100 / (wall * n_gpus):.1f}%",
@@ -98,6 +99,21 @@ def calculate_efficiency_table(frame, wall, n_gpus):
         ],
         ["largest item", f"{big}s", bigname + floor],
     ]
+    if clock["total"]:
+        # Named as the serial overhead it is: it is spent before any GPU starts
+        # work, so it is a fixed floor no amount of reordering can shorten, and
+        # it is the part a comparison against an older run must not drop.
+        overhead = max(clock["total"] - wall, 0)
+        rows.insert(
+            3,
+            [
+                "end-to-end",
+                f"{clock['total']}s",
+                f"the whole script: {overhead}s outside the queue, chiefly"
+                f" expansion {clock['expand']}s and prerequisites {clock['setup']}s",
+            ],
+        )
+    return rows
 
 
 def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
@@ -208,7 +224,9 @@ def missing_items(frame, queue_keys):
 # Report.
 
 
-def render_report_md(frame, wall, gpu_ids, total_items, default_weight, missing, weights):
+def render_report_md(
+    frame, wall, gpu_ids, total_items, default_weight, missing, weights, clock, rerun=False
+):
     """The Markdown report the workflow appends to the job summary."""
     n_gpus = len(gpu_ids)
     ran = len(frame)
@@ -225,9 +243,21 @@ def render_report_md(frame, wall, gpu_ids, total_items, default_weight, missing,
         f"## {REPORT_TITLE}",
         "",
         f"{mark} **{ran} items** on {n_gpus} GPUs -- {failed} failed{note} "
-        f"-- {wall}s wall clock at {util:.1f}% GPU utilisation",
+        f"-- {wall}s in the queue at {util:.1f}% GPU utilisation"
+        + (f", {clock['total']}s end to end" if clock["total"] else ""),
         "",
     ]
+
+    # Ahead of everything else, because it changes how the whole report reads: a
+    # re-run queues only what failed, so the low utilisation below is the queue
+    # being short rather than the schedule being bad, and the weight table was
+    # deliberately not updated from these timings.
+    if rerun:
+        out.append("> :repeat: **Re-run of the failed items only.** Everything absent from")
+        out.append("> the schedule below passed on an earlier attempt of this run. GPU")
+        out.append("> utilisation is not comparable to a full queue, and the learned")
+        out.append("> weights were left as the full run wrote them.")
+        out.append("")
 
     if ran != total_items:
         out.append(f"> :warning: **Only {ran} of {total_items} items produced a timing")
@@ -237,7 +267,7 @@ def render_report_md(frame, wall, gpu_ids, total_items, default_weight, missing,
         out.append("")
 
     for heading, rows in (
-        ("Efficiency", calculate_efficiency_table(frame, wall, n_gpus)),
+        ("Efficiency", calculate_efficiency_table(frame, wall, n_gpus, clock)),
         ("Per-GPU utilisation", calculate_gpu_utilisation_table(frame, wall, gpu_ids)),
     ):
         out += [f"### {heading}", ""] + render_md(rows) + [""]
@@ -280,7 +310,24 @@ def main():
         "--gpus", required=True, metavar="IDS", help='space-separated device ids, e.g. "0 1 2 4"'
     )
     parser.add_argument(
-        "--wall", type=int, required=True, metavar="SECS", help="run wall clock in seconds"
+        "--wall", type=int, required=True, metavar="SECS", help="queue wall clock in seconds"
+    )
+    # Optional, unlike --wall: without them the report simply omits the
+    # end-to-end line rather than inventing one, which keeps the tool usable
+    # against a timings.tsv salvaged from an artifact.
+    parser.add_argument(
+        "--total-wall",
+        type=int,
+        default=0,
+        metavar="SECS",
+        help="whole-script wall clock, queue plus expansion and setup; the "
+        "number to compare against a run that predates the queue",
+    )
+    parser.add_argument(
+        "--expand-secs", type=int, default=0, metavar="SECS", help="seconds spent in phases 1-2"
+    )
+    parser.add_argument(
+        "--setup-secs", type=int, default=0, metavar="SECS", help="seconds spent in phase 3"
     )
     parser.add_argument(
         "--default-weight",
@@ -294,6 +341,12 @@ def main():
         metavar="TABLE",
         help="the weight table build_weights.py has just rewritten; the report "
         "reads it to show what the next run will schedule with",
+    )
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help="this run queued only the items that failed a previous attempt; "
+        "say so, because it makes the utilisation figures incomparable",
     )
     args = parser.parse_args()
 
@@ -316,8 +369,17 @@ def main():
 
     weights = read_weights(args.weights)
 
+    clock = {"total": args.total_wall, "expand": args.expand_secs, "setup": args.setup_secs}
     report = render_report_md(
-        frame, wall, gpu_ids, len(queue_keys), args.default_weight, missing, weights
+        frame,
+        wall,
+        gpu_ids,
+        len(queue_keys),
+        args.default_weight,
+        missing,
+        weights,
+        clock,
+        rerun=args.rerun,
     )
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as handle:

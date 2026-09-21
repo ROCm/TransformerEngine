@@ -186,8 +186,20 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ci-weights
-          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of *this* run. The restore key is
+      # anchored to run_id, so it can only match an earlier attempt of the same
+      # run -- a first attempt finds nothing and the queue runs in full. That is
+      # the whole trigger: "Re-run failed jobs" already picks which jobs come
+      # back, and the presence of this file is what tells the scheduler why.
+      - name: Restore the previous attempt's failed items
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
 
       - name: Run sGPU tests as one queue (pytorch, jax, examples, core)
         id: run-tests
@@ -206,6 +218,14 @@ jobs:
           wc -l ci-weights/*.txt 2>/dev/null \
             || echo "no weight table restored; this run will be unordered"
 
+          mkdir -p ci-rerun
+          wc -l ci-rerun/*.tsv 2>/dev/null \
+            || echo "no failed-item list restored; this run queues every suite"
+          # Present only for items the last attempt could narrow to single
+          # tests; the rest of the failed list re-runs whole.
+          wc -l ci-rerun/tests/*.txt 2>/dev/null \
+            || echo "no per-test lists restored; any queued item re-runs whole"
+
           docker exec \
             -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
@@ -213,7 +233,7 @@ jobs:
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            te-runner bash /workspace/.github/scripts/run_queue_sgpu.sh \
+            te-runner bash /workspace/ci/run_queue_sgpu.sh \
               --log-dir /workspace/test-results/logs
 
       - name: Save learned test weights
@@ -221,7 +241,17 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ci-weights
-          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Saved under this attempt's number so the next one restores it by prefix.
+      # Saved even when the queue passed: the file is then empty, and restoring
+      # an empty list is what stops a third attempt re-running the second's work.
+      - name: Save this attempt's failed items
+        if: always() && hashFiles('ci-rerun/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
@@ -262,7 +292,7 @@ jobs:
               cat "$f"
               echo "::endgroup::"
             done
-          done < .github/scripts/ci_sgpu_queue.conf
+          done < ci/ci_sgpu_queue.conf
           exit $EXIT_STATUS
 
       - name: Upload logs
@@ -273,8 +303,14 @@ jobs:
           path: |
             test-results/**
             ci-weights/*.txt
+            ci-rerun/*.tsv
+            ci-rerun/tests/*.txt
           if-no-files-found: ignore
           retention-days: 5
+          # A re-run uploads under a name the first attempt already used, which
+          # v4 rejects as a duplicate. Replace it: the logs of the attempt being
+          # re-run are the ones nobody wants.
+          overwrite: true
 
       - name: Cleanup container
         if: always()

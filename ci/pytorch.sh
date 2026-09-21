@@ -165,7 +165,9 @@ fi
 start_message
 #Prerequisites and the CK JIT cache are container-wide state, so a scheduler
 #that dispatches many TEST_FILTER-ed invocations does them once up front with
-#TE_CI_SETUP_ONLY and then passes TE_CI_SKIP_SETUP on every item.
+#TE_CI_SETUP_ONLY and then passes TE_CI_SKIP_SETUP on every item. The CK JIT
+#cache is keyed by GPU arch rather than by framework, so a scheduler running
+#more than one suite hoists it a level further and sets TE_CI_SKIP_CK_JIT here.
 if check_setup_needed; then
     install_prerequisites
     pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"

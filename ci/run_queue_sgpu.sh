@@ -15,17 +15,19 @@
 # The queue uses every GPU it can see; restrict it with HIP_VISIBLE_DEVICES.
 #
 # Example usage:
-#   TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
-#   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
+#   TEST_LEVEL=1 ci/run_queue_sgpu.sh
+#   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 ci/run_queue_sgpu.sh
 set -u
+SCRIPT_START_TS=$(date +%s)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Two directories in the repo root:
+# Three directories in the repo root:
 #
 #   test-results/  everything one run produced; this script adds logs/ under it
 #   ci-weights/    the learned weight table
+#   ci-rerun/      what failed, so a re-run of this job can queue only that
 : "${LOG_DIR:=${REPO_ROOT}/test-results/logs}"
 
 # Items with no recorded weight sort first: an unknown item is more likely to be
@@ -164,6 +166,21 @@ echo "== Arch: ${ARCH} =="
 WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
 mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 
+# What failed last time, keyed the same way. Phase 5 writes it; Phase 2 reads it
+# and narrows the queue to it, which is how "re-run failed jobs" re-runs only the
+# failed tests. Nothing here decides whether this is a re-run -- the file is
+# present only when something put the previous attempt's copy in place, so the
+# scheduler needs no flag to tell the two cases apart.
+RERUN_FILE="${REPO_ROOT}/ci-rerun/failed.${ARCH}.l${TEST_LEVEL:-99}.tsv"
+mkdir -p "$(dirname "$RERUN_FILE")" 2>/dev/null
+RERUN_MODE=""   # set by Phase 2 once it has actually narrowed the queue
+
+# A second, finer layer over the same idea: one file of pytest nodeids per item,
+# named "<label>.<tag>.txt", narrowing a re-run of that item to the tests that
+# actually failed instead of the whole file. Strictly optional -- an item with no
+# file here re-runs whole -- so nothing about the queue depends on it being right.
+RERUN_TESTS_DIR="${REPO_ROOT}/ci-rerun/tests"
+
 [[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
 
 # Items no longer run from the repo root (Phase 4), so a relative JUnit prefix
@@ -179,7 +196,10 @@ fi
 
 # Directory Structure under LOG_DIR:
 #
-#   prerequisite_ck_jit_status/ Phase 3  one-time prerequisites per suite
+#   prerequisite_ck_jit_status/ Phase 3  the CK JIT prebuild log and the cache
+#                                        snapshot it leaves for the post-queue
+#                                        drift check, plus one pip setup log
+#                                        per suite
 #   items/                      Phase 4  the test output itself -- one file per item
 #   cwd/                        Phase 4  one working directory per item; empty ones
 #                                        are removed, so whatever is left here is
@@ -235,6 +255,7 @@ LIST_TMP="$QUEUE_DIR/.expand.tmp"  # one suite's list, reused per suite
 # QUEUE_DIR covers the same case; this keeps the phase correct on its own.
 : > "$QUEUE_FILE.raw"
 
+EXPAND_TS=$(date +%s)
 echo "== Expanding test suites into work items =="
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
@@ -284,9 +305,36 @@ done
 rm -f "$LIST_TMP"
 
 # ---------------------------------------------------------------------------
-# Phase 2: weight and order the queue (longest processing time first)
+# Phase 2: narrow the queue to a re-run, then weight and order it
 # ---------------------------------------------------------------------------
-if ! python3 "$REPO_ROOT/.github/scripts/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
+#
+# Narrowing happens here, after expansion, rather than by expanding less. Phase 1
+# still lists every suite in full, so items.tsv stays a complete census of what
+# exists at this level -- which is what Phase 6 prunes against, and reading "not
+# re-run this attempt" as "deleted" would throw away most of the weight table.
+if [[ -s "$RERUN_FILE" ]]; then
+    # Columns differ: the failure list is label+tag, the raw queue is
+    # label+cmd+tag+rest, so the join is on fields 1,2 against 1,3.
+    awk -F'\t' 'NR==FNR { want[$1 FS $2]; next } ($1 FS $3) in want' \
+        "$RERUN_FILE" "$QUEUE_FILE.raw" > "$QUEUE_FILE.rerun"
+    n_failed=$(wc -l < "$RERUN_FILE")
+    n_rerun=$(wc -l < "$QUEUE_FILE.rerun")
+    if [[ "$n_rerun" -gt 0 ]]; then
+        RERUN_MODE=1
+        mv "$QUEUE_FILE.rerun" "$QUEUE_FILE.raw"
+        echo "== Re-run: ${n_failed} items failed the previous attempt;" \
+             "queueing the ${n_rerun} of them this runner still has =="
+    else
+        # Every listed item is gone -- the config changed under the re-run, or
+        # this runner skips them all. Running everything is the safe reading of
+        # that; trusting the empty intersection would test nothing and pass.
+        rm -f "$QUEUE_FILE.rerun"
+        log_warn "none of the ${n_failed} items in ${RERUN_FILE##*/} are in this" \
+                 "runner's queue; running everything instead"
+    fi
+fi
+
+if ! python3 "$REPO_ROOT/ci/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
         --weights "$WEIGHTS_FILE" \
         --output "$QUEUE_FILE" \
         --default-weight "$DEFAULT_WEIGHT" \
@@ -297,10 +345,50 @@ fi
 rm -f "$QUEUE_FILE.raw"
 
 TOTAL_ITEMS=$(wc -l < "$QUEUE_FILE")
+EXPAND_SECS=$(( $(date +%s) - EXPAND_TS ))   # Phases 1-2: listing and ordering
 
 # ---------------------------------------------------------------------------
-# Phase 3: Install pip prerequisites and build CK JIT blob once here.
+# Phase 3: one-time prerequisites
 # ---------------------------------------------------------------------------
+#
+# Two kinds of prerequisite, hoisted to two different levels because their scope
+# differs:
+#
+#   CK JIT blobs   container-wide state keyed by GPU arch, not by framework, so
+#                  every suite wants the same cache. Built once for the whole
+#                  run, here, and TE_CI_SKIP_CK_JIT keeps the per-suite setup
+#                  below from rebuilding what already exists.
+#   pip packages   framework-specific (torch vs jax), so each list-mode suite
+#                  still installs its own.
+#
+# Outside the queue nothing changes: a bare ci/pytorch.sh sees neither variable
+# and still does both steps inline.
+SETUP_TS=$(date +%s)
+
+# ck_jit_prebuild and check_setup_needed live in _utils.sh, the same definitions
+# the suite scripts use -- the point of the hoist is to run that code once, not
+# to reimplement it. DIR is what _utils.sh resolves TE_PATH from.
+DIR="$REPO_ROOT/ci"
+# shellcheck source=/dev/null
+source "$REPO_ROOT/ci/_utils.sh"
+
+# The build runs in a subshell (so pinning HIP_VISIBLE_DEVICES does not stick to
+# the scheduler itself) and the drift check runs after the queue drains, in this
+# process. A shell variable cannot cross that boundary, so the snapshot goes to
+# a file; _utils.sh falls back to its in-process variable when this is unset.
+export TE_CI_CK_JIT_SNAPSHOT="$SETUP_DIR/ck_jit_cache.snapshot"
+
+echo "== One-time setup: CK JIT prebuild (once per run, shared by every suite) =="
+ck_jit_start=$(date +%s)
+if ! ( export HIP_VISIBLE_DEVICES="${GPU_IDS[0]}"; ck_jit_prebuild build ) \
+        > "$SETUP_DIR/ck_jit_prebuild.log" 2>&1; then
+    log_error "CK JIT prebuild failed; see $SETUP_DIR/ck_jit_prebuild.log"
+    tail -30 "$SETUP_DIR/ck_jit_prebuild.log" >&2
+    exit 1
+fi
+sed -n 's/^/  /p' "$SETUP_DIR/ck_jit_prebuild.log"
+echo "  done in $(( $(date +%s) - ck_jit_start ))s"
+
 setup_banner=""
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
@@ -308,13 +396,17 @@ for i in "${!SUITE_LABELS[@]}"; do
     # Only list-mode suites have a setup/dispatch split; an opaque suite is a
     # single invocation that still does its own setup inline.
     [[ "${SUITE_MODES[$i]}" == "list" ]] || continue
+    # Nothing of this suite is queued, so installing its prerequisites would buy
+    # nothing. Only a re-run reaches this: Phase 1 fails a suite that expands to
+    # nothing, so outside one every list-mode suite has rows.
+    awk -F'\t' -v l="$label" '$2==l {found=1} END {exit !found}' "$QUEUE_FILE" || continue
     if [[ -z "$setup_banner" ]]; then
-        echo "== One-time setup: pip prerequisites + CK JIT prebuild (once per suite) =="
+        echo "== One-time setup: pip prerequisites (once per suite) =="
         setup_banner=1
     fi
-    printf '  %s: installing prerequisites, prebuilding CK JIT blobs (%s) ... ' "$label" "$cmd"
+    printf '  %s: installing prerequisites (%s) ... ' "$label" "$cmd"
     setup_start=$(date +%s)
-    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 "$cmd" \
+    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 TE_CI_SKIP_CK_JIT=1 "$cmd" \
             > "$SETUP_DIR/${label}.log" 2>&1; then
         echo "FAILED"
         log_error "setup failed for ${label}; see $SETUP_DIR/${label}.log"
@@ -323,6 +415,7 @@ for i in "${!SUITE_LABELS[@]}"; do
     fi
     echo "done in $(( $(date +%s) - setup_start ))s"
 done
+SETUP_SECS=$(( $(date +%s) - SETUP_TS ))   # Phase 3: CK JIT prebuild + pip prerequisites
 
 # ---------------------------------------------------------------------------
 # Phase 4: run the queue
@@ -374,13 +467,21 @@ worker() {
         itemcwd="$ITEM_CWD_DIR/${label}.${safetag}"
         mkdir -p "$itemcwd"
 
+        # Narrow this item to the individual tests that failed the last attempt,
+        # if one left a list for it. List-mode items only: an opaque suite runs
+        # several pytest invocations and a single nodeid list cannot speak for
+        # all of them. Empty reads to the plugin as "run the item whole", which
+        # is also what it does with a list that no longer matches anything.
+        only_tests="$RERUN_TESTS_DIR/${label}.${tag}.txt"
+        [[ -n "$tag" && -n "$junit_dir" && -s "$only_tests" ]] || only_tests=""
+
         # No scheduler-imposed deadline: the suite scripts' own PYTEST_TIMEOUT and
         # the workflow's timeout-minutes are the only limits, exactly as they are
         # outside the queue.
         start=$(date +%s)
         if [[ -n "$tag" ]]; then
             ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
-                JUNITXML_PREFIX="$junit_dir" \
+                JUNITXML_PREFIX="$junit_dir" TE_CI_ONLY_TESTS="$only_tests" \
                 "$cmd" ${rest:-} ) > "$itemlog" 2>&1
         else
             ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="$junit_dir" \
@@ -451,18 +552,43 @@ WALL=$(( $(date +%s) - START_TS ))
 # zero seconds would otherwise abort the whole report on a division by zero.
 [[ $WALL -lt 1 ]] && WALL=1
 
+# --- CK JIT cache drift ----------------------------------------------------
+# What the queue JIT-compiled that ci/ck_jit_prebuild.txt did not cover, i.e.
+# what that list is now missing. Run once for the whole queue rather than once
+# per item: the cache is container-wide, so every item after the first would
+# report the same drift. Silent when the list is complete.
+ck_jit_drift="$(ck_jit_prebuild list 2>&1)" \
+    || log_warn "CK JIT cache check failed; continuing"
+echo "== CK JIT cache =="
+if [[ -n "$ck_jit_drift" ]]; then
+    sed -n 's/^/  /p' <<< "$ck_jit_drift"
+else
+    echo "  no drift: ci/ck_jit_prebuild.txt covered every blob the queue used"
+fi
+
 # ---------------------------------------------------------------------------
 # Phase 5: roll per-item results up into a per-suite verdict
 # ---------------------------------------------------------------------------
 declare -a FAILED_ITEMS=()   # log path per failed item, for Phase 8
+declare -a FAILED_KEYS=()    # label+tag per failed item, for the next attempt
 
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
-    # Phase 1 fails a suite that expands to nothing, so this should never skip.
-    # It stays because the alternative to skipping is an empty suite log and
-    # rc=0, which reads as "passed" to the workflow's gate.
-    awk -F'\t' -v l="$label" '$2==l {found=1} END {exit !found}' "$QUEUE_FILE" || continue
     suite_log="$SUITE_LOG_DIR/${SUITE_LOGFILES[$i]}"
+    if ! awk -F'\t' -v l="$label" '$2==l {found=1} END {exit !found}' "$QUEUE_FILE"; then
+        # Nothing of this suite was queued. On a re-run that is the ordinary
+        # case and means every item of it passed the attempt being re-run, so it
+        # is recorded as passing: the workflow's gate reads these files, and a
+        # missing one reads as a failure rather than as an absence.
+        #
+        # Outside a re-run the branch is unreachable (Phase 1 fails a suite that
+        # expands to nothing) and skipping is the honest answer -- writing rc=0
+        # for a suite that genuinely vanished would claim a pass nobody saw.
+        [[ -n "$RERUN_MODE" ]] || continue
+        echo "not re-run this attempt: no item of this suite failed the last one" > "$suite_log"
+        echo 0 > "${suite_log}.rc"
+        continue
+    fi
     : > "$suite_log"
     worst=0
     while IFS= read -r tag; do
@@ -480,16 +606,55 @@ for i in "${!SUITE_LABELS[@]}"; do
         [[ "$rc" == "0" ]] && continue
         worst=$rc
         FAILED_ITEMS+=( "${itemlog#"${REPO_ROOT}/"}" )
+        FAILED_KEYS+=( "$(printf '%s\t%s' "$label" "$tag")" )
     done < <(awk -F'\t' -v l="$label" '$2==l {print $4}' "$QUEUE_FILE")
     echo "$worst" > "${suite_log}.rc"
     [[ "$worst" != "0" ]] && OVERALL_RC=$worst
 done
 
+# What a re-run of this job should queue instead of the whole config. Written on
+# every run, pass or fail: a green run has to leave an empty list behind rather
+# than the previous attempt's stale one.
+#
+# The list converges across attempts on its own. An item that passed was never
+# queued on the next attempt, so it cannot reappear here, and each attempt's list
+# is a subset of the one before it.
+if [[ ${#FAILED_KEYS[@]} -gt 0 ]]; then
+    printf '%s\n' "${FAILED_KEYS[@]}" > "$RERUN_FILE"
+else
+    : > "$RERUN_FILE"
+fi
+
+# And how much of each of those items has to come back. Rebuilt from nothing
+# every run: a list left over from an earlier attempt would send an item back to
+# tests that are no longer the reason it fails, and an item that has since begun
+# failing at collection would keep a narrowing it must no longer get.
+rm -rf "$RERUN_TESTS_DIR"
+if [[ ${#FAILED_KEYS[@]} -gt 0 && -n "${JUNITXML_PREFIX:-}" ]]; then
+    echo "== Re-run granularity: which failed items can come back as single tests =="
+    printf '%s\n' "${FAILED_KEYS[@]}" \
+        | python3 "$REPO_ROOT/ci/scheduler/rerun_tests.py" \
+              --junit-prefix "$JUNITXML_PREFIX" --junit-suffix "${JUNITXML_SUFFIX:-}" \
+              -o "$RERUN_TESTS_DIR" \
+        || log_warn "could not work out per-test re-runs; each failed item will re-run whole"
+fi
+
 # ---------------------------------------------------------------------------
 # Phase 6: update the learned weight table for the next run
 # ---------------------------------------------------------------------------
 echo
-if ! python3 "$REPO_ROOT/.github/scripts/scheduler/build_weights.py" update "$TIMINGS_FILE" \
+if [[ -n "$RERUN_MODE" ]]; then
+    # Two reasons, either of which alone is enough. An item narrowed to its
+    # failing nodeids ran a handful of its tests, so its duration measures the
+    # re-run and not the item -- there is no contention model that recovers the
+    # other 300 tests it did not run. And even an item that came back whole ran
+    # on a box with most of its GPUs idle, without the CPU, memory and PCIe
+    # contention of a full queue, so it lands faster than it would in the run
+    # this table is meant to schedule. Both drag weights downward. The attempt
+    # being re-run already merged its own measurements, so sitting this one out
+    # costs the table nothing.
+    echo "== Weights: left alone -- a re-run's timings are not a full queue's =="
+elif ! python3 "$REPO_ROOT/ci/scheduler/build_weights.py" update "$TIMINGS_FILE" \
         --items "$ITEMS_FILE" -o "$WEIGHTS_FILE"; then
     log_warn "could not update $WEIGHTS_FILE; the next run will use the table as it stands"
 fi
@@ -497,11 +662,15 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 7: scheduling report
 # ---------------------------------------------------------------------------
-if ! python3 "$REPO_ROOT/.github/scripts/scheduler/schedule_report.py" "$LOG_DIR" \
+if ! python3 "$REPO_ROOT/ci/scheduler/schedule_report.py" "$LOG_DIR" \
         --gpus "${GPU_IDS[*]}" \
         --wall "$WALL" \
+        --expand-secs "$EXPAND_SECS" \
+        --setup-secs "$SETUP_SECS" \
+        --total-wall "$(( $(date +%s) - SCRIPT_START_TS ))" \
         --default-weight "$DEFAULT_WEIGHT" \
-        --weights "$WEIGHTS_FILE"; then
+        --weights "$WEIGHTS_FILE" \
+        ${RERUN_MODE:+--rerun}; then
     log_warn "could not write the scheduling report"
 fi
 
@@ -512,6 +681,7 @@ if [[ ${#FAILED_ITEMS[@]} -gt 0 ]]; then
     echo
     echo "== ${#FAILED_ITEMS[@]} of ${TOTAL_ITEMS} items FAILED =="
     printf '  %s\n' "${FAILED_ITEMS[@]}"
+    echo "  (re-running this job queues these ${#FAILED_ITEMS[@]} items and nothing else)"
 fi
 
 exit $OVERALL_RC

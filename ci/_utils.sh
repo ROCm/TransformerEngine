@@ -45,6 +45,14 @@ TEST_JOBS_MODE=""
 : ${TE_CI_SKIP_CHECK_SUPPORTED:=}
 : ${TE_CI_SETUP_ONLY:=}
 : ${TE_CI_SKIP_SETUP:=}
+#Set when the caller already built the CK JIT cache for the whole run. The cache
+#is keyed by GPU arch, not by framework, so a scheduler running several suites in
+#one container builds it once and sets this on each suite.
+: ${TE_CI_SKIP_CK_JIT:=}
+#File `ck_jit_prebuild build` writes its cache snapshot to, so that a later
+#`ck_jit_prebuild list` in a different process can still diff against it. Unset
+#means in-process only, which is what a plain suite run needs.
+: ${TE_CI_CK_JIT_SNAPSHOT:=}
 
 if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_SGPU=1
@@ -431,14 +439,26 @@ pytest_run() {
     _junitxml_arg=`get_pytest_junitxml $_test_name_tag`
     _sink_plugin=""
     _result_sink=""
+    _failed_tests=""
+    _narrowed_mark=""
     _pytest_pythonpath="$PYTHONPATH"
     if [ -n "$_junitxml_arg" ]; then
         _result_sink="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.partial"
         rm -f "$_result_sink" 2>/dev/null
+        # Unlike the sidecar these two are kept when the session ends cleanly, so
+        # they have to be truncated here instead: left over from a previous run
+        # they would send a passing item back into the next attempt's queue, and
+        # describe that queue's run as narrowed when it was not.
+        _failed_tests="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.failed"
+        rm -f "$_failed_tests" 2>/dev/null
+        _narrowed_mark="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.narrowed"
+        rm -f "$_narrowed_mark" 2>/dev/null
         _sink_plugin="-p te_ci_result_sink"
         _pytest_pythonpath="${TE_PATH}ci${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    TE_RESULT_SINK="$_result_sink" PYTHONPATH="$_pytest_pythonpath" \
+    TE_RESULT_SINK="$_result_sink" TE_CI_FAILED_TESTS="$_failed_tests" \
+        TE_CI_NARROWED_MARK="$_narrowed_mark" \
+        PYTHONPATH="$_pytest_pythonpath" \
         python3 -m pytest -v -rfEs \
         --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
         $_sink_plugin $_junitxml_arg $TEST_PYTEST_ARGS "$TEST_DIR/$@"
@@ -453,6 +473,7 @@ pytest_run() {
 PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
 ck_jit_prebuild() {
     check_setup_needed || return 0
+    test -n "$TE_CI_SKIP_CK_JIT" && return 0
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
     if [ ! -f "$_prebuild_list" ]; then
         script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
@@ -483,8 +504,15 @@ ck_jit_prebuild() {
         echo "Building CK JIT cache for arch=${_gpu_arch:-<not detected>}..."
         python "$_prebuild_py" build --blob-list "$_prebuild_list" $_arch_arg $_jobs_arg > /dev/null
         _CK_JIT_CACHE_SNAPSHOT=$(python "$_prebuild_py" cache)
+        test -n "$TE_CI_CK_JIT_SNAPSHOT" && echo "$_CK_JIT_CACHE_SNAPSHOT" > "$TE_CI_CK_JIT_SNAPSHOT"
         echo "$_CK_JIT_CACHE_SNAPSHOT" | grep Cache
     else
+        #A build in this shell leaves the snapshot in the variable; one in another
+        #process (a scheduler that builds once and lists after the run) leaves it
+        #in the file. Either way the diff below has something to compare against.
+        if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" -a -s "$TE_CI_CK_JIT_SNAPSHOT" ]; then
+            _CK_JIT_CACHE_SNAPSHOT=$(cat "$TE_CI_CK_JIT_SNAPSHOT")
+        fi
         if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" ]; then
             python "$_prebuild_py" cache | grep Cache
         else
