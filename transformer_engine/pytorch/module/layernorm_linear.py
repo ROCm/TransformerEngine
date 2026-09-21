@@ -220,32 +220,35 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
+        is_mxfp8 = fp8 and isinstance(input_quantizer, MXFP8Quantizer)
         if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
-            ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_size, fp8, mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_size, fp8,
+            mxfp8=is_mxfp8,
         ):
             ub_overlap_ag_fprop = False
         if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
-            ub_name + "_dgrad", inp, weight, None, activation_dtype, tp_size, fp8, is_dgrad=True, mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            ub_name + "_dgrad", inp, weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+            mxfp8=is_mxfp8,
         ):
             ub_overlap_ag_dgrad = False
         if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
             ub_name + "_fprop", weight, bias, activation_dtype, tp_size, fp8,
-            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            mxfp8=is_mxfp8,
         ):
             ub_overlap_rs_fprop = False
         if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
             ub_name + "_dgrad", weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
-            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            mxfp8=is_mxfp8,
         ):
             ub_overlap_rs_dgrad = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
             ub_name + "_dgrad", inp, weight, activation_dtype, tp_size, fp8,
-            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            mxfp8=is_mxfp8,
         ):
             ub_bulk_dgrad = False
         if ub_bulk_wgrad and not fused_bulk_rs_eligible(
             ub_name + "_wgrad", inp, weight, activation_dtype, tp_size, fp8, bias,
-            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
+            mxfp8=is_mxfp8,
         ):
             ub_bulk_wgrad = False
         if ub_overlap_rs_fprop:
