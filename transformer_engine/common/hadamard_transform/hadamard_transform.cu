@@ -630,14 +630,18 @@ void HadamardTransformKernel(
         smem[local_row][col_offset+3] = to_bf16(global_row < num_rows ? v3 : 0.f);
         __syncthreads();
 
-        // Re-read: row_in_warp -> column index, thread_in_grp -> 4 rows
-        const int t_col      = row_in_warp;
-        const int smem_rbase = warp_id*kRowsPerWarp + thread_in_grp*kElemsPerThread;
+        // Re-read for the column-direction WHT. Derive (16-row segment, column, 4-row group)
+        // from tid so each 4-lane WHT group is consecutive lanes on both wave64 and
+        // wave32 (gfx1250); on wave64 this equals the old (segment=warp_id, t_col=row_in_warp) map.
+        const int t_seg   = tid >> 6;         // 16-row segment within the 64-row block (0..3)
+        const int t_col   = (tid >> 2) & 15;  // column within the 16-col tile (0..15)
+        const int t_grp   = tid & 3;          // group of 4 rows (0..3)
+        const int smem_rbase = t_seg * kHadamardDim + t_grp * kElemsPerThread;
 
         float c0=to_f32(smem[smem_rbase+0][t_col]), c1=to_f32(smem[smem_rbase+1][t_col]);
         float c2=to_f32(smem[smem_rbase+2][t_col]), c3=to_f32(smem[smem_rbase+3][t_col]);
 
-        wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, apply_pre);
+        wht16(c0, c1, c2, c3, t_grp, random_sign_mask_t, apply_pre);
 
         if constexpr (kUpdateAmaxT) {
             // Down-cast to BF16 and back so the amax matches the
@@ -656,8 +660,8 @@ void HadamardTransformKernel(
         if constexpr (kComputeTransposed) {
             if (output_t) {
                 const uint64_t global_col   = col_tile_base + t_col;
-                const uint64_t out_row_base = row_batch + (uint64_t)warp_id*kRowsPerWarp
-                                              + (uint64_t)thread_in_grp*kElemsPerThread;
+                const uint64_t out_row_base = row_batch + (uint64_t)t_seg*kHadamardDim
+                                              + (uint64_t)t_grp*kElemsPerThread;
                 if (global_col < row_length && out_row_base+kElemsPerThread-1 < num_rows)
                     *reinterpret_cast<uint64_t*>(
                         &output_t[global_col*num_rows+out_row_base]) =
@@ -968,12 +972,6 @@ void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int rand
                              int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform);
   using namespace transformer_engine;
-#ifdef __HIP_PLATFORM_AMD__
-  //TODO: remove when enable HW code
-  if (cuda::sm_arch(cuda::current_device()) == 125) {
-    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
-  }
-#endif
   hadamard_transform(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                      static_cast<uint16_t>(random_sign_mask),
                      static_cast<uint16_t>(random_sign_mask_t), stream);
@@ -983,12 +981,6 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
                                   int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform_amax);
   using namespace transformer_engine;
-#ifdef __HIP_PLATFORM_AMD__
-  //TODO: remove when enable HW code
-  if (cuda::sm_arch(cuda::current_device()) == 125) {
-    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
-  }
-#endif
   hadamard_transform_amax(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                           static_cast<uint16_t>(random_sign_mask),
                           static_cast<uint16_t>(random_sign_mask_t), stream);

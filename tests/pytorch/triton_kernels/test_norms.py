@@ -25,6 +25,7 @@ from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
 )
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
 
 # Check if FP8 is supported
@@ -213,6 +214,12 @@ class TestNorms:
         in_dtype = str_to_torch_dtype(in_dtype)
         out_dtype = str_to_torch_dtype(out_dtype)
         te_out_dtype = torch_dtype_to_te_dtype(out_dtype)
+
+        #TODO: fix it on GFX1250
+        if ( autotune and shape == (29, 17389) and norm == "rms" and
+            (in_dtype != torch.float32 or quantization is not None) and
+            get_device_compute_capability() == (12, 5) ):
+            pytest.skip("This config causes soft hang on GFX1250")
 
         input_tensor = fill_uniform((M, N), in_dtype)
         gamma_tensor = fill_uniform(N, in_dtype)

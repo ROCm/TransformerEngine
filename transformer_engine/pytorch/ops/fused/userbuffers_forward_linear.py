@@ -18,6 +18,7 @@ from ...quantization import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    ub_overlap_disabled,
     _2X_ACC_FPROP,
 )
 from ...quantized_tensor import Quantizer
@@ -421,6 +422,9 @@ class UserbuffersForwardLinear(FusedOperation):
                 continue
             linear = window[0]
             if linear._userbuffers_options is None:
+                continue
+            # No buffer was registered for this name, so there is nothing to overlap with.
+            if ub_overlap_disabled(linear._userbuffers_options["comm_name"] + "_fprop"):
                 continue
 
             # Check if next op is bias

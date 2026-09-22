@@ -21,6 +21,10 @@
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "../gemm/kittens/comm_gemm.h"
+#endif
+
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
@@ -167,6 +171,10 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     The event is used to schedule the communication kernel before the GEMM.
     This is needed only for Hopper, which uses persistent CTA execution.
   */
+#ifdef __HIP_PLATFORM_AMD__
+  // No HIP equivalent
+  _comm_launch_event = 0;
+#else
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
   int runtime_version = 0;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&runtime_version));
@@ -177,6 +185,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   } else {
     _comm_launch_event = 0;
   }
+#endif
 }
 
 CommOverlapCore::~CommOverlapCore() {
@@ -799,11 +808,12 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate)
+                                       bool atomic_gemm, bool aggregate, bool fused)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-                      atomic_gemm) {
+                      atomic_gemm),
+      _fused(fused) {
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 
@@ -818,11 +828,22 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
   _num_ubuf_chunks = _tp_size;
+  int num_ubuf_view_chunks = _tp_size;
   if (_is_reduce_scatter) {
-    // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
-    // outputs for reduction at the end of the pipelining.
-    buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
-    _num_ubuf_chunks = _tp_size * 2 - 1;
+#ifdef USE_HIPKITTENS_GEMM
+    if (_fused) {
+      // Fused RS holds two stage halves, alternating on epoch parity.
+      _num_ubuf_chunks = _tp_size * 2;
+      buffer_bytes = kittens_fused_rs_region_bytes(buffer_chunk_bytes, _tp_size);
+    } else
+#endif
+    {
+      // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
+      // outputs for reduction at the end of the pipelining.
+      buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
+      _num_ubuf_chunks = _tp_size * 2 - 1;
+      num_ubuf_view_chunks = _num_ubuf_chunks;
+    }
   }
 
   void *buffer_ptr;
@@ -830,7 +851,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
   _ubuf = TensorWrapper(
       buffer_ptr,
-      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_view_chunks, buffer_shape[1]},
       buffer_dtype);
 
   // Create tensor chunks for easy management

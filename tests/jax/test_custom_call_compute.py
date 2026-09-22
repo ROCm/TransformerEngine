@@ -2108,7 +2108,6 @@ class TestDebugInspectFFI:
         assert_allclose(actual, expected, dtype=dtype)
 
 
-@pytest.mark.skipif(is_hip_extension(), reason="Standalone TopK (nvte_topk) is not supported on ROCm")
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float32])
 @pytest.mark.parametrize(
     "problem_size",

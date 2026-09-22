@@ -33,7 +33,7 @@ namespace {
 
 // const values configuration
 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__GFX12__)
 constexpr size_t kThreadsPerWarp = 64;
 #else
 constexpr size_t kThreadsPerWarp = 32;
@@ -49,7 +49,7 @@ constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 64;
 constexpr size_t WARP_TILE_DIM_Y = 32;
 constexpr size_t THREAD_TILE_DIM_X = 8;
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__GFX12__)
 constexpr size_t THREAD_TILE_DIM_Y = 4;
 #else
 constexpr size_t THREAD_TILE_DIM_Y = 8;

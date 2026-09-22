@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -49,7 +51,13 @@ void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor l
   } while (0)
 
   if (dtype == DType::kBFloat16) {
+#ifdef __HIP_PLATFORM_AMD__
+    // hipCUB specializes NumericTraits for hip_bfloat16, not __hip_bfloat16,
+    // and the radix select needs those traits to twiddle the key bits.
+    DISPATCH_TOPK(hip_bfloat16);
+#else
     DISPATCH_TOPK(__nv_bfloat16);
+#endif
   } else if (dtype == DType::kFloat32) {
     DISPATCH_TOPK(float);
   } else {

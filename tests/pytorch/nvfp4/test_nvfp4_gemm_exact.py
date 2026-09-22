@@ -39,8 +39,6 @@ def check_nvfp4_gemm_versus_reference(
 ):
     if nvfp4_e4m3_max != 448 and not use_4over6:
         pytest.skip("E4M3 max 256 is only meaningful for 4over6")
-    if IS_HIP_EXTENSION and use_4over6:
-        pytest.skip("NVFP4 4over6 is not supported on ROCm")
     te_dtype = te.DType.kFloat4E2M1
 
     # Setup device and random seed
@@ -467,7 +465,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     ids=["rowxrow", "colxrow", "colxcol"],
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
-@pytest.mark.parametrize("use_4over6", [False] if IS_HIP_EXTENSION else [False, True], ids=["default"] if IS_HIP_EXTENSION else ["default", "4over6"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_gemm_versus_reference(
@@ -530,7 +528,7 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
-@pytest.mark.parametrize("use_4over6", [False] if IS_HIP_EXTENSION else [False, True], ids=["default"] if IS_HIP_EXTENSION else ["default", "4over6"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 GEMM is not supported on ROCm")
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
@@ -579,7 +577,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
-@pytest.mark.parametrize("use_4over6", [False] if IS_HIP_EXTENSION else [False, True], ids=["default"] if IS_HIP_EXTENSION else ["default", "4over6"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_row_scaled_gemm_matches_emulated(
     M: int,

@@ -216,18 +216,18 @@ jobs:
 
       - name: Upload wheels as GitHub Actions artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: te-rocm-wheels
           path: |
             ${{ runner.temp }}/wheelhouse/*.whl
             ${{ runner.temp }}/wheelhouse/*.tar.gz
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: te-rocm-build-logs
           path: ${{ runner.temp }}/wheelhouse/logs/

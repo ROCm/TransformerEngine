@@ -14,7 +14,7 @@ extern "C" bool nvte_is_rocm_build() {
 }
 
 #ifdef USE_ROCM
-extern "C" bool nvte_uses_fp8_fnuz() 
+extern "C" bool nvte_uses_fp8_fnuz()
 {
   return te_fp8_fnuz();
 }
