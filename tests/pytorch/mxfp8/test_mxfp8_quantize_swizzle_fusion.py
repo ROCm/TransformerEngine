@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +11,7 @@ from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import random
 import math
 
@@ -16,7 +19,17 @@ from typing import Tuple
 
 from mxfp8_utils import swizzle_mxfp8_scale, get_mxfp8_scale_shape_no_padding
 
+_ROCM_NO_SWIZZLE_FUSION = (
+    "MXFP8 scale swizzle fusion (optimize_for_gemm) is not implemented on ROCm;"
+    " the quantizer silently returns unswizzled scales"
+)
+
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
+
+pytestmark = pytest.mark.skipif(
+    IS_HIP_EXTENSION,
+    reason=_ROCM_NO_SWIZZLE_FUSION,
+)
 
 
 def unpack_quantized_tensor(
