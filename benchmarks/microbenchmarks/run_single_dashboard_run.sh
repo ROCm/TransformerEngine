@@ -10,6 +10,8 @@
 #
 # Usage: bash run_single_dashboard_run.sh [OUTDIR]
 #   KERNEL_PROFILE=0   skip GPU kernel timing (wall time only)
+#   RUN_FLYDSL=0       skip FlyDSL-backed cases (long compile; gfx950-only)
+#   SAMPLES=0          skip per-iteration timing samples (--csv-samples)
 #   BENCH_FILES="..."  override the family list
 ###############################################################################
 set -uo pipefail
@@ -17,6 +19,8 @@ set -uo pipefail
 MB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTDIR="${1:-${MB_DIR}/results/single_run}"
 KERNEL_PROFILE="${KERNEL_PROFILE:-1}"
+RUN_FLYDSL="${RUN_FLYDSL:-1}"        # include FlyDSL-backed cases (--run-flydsl); 0 to skip
+SAMPLES="${SAMPLES:-1}"              # also write per-iteration wall-clock samples (--csv-samples); 0 to skip
 BENCH_FILES="${BENCH_FILES:-benchmark_gemm.py benchmark_casting.py benchmark_grouped_gemm.py benchmark_normalization.py}"
 
 sha="$(git -C "${MB_DIR}" rev-parse HEAD)"
@@ -32,20 +36,30 @@ model="$(amd-smi static --asic 2>/dev/null | grep -oiE 'MI[0-9]{3,4}[A-Z]*' | he
 [[ -n "${model}" ]] || model="UNKNOWN"
 
 kp=""; [[ "${KERNEL_PROFILE}" == "1" ]] && kp="--kernel-profile"
+fly=""; [[ "${RUN_FLYDSL}" == "1" ]] && fly="--run-flydsl"
+smp=""; [[ "${SAMPLES}" == "1" ]] && smp="--csv-samples"
 export NVTE_FRAMEWORK="${NVTE_FRAMEWORK:-pytorch}"
 
 rm -f "${MB_DIR}"/benchmark_*.csv          # clear stale generated CSVs (gitignored)
 read -r -a files <<< "${BENCH_FILES}"
 for f in "${files[@]}"; do
   echo "== ${f} =="
-  ( cd "${MB_DIR}" && python "${f}" --csv ${kp} ) \
+  ( cd "${MB_DIR}" && python "${f}" -v --csv ${kp} ${fly} ${smp} ) \
     || echo "  (${f} returned non-zero; continuing)"
 done
 
-# Collect + tag each CSV with run_week/commit_sha/commit_date
+# Collect outputs: summary CSVs get run_week/commit_sha/commit_date and feed the
+# ingest; per-iteration samples (benchmark_*_samples.csv) are archived untouched
+# under samples/ (not ingested yet -- kept for future swarm/violin + A/B use).
 shopt -s nullglob
 for csv in "${MB_DIR}"/benchmark_*.csv; do
   base="$(basename "${csv}")"
+  if [[ "${base}" == *_samples.csv ]]; then
+    mkdir -p "${run_dir}/samples"
+    mv "${csv}" "${run_dir}/samples/${base}"
+    echo "  -> ${run_dir}/samples/${base}"
+    continue
+  fi
   mv "${csv}" "${run_dir}/${base}"
   python3 - "${run_dir}/${base}" "${week}" "${sha}" "${cdate}" <<'PY'
 import csv, sys
@@ -64,6 +78,7 @@ shopt -u nullglob
 
 echo
 echo "CSVs ready in ${run_dir}"
+[[ "${SAMPLES}" == "1" ]] && echo "Per-iteration samples archived in ${run_dir}/samples/ (not ingested yet)"
 echo "Ingest (from a checkout that has the dashboard tooling):"
 echo "  python dashboard_ingest.py ${run_dir}/benchmark_*.csv --model ${model} --runner local --ref dev"
 echo "  python build_bundle.py"
