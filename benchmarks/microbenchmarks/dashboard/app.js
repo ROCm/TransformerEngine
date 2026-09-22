@@ -892,7 +892,7 @@ function kernelIndex() {
 function renderKernelRail() {
   const idx = kernelIndex();
   const agg = S.trend.railMode === "aggregates";
-  $("#railMode").innerHTML = [["kernels", "kernels"], ["aggregates", "\u03a3 aggregates"]].map(([v, t]) =>
+  $("#railMode").innerHTML = [["kernels", "per-config"], ["aggregates", "aggregate"]].map(([v, t]) =>
     `<button data-rm="${v}" class="${v === S.trend.railMode ? "is-active" : ""}">${t}</button>`).join("");
   let keys = [...idx.keys()].filter(k => !!idx.get(k).aggregate === agg);
   if (S.trend.q) { const q = S.trend.q.toLowerCase(); keys = keys.filter(k => k.toLowerCase().includes(q)); }
