@@ -10,7 +10,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 ARG ROCK_RELEASE_VERSION=10.0.0
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG TORCH_VERSION=2.13.0
 ARG TORCHVISION_VERSION=0.28.0
 # triton 3.8.0 ships as a git snapshot: triton-3.8.0+<TRITON_LOCAL>.rocm<rel>
@@ -21,13 +21,16 @@ ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 ARG GPU_ARCH=gfx950;gfx942
 
-# Base OS packages
+# Base OS packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
     git vim \
     build-essential cmake ninja-build pkg-config liblzma-dev \
     libnuma1 libnuma-dev \
-    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev python3-pip \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Isolated Python env for pip packages
