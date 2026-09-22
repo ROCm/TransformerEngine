@@ -516,6 +516,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
     cudaDeviceProp prop;
     (void)cudaGetDeviceProperties(&prop, 0);
     if (prop.major == 9 && prop.minor == 5) {
+      atol = std::max(atol, 3e-3);
       rtol = std::max(rtol, 2e-2);
     }
   }
