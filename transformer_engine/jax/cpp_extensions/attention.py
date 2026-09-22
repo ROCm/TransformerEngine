@@ -341,7 +341,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
-        out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
+        fp8_e4m3_dtypes = {
+            dtypes.canonicalize_dtype(jnp.float8_e4m3fn),
+            dtypes.canonicalize_dtype(jnp.float8_e4m3fnuz),
+        }
+        output_dtype = (
+            dtypes.canonicalize_dtype(jnp.bfloat16)
+            if is_hip_extension() and q_dtype in fp8_e4m3_dtypes
+            else q_dtype
+        )
+        out_aval = q_aval.update(shape=output_shape, dtype=output_dtype)
 
         # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(

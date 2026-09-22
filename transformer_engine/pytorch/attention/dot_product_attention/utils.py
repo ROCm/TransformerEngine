@@ -573,6 +573,14 @@ def get_attention_backend(
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        if use_fused_attention and IS_HIP_EXTENSION and (
+            is_training or not fp8_recipe.delayed()
+        ):
+            logger.debug(
+                "Disabling ROCm FP8 FusedAttention: AITER FP8 ASM supports "
+                "inference with delayed tensor scaling only"
+            )
+            use_fused_attention = False
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
             use_flash_attention_2 = False
