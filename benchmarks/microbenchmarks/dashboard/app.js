@@ -18,6 +18,7 @@ const CFG = {
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
   sparkFloorPct: 6,      // sparkline min half-window (% of baseline) so trivial noise stays flat
+  gapPct: 10,            // a backend is "slower" when it trails its family's reference by > this %
 };
 
 const S = {
@@ -36,7 +37,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const VIEWS = ["health", "bytype", "prcheck", "board"];
+const VIEWS = ["health", "bytype", "gaps", "prcheck", "board"];
 
 // theme-aware colors: each model gets a distinct hue by golden-angle spacing, so
 // any number of models renders with well-separated, legible colors -- no palette
@@ -713,6 +714,168 @@ function renderPRCheck() {
     <div class="noise-note" style="padding:10px 12px">latest run of #${pr} · <a href="${esc(runUrl)}" target="_blank" rel="noopener">view on GitHub</a> · “real” = beyond the kernel’s run-to-run noise on dev</div></div>`;
 }
 
+/* --------------------------------------------------- 2b · BACKEND GAPS --- */
+// Native reference backend per family; every other backend is measured against it.
+const GAP_REF_BACKEND = { gemm: "hipblaslt", grouped_gemm: "hipblaslt", casting: "hip", normalization: "hip" };
+
+// Latest-dev cross-backend comparison. For each config (arch, family, base, shape,
+// dtype, metric) where the family's reference backend has a value, measure how far
+// each other backend's throughput trails it, then roll up per (arch, family, backend).
+// Throughput is higher-is-better, so a negative gap % means slower than the reference.
+function backendGapFindings() {
+  const groups = new Map();                         // config -> { backend: record }
+  for (const x of healthRows()) {
+    const r = x.r;
+    if (!(r.value > 0)) continue;
+    const k = [r.model, r.family, r.base, r.shape, r.dtype, r.metric].join("\u0000");
+    (groups.get(k) || groups.set(k, {}).get(k))[r.backend] = r;
+  }
+  const cand = new Map();                            // arch\0family\0backend -> [{gap, r, ref}]
+  for (const byBackend of groups.values()) {
+    const any = Object.values(byBackend)[0];
+    const ref = GAP_REF_BACKEND[any.family];
+    const refR = ref && byBackend[ref];
+    if (!refR || !(refR.value > 0)) continue;
+    for (const [b, r] of Object.entries(byBackend)) {
+      if (b === ref) continue;
+      const gap = (r.value / refR.value - 1) * 100;
+      const ck = [r.model, any.family, b].join("\u0000");
+      (cand.get(ck) || cand.set(ck, []).get(ck)).push({ gap, r, refR, ref });
+    }
+  }
+  const findings = [];
+  for (const [ck, list] of cand) {
+    const [model, family, backend] = ck.split("\u0000");
+    const gaps = list.map(e => e.gap).sort((a, b) => a - b);
+    const median = gaps[Math.floor((gaps.length - 1) / 2)];
+    const worst = list.reduce((a, e) => e.gap < a.gap ? e : a, list[0]);
+    const nSlower = list.filter(e => e.gap <= -CFG.gapPct).length;
+    // work-weighted aggregate throughput (Σ(thr·ms)/Σms) for backend vs ref, over timed shapes
+    let wb = 0, tb = 0, wr = 0, tr = 0;
+    for (const e of list) {
+      const tB = e.r.extra && e.r.extra.median_ms, tR = e.refR.extra && e.refR.extra.median_ms;
+      if (!(tB > 0) || !(tR > 0)) continue;
+      wb += e.r.value * tB; tb += tB;
+      wr += e.refR.value * tR; tr += tR;
+    }
+    const aggGap = (tb > 0 && tr > 0) ? ((wb / tb) / (wr / tr) - 1) * 100 : median;
+    findings.push({ model, family, backend, ref: list[0].ref, n: list.length, aggGap, median, nSlower, worst });
+  }
+  // surface a combo when it's slower overall (work-weighted) or on a big share of shapes
+  return findings
+    .filter(f => f.aggGap <= -CFG.gapPct || f.nSlower >= Math.max(2, Math.ceil(f.n * 0.3)))
+    .sort((a, b) => a.aggGap - b.aggGap);
+}
+
+function renderBackendGaps() {
+  const findings = backendGapFindings();
+  const sum = $("#gapsSummary");
+  if (sum) sum.innerHTML = findings.length
+    ? `${findings.length} backend\u00d7family\u00d7arch ${findings.length === 1 ? "combo" : "combos"} > ${CFG.gapPct}% slower than native`
+    : `nothing > ${CFG.gapPct}% slower than native`;
+  const pane = $("#gapsList"); if (!pane) return;
+  if (!findings.length) {
+    pane.innerHTML = `<div class="reg-list-empty"><div class="big">` +
+      `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>` +
+      `all backends within ${CFG.gapPct}% of native</div>no backend trails its family reference (hip / hipBLASLt) by more than ${CFG.gapPct}%.</div>`;
+    return;
+  }
+  pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>` +
+    `<th>backend</th><th>family</th><th>arch</th><th class="num" title="work-weighted aggregate throughput (Σwork ÷ Σtime) vs reference">overall vs ref</th><th class="num">median</th><th class="num">shapes ${CFG.gapPct}%+ slower</th><th>worst shape</th>` +
+    `</tr></thead><tbody>${findings.map(f => {
+      const w = f.worst;
+      return `<tr data-k="${esc(kkey(w.r))}" data-model="${f.model}" title="open the backend comparison chart for the worst shape">
+        <td>${esc(f.backend)} <span class="metric-tag">vs ${esc(f.ref)}</span></td>
+        <td>${esc(familyLabel(f.family))}</td>
+        <td style="color:${modelVar(f.model)}">${esc(f.model)}</td>
+        <td class="num delta ${f.aggGap <= -CFG.gapPct ? "bad" : "warn"}">${fmtPct(f.aggGap)}</td>
+        <td class="num k-dim">${fmtPct(f.median)}</td>
+        <td class="num">${f.nSlower}/${f.n}</td>
+        <td class="k-dim">${fmtPct(w.gap)} on ${esc(w.r.shape)} · ${esc(w.r.dtype)}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+/* --------------------------------------------------- 2c · FEATURE GAPS --- */
+// Declared backend capabilities (from the harness backend-selection code + kernel
+// support). Edit as backends gain/lose support; a backend with no entry falls back to
+// its observed coverage. A reference-covered config a backend can't satisfy is a gap,
+// attributed to the first violated axis: dtype, then arch, then shape (a supported
+// dtype+arch whose specific shapes weren't covered).
+const BACKEND_CAPS = {
+  gemm:         { triton: { dtypes: ["bf16"], archs: ["MI355X"] } },
+  grouped_gemm: {
+    ck_tile:    { dtypes: ["bf16", "fp8"] },
+    hipkittens: { dtypes: ["mxfp8"], archs: ["MI355X", "MI455X"] },
+    triton:     { dtypes: ["bf16"] },
+  },
+  casting:      { triton: { dtypes: ["fp8-e4m3", "fp8-e5m2", "mxfp4", "mxfp8-e4m3", "mxfp8-e5m2"] } },
+};
+
+function featureGapFindings() {
+  const cfgOf = r => [r.model, r.base, r.shape, r.dtype].join("\u0000");
+  const covered = new Map();                          // family -> backend -> Set(configKey)
+  for (const x of healthRows()) {
+    const r = x.r; if (!(r.value > 0)) continue;
+    const fam = covered.get(r.family) || covered.set(r.family, new Map()).get(r.family);
+    (fam.get(r.backend) || fam.set(r.backend, new Set()).get(r.backend)).add(cfgOf(r));
+  }
+  const findings = [];
+  for (const [family, byBackend] of covered) {
+    const ref = GAP_REF_BACKEND[family];
+    const refSet = byBackend.get(ref);
+    if (!refSet) continue;
+    const caps = BACKEND_CAPS[family] || {};
+    for (const [backend, set] of byBackend) {
+      if (backend === ref) continue;
+      const cap = caps[backend] || {};
+      // declared caps if present, else the backend's own observed dtypes/archs
+      const dtypes = cap.dtypes ? new Set(cap.dtypes) : new Set([...set].map(k => k.split("\u0000")[3]));
+      const archs = cap.archs ? new Set(cap.archs) : new Set([...set].map(k => k.split("\u0000")[0]));
+      const buckets = new Map();                       // reason\0detail -> config count
+      for (const key of refSet) {
+        if (set.has(key)) continue;
+        const [arch, , , dtype] = key.split("\u0000");
+        const bk = !dtypes.has(dtype) ? `dtype\u0000${dtype}`
+                 : !archs.has(arch) ? `arch\u0000${arch}`
+                 : `shape\u0000${dtype}`;
+        buckets.set(bk, (buckets.get(bk) || 0) + 1);
+      }
+      for (const [bk, n] of buckets) {
+        const [reason, detail] = bk.split("\u0000");
+        findings.push({ family, backend, reason, detail, n });
+      }
+    }
+  }
+  const rank = { dtype: 0, arch: 1, shape: 2 };
+  return findings.sort((a, b) => (rank[a.reason] - rank[b.reason]) || b.n - a.n);
+}
+
+function renderFeatureGaps() {
+  const findings = featureGapFindings();
+  const sum = $("#featSummary");
+  if (sum) sum.innerHTML = findings.length
+    ? `${findings.length} gaps · ${findings.reduce((a, f) => a + f.n, 0)} configs not covered`
+    : "no feature gaps";
+  const pane = $("#featList"); if (!pane) return;
+  if (!findings.length) {
+    pane.innerHTML = `<div class="reg-list-empty"><div class="big">every backend covers its reference's configs</div></div>`;
+    return;
+  }
+  const detailText = f => f.reason === "shape"
+    ? `partial — some ${esc(f.detail)} shapes`
+    : `no ${esc(f.detail)}`;
+  pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>` +
+    `<th>backend</th><th>family</th><th>reason</th><th>missing</th><th class="num">configs</th>` +
+    `</tr></thead><tbody>${findings.map(f => `<tr>
+      <td>${esc(f.backend)}</td>
+      <td>${esc(familyLabel(f.family))}</td>
+      <td><span class="metric-tag">${f.reason}</span></td>
+      <td class="k-dim">${detailText(f)}</td>
+      <td class="num">${f.n}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
 /* ------------------------------------------------------------ 3 · TRENDS --- */
 function kernelIndex() {
   const regKeys = new Set(healthRows().filter(x => x.real).map(x => kkey(x.r)));
@@ -1043,7 +1206,7 @@ function renderBoard() {
 }
 
 /* ------------------------------------------------------------------ shell -- */
-function renderAll() { renderModelLegend(); renderHealth(); populateFacets(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
+function renderAll() { renderModelLegend(); renderHealth(); populateFacets(); renderByType(); renderBackendGaps(); renderFeatureGaps(); renderKernelRail(); renderPRCheck(); renderBoard(); }
 
 // --- shareable URL state: the location hash carries the active view AND its
 // selection (trend kernel/metric/model/range/x, or by-type facets/search, or the
@@ -1102,6 +1265,8 @@ function applyState() {
   } else if (S.view === "bytype") {
     $("#typeSearch").value = S.byType.q;
     populateFacets(); renderByType();
+  } else if (S.view === "gaps") {
+    renderBackendGaps(); renderFeatureGaps();
   } else if (S.view === "prcheck") {
     renderPRCheck();
   }
@@ -1141,7 +1306,7 @@ function wire() {
   $("#tabs").addEventListener("click", e => { const t = e.target.closest(".tab"); if (t) showView(t.dataset.view); });
   document.addEventListener("keydown", e => {
     if (e.target.matches("input,select")) return;
-    const map = { 1: "health", 2: "bytype", 3: "prcheck", 4: "board" };
+    const map = { 1: "health", 2: "bytype", 3: "gaps", 4: "prcheck", 5: "board" };
     if (map[e.key]) showView(map[e.key]);
     if (e.key.toLowerCase() === "r") doRefresh();
   });
@@ -1158,6 +1323,8 @@ function wire() {
   $("#facetReset").addEventListener("click", () => { S.byType.facets = { family: "all", mode: "all", dtype: "all", model: "all" }; S.byType.q = ""; $("#typeSearch").value = ""; populateFacets(); renderByType(); writeHash(); });
   // A row click selects it in the All-Benchmarks chart (in place, no tab jump).
   $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (!tr) return; S.byType.trend.model = tr.dataset.model || "all"; selectKernel(tr.dataset.k, BYTYPE_CTX); });
+  // a gap row opens the by-backend comparison chart for the worst shape
+  $("#gapsList").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (!tr) return; S.trend.by = "backend"; goTrend(tr.dataset.k, tr.dataset.model); });
   $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); writeHash(); });
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
   $("#railMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.railMode = b.dataset.rm; S.trend.key = null; renderKernelRail(); });

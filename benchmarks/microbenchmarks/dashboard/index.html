@@ -44,6 +44,8 @@
     Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
   <button class="tab"           id="tab-bytype"  data-view="bytype"  role="tab" aria-selected="false" aria-controls="panel-bytype">
     All Benchmarks</button>
+  <button class="tab"           id="tab-gaps"    data-view="gaps"    role="tab" aria-selected="false" aria-controls="panel-gaps">
+    Backend Gaps</button>
   <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck">
     PR Check</button>
   <!-- CI Board tab disabled in the TE dashboard: no live GitHub Actions integration (CFG.api="").
@@ -149,7 +151,28 @@
     <div id="typeSections"></div>
   </section>
 
-  <!-- 3 · PR CHECK -->
+  <!-- 3 · BACKEND GAPS -->
+  <section class="view" data-view="gaps" id="panel-gaps" role="tabpanel" aria-labelledby="tab-gaps" tabindex="0">
+    <div class="view-head">
+      <h2 class="section-title">Performance gaps</h2>
+      <span class="spacer"></span>
+      <span class="hint" id="gapsSummary"></span>
+    </div>
+    <div class="view-head" style="margin-top:-6px"><span class="hint">latest dev · vs family native reference (hip / hipBLASLt) per shape · listed when a backend is ≥10% slower overall (work-weighted) or on ≥30% of shapes</span></div>
+    <div id="gapsList"></div>
+
+    <hr class="section-divider">
+
+    <div class="view-head">
+      <h2 class="section-title">Feature gaps</h2>
+      <span class="spacer"></span>
+      <span class="hint" id="featSummary"></span>
+    </div>
+    <div class="view-head" style="margin-top:-6px"><span class="hint">configs the reference backend runs but this backend does not — by reason (dtype / arch / shape)</span></div>
+    <div id="featList"></div>
+  </section>
+
+  <!-- 4 · PR CHECK -->
   <section class="view" data-view="prcheck" id="panel-prcheck" role="tabpanel" aria-labelledby="tab-prcheck" tabindex="0">
     <div class="view-head">
       <h2 class="section-title">Does this PR slow any kernel vs dev?</h2>
