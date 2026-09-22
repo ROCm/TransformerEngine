@@ -781,7 +781,7 @@ function renderBackendGaps() {
     return;
   }
   pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>` +
-    `<th>backend</th><th>family</th><th>arch</th><th class="num" title="work-weighted aggregate throughput (Σwork ÷ Σtime) vs reference">overall vs ref</th><th class="num">median</th><th class="num">shapes ${CFG.gapPct}%+ slower</th><th>worst shape</th>` +
+    `<th>backend</th><th>family</th><th>arch</th><th class="num" title="work-weighted aggregate gap vs reference (Σwork ÷ Σtime)">overall (agg)</th><th class="num" title="median per-shape gap vs reference">median</th><th class="num">shapes ${CFG.gapPct}%+ slower</th><th>worst shape</th>` +
     `</tr></thead><tbody>${findings.map(f => {
       const w = f.worst;
       return `<tr data-k="${esc(kkey(w.r))}" data-model="${f.model}" title="open the backend comparison chart for the worst shape">
