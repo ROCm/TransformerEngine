@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """ROCm fused comm+GEMM overlap tests"""
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -268,8 +269,19 @@ def test_fused_layer_bulk_wgrad(nprocs, quantization):
         assert "qkv_wgrad" not in eligible, eligible
 
 
-def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
-    """Run the layer harness on a row-parallel Linear: RS in proj_fprop, AG in proj_dgrad."""
+def _run_fused_row_parallel_layer(
+    nprocs,
+    extra_args,
+    seq_length=SEQ_LENGTH,
+    env_extra=None,
+    num_heads=NUM_HEADS,
+    head_dim=HEAD_DIM,
+):
+    """Run the layer harness on a row-parallel Linear: RS in proj_fprop, AG in proj_dgrad.
+
+    num_heads/head_dim set the layer's out_features, which is the fused NN kernel's K -- the axis
+    the MXFP8 scale path branches on at K >= 16384.
+    """
     test_cmd = (
         _fused_launch_cmd(nprocs)
         + [
@@ -277,8 +289,8 @@ def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
             f"--seed={RNG_SEED}",
             f"--seq-length={seq_length}",
             f"--batch-size={BATCH_SIZE}",
-            f"--num-heads={NUM_HEADS}",
-            f"--head-dim={HEAD_DIM}",
+            f"--num-heads={num_heads}",
+            f"--head-dim={head_dim}",
             f"--layer-type={te.Linear.__name__}",
             "--linear-parallel-mode=row",
             "--num-layers=1",
@@ -290,6 +302,7 @@ def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    env.update(env_extra or {})
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
@@ -310,8 +323,19 @@ def test_fused_rs_overlap_bf16(nprocs):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
-    """Backward gathers dY twice: row-scaled for dgrad, column-scaled for wgrad."""
+@pytest.mark.parametrize("wgrad_copy", ("transpose", "gather"))
+def test_fused_ag_overlap_row_parallel_mxfp8(nprocs, wgrad_copy):
+    """Backward needs dY twice: row-scaled for dgrad, column-scaled for wgrad.
+
+    Both ways of producing the column-scaled copy are reachable in one build and both are
+    covered here. `transpose` derives it in-kernel from the row-wise bytes, so the run also
+    compares the region byte for byte against a reference transpose; `gather` fills it with a
+    second all-gather of an independently quantized copy, which no local reference predicts, so
+    that arm rests on the end-to-end gradient check.
+
+    The grad scaling matters for `transpose`: the default loss leaves every MXFP8 scale equal,
+    and the derivation would then be an identity that passes without ever rescaling anything.
+    """
     if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_row_parallel_layer(
@@ -320,14 +344,56 @@ def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
             f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
             "--fp8",
             "--quantization=mxfp8",
+            "--check-wgrad-colwise",
+            "--grad-scale-binades=6",
         ],
+        env_extra={"NVTE_AG_WGRAD_COPY": wgrad_copy},
     )
     _assert_numerics_passed(result)
+    stdout = result.stdout.decode()
+    if wgrad_copy == "transpose":
+        assert "WGRAD COLWISE CHECK PASSED" in stdout, stdout
+        shifted = re.search(r"(\d+) elements needed a non-zero shift", stdout)
+        assert shifted is not None and int(shifted.group(1)) > 0, (
+            "the column-wise derivation never rescaled an element, so this run proves nothing "
+            f"about it\n{stdout}"
+        )
     stderr = result.stderr.decode()
     # The second gather used to be routed to CommOverlapP2PBase::bulk_overlap_external_ag, which
     # is a stub on every backend.
     assert "Operation not supported" not in stderr, stderr
     assert "failed to launch" not in stderr, stderr
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_row_parallel_mxfp8_interleaved(nprocs):
+    """The column-scaled copy at K >= 16384, where the scale path switches to interleaved.
+
+    Below that threshold the host pre-gathers the row-wise scales before the kernel starts; at or
+    above it the gatherer blocks pack them in-kernel and mirror the raw bytes into the region as
+    they go. The derivation reads those same row-wise scales, so it is the interleaved path's
+    first real consumer -- and the layer tests otherwise run at K=1536, which never reaches it.
+    """
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_row_parallel_layer(
+        nprocs,
+        [
+            f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
+            "--fp8",
+            "--quantization=mxfp8",
+            "--check-wgrad-colwise",
+            "--grad-scale-binades=6",
+        ],
+        num_heads=128,
+        head_dim=128,  # K = 16384, exactly the interleave threshold
+    )
+    _assert_numerics_passed(result)
+    stdout = result.stdout.decode()
+    assert "WGRAD COLWISE CHECK PASSED" in stdout, stdout
+    shifted = re.search(r"(\d+) elements needed a non-zero shift", stdout)
+    assert shifted is not None and int(shifted.group(1)) > 0, stdout
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

@@ -283,6 +283,27 @@ def _parse_args(argv=None, namespace=None):
         help="Use cuBLASMp backend.",
     )
     parser.add_argument(
+        "--grad-scale-binades",
+        type=int,
+        default=0,
+        help=(
+            "Weight the loss per token by a random power of two spanning this many binades, so "
+            "the grad output's row scales differ. The default loss is out.sum(), whose gradient "
+            "is identically 1.0 -- every MXFP8 scale then comes out equal, and anything that "
+            "depends on rescaling between scales goes untested."
+        ),
+    )
+    parser.add_argument(
+        "--check-wgrad-colwise",
+        action="store_true",
+        default=False,
+        help=(
+            "Check the column-wise grad output the fused MXFP8 dgrad kernel derives into the "
+            "_wgrad Userbuffers region against a reference transpose of the row-wise copy it "
+            "gathered into the _dgrad region. Row-parallel te.Linear under MXFP8 only."
+        ),
+    )
+    parser.add_argument(
         "--rtol",
         type=float,
         default=None,
@@ -335,6 +356,105 @@ def _digest(tensors):
         raw = tensor.detach().contiguous().cpu().flatten().view(torch.uint8)
         digest.update(raw.numpy().tobytes())
     return digest.hexdigest()
+
+
+def _mx_direct_transpose(data, scale, e5m2):
+    """Row-wise MXFP8 -> column-wise MXFP8 by exponent arithmetic (arXiv:2511.02302).
+
+    A transcription of the kernel's rule, for checking its plumbing -- which chunk, band and
+    scale byte each element is addressed by. The element rule itself is checked exhaustively
+    against an independent encoder on the host, not here.
+
+    data is [rows, cols] uint8 with scales [rows, cols/32]; the result is the same data re-encoded
+    against column-wise scales of shape [rows/32, cols].
+    """
+    man_bits = 2 if e5m2 else 3
+    exp_mask = 0x1F if e5m2 else 0xF
+    man_mask = (1 << man_bits) - 1
+    implicit = 1 << man_bits
+
+    rows, cols = data.shape
+    blocks = cols // 32
+
+    # Step 2: the target scale is the max of each 32x32 tile's 32 row scales.
+    tgt = scale.view(rows // 32, 32, blocks).amax(dim=1)                  # [rows/32, blocks]
+    out_scale = torch.repeat_interleave(tgt, 32, dim=1)                   # [rows/32, cols]
+
+    shift = torch.repeat_interleave(tgt.to(torch.int32), 32, dim=0) - scale.to(torch.int32)
+    shift = torch.repeat_interleave(shift, 32, dim=1)                     # [rows, cols], >= 0
+
+    # Step 3: shrink each element by 2^shift, which for a normal number is one subtraction on the
+    # exponent field and for a subnormal comes out of the mantissa instead.
+    v = data.to(torch.int32)
+    exp = (v >> man_bits) & exp_mask
+    man = v & man_mask
+    reserved = (exp == exp_mask) if e5m2 else ((exp == exp_mask) & (man == man_mask))
+    normal = exp >= 1
+    sig = torch.where(normal, implicit + man, man)
+    new_exp = torch.where(normal, exp, torch.ones_like(exp)) - shift
+    stayed_normal = normal & (new_exp >= 1)
+
+    count = (1 - new_exp).clamp(min=0, max=8)
+    trunc = sig >> count
+    rem = sig - (trunc << count)
+    half = torch.where(count > 0, 1 << (count - 1).clamp(min=0), torch.zeros_like(count))
+    round_up = (rem > half) | ((rem == half) & (count > 0) & ((trunc & 1) == 1))
+    sub_man = trunc + round_up.to(torch.int32)
+
+    out_exp = torch.where(stayed_normal, new_exp, torch.zeros_like(new_exp))
+    out_man = torch.where(stayed_normal, man, sub_man)
+    carried = (~stayed_normal) & (out_man == implicit)                     # rounded out of subnormals
+    out_exp = torch.where(carried, torch.ones_like(out_exp), out_exp)
+    out_man = torch.where(carried, torch.zeros_like(out_man), out_man)
+
+    out = (v & 0x80) | (out_exp << man_bits) | out_man
+    out = torch.where(reserved | (shift == 0), v, out)
+    return out.to(torch.uint8), out_scale
+
+
+def _check_wgrad_colwise(tokens, hidden, e5m2, dist_print, tp_group):
+    """Compare the derived _wgrad region against a transpose of the gathered _dgrad region.
+
+    Only meaningful when the kernel DERIVES that region. In the all-gather mode the region holds
+    each rank's own column-wise quantization of the high-precision dY, which no transpose of the
+    row-wise copy predicts -- so say the check does not apply rather than report a false failure.
+    """
+    mode = os.getenv("NVTE_AG_WGRAD_COPY", "transpose")
+    if mode != "transpose":
+        dist_print(f"WGRAD COLWISE CHECK SKIPPED: NVTE_AG_WGRAD_COPY={mode} does not derive the "
+                   "region, so there is nothing to compare it against")
+        return False
+    ub_dgrad = te.module.base.get_ub("proj_dgrad", True)
+    ub_wgrad = te.module.base.get_ub("proj_wgrad", True)
+    torch.cuda.synchronize()
+    dist.barrier(tp_group)
+
+    rowwise = ub_dgrad.get_buffer(shape=[tokens, hidden]).view(torch.uint8)
+    rowwise_scale = ub_dgrad.get_scale_buffer(shape=[tokens, hidden // 32])
+    ref_data, ref_scale = _mx_direct_transpose(rowwise, rowwise_scale, e5m2)
+
+    got_data = ub_wgrad.get_buffer(shape=[tokens, hidden]).view(torch.uint8)
+    got_scale = ub_wgrad.get_scale_buffer(shape=[tokens // 32, hidden])
+
+    bad_data = int((got_data != ref_data).sum().item())
+    bad_scale = int((got_scale != ref_scale).sum().item())
+    # A run whose grad output is constant leaves every scale equal and every shift zero, which
+    # this check would pass without the rescale ever running. Say so rather than imply coverage.
+    shifted = int((rowwise_scale.view(tokens // 32, 32, hidden // 32).amax(dim=1, keepdim=True)
+                   != rowwise_scale.view(tokens // 32, 32, hidden // 32)).sum().item())
+    failed = bad_data != 0 or bad_scale != 0
+    if failed:
+        info = (
+            f"WGRAD COLWISE CHECK FAILED: {bad_data}/{ref_data.numel()} data bytes and "
+            f"{bad_scale}/{ref_scale.numel()} scale bytes differ"
+        )
+    else:
+        info = (
+            f"WGRAD COLWISE CHECK PASSED: {ref_data.numel()} data and {ref_scale.numel()} scale "
+            f"bytes match, {shifted} elements needed a non-zero shift"
+        )
+    dist_print(info, error=failed)
+    return failed
 
 
 def _compare_tensors(name, test, ref, rtol, atol):
@@ -559,6 +679,33 @@ def _train(opts):
     torch.testing.assert_close(test_x, ref_x, rtol=0.0, atol=0.0)
     ref_x.retain_grad()
 
+    # out.sum() has a gradient of exactly 1.0 everywhere, which leaves every MXFP8 block on the
+    # same scale. Weighting it per token spreads those scales over the requested binades. The
+    # weights are built on first use, from a generator of their own, and cached -- the output is
+    # sequence-parallel so its shape is not known until the model has run, and the test and
+    # reference models must weight identically.
+    loss_weights = {}
+
+    def _loss(out):
+        if opts.grad_scale_binades <= 0:
+            return out.sum()
+        if "w" not in loss_weights:
+            half = opts.grad_scale_binades // 2
+            gen = torch.Generator(device="cuda")
+            gen.manual_seed(opts.seed + 1)
+            exponents = torch.randint(
+                -half,
+                opts.grad_scale_binades - half + 1,
+                (out.shape[0], 1, 1),
+                device="cuda",
+                generator=gen,
+            )
+            # The power of two alone would make every grad element exactly representable, so the
+            # rescale would run but never round. The normal factor is what makes it round.
+            spread = torch.randn(out.shape, device="cuda", generator=gen, dtype=torch.float32)
+            loss_weights["w"] = torch.exp2(exponents.to(torch.float32)) * spread
+        return (out * loss_weights["w"]).sum()
+
     # Execute fwd/bwd and collect tensors to test
     def run_fwd_bwd(model, x):
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -567,7 +714,7 @@ def _train(opts):
                 out, *_ = y
             else:
                 out = y
-            loss = out.sum()
+            loss = _loss(out)
             loss.backward()
         return out
 
@@ -586,6 +733,16 @@ def _train(opts):
         "UB BULK ELIGIBLE: "
         + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
     )
+    colwise_failed = False
+    if opts.check_wgrad_colwise:
+        colwise_failed = _check_wgrad_colwise(
+            opts.seq_length * opts.batch_size,
+            opts.num_heads * opts.head_dim,
+            fp8_recipe.fp8_format == Format.HYBRID,
+            dist_print,
+            nccl_world,
+        )
+
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():
@@ -643,6 +800,10 @@ def _train(opts):
                 dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
                 if bool(numerics_failed.item()) and not opts.debug:
                     break
+
+    if colwise_failed:
+        numerics_failed[0] = 1
+        dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
 
     if opts.benchmark:
         # Warmup to not profile CPU overhead
