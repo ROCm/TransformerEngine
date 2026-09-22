@@ -98,6 +98,7 @@ run_test_config(){
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
+    run_default_fa 1 attention/test_cu_seqlens_cache.py
     run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
@@ -126,6 +127,13 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
     run_default_fa 1 mxfp4/
+    run_default_fa 1 test_qk_norm.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_partial_cast.py
+    NVTE_DISABLE_TRITON_AUTOTUNING=1 run_default_fa 1 test_mhc.py
+    run_default_fa 1 layernorm_mlp/test_selective_activation_checkpoint.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_custom_recipe.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 mxfp8/
+    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
 }
 
 run_test_config_mgpu(){
@@ -140,6 +148,8 @@ run_test_config_mgpu(){
     run_default_fa 3 distributed/test_rocm_fused_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
+    run_default_fa 2 distributed/test_sanity.py
+    run_default_fa 2 distributed/test_numerics_exact.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then
