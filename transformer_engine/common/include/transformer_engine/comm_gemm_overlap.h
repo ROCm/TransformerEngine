@@ -203,7 +203,7 @@ class CommOverlapCore {
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                                CommOverlapCore *aux_ag_comm, cudaStream_t stream_main) {
+                                CommOverlapCore *aux_colwise_comm, cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
 
@@ -451,7 +451,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
-                        CommOverlapCore *aux_ag_comm, cudaStream_t stream_main) override;
+                        CommOverlapCore *aux_colwise_comm, cudaStream_t stream_main) override;
 
   /*
   ** ROCm fused bulk AllGather implemented with hipKittens

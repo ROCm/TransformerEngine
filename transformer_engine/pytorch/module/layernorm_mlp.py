@@ -23,7 +23,9 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
+    ag_wgrad_copy_mode,
     fill_userbuffers_buffer_for_all_gather,
+    userbuffers_view_for_derived_columnwise,
     _ub_communicators,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
@@ -1324,9 +1326,11 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 fc2_weight.update_usage(columnwise_usage=True)
 
-            # ROCm fused backend: the fc2 dgrad kernel can carry a second all-gather for the
-            # column-scaled grad output, so upstream's external AG on borrowed dgrad streams is
-            # not needed. It rides inside this GEMM, so the region is staged before it launches.
+            # ROCm fused backend: the fc2 dgrad kernel supplies the column-scaled grad output
+            # itself, so upstream's external AG on borrowed dgrad streams is not needed.
+            # NVTE_AG_WGRAD_COPY picks how: "transpose" derives it from the row-scaled bytes the
+            # kernel already gathers and stages nothing, "gather" carries a second all-gather that
+            # needs this rank's shard staged into the region before the dgrad GEMM launches.
             ub_obj_fc2_wgrad_ag = None
             grad_output_wgrad = None
             ub_fused_wgrad_ag = (
@@ -1338,12 +1342,21 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_fused_wgrad_ag:
                 ub_obj_fc2_wgrad_ag = get_ub("fc2_wgrad", ctx.fp8)
                 ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
-                    ub_obj_fc2_wgrad_ag,
-                    grad_outputs[0],
-                    ctx.fc2_grad_output_quantizer,
-                    ctx.tp_group,
-                )
+                if ag_wgrad_copy_mode() == "gather":
+                    # The gather rides inside the fc2 dgrad GEMM below, so the local shard has to
+                    # be in place before that GEMM launches.
+                    grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                        ub_obj_fc2_wgrad_ag,
+                        grad_outputs[0],
+                        ctx.fc2_grad_output_quantizer,
+                        ctx.tp_group,
+                    )
+                else:
+                    grad_output_wgrad = userbuffers_view_for_derived_columnwise(
+                        ub_obj_fc2_wgrad_ag,
+                        grad_output,
+                        ctx.fc2_grad_output_quantizer,
+                    )
 
             # Perform GEMM
             gemm_output, *_ = general_gemm(
@@ -1421,8 +1434,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ub_fused_wgrad_ag:
-                    # The fc2 dgrad kernel carried the column-scaled gather into the fc2_wgrad
-                    # region, so the view staged above that GEMM is already complete.
+                    # The fc2 dgrad kernel filled the fc2_wgrad region with the column-scaled
+                    # copy, either way, so the view taken above that GEMM is already complete.
                     grad_output = grad_output_wgrad
                 elif ctx.ub_overlap_ag and isinstance(
                     ctx.fc2_grad_output_quantizer, MXFP8Quantizer

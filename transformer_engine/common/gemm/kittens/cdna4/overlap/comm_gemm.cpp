@@ -65,6 +65,46 @@ uint64_t ag_ready_warn_ticks() {
     return ticks;
 }
 
+// Measurement-only toggle for the column-scaled copy the fused MXFP8 dgrad kernel produces for
+// wgrad. With it set, the copy is not produced at all -- in either NVTE_AG_WGRAD_COPY mode -- so
+// wgrad reads whatever the region held before and a run is numerically WRONG by construction. It
+// exists to price the copy against an otherwise identical build, not to be a supported
+// configuration. Every rank reads the same environment, so dropping the aux round's handshake
+// stays symmetric across the TP group.
+//   NVTE_AG_NO_WGRAD_COPY=1   skip the column-scaled copy entirely
+bool ag_no_wgrad_copy() {
+    static const bool off = std::getenv("NVTE_AG_NO_WGRAD_COPY") != nullptr;
+    return off;
+}
+
+// WHERE transpose mode's re-encode runs. Every mode emits the same bytes -- this only moves the
+// work relative to the gather and the GEMM, so it is safe to flip between runs and is meant to be
+// benchmarked rather than reasoned about. Ignored entirely by NVTE_AG_WGRAD_COPY=gather, which
+// communicates the copy instead of deriving it. See the MX_CW_* block in overlap_common.cuh.
+//   NVTE_AG_WGRAD_TRANSPOSE=inflight  (default) re-encode inside the gather copy, out of bytes
+//                                     already in registers: no second pass over the tensor at
+//                                     all, at the price of a second store stream inside the
+//                                     window the arrival publish closes. Our own chunk, which no
+//                                     gather carries, still goes through the band pool.
+//   NVTE_AG_WGRAD_TRANSPOSE=deferred  leave the gather untouched and drain every band from that
+//                                     pool between GEMM tiles: the re-read is still paid, but it
+//                                     overlaps with compute instead of delaying arrivals.
+//   NVTE_AG_WGRAD_TRANSPOSE=phase     the original second pass, run by the gatherer blocks before
+//                                     they join the compute queue. On the critical path by
+//                                     construction; kept as the measurement baseline.
+// inflight is the default because it is the only one that deletes the redundant read rather than
+// hiding it, and the shapes that matter here are bandwidth-bound.
+int ag_wgrad_transpose_mode() {
+    static const int mode = [] {
+        const char *v = std::getenv("NVTE_AG_WGRAD_TRANSPOSE");
+        if (v == nullptr) return hk_overlap::MX_CW_INFLIGHT;
+        if (std::strcmp(v, "deferred") == 0) return hk_overlap::MX_CW_DEFERRED;
+        if (std::strcmp(v, "phase") == 0) return hk_overlap::MX_CW_PHASE;
+        return hk_overlap::MX_CW_INFLIGHT;
+    }();
+    return mode;
+}
+
 // Peer base pointers for the scale all-gather, passed by value like PeerPtrs.
 struct ScalePeers {
     const char *base[8];
@@ -386,7 +426,11 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     const size_t arrive_bytes = static_cast<size_t>(tiles_gath) * sizeof(unsigned int);
     Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
     int *tile_counter = static_cast<int *>(ws.take(sizeof(int)));
-    int *bucket_ctr   = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    // One extra word for the column-wise band pool's claim counter. Carve rounds every take up to
+    // 256 bytes, so it rides in slack the bucket counters already own and the workspace footprint
+    // is unchanged; counter_bytes below covers it, which is what zeroes it.
+    int *bucket_ctr   = static_cast<int *>(ws.take((NUM_XCDS_AFF + 1) * sizeof(int)));
+    int *band_ctr     = bucket_ctr + NUM_XCDS_AFF;
     unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
 
     const size_t counter_bytes = ws.used;
@@ -412,20 +456,33 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     }
     peers.base[args.rank] = static_cast<fp8e4m3 *>(args.ub);
 
-    // Second all-gather region, if the caller supplied one. Its own registered region, so its own
-    // peer table; our slot is the destination, as in the bulk path.
+    // Destination for wgrad's column-scaled copy, if the caller supplied one. Transpose mode
+    // exchanges nothing through it, so it needs no peer table and no arrival signal -- only
+    // somewhere to write and the scale sub-buffer's offset. Gather mode ships peer bytes into it,
+    // so it gets its own peer table, with our slot as the destination as in the bulk path.
     PeerPtrs aux_peers{};
     char *aux_dst = nullptr;
-    if (args.aux_ag != nullptr) {
-        const std::vector<void *> *aux_bases = peer_bases(args.aux_ag->peer_ub, args.peer_count);
-        if (!aux_bases) return false;
-        for (int c = 0; c < tp_size; c++) {
-            aux_peers.base[c] =
-                static_cast<fp8e4m3 *>((*aux_bases)[(args.peer_first + c) % args.peer_count]);
+    size_t aux_scale_base = 0;
+    bool aux_gather = false;
+    if (args.aux_colwise != nullptr) {
+        aux_dst        = static_cast<char *>(args.aux_colwise->dst);
+        aux_scale_base = args.aux_colwise->scale_base_offset;
+        aux_gather     = args.aux_colwise->mode == KittensAuxColwiseMode::Gather;
+        if (aux_gather) {
+            const std::vector<void *> *aux_bases =
+                peer_bases(args.aux_colwise->peer_ub, args.peer_count);
+            if (!aux_bases) return false;
+            for (int c = 0; c < tp_size; c++) {
+                aux_peers.base[c] =
+                    static_cast<fp8e4m3 *>((*aux_bases)[(args.peer_first + c) % args.peer_count]);
+            }
+            aux_peers.base[args.rank] = static_cast<fp8e4m3 *>(args.aux_colwise->dst);
         }
-        aux_peers.base[args.rank] = static_cast<fp8e4m3 *>(args.aux_ag->dst);
-        aux_dst                   = static_cast<char *>(args.aux_ag->dst);
     }
+
+    // The measurement toggle drops the copy whichever way it would have been produced.
+    char *const aux_dst_kernel = ag_no_wgrad_copy() ? nullptr : aux_dst;
+    const bool aux_on          = aux_dst_kernel != nullptr;
 
     XcdBuckets buckets{};
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
@@ -442,44 +499,54 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
             args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
 
-    // The aux region has its own signal space -- nothing else advances it, since the communicator
-    // that owns it never runs an overlap method of its own.
-    if (args.aux_ag != nullptr && args.arrive_peers && args.aux_ag->arrive_local) {
+    // Gather mode only. The aux region has its own signal space -- nothing else advances it,
+    // since the communicator that owns it never runs an overlap method of its own.
+    if (aux_on && aux_gather && args.arrive_peers && args.aux_colwise->arrive_local) {
         ag_ready_kernel<<<1, 64, 0, args.stream>>>(
             static_cast<void *const *>(const_cast<void *>(args.arrive_peers)),
-            args.aux_ag->arrive_offset, static_cast<const char *>(args.aux_ag->arrive_local),
-            args.aux_ag->arrive_stride, args.aux_ag->arrive_value, args.peer_first,
+            args.aux_colwise->arrive_offset,
+            static_cast<const char *>(args.aux_colwise->arrive_local),
+            args.aux_colwise->arrive_stride, args.aux_colwise->arrive_value, args.peer_first,
             args.peer_count, tp_size, ag_ready_warn_ticks());
     }
 
     // Aux scales, up front and unpacked: nothing in this kernel reads them, so there is no
     // lane-native format to interleave into, and the consumer is a later GEMM in TE layout.
-    if (args.aux_ag != nullptr && args.aux_ag->scale_chunk_bytes) {
+    // Transpose mode writes its own scales from inside the kernel and needs none of this.
+    if (aux_on && aux_gather && args.aux_colwise->scale_chunk_bytes) {
         ScalePeers sp{};
         for (int c = 0; c < tp_size; c++) {
             sp.base[c] = reinterpret_cast<const char *>(aux_peers.base[c]);
         }
         constexpr int SCALE_GATHER_U       = 4;
         constexpr int SCALE_GATHER_THREADS = 256;
-        const size_t lines     = args.aux_ag->scale_chunk_bytes / 16;
+        const size_t lines     = args.aux_colwise->scale_chunk_bytes / 16;
         const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
         int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
         if (grid_x < 1) grid_x = 1;
         if (grid_x > 256) grid_x = 256;
         gather_scales<SCALE_GATHER_U, false>
             <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
-                aux_dst, sp, args.rank, tp_size, args.aux_ag->scale_base_offset,
-                args.aux_ag->scale_chunk_bytes);
+                aux_dst_kernel, sp, args.rank, tp_size, args.aux_colwise->scale_base_offset,
+                args.aux_colwise->scale_chunk_bytes);
     }
 
     // Packing inside the gatherer only pays at large K, where each scale row's k-range is long
     // enough that reading it contiguously beats a separate prologue pass.
     const bool interleave = args.scale_chunk_bytes != 0 && K >= 16384;
 
-    // NVTE_AG_DIAG=1 reports which scale path the geometry selected, once per call.
+    // NVTE_AG_DIAG=1 reports which scale path the geometry selected, once per call, and how the
+    // column-scaled wgrad copy was produced, so a measurement log records what it priced.
     if (args.scale_chunk_bytes && std::getenv("NVTE_AG_DIAG")) {
-        std::fprintf(stderr, "[AG_DIAG] M=%d N=%d K=%d tp=%d scales=%s\n",
-            M, N_TOTAL, K, tp_size, interleave ? "interleaved" : "gathered");
+        std::fprintf(stderr, "[AG_DIAG] M=%d N=%d K=%d tp=%d scales=%s wgrad_copy=%s\n",
+            M, N_TOTAL, K, tp_size, interleave ? "interleaved" : "gathered",
+            !aux_on ? "off"
+                    : (aux_gather ? "gather"
+                                  : (ag_wgrad_transpose_mode() == hk_overlap::MX_CW_INFLIGHT
+                                         ? "transpose/inflight"
+                                         : (ag_wgrad_transpose_mode() == hk_overlap::MX_CW_DEFERRED
+                                                ? "transpose/deferred"
+                                                : "transpose/phase"))));
     }
 
     if (args.scale_chunk_bytes && !interleave) {
@@ -534,14 +601,26 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
 
     fp8e4m3 *const d_weight = static_cast<fp8e4m3 *>(const_cast<void *>(args.A));
     fp8e4m3 *const d_gath   = static_cast<fp8e4m3 *>(args.ub);
-    launch(
-        M, N_TOTAL, K, L::GATHERED_ON_M ? d_gath : d_weight,
-        L::GATHERED_ON_M ? d_weight : d_gath, static_cast<bf16 *>(args.D),
-        packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
-        tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, gath_local, args.chunk_bytes,
-        plan.xcd_bucket, buckets, bucket_ctr,
-        args.scale_base_offset, args.scale_chunk_bytes, interleave, aux_peers, aux_dst,
-        args.stream);
+    // Only NN produces a column-scaled wgrad copy, so only NN's kernel carries the two arguments
+    // that say where its re-encode runs; TN's signature is unchanged.
+    if constexpr (L::GATHERED_ON_M) {
+        launch(
+            M, N_TOTAL, K, d_gath, d_weight, static_cast<bf16 *>(args.D),
+            packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
+            tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, gath_local, args.chunk_bytes,
+            plan.xcd_bucket, buckets, bucket_ctr,
+            args.scale_base_offset, args.scale_chunk_bytes, interleave, aux_peers, aux_dst_kernel,
+            aux_scale_base, aux_gather ? 1 : 0, ag_wgrad_transpose_mode(), band_ctr, args.stream);
+    } else {
+        static_cast<void>(band_ctr);
+        launch(
+            M, N_TOTAL, K, d_weight, d_gath, static_cast<bf16 *>(args.D),
+            packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
+            tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, gath_local, args.chunk_bytes,
+            plan.xcd_bucket, buckets, bucket_ctr,
+            args.scale_base_offset, args.scale_chunk_bytes, interleave, aux_peers, aux_dst_kernel,
+            aux_scale_base, aux_gather ? 1 : 0, args.stream);
+    }
     return hipGetLastError() == hipSuccess;
 }
 

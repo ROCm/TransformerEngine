@@ -250,13 +250,15 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
-// Raw inputs for a second all-gather region; hk_fused_ag_gemm resolves them into peer pointers.
-struct AuxAgSource {
-  int reg;
+// Raw inputs for the region that carries wgrad's column-scaled copy of the gathered tensor.
+// `reg` and `signal` are Gather mode only; hk_fused_ag_gemm resolves them into peer pointers.
+struct AuxColwiseSource {
+  KittensAuxColwiseMode mode;
   void *dst;
   size_t chunk_bytes;
   size_t scale_base_offset;
   size_t scale_chunk_bytes;
+  int reg;
   uint64_t signal;
 };
 
@@ -266,7 +268,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
                              TensorWrapper &workspace, bool accumulate, const TensorWrapper &ubuf, DType ubuf_elt_dtype,
                              const TensorWrapper &chunk, communicator *comm, int reg, int tp_id, int tp_size,
                              uint64_t signal, size_t scale_base_offset, size_t scale_chunk_bytes,
-                             const AuxAgSource *aux_ag, cudaStream_t stream) {
+                             const AuxColwiseSource *aux_colwise, cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
              "fused AG+GEMM reached with an unsupported epilogue");
@@ -284,22 +286,39 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
     }
   }
 
-  // MXFP8 cannot derive column scales from row scales, so NN's wgrad needs a second, column-scaled
-  // copy of the gathered tensor. It arrives as raw bytes, so only its shape is checkable here.
-  if (aux_ag != nullptr) {
-    NVTE_CHECK(!transa, "fused AG+GEMM: an auxiliary all-gather region is NN only");
-    NVTE_CHECK(is_fp8, "fused AG+GEMM: an auxiliary all-gather region requires MXFP8 operands");
-    NVTE_CHECK(aux_ag->dst != nullptr,
-               "fused AG+GEMM: the auxiliary all-gather region has no destination");
-    NVTE_CHECK(aux_ag->scale_chunk_bytes != 0,
-               "fused AG+GEMM: the auxiliary all-gather region carries no scales, so the wgrad "
+  // NN's wgrad needs dY column-scaled while this GEMM needs it row-scaled. Transpose mode derives
+  // the column-scaled copy from the row-wise bytes the kernel gathers (arXiv:2511.02302); Gather
+  // mode carries a second all-gather of a shard Python staged column-scaled. Either way the
+  // region is raw bytes -- nothing stages a TensorWrapper into it -- so only its shape is
+  // checkable, and the band addressing in the kernel rests on that shape matching exactly.
+  if (aux_colwise != nullptr) {
+    NVTE_CHECK(!transa, "fused AG+GEMM: a column-scaled wgrad region is NN only");
+    NVTE_CHECK(is_fp8, "fused AG+GEMM: a column-scaled wgrad region requires MXFP8 operands");
+    NVTE_CHECK(aux_colwise->dst != nullptr,
+               "fused AG+GEMM: the column-scaled wgrad region has no destination");
+    NVTE_CHECK(aux_colwise->scale_chunk_bytes != 0,
+               "fused AG+GEMM: the column-scaled wgrad region carries no scales, so the wgrad "
                "GEMM would have no column-wise scale-inverses for the gathered tensor");
-    NVTE_CHECK(aux_ag->chunk_bytes == chunk.bytes() &&
-                   aux_ag->scale_chunk_bytes == scale_chunk_bytes,
-               "fused AG+GEMM: the auxiliary region shards ", aux_ag->chunk_bytes, " data and ",
-               aux_ag->scale_chunk_bytes, " scale bytes, but the gathered tensor shards ",
-               chunk.bytes(), " and ", scale_chunk_bytes,
-               "; both hold the same tensor and must agree.");
+    NVTE_CHECK(aux_colwise->chunk_bytes == chunk.bytes() &&
+                   aux_colwise->scale_chunk_bytes == scale_chunk_bytes,
+               "fused AG+GEMM: the column-scaled wgrad region shards ", aux_colwise->chunk_bytes,
+               " data and ", aux_colwise->scale_chunk_bytes,
+               " scale bytes, but the gathered tensor shards ", chunk.bytes(), " and ",
+               scale_chunk_bytes, "; both hold the same tensor and must agree.");
+    if (aux_colwise->mode == KittensAuxColwiseMode::Transpose) {
+      // The derivation writes whole 16-byte vectors of both data and scales.
+      NVTE_CHECK((aux_colwise->scale_base_offset % 16) == 0 &&
+                     (aux_colwise->chunk_bytes % 16) == 0 &&
+                     (reinterpret_cast<uintptr_t>(aux_colwise->dst) % 16) == 0,
+                 "fused AG+GEMM: the column-scaled wgrad region is not 16-byte aligned (base ",
+                 reinterpret_cast<uintptr_t>(aux_colwise->dst), ", scale offset ",
+                 aux_colwise->scale_base_offset, ", chunk ", aux_colwise->chunk_bytes, ")");
+    } else {
+      // Gather mode ships peer bytes through the region, so it has to be a registered one.
+      NVTE_CHECK(aux_colwise->reg >= 0,
+                 "fused AG+GEMM: the column-scaled wgrad region is not registered with the "
+                 "communicator, so its peers cannot be resolved for the second all-gather");
+    }
   }
 
   const void *scale_A = nullptr;
@@ -328,21 +347,26 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
       tp_id, tp_size, chunk.bytes(), scale_base_offset, scale_chunk_bytes, workspace.dptr(), workspace.bytes(), stream};
 
   // Lives until the launch below, which reads it synchronously.
-  KittensAuxAgRegion aux_region{};
-  if (aux_ag != nullptr) {
-    aux_region.dst     = aux_ag->dst;
-    aux_region.peer_ub = reinterpret_cast<char *>(comm->gpu_ptrs) +
-                         aux_ag->reg * comm->nvsize * sizeof(void *);
-    aux_region.arrive_local  = GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, aux_ag->reg, 0);
-    aux_region.arrive_offset = static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, aux_ag->reg, 0) -
-                                                  reinterpret_cast<char *>(comm->peer_ptr[0][0]));
-    aux_region.arrive_stride = static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, aux_ag->reg, 0) -
-                                                  GET_RECV_PTR_BY_INDEX(0, comm, aux_ag->reg, 0));
-    aux_region.arrive_value      = aux_ag->signal;
-    aux_region.chunk_bytes       = aux_ag->chunk_bytes;
-    aux_region.scale_base_offset = aux_ag->scale_base_offset;
-    aux_region.scale_chunk_bytes = aux_ag->scale_chunk_bytes;
-    args.aux_ag = &aux_region;
+  KittensAuxColwiseRegion aux_region{};
+  if (aux_colwise != nullptr) {
+    aux_region.mode              = aux_colwise->mode;
+    aux_region.dst               = aux_colwise->dst;
+    aux_region.chunk_bytes       = aux_colwise->chunk_bytes;
+    aux_region.scale_base_offset = aux_colwise->scale_base_offset;
+    aux_region.scale_chunk_bytes = aux_colwise->scale_chunk_bytes;
+    if (aux_colwise->mode == KittensAuxColwiseMode::Gather) {
+      aux_region.peer_ub = reinterpret_cast<char *>(comm->gpu_ptrs) +
+                           aux_colwise->reg * comm->nvsize * sizeof(void *);
+      aux_region.arrive_local  = GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, aux_colwise->reg, 0);
+      aux_region.arrive_offset =
+          static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, aux_colwise->reg, 0) -
+                              reinterpret_cast<char *>(comm->peer_ptr[0][0]));
+      aux_region.arrive_stride =
+          static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, aux_colwise->reg, 0) -
+                              GET_RECV_PTR_BY_INDEX(0, comm, aux_colwise->reg, 0));
+      aux_region.arrive_value = aux_colwise->signal;
+    }
+    args.aux_colwise = &aux_region;
   }
 
   if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -525,21 +549,29 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                                CommOverlapCore *aux_ag_comm, cudaStream_t stream_main) {
+                                CommOverlapCore *aux_colwise_comm, cudaStream_t stream_main) {
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
-    // The aux region's own overlap method never runs, so nothing else advances its signal.
-    AuxAgSource aux_src{};
-    const AuxAgSource *aux_ptr = nullptr;
-    if (aux_ag_comm != nullptr) {
-      auto *aux = static_cast<CommOverlapP2PBase *>(aux_ag_comm);
-      aux_src.reg               = aux->_ub_reg;
+    // NVTE_AG_WGRAD_COPY picks how wgrad's column-scaled copy of dY is produced. Transpose mode
+    // communicates nothing through the region, so it needs neither a peer table nor a signal --
+    // only the geometry of the buffer the kernel writes. Gather mode runs a second all-gather
+    // into it and needs both, plus a shard Python staged there first.
+    const KittensAuxColwiseMode aux_mode = kittens_aux_colwise_mode();
+    AuxColwiseSource aux_src{};
+    const AuxColwiseSource *aux_ptr = nullptr;
+    if (aux_colwise_comm != nullptr) {
+      auto *aux = static_cast<CommOverlapP2PBase *>(aux_colwise_comm);
+      aux_src.mode              = aux_mode;
       aux_src.dst               = aux->_ubuf.dptr();
       aux_src.chunk_bytes       = aux->_ubufs[0].bytes();
       aux_src.scale_base_offset = aux->_scale_base_offset;
       aux_src.scale_chunk_bytes = aux->_scale_chunk_bytes;
-      aux_src.signal            = aux->_ag_signal_base + _tp_size;
-      aux->_ag_signal_base += _tp_size;
+      if (aux_mode == KittensAuxColwiseMode::Gather) {
+        // The aux region's own overlap method never runs, so nothing else advances its signal.
+        aux_src.reg    = aux->_ub_reg;
+        aux_src.signal = aux->_ag_signal_base + _tp_size;
+        aux->_ag_signal_base += _tp_size;
+      }
       aux_ptr = &aux_src;
     }
     const bool launched = hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy,

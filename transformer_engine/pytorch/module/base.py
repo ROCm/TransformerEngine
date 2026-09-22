@@ -50,7 +50,7 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_gather_tensors,
 )
-from ..constants import dist_group_type
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, dist_group_type
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -778,14 +778,44 @@ def fused_bulk_rs_eligible(
 
 
 def fused_wgrad_ag_eligible(name: Optional[str]) -> bool:
-    """Whether the fused AG+GEMM kernel can carry the wgrad grad-output all-gather.
+    """Whether the fused AG+GEMM kernel can supply wgrad's column-scaled grad output.
 
-    The gather rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
+    The work rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
     False off ROCm, where there is no fused backend and upstream's external-AG path is unchanged.
     """
     if not IS_HIP_EXTENSION or name is None:
         return False
     return _ub_is_fused(name + "_dgrad") and _ub_is_fused(name + "_wgrad")
+
+
+_ag_wgrad_copy_mode: Optional[str] = None
+
+
+def ag_wgrad_copy_mode() -> str:
+    """How the fused MXFP8 dgrad kernel produces wgrad's column-scaled copy of the grad output.
+
+    MXFP8 row-scaled and column-scaled tensors are not interchangeable, so the row-scaled tensor
+    the dgrad GEMM gathers cannot serve wgrad. Two ways to get the column-scaled copy:
+
+    * ``"transpose"`` (default) -- the kernel re-encodes the row-wise bytes it already gathered
+      into the region. Nothing is staged; the region is a view the kernel fills.
+    * ``"gather"`` -- the kernel carries a second all-gather into the region, so this rank's
+      column-scaled shard must be staged there *before* the dgrad GEMM launches.
+
+    The C++ side reads the same ``NVTE_AG_WGRAD_COPY`` in
+    ``transformer_engine/common/gemm/kittens/comm_gemm.h`` (``kittens_aux_colwise_mode()``).
+    THE TWO READ SITES MUST AGREE: staging for the mode the kernel is not running leaves wgrad
+    reading stale bytes with no error anywhere.
+    """
+    global _ag_wgrad_copy_mode
+    if _ag_wgrad_copy_mode is None:
+        mode = os.getenv("NVTE_AG_WGRAD_COPY", "transpose")
+        if mode not in ("transpose", "gather"):
+            raise ValueError(
+                f"NVTE_AG_WGRAD_COPY={mode!r} is not a mode; expected 'transpose' or 'gather'"
+            )
+        _ag_wgrad_copy_mode = mode
+    return _ag_wgrad_copy_mode
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -977,6 +1007,66 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unsupported data format
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
+
+
+def userbuffers_view_for_derived_columnwise(
+    comm,
+    rowwise_gathered: MXFP8TensorStorage,
+    quantizer: MXFP8Quantizer,
+) -> MXFP8TensorStorage:
+    """View a Userbuffers region as the column-wise copy the fused AG+GEMM kernel derives.
+
+    ``NVTE_AG_WGRAD_COPY="transpose"`` only -- in ``"gather"`` mode the region is filled by
+    :func:`fill_userbuffers_buffer_for_all_gather` instead. See :func:`ag_wgrad_copy_mode`.
+
+    MXFP8's column-wise form shares the row-wise data layout and differs only in how the scales
+    are blocked, so the fused dgrad kernel derives the whole column-wise tensor from the row-wise
+    bytes it gathers, writing it into this region. Nothing is staged here and nothing is
+    communicated through it: the returned tensor is a view that the kernel fills, complete once
+    it has run.
+
+    ``rowwise_gathered`` is the gathered row-wise tensor the kernel reads, and supplies the
+    shape and element format the derived copy must match.
+
+    """
+    if not isinstance(quantizer, MXFP8Quantizer):
+        raise ValueError(
+            f"Expected an MXFP8 quantizer for the derived column-wise copy ({quantizer})"
+        )
+    if not isinstance(rowwise_gathered, MXFP8TensorStorage):
+        raise ValueError(
+            "Expected the gathered grad output to be MXFP8 before deriving its transpose"
+        )
+    if rowwise_gathered._rowwise_data is None:
+        raise RuntimeError("The gathered grad output carries no row-wise data to derive from")
+    if not comm.is_fp8_ubuf():
+        raise RuntimeError(
+            "Attempting to derive an MXFP8 tensor into Userbuffers, "
+            "but Userbuffers is not initialized with FP8 buffers"
+        )
+    if not (isinstance(comm, tex.CommOverlapP2P) and comm.has_scale_buffer()):
+        raise RuntimeError(
+            "The fused column-wise derivation needs the scales to live in the Userbuffers "
+            "allocation, but this communicator has no scale buffer"
+        )
+
+    # Row-wise scales are [rows, cols/32] and column-wise ones [rows/32, cols]: the same byte
+    # count, which is why the region needs no resizing.
+    shape = list(rowwise_gathered._rowwise_data.size())
+    scale_shape = [
+        math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
+        shape[-1],
+    ]
+    return MXFP8TensorStorage(
+        rowwise_data=None,
+        rowwise_scale_inv=None,
+        columnwise_data=comm.get_buffer(shape=shape),
+        columnwise_scale_inv=comm.get_scale_buffer(shape=scale_shape),
+        fp8_dtype=rowwise_gathered._fp8_dtype,
+        quantizer=quantizer,
+        with_gemm_swizzled_scales=False,
+        fake_dtype=rowwise_gathered._dtype,
+    )
 
 
 def _is_weight_workspace_valid(

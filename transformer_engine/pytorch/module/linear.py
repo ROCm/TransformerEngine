@@ -20,7 +20,9 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
+    ag_wgrad_copy_mode,
     fill_userbuffers_buffer_for_all_gather,
+    userbuffers_view_for_derived_columnwise,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
@@ -1011,9 +1013,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # Compute grad input tensor
         # --------------------------------------------------
 
-        # ROCm fused backend: the dgrad kernel can carry a second all-gather for the column-scaled
-        # grad output, so upstream's external AG on borrowed dgrad streams is not needed. It rides
-        # inside the dgrad GEMM, so the region has to be staged before that GEMM launches.
+        # ROCm fused backend: the dgrad kernel supplies the column-scaled grad output itself, so
+        # upstream's external AG on borrowed dgrad streams is not needed. NVTE_AG_WGRAD_COPY picks
+        # how: "transpose" derives it from the row-scaled bytes the kernel already gathers and
+        # stages nothing, "gather" carries a second all-gather that needs this rank's shard staged
+        # into the region before the dgrad GEMM launches.
         ub_obj_overlap_wgrad = None
         grad_output_wgrad = None
         ub_fused_wgrad_ag = (
@@ -1076,12 +1080,21 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             if ub_fused_wgrad_ag:
                 ub_obj_overlap_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
-                    ub_obj_overlap_wgrad,
-                    grad_output_arg,
-                    grad_output_quantizer,
-                    bwd_args.tp_group,
-                )
+                if ag_wgrad_copy_mode() == "gather":
+                    # The gather rides inside the dgrad GEMM below, so the local shard has to be
+                    # in place before that GEMM launches.
+                    grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                        ub_obj_overlap_wgrad,
+                        grad_output_arg,
+                        grad_output_quantizer,
+                        bwd_args.tp_group,
+                    )
+                else:
+                    grad_output_wgrad = userbuffers_view_for_derived_columnwise(
+                        ub_obj_overlap_wgrad,
+                        grad_output,
+                        grad_output_quantizer,
+                    )
 
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight_fp8
@@ -1197,8 +1210,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
             if ub_fused_wgrad_ag:
-                # The dgrad kernel carried the column-scaled gather into the _wgrad region, so the
-                # view staged above that GEMM is complete. No streams to borrow, no external AG.
+                # The dgrad kernel filled the _wgrad region with the column-scaled copy, either
+                # way, so the view taken above that GEMM is complete. No streams to borrow and no
+                # external AG.
                 grad_output = grad_output_wgrad
             elif bwd_args.ub_overlap_ag and isinstance(grad_output_quantizer, MXFP8Quantizer):
                 # UB does not support pipelined overlapping grad output

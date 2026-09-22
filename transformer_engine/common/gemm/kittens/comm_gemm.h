@@ -8,22 +8,52 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 #include "kittens_common.h"
 
-// A second all-gather, carried alongside the GEMM's own but not consumed by it: no compute block
-// waits on these arrivals, so the gathered tensor's dtype and scales are the caller's business.
-// Same contract the BULK path already uses, applied to a region the GEMM never reads.
-struct KittensAuxAgRegion {
-    void *dst;                  // this rank's base for the gathered tensor
+// MXFP8 row-scaled and column-scaled tensors are not interchangeable, so the NN kernel's wgrad
+// needs its own column-scaled copy of the tensor the GEMM gathers row-scaled. Two ways to get it,
+// priced differently and needing different host-side work:
+enum class KittensAuxColwiseMode {
+    Transpose = 0,   // re-encode the row-wise bytes in place (arXiv:2511.02302); no communication
+    Gather    = 1,   // a second all-gather of an already column-scaled shard the host staged
+};
+
+// Runtime mode selection, read once. The Python side reads the same variable in
+// transformer_engine/pytorch/module/base.py (ag_wgrad_copy_mode()) and THE TWO MUST AGREE: only
+// Gather wants this rank's column-scaled shard staged into the region before the dgrad GEMM
+// launches, and staging for the mode the kernel is not running leaves wgrad reading stale bytes.
+//   NVTE_AG_WGRAD_COPY=transpose   (default) derive the copy in the dgrad kernel
+//   NVTE_AG_WGRAD_COPY=gather      carry a second all-gather inside the dgrad kernel
+inline KittensAuxColwiseMode kittens_aux_colwise_mode() {
+    static const KittensAuxColwiseMode mode = [] {
+        const char *v = std::getenv("NVTE_AG_WGRAD_COPY");
+        return (v != nullptr && std::strcmp(v, "gather") == 0) ? KittensAuxColwiseMode::Gather
+                                                               : KittensAuxColwiseMode::Transpose;
+    }();
+    return mode;
+}
+
+// The region holding that column-scaled copy. Nothing in this GEMM reads it -- no compute block
+// waits on it -- so in Gather mode the gathered tensor's dtype and scales are the caller's
+// business, the same contract the BULK path uses. It must shard exactly as the gathered tensor
+// does either way.
+struct KittensAuxColwiseRegion {
+    KittensAuxColwiseMode mode;
+    void *dst;                  // this rank's base for the column-scaled tensor
+    size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
+    // Gather mode only: its own registered region, so its own peer table, and its own signal
+    // space, since the communicator that owns it never runs an overlap method of its own. Left
+    // zero in Transpose mode, where nothing is communicated through the region.
     const void *peer_ub;        // peer base table for this region
     void *arrive_local;
     size_t arrive_offset;
     size_t arrive_stride;
     uint64_t arrive_value;
-    size_t chunk_bytes;
-    size_t scale_base_offset;
-    size_t scale_chunk_bytes;
 };
 
 struct KittensAgGemmArgs {
@@ -52,7 +82,7 @@ struct KittensAgGemmArgs {
     void *gather_dst;     // Bulk all-gather only
     KittensDType a_dtype;
     KittensDType b_dtype;
-    const KittensAuxAgRegion *aux_ag;   // Second AG region; nullptr when absent
+    const KittensAuxColwiseRegion *aux_colwise;   // Column-scaled wgrad copy; nullptr when absent
 };
 
 struct KittensRsGemmArgs {

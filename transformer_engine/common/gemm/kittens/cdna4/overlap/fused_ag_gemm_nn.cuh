@@ -655,11 +655,20 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     [[maybe_unused]] size_t scale_chunk_bytes, [[maybe_unused]] int scale_K,
     [[maybe_unused]] int interleave_scales,
     [[maybe_unused]] char *__restrict__ gather_dst,
-    // A second all-gather this kernel carries but never reads: no arrivals are published and no
-    // compute block waits, so the gathered tensor's dtype and scales are the caller's business.
+    // Destination for the column-scaled copy of the gathered tensor that a later wgrad GEMM
+    // reads. aux_gather picks how it is produced: 0 re-encodes the row-wise bytes this kernel
+    // already gathered (see mx_colwise_all), 1 carries a second all-gather of a column-scaled
+    // shard the host staged. Either way no arrivals are published on it and no compute block
+    // waits, so in gather mode the copy's dtype and scales are the caller's business.
     // aux_dst == nullptr means there is none.
     [[maybe_unused]] const PeerPtrs aux_peers,
-    [[maybe_unused]] char *__restrict__ aux_dst) {
+    [[maybe_unused]] char *__restrict__ aux_dst,
+    [[maybe_unused]] size_t aux_scale_base,
+    [[maybe_unused]] int aux_gather,
+    // Transpose mode only: WHERE the re-encode runs (MX_CW_*), and the claim counter for the band
+    // pool the INFLIGHT and DEFERRED modes drain between GEMM tiles.
+    [[maybe_unused]] int colwise_mode,
+    [[maybe_unused]] int *__restrict__ band_ctr) {
 
     const int M       = A.rows();
     const int K       = A.cols();
@@ -669,6 +678,50 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 #include "mxfp8_nn_prologue.inc"
 
     const int NGATH = (tp_size - 1) * gath_wg;
+
+    // How the column-scaled wgrad copy gets produced, decided once and uniformly across the grid
+    // (every input is a kernel argument). Gather mode and BULK reach none of it.
+    //
+    // The staging every mode needs borrows As[0][0]. Gatherer blocks do not touch the operand
+    // tiles until they join the compute queue, and the pool steps below run between GEMM tiles,
+    // where the previous tile's As is dead and the next tile's G::load() has not run yet -- the
+    // same trade the interleaved scale packer makes with scale_A_smem.
+    static_assert(sizeof(As[0][0]) >= MX_COLWISE_SMEM_BYTES,
+                  "As[0][0] too small to stage a column-wise band");
+    const bool cw_on = !BULK && aux_dst != nullptr && !aux_gather;
+    // INFLIGHT additionally needs the non-interleaved scale path, where the host has already
+    // staged every peer's row-wise scales into our own region, and a geometry whose gather
+    // sub-block is exactly one band. Anything else falls back to DEFERRED rather than mis-stride.
+    const bool cw_stream = cw_on && colwise_mode == MX_CW_INFLIGHT && !interleave_scales &&
+                           scale_chunk_bytes != 0 &&
+                           mx_can_stream_colwise(gath_wg, chunk_bytes / (size_t)tiles_per_chunk, K,
+                                                 scale_K, (int)sizeof(As[0][0]));
+    const bool cw_pool   = cw_on && colwise_mode != MX_CW_PHASE;
+    const bool cw_phase  = cw_on && !cw_pool;
+
+    MxColwisePool cw{};
+    if (cw_on) {
+        const int bands_per_chunk = tiles_per_chunk * MX_BANDS_PER_TILE;
+        cw.ctr               = band_ctr;
+        cw.arrive            = arrive;
+        cw.ub                = (const char *)&A[{0, 0, 0, 0}];
+        cw.dst               = aux_dst;
+        cw.chunk_bytes       = chunk_bytes;
+        cw.scale_base        = scale_base;
+        cw.scale_chunk_bytes = scale_chunk_bytes;
+        cw.dst_scale_base    = aux_scale_base;
+        // INFLIGHT leaves the pool only our own chunk: nobody gathers those rows, so no copy
+        // carries them. DEFERRED keeps the gather untouched and puts every band in the pool.
+        cw.bands             = (cw_stream ? 1 : tp_size) * bands_per_chunk;
+        cw.bands_per_chunk   = bands_per_chunk;
+        cw.tiles_per_chunk   = tiles_per_chunk;
+        cw.my_pe             = my_pe;
+        cw.tp_size           = tp_size;
+        cw.gath_wg           = gath_wg;
+        cw.K                 = K;
+        cw.scale_K           = scale_K;
+    }
+
     if ((int)blockIdx.x < NGATH) {
         // In bulk mode chunk_bytes describes the gathered region's shard, not the A operand's.
         char *gb = (char *)&A[{0, 0, 0, 0}];
@@ -686,18 +739,34 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
                 scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_iters,
                 reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
+        } else if (cw_stream) {
+            // CBSZ is the A slot's element format, and for NN the A slot is the gathered tensor,
+            // so it is also the format being re-encoded.
+            gather_all_colwise<true, CBSZ>(
+                my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive, scale_base,
+                scale_chunk_bytes, aux_dst, aux_scale_base, K, scale_K,
+                reinterpret_cast<uint8_t *>(&As[0][0].data[0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
         }
 
-        // After the primary round, never before: the aux bytes have no deadline, while the primary
-        // arrivals gate compute. Running them concurrently would only split the link bandwidth and
-        // push those arrivals out. Both regions shard identically, so chunk_bytes and
-        // tiles_per_chunk carry over -- hk_fused_ag_gemm checks that.
+        // After the primary round, never before: these bytes have no deadline, while the primary
+        // arrivals gate compute. In gather mode, running them concurrently would only split the
+        // link bandwidth and push those arrivals out. Both regions shard identically, so
+        // chunk_bytes, tiles_per_chunk and scale_chunk_bytes carry over -- hk_fused_ag_gemm
+        // checks that.
         if constexpr (!BULK) {
-            if (aux_dst != nullptr) {
+            if (aux_dst != nullptr && aux_gather) {
                 gather_all<1, true, false>(my_pe, gath_wg, tiles_per_chunk, aux_dst, aux_peers,
                                            chunk_bytes, nullptr);
+            } else if (cw_phase) {
+                // The original shape, kept as the measurement baseline and as the safety net for
+                // geometries the other two modes do not cover: a pass of its own, over a tensor
+                // it re-reads from HBM, run before this block may join the compute queue.
+                mx_colwise_all<CBSZ>(
+                    my_pe, tp_size, gath_wg, tiles_per_chunk, NGATH, (const char *)gb,
+                    chunk_bytes, scale_base, scale_chunk_bytes, aux_dst, aux_scale_base,
+                    arrive, K, scale_K, reinterpret_cast<uint8_t *>(&As[0][0].data[0]));
             }
         }
     }
@@ -717,6 +786,17 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         __syncthreads();
         int tile_idx = s_tile_idx;
         sched_iter++;
+
+        // One column-wise band per scheduling step, claimed from the shared pool, so the
+        // derivation rides between GEMM tiles instead of forming a phase of its own. It sits here
+        // -- after the barrier that ends the previous tile, before this one's operands are loaded
+        // -- because it stages through As[0][0], which is dead at exactly this point.
+        if constexpr (!BULK) {
+            if (cw_pool) {
+                mx_colwise_pool_step<CBSZ>(cw, reinterpret_cast<uint8_t *>(&As[0][0].data[0]));
+            }
+        }
+
         if (tile_idx >= num_tiles) break;
 
         TileDesc desc = work_queue[tile_idx];
@@ -788,6 +868,14 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
 
     } // end persistent loop
+
+    // Bands the interleaved steps did not reach. Blocks run out of GEMM tiles at different times,
+    // so this self-balances, and on a shape with tiles to spare there is nothing left to do.
+    if constexpr (!BULK) {
+        if (cw_pool) {
+            mx_colwise_pool_drain<CBSZ>(cw, reinterpret_cast<uint8_t *>(&As[0][0].data[0]));
+        }
+    }
 }
 
 static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
@@ -836,8 +924,9 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
                                    int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe, int tp_size,
                                    int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
                                    int *d_bucket_ctr, size_t scale_base, size_t scale_chunk_bytes,
-                                   int interleave_scales, char *d_gather_dst, PeerPtrs aux_peers, char *d_aux_dst,
-                                   hipStream_t stream) {
+                                   int interleave_scales, char *d_gather_dst, PeerPtrs aux_peers,
+                                   char *d_aux_dst, size_t aux_scale_base, int aux_gather,
+                                   int colwise_mode, int *d_band_ctr, hipStream_t stream) {
     const int tiles_M         = M / BLOCK_ROW;
     const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
@@ -866,7 +955,7 @@ static void launch_persistent_impl(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
         xcd_bucket, buckets, d_bucket_ctr,
         packed_sa, scale_base, scale_chunk_bytes, K / 32, interleave_scales, d_gather_dst,
-        aux_peers, d_aux_dst);
+        aux_peers, d_aux_dst, aux_scale_base, aux_gather, colwise_mode, d_band_ctr);
 }
 
 // Fused: gather feeds the A operand, so there is no separate destination.
@@ -878,12 +967,13 @@ static void launch_persistent(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *
                               int m_local, size_t chunk_bytes, int xcd_bucket, XcdBuckets buckets,
                               int *d_bucket_ctr, size_t scale_base, size_t scale_chunk_bytes,
                               int interleave_scales, PeerPtrs aux_peers, char *d_aux_dst,
-                              hipStream_t stream) {
+                              size_t aux_scale_base, int aux_gather, int colwise_mode,
+                              int *d_band_ctr, hipStream_t stream) {
     launch_persistent_impl<CBSZ, BLGP, false>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
         peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
         d_bucket_ctr, scale_base, scale_chunk_bytes, interleave_scales, nullptr, aux_peers,
-        d_aux_dst, stream);
+        d_aux_dst, aux_scale_base, aux_gather, colwise_mode, d_band_ctr, stream);
 }
 
 // Bulk: the all-gather is unrelated to this GEMM and lands in d_gather_dst.
@@ -898,12 +988,13 @@ static void launch_persistent_bulk(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e
     launch_persistent_impl<CBSZ, BLGP, true>(
         M, N_TOTAL, K, d_a, d_b, d_c, packed_sa, packed_sb, d_queue, num_tiles, d_tile_counter,
         peers, d_arrive, my_pe, tp_size, gath_wg, m_local, chunk_bytes, xcd_bucket, buckets,
-        d_bucket_ctr, 0, 0, 0, d_gather_dst, PeerPtrs{}, nullptr, stream);
+        d_bucket_ctr, 0, 0, 0, d_gather_dst, PeerPtrs{}, nullptr, 0, 0, MX_CW_PHASE, nullptr,
+        stream);
 }
 
 using persistent_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *, uint32_t *, TileDesc *, int,
                               int *, PeerPtrs, unsigned int *, int, int, int, int, size_t, int, XcdBuckets, int *,
-                              size_t, size_t, int, PeerPtrs, char *, hipStream_t);
+                              size_t, size_t, int, PeerPtrs, char *, size_t, int, int, int *, hipStream_t);
 
 using persistent_bulk_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *, uint32_t *,
                                       uint32_t *, TileDesc *, int, int *, PeerPtrs, char *,
