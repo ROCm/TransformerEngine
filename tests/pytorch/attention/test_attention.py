@@ -563,6 +563,9 @@ model_configs_d256 = {
 
 
 @pytest.mark.skipif(
+    IS_HIP_EXTENSION, reason="head_dim=256 backward fused attention is not supported on ROCm."
+)
+@pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",
 )
