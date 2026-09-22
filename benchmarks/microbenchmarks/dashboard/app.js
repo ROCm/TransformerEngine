@@ -27,7 +27,8 @@ const S = {
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
   trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits", by: "arch", railMode: "kernels" },
-  byType: { q: "", facets: { family: "all", mode: "all", dtype: "all", model: "all" } },
+  byType: { q: "", facets: { family: "all", mode: "all", dtype: "all", model: "all" },
+    trend: { key: null, model: "all", metric: null, range: "all", xmode: "commits", by: "arch" } },
   theme: "dark",
 };
 
@@ -531,11 +532,14 @@ function populateFacets() {
     if (!vals.includes(S.byType.facets[key])) S.byType.facets[key] = "all";   // drop stale selection
     el.innerHTML = buildOpt(vals, S.byType.facets[key], labelFn);
     el.value = S.byType.facets[key];
+    // nothing to choose (0/1 distinct value in the data) -> hide the facet entirely
+    const wrap = el.closest(".facet");
+    if (wrap) wrap.hidden = vals.length <= 1;
   };
   set("facetFamily", "family", fams, familyLabel);
   set("facetMode", "mode", uniq(x => x.r.mode).sort(), null);
   set("facetDtype", "dtype", uniq(x => x.r.dtype).sort(), null);
-  set("facetModel", "model", uniq(x => x.r.model).sort(), null);
+  // arch isn't a facet: the table already groups by arch and the chart has its own arch selector.
 }
 
 // Every latest dev kernel/model, grouped by benchmark family -- the full picture,
@@ -646,6 +650,20 @@ function renderByType() {
         `</details>`;
     }).join("");
   }
+
+  // Drive the All-Benchmarks chart from the tables: keep the current selection if it
+  // survived the filter, else default to the first visible row (empty if none).
+  const domRows = $$("#typeSections tr[data-k]");
+  const bt = S.byType.trend;
+  const present = new Set(domRows.map(tr => tr.dataset.k));
+  if (bt.key && present.has(bt.key)) {
+    selectKernel(bt.key, BYTYPE_CTX, false);
+  } else if (domRows.length) {
+    bt.model = "all";   // overview across arches; clicking a row drills into that arch
+    selectKernel(domRows[0].dataset.k, BYTYPE_CTX, false);
+  } else {
+    selectKernel(null, BYTYPE_CTX, false);
+  }
 }
 
 /* ---------------------------------------------------------- 3 · PR CHECK --- */
@@ -716,11 +734,11 @@ function renderKernelRail() {
   let keys = [...idx.keys()].filter(k => !!idx.get(k).aggregate === agg);
   if (S.trend.q) { const q = S.trend.q.toLowerCase(); keys = keys.filter(k => k.toLowerCase().includes(q)); }
   keys.sort();
-  // default to a regressed kernel, else the best-sampled one (so the chart isn't a lone point)
-  if (!S.trend.key && keys.length) {
-    const reg = keys.find(k => idx.get(k).reg);
-    const dense = keys.slice().sort((a, b) => idx.get(b).n - idx.get(a).n)[0];
-    selectKernel(reg || dense, false);
+  // default: the worst confirmed regression on dev; if there is none, leave the chart empty.
+  if (!S.trend.key) {
+    const worst = healthRows().filter(x => x.real).sort((a, b) => a.d - b.d)[0];
+    const worstK = worst ? kkey(worst.r) : null;
+    selectKernel(worstK && keys.includes(worstK) ? worstK : null, HEALTH_CTX, false);
   }
   $("#kernelList").innerHTML = keys.map(k => {
     const e = idx.get(k);
@@ -729,37 +747,66 @@ function renderKernelRail() {
       ${esc(e.op)}<span class="ks">${sub}</span></button>`;
   }).join("") || `<div class="empty" style="padding:20px">no ${agg ? "aggregates" : "match"}</div>`;
 }
-let trendChart = null;
-function selectKernel(k, rerail = true) {
-  S.trend.key = k;
-  const idx = kernelIndex(); const e = idx.get(k); if (!e) return;
+// Each tab hosts its own trend chart: Health drives from S.trend (+ the kernel rail),
+// All Benchmarks from S.byType.trend (+ the benchmark tables). A ctx bundles the
+// per-tab state, DOM element ids, and the live Chart.js instance so selectKernel /
+// drawTrend render into either without touching the other.
+const HEALTH_CTX = { state: S.trend, hasRail: true, chart: null, hash: true, ids: {
+  title: "trendTitle", chart: "trendChart", by: "trendBy", model: "trendModel",
+  range: "trendRange", xmode: "trendXMode", note: "noiseNote", headRow: "trendHeadRow", body: "trendBody" } };
+const BYTYPE_CTX = { state: S.byType.trend, hasRail: false, chart: null, hash: false, ids: {
+  title: "btTitle", chart: "btChart", by: "btBy", model: "btModel",
+  range: "btRange", xmode: "btXMode", note: "btNote", headRow: "btHeadRow", body: "btBody" } };
+const cq = (ctx, name) => document.getElementById(ctx.ids[name]);
+
+// Empty state: tear the chart down and blank the title/note/table (Health with no
+// regression to show, or All Benchmarks with no rows in the current filter).
+function clearChart(ctx, msg) {
+  if (ctx.chart) { ctx.chart.destroy(); ctx.chart = null; }
+  const t = cq(ctx, "title"); if (t) t.innerHTML = esc(msg);
+  const n = cq(ctx, "note"); if (n) n.innerHTML = "";
+  const hr = cq(ctx, "headRow"); if (hr) hr.innerHTML = "<th>commit</th><th>date</th><th>pr</th>";
+  const b = cq(ctx, "body"); if (b) b.innerHTML = "";
+}
+
+function selectKernel(k, ctx = HEALTH_CTX, rerail = true) {
+  const st = ctx.state;
+  const idx = kernelIndex(); const e = k ? idx.get(k) : null;
+  if (!e) {
+    st.key = null;
+    clearChart(ctx, ctx.hasRail ? "No confirmed regressions on dev" : "Select a benchmark");
+    if (ctx.hash) writeHash();
+    return;
+  }
+  st.key = k;
   const metrics = [...e.metrics];
   // one metric per kernel: auto-select it (the unit is shown in the trend title)
-  if (!metrics.includes(S.trend.metric)) S.trend.metric = metrics.find(m => m !== "speedup") || metrics[0];
-  const byBackend = S.trend.by === "backend";
+  if (!metrics.includes(st.metric)) st.metric = metrics.find(m => m !== "speedup") || metrics[0];
+  const byBackend = st.by === "backend";
   // backend mode compares backends at one arch, so drop the "all" arch option
-  if (byBackend && (S.trend.model === "all" || !S.models.includes(S.trend.model))) S.trend.model = S.models[0] || "all";
-  $("#trendBy").innerHTML = [["arch", "by arch"], ["backend", "by backend"]].map(([v, t]) =>
-    `<button data-b="${v}" class="${v === S.trend.by ? "is-active" : ""}">${t}</button>`).join("");
-  $("#trendModel").innerHTML = (byBackend ? S.models : ["all", ...S.models]).map(a =>
-    `<button data-a="${a}" class="${a === S.trend.model ? "is-active" : ""}">${esc(a)}</button>`).join("");
-  $("#trendRange").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
-    `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
-  $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
-    `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
-  $("#trendTitle").innerHTML = byBackend
-    ? `${esc(e.base)} <small>${esc(e.aggregate ? "\u03a3 aggregate" : e.shape)} · ${esc(e.dtype)} · ${esc(S.trend.model)} · ${S.trend.metric} · backends</small>`
+  if (byBackend && (st.model === "all" || !S.models.includes(st.model))) st.model = S.models[0] || "all";
+  cq(ctx, "by").innerHTML = [["arch", "by arch"], ["backend", "by backend"]].map(([v, t]) =>
+    `<button data-b="${v}" class="${v === st.by ? "is-active" : ""}">${t}</button>`).join("");
+  cq(ctx, "model").innerHTML = (byBackend ? S.models : ["all", ...S.models]).map(a =>
+    `<button data-a="${a}" class="${a === st.model ? "is-active" : ""}">${esc(a)}</button>`).join("");
+  cq(ctx, "range").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
+    `<button data-r="${v}" class="${v === st.range ? "is-active" : ""}">${t}</button>`).join("");
+  cq(ctx, "xmode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
+    `<button data-x="${v}" class="${v === st.xmode ? "is-active" : ""}">${t}</button>`).join("");
+  cq(ctx, "title").innerHTML = byBackend
+    ? `${esc(e.base)} <small>${esc(e.aggregate ? "\u03a3 aggregate" : e.shape)} · ${esc(e.dtype)} · ${esc(st.model)} · ${st.metric} · backends</small>`
     : e.aggregate
-      ? `${esc(e.op)} <small>\u03a3 work-weighted H-mean · ${esc(e.dtype)} · ${S.trend.metric}</small>`
-      : `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
-  if (rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
-  drawTrend(e);
-  writeHash();
+      ? `${esc(e.op)} <small>\u03a3 work-weighted H-mean · ${esc(e.dtype)} · ${st.metric}</small>`
+      : `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${st.metric}</small>`;
+  if (ctx.hasRail && rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
+  drawTrend(e, ctx);
+  if (ctx.hash) writeHash();
 }
-function drawTrend(e) {
-  const metric = S.trend.metric, shape = e.shape, dtype = e.dtype;
-  const byBackend = S.trend.by === "backend";
-  const base = e.base, arch = (S.trend.model === "all") ? (S.models[0] || "") : S.trend.model;
+function drawTrend(e, ctx = HEALTH_CTX) {
+  const st = ctx.state;
+  const metric = st.metric, shape = e.shape, dtype = e.dtype;
+  const byBackend = st.by === "backend";
+  const base = e.base, arch = (st.model === "all") ? (S.models[0] || "") : st.model;
   // Overlay dimension: archs of one exact op (default), or backends of one op-family
   // (base) at a single arch. opFor() maps a dim value back to its full op for baselines.
   const dimOf = byBackend ? (r => r.backend) : (r => r.model);
@@ -775,7 +822,7 @@ function drawTrend(e) {
     return { id, ts: any.ts, commit: any.commit, pr: any.pr, main: isMainRec(any) };
   }).sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
   // time-range filter. range is "<N>d" (last N days) or "all" (no filter).
-  const days = S.trend.range === "all" ? Infinity : parseInt((S.trend.range.match(/\d+/) || ["30"])[0], 10);
+  const days = st.range === "all" ? Infinity : parseInt((st.range.match(/\d+/) || ["30"])[0], 10);
   if (Number.isFinite(days)) {
     const cutoff = Date.now() - days * 86400000;
     runIds = runIds.filter(ri => !ri.ts || new Date(ri.ts).getTime() >= cutoff);
@@ -784,7 +831,7 @@ function drawTrend(e) {
   for (const r of recs) val.set(r.run_id + "|" + dimOf(r), r.value);
 
   // x-axis points: one per commit, or one per day (daily mean) when xmode=daily
-  const daily = S.trend.xmode === "daily";
+  const daily = st.xmode === "daily";
   let points;
   if (daily) {
     const byDay = new Map();
@@ -802,9 +849,9 @@ function drawTrend(e) {
     return val.get(p.id + "|" + dv) ?? null;
   };
   // single-arch mode draws a noise band; multi-arch and backend modes overlay for comparison
-  const single = !byBackend && S.trend.model !== "all";
+  const single = !byBackend && st.model !== "all";
   // backend mode lists only backends that actually ran this config+arch (drop absent ones)
-  const dims = single ? [S.trend.model]
+  const dims = single ? [st.model]
     : byBackend ? [...new Set(recs.map(r => r.backend))].sort()
     : S.models;
   if (aggInfo) {                              // tag points with config count + set-change flag
@@ -820,9 +867,9 @@ function drawTrend(e) {
   const datasets = [];
   let note = "";
   const span = `${points.length} ${daily ? "day" + (points.length === 1 ? "" : "s") : "commits"}` +
-    (S.trend.range === "all" ? "" : ` · last ${days}d`);
+    (st.range === "all" ? "" : ` · last ${days}d`);
   if (single) {
-    const noise = mainBaseline(e.op, shape, dtype, S.trend.model, metric);
+    const noise = mainBaseline(e.op, shape, dtype, st.model, metric);
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
       datasets.push({ label: "+2σ", data: points.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: cssVal("--band"), order: 20 });
       datasets.push({ label: "-2σ", data: points.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
@@ -860,18 +907,18 @@ function drawTrend(e) {
       borderWidth: daily ? 2.4 : 2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
     });
   }
-  $("#noiseNote").innerHTML =
+  cq(ctx, "note").innerHTML =
     `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v4M8 5v.01" stroke-linecap="round"/></svg>` + note;
 
   const tickCol = cssVal("--ink-3"), gridCol = cssVal("--grid");
-  const canvasEl = $("#trendChart");
+  const canvasEl = cq(ctx, "chart");
   // Robust teardown: destroy our instance AND any chart still bound to this canvas
   // (Chart.getChart), so a re-entrant/interrupted redraw can't leave the canvas
   // "already in use" -> a blank chart that only a full page reload clears.
-  if (trendChart) { trendChart.destroy(); trendChart = null; }
+  if (ctx.chart) { ctx.chart.destroy(); ctx.chart = null; }
   const bound = (window.Chart && Chart.getChart) ? Chart.getChart(canvasEl) : null;
   if (bound) bound.destroy();
-  trendChart = new Chart(canvasEl, {
+  ctx.chart = new Chart(canvasEl, {
     type: "line", data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 220 },
@@ -912,9 +959,9 @@ function drawTrend(e) {
   // Columns are the overlay dimension (archs, or backends in backend mode) so the
   // header stays aligned with the data cells below.
   const cols = byBackend ? dims : S.models;
-  $("#trendHeadRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
+  cq(ctx, "headRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
     cols.map(c => `<th class="num">${esc(c)}</th>`).join("");
-  $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
+  cq(ctx, "body").innerHTML = runIds.slice().reverse().map(ri => {
     const cell = dv => {
       const r = recs.find(x => x.run_id === ri.id && dimOf(x) === dv)
         || S.records.find(x => x.run_id === ri.id && dimOf(x) === dv && x.shape === shape && x.dtype === dtype && x.metric === metric &&
@@ -932,8 +979,8 @@ function drawTrend(e) {
   }).join("");
   // If the chart was built while its container was briefly unsized (view switch or
   // first paint), force a resize on the next frame so it isn't left blank.
-  const _ch = trendChart;
-  requestAnimationFrame(() => { if (_ch && _ch === trendChart) trendChart.resize(); });
+  const _ch = ctx.chart;
+  requestAnimationFrame(() => { if (_ch && _ch === ctx.chart) ctx.chart.resize(); });
 }
 
 /* ------------------------------------------------------------- 4 · BOARD --- */
@@ -1050,7 +1097,7 @@ function readHash() {
 function applyState() {
   showView(S.view);
   if (S.view === "health") {
-    if (S.trend.key && kernelIndex().get(S.trend.key)) selectKernel(S.trend.key);
+    if (S.trend.key && kernelIndex().get(S.trend.key)) selectKernel(S.trend.key, HEALTH_CTX);
     else { S.trend.key = null; renderKernelRail(); }
   } else if (S.view === "bytype") {
     $("#typeSearch").value = S.byType.q;
@@ -1066,7 +1113,9 @@ function showView(v) {
   $$(".tab").forEach(t => { const on = t.dataset.view === v; t.classList.toggle("is-active", on); t.setAttribute("aria-selected", on ? "true" : "false"); });
   $$(".view").forEach(s => s.classList.toggle("is-active", s.dataset.view === v));
   writeHash();
-  if (v === "health" && trendChart) requestAnimationFrame(() => { if (trendChart) trendChart.resize(); });
+  // charts built while their tab was hidden come up unsized -> resize the now-visible one
+  const ctx = v === "health" ? HEALTH_CTX : v === "bytype" ? BYTYPE_CTX : null;
+  if (ctx && ctx.chart) requestAnimationFrame(() => { if (ctx.chart) ctx.chart.resize(); });
 }
 function goTrend(k, model) {
   S.trend.model = model || "all";
@@ -1075,7 +1124,7 @@ function goTrend(k, model) {
   S.trend.key = k;
   if (S.view !== "health") showView("health");
   renderKernelRail();          // rebuild the rail for the (possibly switched) mode + highlight k
-  selectKernel(k);
+  selectKernel(k, HEALTH_CTX);
   const el = document.getElementById("trendsSection");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -1098,21 +1147,32 @@ function wire() {
   });
   $("#refresh").addEventListener("click", doRefresh);
   $("#bannerClose").addEventListener("click", hideBanner);
-  $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; _healthRows = null; _aggRows = null; renderHealth(); renderByType(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
+  $("#noiseAware").addEventListener("change", e => {
+    S.noiseAware = e.target.checked; _healthRows = null; _aggRows = null;
+    renderHealth(); renderByType();   // renderByType redraws the All-Benchmarks chart
+    if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key), HEALTH_CTX);
+  });
   $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.model); });
   $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); writeHash(); });
   $("#typeFacets").addEventListener("change", e => { const s = e.target.closest("select[data-facet]"); if (!s) return; S.byType.facets[s.dataset.facet] = s.value; renderByType(); writeHash(); });
   $("#facetReset").addEventListener("click", () => { S.byType.facets = { family: "all", mode: "all", dtype: "all", model: "all" }; S.byType.q = ""; $("#typeSearch").value = ""; populateFacets(); renderByType(); writeHash(); });
-  $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) goTrend(tr.dataset.k, tr.dataset.model); });
+  // A row click selects it in the All-Benchmarks chart (in place, no tab jump).
+  $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (!tr) return; S.byType.trend.model = tr.dataset.model || "all"; selectKernel(tr.dataset.k, BYTYPE_CTX); });
   $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); writeHash(); });
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
   $("#railMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.railMode = b.dataset.rm; S.trend.key = null; renderKernelRail(); });
   $("#kernelSearch").addEventListener("input", e => { S.trend.q = e.target.value; renderKernelRail(); });
-  $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k); });
-  $("#trendBy").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.by = b.dataset.b; selectKernel(S.trend.key); });
-  $("#trendModel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.model = b.dataset.a; selectKernel(S.trend.key); });
-  $("#trendRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.range = b.dataset.r; selectKernel(S.trend.key); });
-  $("#trendXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.xmode = b.dataset.x; selectKernel(S.trend.key); });
+  $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k, HEALTH_CTX); });
+  // Health chart controls
+  $("#trendBy").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.by = b.dataset.b; selectKernel(S.trend.key, HEALTH_CTX); });
+  $("#trendModel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.model = b.dataset.a; selectKernel(S.trend.key, HEALTH_CTX); });
+  $("#trendRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.range = b.dataset.r; selectKernel(S.trend.key, HEALTH_CTX); });
+  $("#trendXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.xmode = b.dataset.x; selectKernel(S.trend.key, HEALTH_CTX); });
+  // All-Benchmarks chart controls
+  $("#btBy").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.byType.trend.by = b.dataset.b; selectKernel(S.byType.trend.key, BYTYPE_CTX); });
+  $("#btModel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.byType.trend.model = b.dataset.a; selectKernel(S.byType.trend.key, BYTYPE_CTX); });
+  $("#btRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.byType.trend.range = b.dataset.r; selectKernel(S.byType.trend.key, BYTYPE_CTX); });
+  $("#btXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.byType.trend.xmode = b.dataset.x; selectKernel(S.byType.trend.key, BYTYPE_CTX); });
   $("#themeBtn").addEventListener("click", toggleTheme);
 }
 
@@ -1130,7 +1190,7 @@ function toggleTheme() {
   setModelColors();                    // re-tune model hues for the new theme
   setBackendColors();                  // ...and backend hues
   renderAll();                         // re-render SVG sparklines with theme colors
-  if (S.trend.key) selectKernel(S.trend.key);   // redraw the canvas chart
+  if (S.trend.key) selectKernel(S.trend.key, HEALTH_CTX);   // redraw Health chart with new theme colors
 }
 function initTheme() {
   let saved = null;
@@ -1152,7 +1212,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   showView(S.view);
   await loadAll();
   if (S.view === "health" && S.trend.key) {
-    if (kernelIndex().get(S.trend.key)) selectKernel(S.trend.key);
+    if (kernelIndex().get(S.trend.key)) selectKernel(S.trend.key, HEALTH_CTX);
     else { S.trend.key = null; renderKernelRail(); }   // stale link -> fall back to default
   }
   setInterval(enhanceLiveBoard, 90000);

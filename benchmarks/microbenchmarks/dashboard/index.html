@@ -67,20 +67,8 @@
       <div class="hero-stats" id="heroStats"></div>
     </div>
 
-    <div class="panel">
-      <div class="panel-head">
-        <span class="t"><span id="regHeadTitle">Regressions on dev</span></span>
-        <span class="spacer"></span>
-        <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
-      </div>
-      <div class="col-head">
-        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
-      </div>
-      <div id="regList"></div>
-    </div>
-
-    <!-- Trends (inline) -->
-    <div class="trends-layout" id="trendsSection">
+    <!-- Trend chart, pinned near the top -->
+    <div class="trends-layout sticky-chart" id="trendsSection">
       <aside class="kernel-rail">
         <div class="seg" id="railMode" role="group" aria-label="Rail mode" style="margin-bottom:8px"></div>
         <input class="search" id="kernelSearch" type="search" placeholder="find kernel…" spellcheck="false">
@@ -97,18 +85,55 @@
         </div>
         <div class="chart-frame"><canvas id="trendChart"></canvas></div>
         <div class="noise-note" id="noiseNote"></div>
-        <div class="table-wrap small" style="margin-top:14px">
-          <table class="data" id="trendTable">
-            <thead><tr id="trendHeadRow"><th>commit</th><th>date</th><th>pr</th></tr></thead>
-            <tbody id="trendBody"></tbody>
-          </table>
-        </div>
       </div>
+    </div>
+
+    <div class="table-wrap small" style="margin:14px 0">
+      <table class="data" id="trendTable">
+        <thead><tr id="trendHeadRow"><th>commit</th><th>date</th><th>pr</th></tr></thead>
+        <tbody id="trendBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="t"><span id="regHeadTitle">Regressions on dev</span></span>
+        <span class="spacer"></span>
+        <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
+      </div>
+      <div class="col-head">
+        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
+      </div>
+      <div id="regList"></div>
     </div>
   </section>
 
   <!-- 2 · ALL BENCHMARKS -->
   <section class="view" data-view="bytype" id="panel-bytype" role="tabpanel" aria-labelledby="tab-bytype" tabindex="0">
+    <!-- chart (detail of the selected benchmark), pinned near the top -->
+    <div class="trends-main sticky-chart" id="btTrendsSection">
+      <div class="view-head">
+        <h2 class="chart-title" id="btTitle">Select a benchmark</h2>
+        <span class="spacer"></span>
+        <div class="seg" id="btRange" role="group" aria-label="Time range"></div>
+        <div class="seg" id="btXMode" role="group" aria-label="X axis"></div>
+        <div class="seg" id="btBy" role="group" aria-label="Compare by"></div>
+        <div class="seg" id="btModel" role="group" aria-label="GPU architecture"></div>
+      </div>
+      <div class="chart-frame"><canvas id="btChart"></canvas></div>
+      <div class="noise-note" id="btNote"></div>
+    </div>
+
+    <div class="table-wrap small" style="margin:14px 0">
+      <table class="data" id="btTable">
+        <thead><tr id="btHeadRow"><th>commit</th><th>date</th><th>pr</th></tr></thead>
+        <tbody id="btBody"></tbody>
+      </table>
+    </div>
+
+    <hr class="section-divider">
+
+    <!-- browse & pick: filter this table to drive the chart above -->
     <div class="view-head">
       <h2 class="section-title">All benchmark results</h2>
       <span class="spacer"></span>
@@ -118,7 +143,6 @@
       <label class="facet">type <select class="sel" id="facetFamily" data-facet="family" aria-label="Filter by benchmark type"></select></label>
       <label class="facet">timing <select class="sel" id="facetMode" data-facet="mode" aria-label="Filter by timing mode"></select></label>
       <label class="facet">dtype <select class="sel" id="facetDtype" data-facet="dtype" aria-label="Filter by dtype"></select></label>
-      <label class="facet">arch <select class="sel" id="facetModel" data-facet="model" aria-label="Filter by GPU architecture"></select></label>
       <button class="btn-mini" id="facetReset" type="button">reset</button>
     </div>
     <div class="view-head" style="margin-top:-6px"><span class="hint" id="typeSummary"></span></div>
