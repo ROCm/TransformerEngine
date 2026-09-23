@@ -298,6 +298,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
   // first check whether ck can be used, then check aotriton
   if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
+        is_training,
         q_dtype,
         kv_dtype,
         qkv_layout,

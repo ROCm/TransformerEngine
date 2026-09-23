@@ -181,13 +181,18 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
   auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
                            : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+#ifdef USE_ROCM
+  const DType o_dtype = dtype == DType::kFloat8E4M3 ? DType::kBFloat16 : dtype;
+#else
+  const DType o_dtype = dtype;
+#endif
 
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
   auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
 
   // F16 doesn't use this tensor
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
-  auto o_tensor = TensorWrapper(nullptr, o_shape, dtype);
+  auto o_tensor = TensorWrapper(nullptr, o_shape, o_dtype);
 
   auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -273,6 +278,12 @@ static void FusedAttnForwardImpl(
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal) {
   FUSED_ATTN_IMPL_COMMON_BLOCK;
 
+#ifdef USE_ROCM
+  const DType o_dtype = dtype == DType::kFloat8E4M3 ? DType::kBFloat16 : dtype;
+#else
+  const DType o_dtype = dtype;
+#endif
+
   /* Input tensors */
   auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
   auto softmax_offset_tensor =
@@ -280,7 +291,7 @@ static void FusedAttnForwardImpl(
 
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * v_head_dim;
-    (void)cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
+    (void)cudaMemsetAsync(output, 0, output_size * typeToSize(o_dtype), stream);
 
     // Memset to 0xF0 for filling large negative numbers
     auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
@@ -291,7 +302,7 @@ static void FusedAttnForwardImpl(
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
   auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
                            : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
-  auto o_tensor = TensorWrapper(output, o_shape, dtype);
+  auto o_tensor = TensorWrapper(output, o_shape, o_dtype);
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);

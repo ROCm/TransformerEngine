@@ -21,6 +21,7 @@ namespace fused_attn_rocm {
 // check the fused attn config to see whether it's ck backend supported
 // single filtering followed by joint filtering
 bool is_ck_backend_supported(
+  bool is_training,
   NVTEDType q_dtype,
   NVTEDType kv_dtype,
   NVTE_QKV_Layout qkv_layout,
@@ -49,11 +50,14 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // filter based on data type
-  // Q and KV must have the same data type, in fp16 or bf16
-  if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
+  // FP16/BF16 use CK or v3 ASM. FP8 E4M3 uses gfx950 fp8bf16 v3 ASM
+  // exclusively; its output is validated as BF16 at launch time.
+  const bool is_fp8 = q_dtype == NVTEDType::kNVTEFloat8E4M3;
+  const bool is_16bit =
+      q_dtype == NVTEDType::kNVTEFloat16 || q_dtype == NVTEDType::kNVTEBFloat16;
+  if(q_dtype != kv_dtype || (!is_16bit && !is_fp8)){
     if(nvte_log_ck_config){
-      std::cout<<"q, k, v data type has to be fp16 or bf16"<<std::endl;
+      std::cout<<"q, k, v data type has to be fp16, bf16, or fp8 e4m3"<<std::endl;
     }
     return false;
   }
@@ -136,6 +140,24 @@ bool is_ck_backend_supported(
     }
     return false;
   }
+  if(is_fp8){
+    const bool fp8_hdim_supported =
+        (head_dim_qk == 128 && head_dim_v == 128) ||
+        (head_dim_qk == 256 && head_dim_v == 256);
+    const bool fp8_window_supported =
+        is_causal ? (window_size_left == -1 && window_size_right == 0)
+                  : (window_size_left == -1 && window_size_right == -1);
+    if(cuda::sm_arch() != 95 || is_training || !fp8_hdim_supported ||
+       !fp8_window_supported || dropout != 0.f ||
+       bias_type != NVTE_Bias_Type::NVTE_NO_BIAS ||
+       (is_padding && !is_ragged)){
+      if(nvte_log_ck_config){
+        std::cout<<"AITER FP8 ASM fwd requires gfx950 inference, hd128/hd256, "
+                   "no bias/dropout/sliding-window, and THD for padding masks"<<std::endl;
+      }
+      return false;
+    }
+  }
   return true;
 #else
   return false;
@@ -176,6 +198,7 @@ ck_fused_attn::DType nvte_to_ck_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return ck_fused_attn::DType::dtname
   CAST_TYPE(kFloat16, kFloat16);
   CAST_TYPE(kBFloat16, kBFloat16);
+  CAST_TYPE(kFloat8E4M3, kFloat8E4M3);
   return ck_fused_attn::DType::kNumTypes;
 #undef CAST_TYPE
 }
@@ -239,6 +262,12 @@ class WorkspacePlanner {
   size_t total_ = 0;
   bool is_sizing_;
 };
+
+__global__ void set_unit_descale(float* ptr) {
+  if(blockIdx.x == 0 && threadIdx.x == 0) {
+    *ptr = 1.f;
+  }
+}
 
 // nullptr-safe byte arithmetic for carving sub-buffers out of a planner allocation.
 inline void* byte_offset(void* ptr, ptrdiff_t n) {
@@ -490,7 +519,8 @@ void fused_attn_ck_fwd_impl(
   void* devPtrDropoutSeed, void* devPtrDropoutOffset,
   void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
   void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsKV,
-  DType dtype,
+  void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+  DType dtype, DType output_dtype,
   void *workspace, 
   size_t *workspace_size,
   cudaStream_t stream){
@@ -520,11 +550,21 @@ void fused_attn_ck_fwd_impl(
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
   size_t k_storage_bytes = max_tokens_kv*hg*d_qk*nvte_dtype_size(dtype);
   size_t v_storage_bytes = max_tokens_kv*hg*d_v*nvte_dtype_size(dtype);
-  size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(dtype);
+  size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(output_dtype);
 
   // Reserve workspace chunks. Same allocation sequence runs in sizing mode
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
+  void* unit_descale_ptr = nullptr;
+  if(dtype == DType::kFloat8E4M3 &&
+     devPtrDescaleQ == nullptr && devPtrDescaleK == nullptr && devPtrDescaleV == nullptr){
+    // Raw FP8 tensors (not TE quantized tensors) represent unscaled FP8 values.
+    // Materialize a shared unit descale so JAX/raw C API callers can use them.
+    unit_descale_ptr = planner.allocate(sizeof(float));
+    devPtrDescaleQ = unit_descale_ptr;
+    devPtrDescaleK = unit_descale_ptr;
+    devPtrDescaleV = unit_descale_ptr;
+  }
 
   if(ck_small_seq_env_enabled) {
     if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
@@ -589,6 +629,10 @@ void fused_attn_ck_fwd_impl(
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CKAttnFwdArgs ck_args;
   ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.o_dtype = nvte_to_ck_dtype(output_dtype);
+  ck_args.q_descale_ptr = devPtrDescaleQ;
+  ck_args.k_descale_ptr = devPtrDescaleK;
+  ck_args.v_descale_ptr = devPtrDescaleV;
   ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
   ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
   ck_args.is_training = is_training;
@@ -611,7 +655,10 @@ void fused_attn_ck_fwd_impl(
     ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
   }
 
-  ck_args.num_splits = (ck_args.uses_fwd_v3 && !has_sink) ? ck_attn_fwd_num_splits(ck_args) : 0;
+  ck_args.num_splits =
+      (ck_args.uses_fwd_v3 && !has_sink && dtype != DType::kFloat8E4M3)
+          ? ck_attn_fwd_num_splits(ck_args)
+          : 0;
   if (ck_args.num_splits > 0)
   {
     size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
@@ -627,6 +674,9 @@ void fused_attn_ck_fwd_impl(
       std::cout<<std::endl<<"attn_fwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
     }
     return;
+  }
+  if(unit_descale_ptr != nullptr){
+    set_unit_descale<<<1, 1, 0, stream>>>(static_cast<float*>(unit_descale_ptr));
   }
 
   NVTE_CHECK(!has_sink || devPtrSoftmaxOffset != nullptr,
@@ -1352,11 +1402,41 @@ void fused_attn_ck_fwd(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
+  const DType O_type = output_O->data.dtype;
+  const bool is_fp8 = QKV_type == DType::kFloat8E4M3;
+
+  NVTE_CHECK(input_K->data.dtype == QKV_type && input_V->data.dtype == QKV_type,
+             "ROCm fused attention requires Q, K, and V to have the same dtype.");
+  if(is_fp8){
+    NVTE_CHECK(!is_training, "AITER FP8 ASM fused attention is forward-inference only.");
+    NVTE_CHECK(O_type == DType::kBFloat16,
+               "AITER fp8bf16 fused attention requires BF16 output.");
+    NVTE_CHECK(input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
+                   input_K->scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
+                   input_V->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
+               "AITER FP8 ASM fused attention supports delayed tensor scaling only.");
+    auto valid_descale = [](const Tensor* tensor) {
+      return tensor->scale_inv.dptr != nullptr &&
+             tensor->scale_inv.dtype == DType::kFloat32 &&
+             tensor->scale_inv.numel() == 1;
+    };
+    const bool all_descales_present =
+        valid_descale(input_Q) && valid_descale(input_K) && valid_descale(input_V);
+    const bool all_descales_absent =
+        input_Q->scale_inv.dptr == nullptr && input_K->scale_inv.dptr == nullptr &&
+        input_V->scale_inv.dptr == nullptr;
+    NVTE_CHECK(all_descales_present || all_descales_absent,
+               "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, V, "
+               "or no scale metadata for raw unit-scaled FP8 tensors.");
+  }
 
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
   void *devPtrO = output_O->data.dptr;
+  void *devPtrDescaleQ = is_fp8 ? input_Q->scale_inv.dptr : nullptr;
+  void *devPtrDescaleK = is_fp8 ? input_K->scale_inv.dptr : nullptr;
+  void *devPtrDescaleV = is_fp8 ? input_V->scale_inv.dptr : nullptr;
   void *devPtrS = nullptr;
   void *devPtrBias = nullptr;
   size_t bias_b = 0;
@@ -1444,7 +1524,8 @@ void fused_attn_ck_fwd(
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
+    devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+    QKV_type, O_type,
     workspace->data.dptr,
     &workspace_size,
     stream);

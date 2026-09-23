@@ -17,6 +17,7 @@ namespace transformer_engine {
 namespace fused_attn_rocm {
 // check the fused attn config to see whether it's ck backend supported
 bool is_ck_backend_supported(
+  bool is_training,
   NVTEDType q_dtype,
   NVTEDType kv_dtype,
   NVTE_QKV_Layout qkv_layout,

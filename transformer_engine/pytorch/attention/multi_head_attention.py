@@ -896,7 +896,14 @@ class MultiheadAttention(torch.nn.Module):
         # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
         # 1. FP8DS/FP8CS recipe: produce FP8 output
         # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
-        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
+        # gfx950 AITER FP8 attention kernels are fp8bf16: Q/K/V are FP8 but O
+        # is BF16. CUDA fused attention may continue producing FP8 output.
+        dpa_fp8_output = (
+            fp8
+            and (fp8_dpa or fp8_mha)
+            and not mxfp8_scaling
+            and not IS_HIP_EXTENSION
+        )
         # Projection Gemm: match DPA output except
         # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling

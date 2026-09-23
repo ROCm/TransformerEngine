@@ -43,7 +43,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     ReorderStrategy,
 )
-from transformer_engine.jax.cpp_extensions import FusedAttnHelper
+from transformer_engine.jax.cpp_extensions import FusedAttnHelper, fused_attn_fwd
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
@@ -65,6 +65,88 @@ def init():
     # Calling customcalls before jax may cause CUDA uninitialize error
     _ = jnp.zeros(0)
     yield
+
+
+@pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) != 95,
+    reason="AITER FP8 ASM fused attention requires gfx950",
+)
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_backend_selection(head_dim):
+    """gfx950 fp8bf16 inference shapes select CK/AITER, while training does not."""
+    kwargs = dict(
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=512,
+        kv_max_seqlen=512,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    )
+    inference_backend = FusedAttnHelper(is_training=False, **kwargs).get_fused_attn_backend()
+    training_backend = FusedAttnHelper(is_training=True, **kwargs).get_fused_attn_backend()
+    sliding_window_backend = FusedAttnHelper(
+        is_training=False, **(kwargs | {"window_size": (64, 64)})
+    ).get_fused_attn_backend()
+    assert inference_backend == NVTE_Fused_Attn_Backend.NVTE_CK
+    assert training_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert sliding_window_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+
+
+@pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) != 95,
+    reason="AITER FP8 ASM kernels require gfx950",
+)
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_asm(head_dim):
+    """Small dense smoke: load the fp8bf16 ASM kernel and check vs a float32 JAX reference.
+
+    Broader HD128/HD256 accuracy (masks, THD padding, GQA, vs BF16 ASM) lives in
+    TestFusedAttnFP8ASM.
+    """
+    shape = (1, 128, 8, head_dim)
+    key = jax.random.PRNGKey(7)
+    q = (jax.random.normal(key, shape) * 0.2).astype(jnp.float8_e4m3fn)
+    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2).astype(
+        jnp.float8_e4m3fn
+    )
+    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2).astype(
+        jnp.float8_e4m3fn
+    )
+    sequence_descriptor = SequenceDescriptor.from_seqlens(jnp.array([128], dtype=jnp.int32))
+    scale = head_dim**-0.5
+
+    output, _, _ = fused_attn_fwd(
+        (q, k, v),
+        None,
+        None,
+        sequence_descriptor,
+        None,
+        AttnBiasType.NO_BIAS,
+        AttnMaskType.NO_MASK,
+        AttnSoftmaxType.VANILLA_SOFTMAX,
+        QKVLayout.BSHD_BSHD_BSHD,
+        scale,
+        0.0,
+        False,
+        1,
+    )
+    scores = jnp.einsum(
+        "bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)
+    ) * scale
+    reference = jnp.einsum(
+        "bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v.astype(jnp.float32)
+    )
+
+    assert output.dtype == jnp.bfloat16
+    assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
 
 
 @partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12))
@@ -2368,3 +2450,256 @@ class TestFusedAttnCkSmallseq:
         )
         runner.test_forward()
         runner.test_backward()
+
+def _pack_qkv_args(query, key, value, qkv_layout):
+    """Pack Q/K/V the same way as customcall_fused_dpa, without recasting the output dtype."""
+    match qkv_layout:
+        case QKVLayout.BS3HD | QKVLayout.T3HD:
+            query, key, value = map(partial(jnp.expand_dims, axis=-3), [query, key, value])
+            return (jnp.concatenate((query, key, value), axis=-3),)
+        case QKVLayout.BSHD_BS2HD | QKVLayout.THD_T2HD:
+            key, value = map(partial(jnp.expand_dims, axis=-3), [key, value])
+            return (query, jnp.concatenate((key, value), axis=-3))
+        case QKVLayout.BSHD_BSHD_BSHD | QKVLayout.THD_THD_THD:
+            return (query, key, value)
+        case _:
+            raise ValueError(f"Unsupported {qkv_layout=}")
+
+
+def _fused_attn_keep_output_dtype(
+    query, key, value, sequence_descriptor, **kwargs
+):
+    """Call fused_attn without recasting O back to the Q dtype (FP8 in, BF16 out)."""
+    return fused_attn(
+        _pack_qkv_args(query, key, value, kwargs["qkv_layout"]),
+        None,
+        sequence_descriptor,
+        None,
+        softmax_offset=None,
+        **kwargs,
+    )
+
+
+@pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) != 95,
+    reason="AITER FP8 ASM fused attention requires gfx950",
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d, qkv_layout",
+    [
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            128,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-128-BSHD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            128,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-4-128-BSHD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            256,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-256-BSHD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            256,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-4-256-BSHD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            128,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-128-THD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            128,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-4-128-THD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            256,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-256-THD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            256,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-4-256-THD-GQA",
+        ),
+    ],
+)
+class TestFusedAttnFP8ASM:
+    """gfx950 fp8bf16 ASM fused-attn accuracy vs JAX softmax and vs BF16 ASM.
+
+    Coverage mirrors the BF16 HD128/HD256 runner tests: dense BSHD (no/causal)
+    and varlen THD (padding / padding-causal), MHA and GQA, hd128 and hd256.
+    Inference only — FP8 ASM has no training path.
+    """
+
+    @staticmethod
+    def test_forward(attn_mask_type, b, s_q, s_kv, h_q, h_kv, d, qkv_layout):
+        if qkv_layout.is_thd() and not attn_mask_type.is_padding():
+            pytest.skip("THD format requires padding masks.")
+        if attn_mask_type.is_padding() and not qkv_layout.is_thd():
+            pytest.skip("FP8 ASM requires THD layout for padding masks.")
+
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d,
+            d,
+            AttnBiasType.NO_BIAS,
+            attn_mask_type,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            jnp.bfloat16,
+            False,
+            qkv_layout,
+            None,
+            None,
+            SeqDescFormat.Seqlens,
+        )
+        runner._setup_inputs()
+
+        q_fp8 = runner.q.astype(jnp.float8_e4m3fn)
+        k_fp8 = runner.k.astype(jnp.float8_e4m3fn)
+        v_fp8 = runner.v.astype(jnp.float8_e4m3fn)
+        # Dequantized values are the exact numbers the FP8 kernel sees (unit scale).
+        q_dq = q_fp8.astype(jnp.float32)
+        k_dq = k_fp8.astype(jnp.float32)
+        v_dq = v_fp8.astype(jnp.float32)
+        q_bf16 = q_fp8.astype(jnp.bfloat16)
+        k_bf16 = k_fp8.astype(jnp.bfloat16)
+        v_bf16 = v_fp8.astype(jnp.bfloat16)
+
+        fp8_backend = FusedAttnHelper(
+            False,
+            jnp.float8_e4m3fn,
+            jnp.float8_e4m3fn,
+            qkv_layout,
+            AttnBiasType.NO_BIAS,
+            attn_mask_type,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            h_q,
+            h_kv,
+            s_q,
+            s_kv,
+            d,
+            d,
+            (-1, -1),
+        ).get_fused_attn_backend()
+        assert fp8_backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
+            f"FP8 ASM was not selected: backend={fp8_backend}"
+        )
+
+        kwargs = dict(
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=runner.scaling_factor,
+            dropout_probability=0.0,
+            is_training=False,
+            qkv_layout=qkv_layout,
+            max_segments_per_seq=runner._get_max_segments_per_sequence(),
+            window_size=None,
+        )
+
+        fp8_out = jit(
+            partial(_fused_attn_keep_output_dtype, **kwargs),
+            static_argnames=kwargs.keys(),
+        )(q_fp8, k_fp8, v_fp8, runner.sequence_desciptor)
+        bf16_out = jit(
+            partial(customcall_fused_dpa, **kwargs),
+            static_argnames=kwargs.keys(),
+        )(q_bf16, k_bf16, v_bf16, None, None, runner.sequence_desciptor, None)
+        reference_out = jax_dpa(
+            q_dq, k_dq, v_dq, None, None, runner.mask, None, **kwargs
+        )
+
+        assert fp8_out.dtype == jnp.bfloat16
+        assert bf16_out.dtype == jnp.bfloat16
+
+        fp8_valid, fp8_invalid, ref_valid, _ = _split_valid_and_invalid(
+            fp8_out, reference_out, runner.pad_q
+        )
+        bf16_valid, _, _, _ = _split_valid_and_invalid(
+            bf16_out, reference_out, runner.pad_q
+        )
+
+        assert_allclose(
+            fp8_invalid,
+            jnp.zeros_like(fp8_invalid),
+            dtype=jnp.bfloat16,
+            err_msg="FP8 ASM wrote non-zero values into padded tokens",
+        )
+        # JAX softmax reference on the same dequantized FP8 inputs.
+        assert_allclose(
+            fp8_valid,
+            ref_valid,
+            dtype=jnp.float8_e4m3fn,
+            err_msg="FP8 ASM vs JAX softmax reference",
+        )
+        # Same inputs through the BF16 ASM/CK path; residual should stay in e4m3 range.
+        assert_allclose(
+            fp8_valid,
+            bf16_valid,
+            dtype=jnp.float8_e4m3fn,
+            err_msg="FP8 ASM vs BF16 ASM on identical dequantized QKV",
+        )
+        print_debug_tensor_stats("fp8_asm", fp8_valid)
+        print_debug_tensor_stats("bf16_asm", bf16_valid)
+        print_debug_tensor_stats("jax_ref", ref_valid)
