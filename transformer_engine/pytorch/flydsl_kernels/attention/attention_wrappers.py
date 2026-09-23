@@ -262,7 +262,9 @@ def sparse_mla_attn_fwd(
 
     Returns:
         ``(output, lse)`` with ``output`` ``[total_tokens, num_heads, 512]`` in
-        q's dtype and ``lse`` ``[total_tokens, num_heads]`` float32.
+        q's dtype and ``lse`` ``[total_tokens, num_heads]`` float32. With
+        ``attn_sink``, ``lse`` is sink-inclusive (the sink term is part of the
+        softmax denominator it logs).
 
     .. warning::
 

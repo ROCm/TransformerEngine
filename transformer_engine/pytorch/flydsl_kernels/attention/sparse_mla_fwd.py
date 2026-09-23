@@ -1,14 +1,19 @@
 ###############################################################################
+# SPDX-License-Identifier: Apache-2.0
+#
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2025 FlyDSL Project Contributors
 #
+# Adapted from FlyDSL (https://github.com/ROCm/FlyDSL)
+# Modified by the Primus-Turbo team.
 # Ported from Primus-Turbo `primus_turbo/flydsl/attention/sparse_mla_fwd.py`
-# (AMD-AGI/Primus-Turbo @ 502f3f35ce8e6090b2f729d1b478ce65a509f831), which is
-# itself adapted from FlyDSL (https://github.com/ROCm/FlyDSL) and carries the
-# Apache-2.0 terms. TE ships no LICENSE-APACHE, so the terms for the adapted
-# portions are those at https://github.com/ROCm/FlyDSL (LICENSE-APACHE).
+# (AMD-AGI/Primus-Turbo @ 6ccf00ff0b5a159af0b30c60af1c4b9dace504b7) and
+# modified by the Transformer Engine team.
 #
-# See LICENSE for license information.
+# This file is distributed under the Apache License 2.0, not the license that
+# covers the rest of Transformer Engine (see LICENSE). TE ships no
+# LICENSE-APACHE; the terms are those at https://github.com/ROCm/FlyDSL
+# (LICENSE-APACHE).
 ###############################################################################
 
 """DeepSeek-V4 sparse-MLA attention forward (flydsl, gfx950/MI355X).
