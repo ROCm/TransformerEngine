@@ -213,9 +213,12 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
         pytest.skip("CK grouped GEMM fell back to the default backend for this config")
 
     fwd_total_flops = 2 * sum_M * N * K
+    # hipBLASLt grouped GEMM runs the experts across compute streams; the profiler
+    # under-counts concurrent kernels, so measure elapsed device time by makespan.
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
         fwd_func, fwd_bwd_func, fwd_total_flops, 2 * fwd_total_flops,
+        kernel_method="event",
     )
 
 

@@ -162,9 +162,13 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
         pytest.skip("FlyDSL GEMM fell back to C++ for this shape/direction")
 
     fwd_flops = 2 * M * N * K
+    # fp8/mxfp8 multi-streams the operand cast; the profiler under-counts those
+    # concurrent kernels, so measure elapsed device time by makespan. bf16 is a
+    # single GEMM kernel -- keep the profiler, which isolates sub-wall device time.
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
         fwd_func, fwd_bwd_func, fwd_flops, 2 * fwd_flops,
+        kernel_method="event" if use_fp8 else None,
     )
 
 

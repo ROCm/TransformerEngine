@@ -11,6 +11,7 @@ import importlib.util
 import itertools
 import math
 import mmap
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import torch
@@ -208,12 +209,12 @@ def configure_kernel_profile(enabled):
     _KERNEL_PROFILE = bool(enabled)
 
 
-def _kernel_time_ms(fn, warmup=100, iters=100):
+def _kernel_time_profiler_ms(fn, warmup=100, iters=100):
     """Mean GPU kernel (device) time per call, in ms, via torch.profiler.
 
     Sums the self device time of every kernel launched per call, so it excludes
-    host launch overhead and host-side timing noise -- the device-time metric
-    reported alongside wall time under --kernel-profile.
+    host launch overhead and host-side timing noise. Accurate for single-kernel
+    ops; unreliable for concurrent multi-stream ops (use the "event" method there).
     """
     from torch.profiler import profile, ProfilerActivity
     for _ in range(warmup):
@@ -228,16 +229,60 @@ def _kernel_time_ms(fn, warmup=100, iters=100):
     return (device_us / iters) / 1e3
 
 
-def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
+def _kernel_time_event_ms(fn, warmup=100, iters=100):
+    """Mean elapsed GPU device time per call, in ms, via a CUDA-event makespan.
+
+    Brackets a saturated ``iters`` loop with events on the current stream, so
+    concurrent multi-stream kernels are measured by their overlapped span rather
+    than a per-kernel sum. Handles the multi-stream grouped-GEMM path (where the
+    profiler under-counts); converges to the wall time for device-bound ops.
+    """
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(iters):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end) / iters
+
+
+# Kernel-time method: "profiler" (default) or "event". A benchmark opts into the
+# event makespan for concurrent multi-stream ops (grouped GEMM); setting
+# NVTE_MICROBENCH_KERNEL_TIME overrides the method globally for A/B testing.
+_KERNEL_TIME_METHOD_ENV = "NVTE_MICROBENCH_KERNEL_TIME"
+
+
+def _resolve_kernel_method(method):
+    env = os.environ.get(_KERNEL_TIME_METHOD_ENV, "").strip().lower()
+    if env in ("profiler", "event"):
+        return env
+    return method or "profiler"
+
+
+def _kernel_time_ms(fn, warmup=100, iters=100, method=None):
+    """Mean GPU device time per call (ms) using the resolved kernel-time method."""
+    if _resolve_kernel_method(method) == "event":
+        return _kernel_time_event_ms(fn, warmup, iters)
+    return _kernel_time_profiler_ms(fn, warmup, iters)
+
+
+def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
+                   kernel_method=None):
     """Time *fn* and return ``(wall_ms, measurement, kernel_ms)``.
 
     ``wall_ms`` / ``measurement`` are the host wall-clock timing from
     :func:`time_func`. ``kernel_ms`` is the mean GPU kernel (device) time per
     call from :func:`_kernel_time_ms` when kernel profiling is enabled
     (``--kernel-profile``); otherwise it is ``None`` and no profiler pass runs.
+    *kernel_method* selects the measurement ("profiler" default, or "event" for
+    concurrent multi-stream ops such as grouped GEMM).
     """
     wall_ms, measurement = time_func(fn, method=method, min_run_time=min_run_time)
-    kernel_ms = _kernel_time_ms(fn) if _KERNEL_PROFILE else None
+    kernel_ms = _kernel_time_ms(fn, method=kernel_method) if _KERNEL_PROFILE else None
     return wall_ms, measurement, kernel_ms
 
 
@@ -450,25 +495,27 @@ def make_forward_backward_metric_records(label_prefix, unit,
 
 
 def direction_records(direction, label, unit, throughput,
-                      fwd_func, fwd_bwd_func, fwd_work, bwd_work):
+                      fwd_func, fwd_bwd_func, fwd_work, bwd_work, kernel_method=None):
     """Metric records for a forward-only or a derived-backward timing.
 
     *direction* is ``"fwd"`` or ``"bwd"``. *throughput* is ``compute_tflops`` or
     ``compute_gbps`` and *fwd_work* / *bwd_work* the matching flops / bytes.
     Backward is ``(fwd+bwd) - fwd``; its per-sample distribution is each fwd+bwd
     sample shifted by the fwd mean (fwd and fwd+bwd are timed separately, so the
-    spread is inherited from fwd+bwd).
+    spread is inherited from fwd+bwd). *kernel_method* is forwarded to
+    :func:`time_func_dual` ("event" for concurrent multi-stream ops).
     """
     if direction == "fwd":
-        fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
+        fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func, kernel_method=kernel_method)
         return [make_metric_record(
             label, fwd_ms, unit, throughput(fwd_work, fwd_ms), measurement=fwd_measurement,
             kernel_ms=fwd_kernel_ms,
             kernel_throughput=throughput(fwd_work, fwd_kernel_ms) if fwd_kernel_ms else None,
         )]
     fwd_bwd_func()  # warm the backward graph
-    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement, fwd_bwd_kernel_ms = time_func_dual(fwd_bwd_func)
+    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func, kernel_method=kernel_method)
+    fwd_bwd_ms, fwd_bwd_measurement, fwd_bwd_kernel_ms = time_func_dual(
+        fwd_bwd_func, kernel_method=kernel_method)
     bwd_ms = fwd_bwd_ms - fwd_ms
     bwd_kernel_ms = (fwd_bwd_kernel_ms - fwd_kernel_ms
                      if fwd_kernel_ms is not None and fwd_bwd_kernel_ms is not None else None)
