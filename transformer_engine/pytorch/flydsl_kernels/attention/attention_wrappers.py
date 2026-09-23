@@ -20,6 +20,9 @@ from ..version import _check_flydsl_version
 D_LATENT = 512  # kv_lora_rank; also the V width and the output width
 D_QK = 576  # Q / KV row stride
 TOPK_GRANULARITY = 32  # topk must be a multiple of this (pad with -1)
+WINDOW = 128  # sliding-window width of the closed-form banded/pool modes
+
+SPARSE_MLA_MODES = ("gather", "banded", "pool")
 
 # The kernel is written against the gfx950 (MI355X) ISA: ds_read_tr16_b64,
 # permlane16/32_swap and the K=32 bf16 MFMAs are all CDNA4-only.
@@ -31,35 +34,51 @@ def _env_flag(name: str, default: str) -> bool:
     return os.environ.get(name, default).lower() not in ("", "0", "false", "no", "off")
 
 
-def select_kernel_config(total_tokens, num_heads, num_kv, topk):
+def _closed_form_mismatch(mode, total_tokens, num_kv, topk):
+    """Return why the shapes cannot use closed-form ``mode``, or ``None`` if they can."""
+    if mode == "banded" and not (num_kv == total_tokens and topk == WINDOW):
+        return f"requires num_kv == total_tokens and topk == {WINDOW}"
+    if mode == "pool":
+        # Upstream's shape gate, kept as the validity range: cr = S/P >= 64 is
+        # the cr128 family the closed-form pool was built for (cr4 pools are
+        # random, so they take the gather mode).
+        P = num_kv - total_tokens
+        if not (P > 0 and total_tokens % P == 0 and total_tokens // P >= 64 and topk >= WINDOW + P):
+            return (
+                "requires num_kv = total_tokens + P with total_tokens % P == 0, "
+                f"total_tokens // P >= 64 and topk >= {WINDOW} + P"
+            )
+    return None
+
+
+def select_kernel_config(total_tokens, num_heads, num_kv, topk, mode="gather"):
     """Choose the kernel specialization knobs for one problem shape.
 
-    Ported verbatim from the upstream Primus-Turbo host dispatcher. This is a
-    baked-in autotuner: the branches encode an offline search over the
+    Ported from the upstream Primus-Turbo host dispatcher. This is a baked-in
+    autotuner: the branches encode an offline search over the
     ``{flash,pro} x {cr0,cr4,cr128}`` shape families, so the ordering and the
     exact thresholds are load-bearing -- do not "simplify" them.
+
+    Unlike upstream, the closed-form modes come from ``mode`` rather than being
+    inferred from the shapes: those modes never read ``topk_indices``, so shape
+    inference silently discarded the caller's indices whenever the shapes
+    happened to match (e.g. any packed self-attention batch with topk == 128).
+    ``mode`` must already have passed :func:`_closed_form_mismatch`.
 
     Pure Python, no FlyDSL import, so callers can validate against ``bh`` before
     committing to the kernel import.
     """
-    # cr=0 (pure SWA): num_kv==total_tokens and topk==W=128 -> closed-form banded
-    # KV (token i attends the contiguous window [i-127..i]). Skips the topk HBM
-    # load + scatter and loads KV contiguously. Bit-exact (kv=i-127+rank).
-    banded = (num_kv == total_tokens) and (topk == 128)
+    # cr=0 (pure SWA): closed-form banded KV (token i attends the contiguous
+    # window [i-127..i]). Skips the topk HBM load + scatter and loads KV
+    # contiguously. Bit-exact (kv=i-127+rank).
+    banded = mode == "banded"
 
     # cr128 HCA: num_kv = S + P pool rows (closed-form causal pool, topk[p]
     # visible iff token >= cr*p+(cr-1), cr = S/P). Folds the whole topk into a
-    # closed-form SWA[128]+pool[P] band. Gate cr = S/P >= 64 to exclude cr4's
-    # random pool.
+    # closed-form SWA[128]+pool[P] band.
     pool_P, pool_cr = 0, 0
-    P = num_kv - total_tokens
-    if (
-        not banded
-        and P > 0
-        and total_tokens % P == 0
-        and (total_tokens // P) >= 64
-        and topk >= 128 + P
-    ):
+    if mode == "pool":
+        P = num_kv - total_tokens
         banded, pool_P, pool_cr = True, P, total_tokens // P
 
     # QK 2-accumulator: splits the 16-deep QK MFMA RAW chain into two 8-deep
@@ -157,8 +176,12 @@ def _check_backend_available():
         )
 
 
-def _validate(q, kv, topk_indices, attn_sink, kv_lora_rank):
+def _validate(q, kv, topk_indices, attn_sink, kv_lora_rank, mode):
     """Validate one request and return ``(total_tokens, num_heads, num_kv, topk, kv)``."""
+    if mode not in SPARSE_MLA_MODES:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL sparse-MLA mode must be one of {SPARSE_MLA_MODES}, got {mode!r}"
+        )
     if q.dim() != 3:
         raise FlyDSLUnsupportedError(
             f"FlyDSL sparse-MLA expects q of rank 3 [tokens, heads, d_qk], got {tuple(q.shape)}"
@@ -215,11 +238,17 @@ def _validate(q, kv, topk_indices, attn_sink, kv_lora_rank):
             f"FlyDSL sparse-MLA requires topk to be a multiple of {TOPK_GRANULARITY} "
             f"(pad with -1), got topk={topk}"
         )
+    mismatch = _closed_form_mismatch(mode, total_tokens, num_kv, topk)
+    if mismatch is not None:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL sparse-MLA mode={mode!r} {mismatch}; got total_tokens={total_tokens}, "
+            f"num_kv={num_kv}, topk={topk}"
+        )
 
     # Upstream asserts ``num_heads % 32 == 0``, which is too weak: the launch
     # computes ``grid.y = num_heads // bh`` with bh in {64,128}, so num_heads=32
     # yields a zero-size grid dimension and hipErrorInvalidValue at launch.
-    bh = select_kernel_config(total_tokens, num_heads, num_kv, topk)["bh"]
+    bh = select_kernel_config(total_tokens, num_heads, num_kv, topk, mode)["bh"]
     if num_heads % bh != 0:
         raise FlyDSLUnsupportedError(
             f"FlyDSL sparse-MLA selected head-block bh={bh} for this shape, so num_heads "
@@ -247,6 +276,7 @@ def sparse_mla_attn_fwd(
     attn_sink=None,
     kv_lora_rank=D_LATENT,
     scale=None,
+    mode="gather",
 ):
     """Sparse multi-head latent attention forward on gfx950.
 
@@ -256,10 +286,11 @@ def sparse_mla_attn_fwd(
             both K (scored dims) and V (first 512 dims) -- MLA shares one latent.
         topk_indices: ``[total_tokens, topk]`` int32, contiguous. ``topk`` must be
             a multiple of 32; pad unused slots with ``-1``. Ignored entirely by
-            the closed-form banded path (see below).
+            the closed-form modes (see below).
         attn_sink: optional ``[num_heads]`` float32 per-head attention sink.
         kv_lora_rank: must be 512.
         scale: softmax scale; defaults to ``1/sqrt(576)``.
+        mode: sparsity pattern, ``"gather"`` (default), ``"banded"`` or ``"pool"``.
 
     Returns:
         ``(output, lse)`` with ``output`` ``[total_tokens, num_heads, 512]`` in
@@ -275,13 +306,22 @@ def sparse_mla_attn_fwd(
         ``q[..., :512] @ kv[..., :512].T``. Callers must fold RoPE into the
         512-wide latent themselves; this is **not** a drop-in MLA forward.
 
-    Three sparsity modes are selected automatically from the shapes:
+    Three sparsity modes, chosen by ``mode``:
 
-    - **gather**: general topk, reads indices from HBM.
-    - **banded**: ``num_kv == total_tokens and topk == 128`` -> closed-form
-      sliding window ``[t-127, t]``. **``topk_indices`` is not read at all.**
-    - **pool (cr128 HCA)**: ``num_kv = S + P`` with compression ratio
-      ``S/P >= 64`` -> closed-form ``SWA[128] + pool[P]`` band.
+    - **gather**: general topk, reads indices from HBM. Supports variable-length
+      (packed) batches: flatten q and kv across sequences and give each token
+      global indices into the flat kv that stay within its own sequence. Build
+      them from lightning-indexer output with
+      :func:`indexer_topk_to_sparse_mla`.
+    - **banded**: requires ``num_kv == total_tokens and topk == 128`` ->
+      closed-form sliding window ``[t-127, t]``.
+    - **pool (cr128 HCA)**: requires ``num_kv = S + P`` with compression ratio
+      ``S/P >= 64`` and ``topk >= 128 + P`` -> closed-form ``SWA[128] + pool[P]``
+      band.
+
+    The closed-form modes **do not read ``topk_indices``** and treat
+    ``total_tokens`` as one sequence (the window crosses any packing boundary),
+    so they are opt-in rather than inferred from the shapes.
 
     Raises:
         FlyDSLUnsupportedError: the build, GPU, flydsl version or request shape
@@ -291,7 +331,7 @@ def sparse_mla_attn_fwd(
     """
     _check_backend_available()
     total_tokens, num_heads, num_kv, topk, kv = _validate(
-        q, kv, topk_indices, attn_sink, kv_lora_rank
+        q, kv, topk_indices, attn_sink, kv_lora_rank, mode
     )
 
     if scale is None:
@@ -307,7 +347,7 @@ def sparse_mla_attn_fwd(
     # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
     from .sparse_mla_fwd import SparseMLASpec, get_compiled_fwd
 
-    config = select_kernel_config(total_tokens, num_heads, num_kv, topk)
+    config = select_kernel_config(total_tokens, num_heads, num_kv, topk, mode)
     spec = SparseMLASpec(
         topk_len=topk,
         scale=float(scale),
@@ -341,3 +381,110 @@ def sparse_mla_attn_fwd(
     )
     get_compiled_fwd(spec, args)(*args)
     return out, lse
+
+
+_INDEXER_MASK_TYPES = ("no_mask", "padding", "causal", "padding_causal")
+
+
+def indexer_topk_to_sparse_mla(
+    topk_indices,
+    *,
+    kv_seqlen,
+    attn_mask_type="no_mask",
+    segment_ids_q=None,
+    segment_pos_q=None,
+    segment_ids_kv=None,
+    segment_pos_kv=None,
+):
+    """Convert lightning-indexer top-k output into ``sparse_mla_attn_fwd`` indices.
+
+    The indexer (``transformer_engine.jax.sparse_attention.indexer_topk``) and
+    this kernel disagree on three points, which this function reconciles:
+
+    - The indexer indexes each batch row's own key axis; the kernel indexes one
+      flat KV pool. Row ``b``'s indices are offset by ``b * kv_seqlen``, matching
+      ``q.reshape(B * T, ...)`` and ``kv.reshape(B * kv_seqlen, ...)``.
+    - When ``k`` exceeds a row's valid-key count, the indexer's surplus entries
+      point at masked keys; the kernel needs ``-1``. Every entry the mask
+      disallows becomes ``-1``, so padding tokens (``segment_id == 0``) get an
+      all ``-1`` row, for which the kernel writes ``o = 0`` and ``lse = -inf``.
+    - The kernel needs ``k`` to be a multiple of 32; the tail is padded with
+      ``-1``.
+
+    The mask follows the indexer's conventions: ``padding*`` masks keep a key
+    only in the query's segment (``segment_id`` 0 is padding), and causal masks
+    keep ``key position <= query position`` -- ``segment_pos`` under
+    ``padding_causal``, the absolute (top-left) position under ``causal``.
+    Entries outside ``[0, kv_seqlen)`` are treated as unused, so no token can
+    read another row's keys. Entry order is preserved, so valid entries stay
+    ahead of the ``-1`` ones as the indexer's descending-score order leaves them.
+
+    Args:
+        topk_indices: ``[B, T, k]`` integer indices into each row's key axis.
+        kv_seqlen: key length ``S`` of each batch row.
+        attn_mask_type: ``'no_mask'``, ``'padding'``, ``'causal'`` or
+            ``'padding_causal'`` -- the value passed to the indexer.
+        segment_ids_q, segment_pos_q: ``[B, T]`` query-side varlen metadata.
+        segment_ids_kv, segment_pos_kv: ``[B, S]`` key-side metadata; default to
+            the query-side metadata for self-attention (``T == S``).
+
+    Returns:
+        ``[B * T, k_pad]`` contiguous int32 indices, ``k_pad`` the next multiple
+        of 32.
+    """
+    if attn_mask_type not in _INDEXER_MASK_TYPES:
+        raise ValueError(
+            f"attn_mask_type must be one of {_INDEXER_MASK_TYPES}, got {attn_mask_type!r}"
+        )
+    if topk_indices.dim() != 3:
+        raise ValueError(f"topk_indices must be [B, T, k], got {tuple(topk_indices.shape)}")
+    B, T, k = topk_indices.shape
+    S = kv_seqlen
+    device = topk_indices.device
+
+    idx = topk_indices.long()
+    valid = (idx >= 0) & (idx < S)
+    safe = idx.clamp(0, S - 1)
+
+    def at_keys(meta):
+        # meta[b, idx[b, t, j]] for every entry.
+        return torch.gather(meta, 1, safe.view(B, T * k)).view(B, T, k)
+
+    padding = attn_mask_type.startswith("padding")
+    causal = attn_mask_type.endswith("causal")
+
+    if padding:
+        if segment_ids_q is None:
+            raise ValueError(f"attn_mask_type={attn_mask_type!r} requires segment_ids_q")
+        if segment_ids_kv is None:
+            if T != S:
+                raise ValueError(f"segment_ids_kv is required when T != S (got T={T}, S={S})")
+            segment_ids_kv, segment_pos_kv = segment_ids_q, segment_pos_q
+        if tuple(segment_ids_q.shape) != (B, T) or tuple(segment_ids_kv.shape) != (B, S):
+            raise ValueError(
+                f"segment_ids_q/segment_ids_kv must be {(B, T)}/{(B, S)}, got "
+                f"{tuple(segment_ids_q.shape)}/{tuple(segment_ids_kv.shape)}"
+            )
+        seg_q = segment_ids_q.to(device)[:, :, None]
+        valid &= (seg_q != 0) & (at_keys(segment_ids_kv.to(device)) == seg_q)
+
+    if causal:
+        if padding:
+            if segment_pos_q is None or segment_pos_kv is None:
+                raise ValueError(
+                    f"attn_mask_type={attn_mask_type!r} requires segment_pos_q and "
+                    "segment_pos_kv (segment_pos_q alone for self-attention)"
+                )
+            pos_q = segment_pos_q.to(device)[:, :, None]
+            pos_k = at_keys(segment_pos_kv.to(device))
+        else:
+            pos_q = torch.arange(T, device=device)[None, :, None]
+            pos_k = safe
+        valid &= pos_k <= pos_q
+
+    offset = torch.arange(B, device=device)[:, None, None] * S
+    out = torch.where(valid, idx + offset, -1).to(torch.int32)
+
+    k_pad = -(-k // TOPK_GRANULARITY) * TOPK_GRANULARITY
+    out = torch.nn.functional.pad(out, (0, k_pad - k), value=-1)
+    return out.view(B * T, k_pad).contiguous()

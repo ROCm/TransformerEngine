@@ -8,13 +8,16 @@ Exercises ``sparse_mla_attn_fwd`` under ``NVTE_USE_FLYDSL=1``. Unlike the GEMM
 tests there is no second backend to cross-check against, so every case compares
 against a vectorized torch reference.
 
-Two references are needed because the kernel has two *different* semantics:
+Separate references are needed because the kernel has *different* semantics:
 
-- **gather** modes consume ``topk_indices``.
-- the **banded** mode ignores ``topk_indices`` entirely and derives KV positions
-  in closed form (``kv = token - 127 + rank``). Checking it against the gather
-  reference would fail for the wrong reason, so it gets a window reference and a
-  deliberately-garbage index tensor proving the indices are unread.
+- the **gather** mode consumes ``topk_indices``.
+- the closed-form **banded** and **pool** modes ignore ``topk_indices`` entirely
+  and derive KV positions in closed form (``kv = token - 127 + rank``, plus the
+  causal pool rows). Checking them against the gather reference would fail for
+  the wrong reason, so they get their own references and a deliberately-garbage
+  index tensor proving the indices are unread.
+- **varlen** (packed) batches run the gather mode on indices built by
+  ``indexer_topk_to_sparse_mla``; they get a dense block-diagonal reference.
 
 The reference scores over **512** dims, not 576 -- see the contract warning on
 ``sparse_mla_attn_fwd``. ``test_rope_dims_are_not_read`` pins that behavior so a
@@ -27,7 +30,10 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.flydsl_kernels import FlyDSLUnsupportedError
-from transformer_engine.pytorch.flydsl_kernels.attention import sparse_mla_attn_fwd
+from transformer_engine.pytorch.flydsl_kernels.attention import (
+    indexer_topk_to_sparse_mla,
+    sparse_mla_attn_fwd,
+)
 
 
 # --- Feature detection --------------------------------------------------------
@@ -139,6 +145,24 @@ def window_reference(q, kv, scale, qk_dims=D_LATENT):
     return attention_reference(q, rows, valid, scale, None, qk_dims)
 
 
+def pool_reference(q, kv, scale, pool):
+    """Reference for the pool mode: the banded window plus causal pool rows.
+
+    Pool row ``p`` (kv row ``tokens + p``) is visible to token ``t`` iff
+    ``t >= cr * p + cr - 1``, with ``cr = tokens // pool``.
+    """
+    tokens = q.shape[0]
+    cr = tokens // pool
+    t = torch.arange(tokens, device=q.device)[:, None]
+    rank = torch.arange(WINDOW, device=q.device)[None, :]
+    p = torch.arange(pool, device=q.device)[None, :]
+    swa_id = t - (WINDOW - 1) + rank
+    kv_id = torch.cat([swa_id, (tokens + p).expand(tokens, -1)], dim=1)
+    valid = torch.cat([swa_id >= 0, t >= cr * p + cr - 1], dim=1)
+    rows = kv.float()[kv_id.clamp(min=0)]
+    return attention_reference(q, rows, valid, scale)
+
+
 def assert_attention_close(out, lse, out_ref, lse_ref, *, rtol=5e-3, lse_atol=2e-3):
     """Compare against the reference, scaled by the reference's own magnitude."""
     scale = max(out_ref.abs().max().item(), 1e-6)
@@ -192,8 +216,42 @@ def test_banded_ignores_topk_indices():
     # Deliberately invalid indices: a gather path would fault or mask everything.
     garbage = torch.full((tokens, topk), -7, device="cuda", dtype=torch.int32)
 
-    out, lse = sparse_mla_attn_fwd(q, kv, garbage, scale=scale)
+    out, lse = sparse_mla_attn_fwd(q, kv, garbage, scale=scale, mode="banded")
     out_ref, lse_ref = window_reference(q, kv, scale)
+
+    assert_attention_close(out, lse, out_ref, lse_ref)
+
+
+@requires_sparse_mla_support
+def test_pool_ignores_topk_indices():
+    """Pool mode is closed-form too: SWA window plus causal pool, indices unread."""
+    tokens, heads, pool = 256, 64, 4
+    topk = 160  # >= WINDOW + pool, rounded up to the 32 granularity
+    q, kv, _ = make_inputs(tokens, heads, tokens + pool, topk)
+    scale = 1.0 / (D_QK**0.5)
+    garbage = torch.full((tokens, topk), -7, device="cuda", dtype=torch.int32)
+
+    out, lse = sparse_mla_attn_fwd(q, kv, garbage, scale=scale, mode="pool")
+    out_ref, lse_ref = pool_reference(q, kv, scale, pool)
+
+    assert_attention_close(out, lse, out_ref, lse_ref)
+
+
+@requires_sparse_mla_support
+@pytest.mark.parametrize("heads", [64, 128])
+def test_gather_on_window_shape_reads_indices(heads):
+    """Gather is the default even when the shapes fit the banded mode.
+
+    ``num_kv == total_tokens and topk == 128`` is what any packed self-attention
+    batch with 128 indexer picks looks like. Inferring the banded mode from that
+    shape used to discard the indices and attend a sliding window instead.
+    """
+    tokens = 256
+    q, kv, idx = make_inputs(tokens, heads, tokens, WINDOW)
+    scale = 1.0 / (D_QK**0.5)
+
+    out, lse = sparse_mla_attn_fwd(q, kv, idx, scale=scale)
+    out_ref, lse_ref = gather_reference(q, kv, idx, scale)
 
     assert_attention_close(out, lse, out_ref, lse_ref)
 
@@ -258,6 +316,131 @@ def test_rope_dims_are_not_read():
     torch.testing.assert_close(baseline, perturbed, rtol=0, atol=0)
 
 
+# --- Varlen -------------------------------------------------------------------
+
+# Segment lengths of each packed row of VARLEN_T tokens: row 0 ends in 18 tokens
+# of padding (segment id 0), row 1 is fully packed.
+VARLEN_T = 128
+VARLEN_SEGMENTS = [[50, 60], [30, 98]]
+
+
+def make_segments(row_lengths, T=VARLEN_T, device="cuda"):
+    """``[B, T]`` segment ids (1-based, 0 = trailing padding) and positions."""
+    ids, pos = [], []
+    for lengths in row_lengths:
+        row_ids = torch.zeros(T, dtype=torch.int32)
+        row_pos = torch.zeros(T, dtype=torch.int32)
+        start = 0
+        for seg, n in enumerate(lengths, start=1):
+            row_ids[start : start + n] = seg
+            row_pos[start : start + n] = torch.arange(n, dtype=torch.int32)
+            start += n
+        ids.append(row_ids)
+        pos.append(row_pos)
+    return torch.stack(ids).to(device), torch.stack(pos).to(device)
+
+
+def dense_allowed(attn_mask_type, seg_ids, seg_pos):
+    """``[B, T, T]`` self-attention mask, written densely (not per top-k entry)."""
+    T = seg_ids.shape[1]
+    allowed = torch.ones(seg_ids.shape[0], T, T, dtype=torch.bool, device=seg_ids.device)
+    if attn_mask_type.startswith("padding"):
+        allowed &= (seg_ids[:, :, None] == seg_ids[:, None, :]) & (seg_ids[:, :, None] != 0)
+    if attn_mask_type == "causal":
+        allowed &= torch.ones(T, T, dtype=torch.bool, device=seg_ids.device).tril()
+    elif attn_mask_type == "padding_causal":
+        allowed &= seg_pos[:, None, :] <= seg_pos[:, :, None]
+    return allowed
+
+
+def indexer_like_topk(allowed, k, seed=0):
+    """Top-k of random scores with disallowed keys at ``finfo.min``, as the indexer does.
+
+    Short rows therefore end in picks of masked keys, which the adapter must drop.
+    """
+    torch.manual_seed(seed)
+    scores = torch.randn(allowed.shape, device=allowed.device)
+    scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
+    return scores.topk(k, dim=-1).indices.to(torch.int32)
+
+
+@requires_sparse_mla_support
+@pytest.mark.parametrize("attn_mask_type", ["no_mask", "padding", "causal", "padding_causal"])
+def test_varlen_indexer_topk(attn_mask_type):
+    """Packed batch: indexer top-k -> adapter -> gather mode matches a dense reference."""
+    B, T, heads, k = len(VARLEN_SEGMENTS), VARLEN_T, 64, 40
+    seg_ids, seg_pos = make_segments(VARLEN_SEGMENTS)
+    allowed = dense_allowed(attn_mask_type, seg_ids, seg_pos)
+    topk = indexer_like_topk(allowed, k)
+
+    idx = indexer_topk_to_sparse_mla(
+        topk,
+        kv_seqlen=T,
+        attn_mask_type=attn_mask_type,
+        segment_ids_q=seg_ids,
+        segment_pos_q=seg_pos,
+    )
+    assert idx.shape == (B * T, 64) and idx.dtype == torch.int32
+
+    q, kv, _ = make_inputs(B * T, heads, B * T, 32)
+    scale = 1.0 / (D_QK**0.5)
+    out, lse = sparse_mla_attn_fwd(q, kv, idx, scale=scale)
+
+    # Dense reference over the flat pool: a key counts iff the indexer picked it
+    # and the mask allows it; rows never see another batch row's keys.
+    picked = torch.zeros(B, T, T, dtype=torch.bool, device="cuda")
+    picked.scatter_(2, topk.long(), True)
+    keep = torch.zeros(B * T, B * T, dtype=torch.bool, device="cuda")
+    for b in range(B):
+        keep[b * T : (b + 1) * T, b * T : (b + 1) * T] = picked[b] & allowed[b]
+
+    scores = torch.einsum("thd,sd->ths", q.float()[..., :D_LATENT], kv.float()[:, :D_LATENT])
+    scores = (scores * scale).masked_fill(~keep[:, None, :], float("-inf"))
+    live = keep.any(dim=-1)
+    out_ref = torch.einsum("ths,sd->thd", scores[live].softmax(-1), kv.float()[:, :D_LATENT])
+    lse_ref = scores[live].logsumexp(-1)
+
+    # Looser than the default: causal rows start with 1-3 keys, where the bf16
+    # rounding of P no longer averages out. fast_path makes it worse, since its
+    # max is floored at 0 so even a single key gets p = exp(s) != 1.
+    assert_attention_close(out[live], lse[live], out_ref, lse_ref, rtol=1e-2)
+    # Tokens with no allowed key (padding) produce zeros and -inf LSE.
+    assert (~live).any() == attn_mask_type.startswith("padding")
+    assert (out[~live] == 0).all()
+    assert torch.isneginf(lse[~live]).all()
+
+
+@requires_sparse_mla_support
+def test_indexer_topk_adapter_cross_attention():
+    """Cross-attention offsets use kv_seqlen, and out-of-row entries become -1."""
+    B, T, S = 2, 4, 6
+    seg_q = torch.tensor([[1, 1, 2, 0], [1, 1, 1, 1]], dtype=torch.int32, device="cuda")
+    seg_kv = torch.tensor(
+        [[1, 2, 2, 0, 1, 2], [1, 1, 1, 0, 0, 0]], dtype=torch.int32, device="cuda"
+    )
+    topk = torch.tensor(
+        [
+            [[0, 1], [4, 6], [2, 5], [0, 1]],  # 6 is past S, the last token is padding
+            [[2, 3], [0, -1], [5, 1], [0, 2]],  # key 3/5 is padding, -1 stays -1
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    idx = indexer_topk_to_sparse_mla(
+        topk, kv_seqlen=S, attn_mask_type="padding", segment_ids_q=seg_q, segment_ids_kv=seg_kv
+    )
+
+    expected = torch.tensor(
+        [[0, -1], [4, -1], [2, 5], [-1, -1], [8, -1], [6, -1], [-1, 7], [6, 8]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    assert idx.shape == (B * T, 32)
+    torch.testing.assert_close(idx[:, :2], expected, rtol=0, atol=0)
+    assert (idx[:, 2:] == -1).all()
+
+
 # --- Validation ---------------------------------------------------------------
 
 @requires_sparse_mla_support
@@ -290,6 +473,18 @@ def test_rejects_unsupported_requests(mutate, match):
     q, kv, idx = mutate(q, kv, idx)
     with pytest.raises(FlyDSLUnsupportedError, match=match):
         sparse_mla_attn_fwd(q, kv, idx)
+
+
+@requires_sparse_mla_support
+@pytest.mark.parametrize(
+    "mode, match",
+    [("banded", "topk == 128"), ("pool", "num_kv = total_tokens \\+ P"), ("window", "one of")],
+)
+def test_rejects_mode_shape_mismatch(mode, match):
+    """A closed-form mode refuses shapes it cannot represent, instead of guessing."""
+    q, kv, idx = make_inputs(64, 64, 256, 64)
+    with pytest.raises(FlyDSLUnsupportedError, match=match):
+        sparse_mla_attn_fwd(q, kv, idx, mode=mode)
 
 
 @requires_sparse_mla_support

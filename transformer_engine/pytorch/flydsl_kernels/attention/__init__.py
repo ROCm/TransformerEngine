@@ -9,9 +9,10 @@ lazily inside :func:`sparse_mla_attn_fwd` once availability has been confirmed.
 """
 
 from ..exceptions import FlyDSLUnsupportedError
-from .attention_wrappers import sparse_mla_attn_fwd
+from .attention_wrappers import indexer_topk_to_sparse_mla, sparse_mla_attn_fwd
 
 __all__ = [
     "FlyDSLUnsupportedError",
+    "indexer_topk_to_sparse_mla",
     "sparse_mla_attn_fwd",
 ]
