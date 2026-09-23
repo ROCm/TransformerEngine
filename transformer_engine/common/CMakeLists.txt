@@ -442,13 +442,6 @@ endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 
-# This is TE-specific and should not apply to all targets
-target_link_options(
-  transformer_engine
-  PRIVATE
-  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
-)
-
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
 # using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
@@ -485,18 +478,19 @@ else() #USE_ROCM
 
   add_library(transformer_engine SHARED ${te_hip_sources})
 
-  # Hide non-necessary symbols in the shared object. TE-specific: scope it to this
-  # target rather than all targets, mirroring the CUDA build above.
-  target_link_options(
-    transformer_engine
-    PRIVATE
-    "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
-  )
-
   # Workaround for TheRock installation that moved some headers from system-wide location
   # to rocm_sysdeps but missing it in the default include path.
   target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
+
+# Hide non-necessary symbols in the shared object. This is TE-specific and should
+# be scoped to this target rather than applied to all targets.
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
+)
+
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -939,8 +933,6 @@ else()
   # pragma in CK headers which is not supported by the compiler used to build TE.
   set(HIP_HCC_FLAGS "${HIP_HCC_FLAGS} -fno-gpu-rdc -Wno-defaulted-function-deleted -Wno-unused-value -Wno-unknown-warning-option")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${HIP_HCC_FLAGS}")
-  # Symbol hiding for the transformer_engine target is applied via target_link_options
-  # next to its add_library() above (mirroring the CUDA build).
 endif()
 
 # Install library

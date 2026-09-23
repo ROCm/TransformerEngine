@@ -590,6 +590,7 @@ model_configs_fa4_hdim256 = {
 
 
 @requires_fa4
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FA4 head_dim=256 kernel is not supported on ROCm.")
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
@@ -623,6 +624,9 @@ model_configs_d256 = {
 }
 
 
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION, reason="D=256 backward fused attention is not supported on ROCm."
+)
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",

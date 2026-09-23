@@ -542,7 +542,13 @@ class FusedAttnRunner:
         # starts with cuDNN FE 1.24 / BE 9.23; THD execution-plan support starts with
         # cuDNN FE 1.26 / BE 9.25. The kernel rejects dBias, dropout, and ALiBi, supports vanilla
         # softmax only, and allows SWA together with a causal mask only.
-        is_sm10x = not is_hip_extension() and 100 <= compute_capability < 110
+        if (
+            self.is_training
+            and is_hip_extension()
+            and (self.head_dim_qk == 256 or self.head_dim_v == 256)
+        ):
+            pytest.skip("D=256 backward fused attention is not supported on ROCm.")
+        is_sm10x = 100 <= compute_capability < 110
         if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
             if self.head_dim_qk != 256 or self.head_dim_v != 256:
                 pytest.skip(

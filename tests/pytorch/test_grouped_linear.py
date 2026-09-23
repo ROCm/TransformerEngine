@@ -437,6 +437,10 @@ def test_grouped_linear_accuracy(
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION,
+    reason="Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR).",
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("num_gemms", [1, 3])
 @pytest.mark.parametrize("bs", [2])
@@ -450,8 +454,6 @@ def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias
     match a stack of independent dense ``Linear`` layers bit-for-bit, since both
     execute the exact same per-expert quantize + GEMM kernels.
     """
-    if IS_HIP_EXTENSION:
-        pytest.skip("Row-scaled NVFP4 columnwise output is not supported on ROCm (quantize.cuh NVTE_ERROR).")
     recipe_row_scaled = nvfp4_row_scaled_quantized_backward()
     config = model_configs[model]
     if dtype not in get_nvfp4_inp_supported_dtypes(recipe_row_scaled, dtype):

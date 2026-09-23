@@ -1816,9 +1816,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 #ifndef USE_ROCM
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
-#endif
 
-#ifndef USE_ROCM
   // The grouped Hadamard transform kernels are implemented for the SM100 family
   // only. On other architectures, where
   // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
