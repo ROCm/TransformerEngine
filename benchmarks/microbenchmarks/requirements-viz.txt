@@ -1,0 +1,5 @@
+# Dependencies for the visualization tooling (visualize.py, dashboard.py).
+# Not required to run the benchmarks themselves.
+pandas
+plotly
+panel
