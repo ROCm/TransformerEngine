@@ -43,7 +43,10 @@ global loads/stores use the 0.3 ``make_buffer_tensor`` + ``BufferCopy`` copy-ato
 API, and the LDS pointers for ``ds_read_tr16`` come from a local ``_lds_ptr``.
 The access pattern (offsets, widths, descriptor byte extents) is unchanged, and
 the port was verified bitwise-identical to the 0.2.x kernel on every dispatch
-path. The kernel body is otherwise byte-identical.
+path. The one other change is ``const_expr(peel_last)``: a bare ``if`` on that
+Python bool is routed through FlyDSL's dynamic-if analysis, which warns on every
+compile about the branch-assigned epilogue variables. The kernel body is
+otherwise byte-identical.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -846,7 +849,7 @@ def build_fwd(
                 loop_results = yield _carry
 
             # head = head_wave_base + lo (single head per lane, replicated across grp).
-            if peel_last:
+            if const_expr(peel_last):
                 # Peeled last KV tile: overlap the epilogue scalar chain with PV.
                 m_run = loop_results[0]
                 l_run_p = loop_results[1]
