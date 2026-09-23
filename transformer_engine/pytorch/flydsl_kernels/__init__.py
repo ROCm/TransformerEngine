@@ -4,13 +4,11 @@
 
 """FlyDSL kernel backends for Transformer Engine (ROCm, gfx950).
 
-Importing this package pulls in FlyDSL via ``gemm``, so it must only be imported
-lazily from a call site that has already confirmed FlyDSL availability -- see
-``transformer_engine/pytorch/cpp_extensions/gemm.py``.
+Subpackages are not imported here: ``gemm`` enforces the supported FlyDSL
+version at import time, and ``attention`` defers its FlyDSL import to first use.
+Import them explicitly from call sites that have confirmed FlyDSL availability.
 """
 
-from . import attention
-from . import gemm
 from .exceptions import FlyDSLUnsupportedError
 
-__all__ = ["FlyDSLUnsupportedError", "attention", "gemm"]
+__all__ = ["FlyDSLUnsupportedError"]

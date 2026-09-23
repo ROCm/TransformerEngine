@@ -461,18 +461,18 @@ def get_attention_backend(
 
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-    use_flash_attention_2 = use_flash_attention
-    use_flash_attention_3 = use_flash_attention
-    use_flash_attention_4 = use_flash_attention
+    use_flash_attention_2 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V2", "1"))
+    use_flash_attention_3 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V3", "1"))
+    use_flash_attention_4 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
     flash_attention_backend = None
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
-        logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0")
+        logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V2=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
-        logger.debug("Disabling FlashAttention 3 due to NVTE_FLASH_ATTN=0")
+        logger.debug("Disabling FlashAttention 3 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V3=0")
     if not use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        logger.debug("Disabling FlashAttention 4 due to NVTE_FLASH_ATTN=0")
+        logger.debug("Disabling FlashAttention 4 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V4=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
@@ -1178,7 +1178,7 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with THD"
                 " format and cp_comm_type = %s",
@@ -1587,10 +1587,15 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if use_flash_attention and (not IS_HIP_EXTENSION) and use_fused_attention and device_compute_capability >= (9, 0):
+    prefer_fused_attention = (
+        # On ROCm, FusedAttention (aiter asm) is much faster than flash-attn for MLA-style unequal head dims.
+        head_dim_qk != head_dim_v
+        if IS_HIP_EXTENSION
+        else device_compute_capability >= (9, 0)
+    )
+    if use_flash_attention and use_fused_attention and prefer_fused_attention:
         logger.debug(
-            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-            "for performance reasons"
+            "Disabling FlashAttention to give FusedAttention preference for performance reasons"
         )
         use_flash_attention = False
 

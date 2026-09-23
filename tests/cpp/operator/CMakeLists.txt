@@ -7,6 +7,7 @@
 add_executable(test_operator
                test_cast.cu
                test_cast_current_scaling.cu
+               test_cast_current_scaling_grouped.cu #CUDA-only test
                test_cast_dbias.cu
                test_cast_dbias_dgelu.cu
                test_cast_gated_swiglu.cu
@@ -16,8 +17,10 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_nvfp4_transpose.cu
                test_cast_float8blockwise.cu
+               test_cast_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
+               test_dequantize_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
@@ -26,6 +29,7 @@ add_executable(test_operator
                test_cast_transpose_dbias_dgelu.cu
                test_cast_transpose_dgeglu.cu
                test_act.cu
+               test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
                test_memset.cu
@@ -33,6 +37,7 @@ add_executable(test_operator
                test_multi_cast_transpose.cu
                test_multi_padding.cu
                test_multi_unpadding.cu
+               test_softmax.cu
                test_causal_softmax.cu
                test_swizzle.cu
                test_multi_swizzle.cu
@@ -44,25 +49,31 @@ if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
   # Remove CUDA-only tests and add ROCm specific ones
   list(REMOVE_ITEM test_cuda_sources
-              test_grouped_gemm.cu)
+              test_grouped_gemm.cu
+              test_cast_current_scaling_grouped.cu
+              test_cast_float8blockwise_grouped.cu
+              test_dequantize_float8blockwise_grouped.cu)
   list(APPEND test_cuda_sources
+              test_multi_tensor_transpose_bhsd.cu
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
+              test_ck_grouped_gemm.cu
+              test_ck_grouped_mxfp8.cu
               test_cast_mxfp4_transpose.cu
               test_multi_quantize_mxfp8.cu)
-
-  list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
-  if(NOT _gfx1250_idx EQUAL -1)
-    list(APPEND test_cuda_sources test_ck_grouped_mxfp8.cu)
-    target_include_directories(test_operator BEFORE PRIVATE
-              ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include)
-  endif()
 
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
   set_target_properties(test_operator PROPERTIES SOURCES "${test_hip_sources}")
+  TE_GetHipifiedSources("test_ck_grouped_mxfp8.cu" ${CMAKE_CURRENT_SOURCE_DIR} ck_mxfp8_hip_source)
+  # -Wno-unknown-warning-option suppresses warning about -Wlifetime-safety-lifetimebound-violation
+  # pragma in CK headers which is not supported by the compiler used to build TE.
+  set_source_files_properties(${ck_mxfp8_hip_source} PROPERTIES
+      INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/composable_kernel/include"
+      COMPILE_OPTIONS "-Wno-unknown-warning-option")
+
 endif()
 
 # Find required packages

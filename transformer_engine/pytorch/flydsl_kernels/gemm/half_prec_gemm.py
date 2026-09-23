@@ -2,10 +2,16 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL FP16 TN/NN/NT 4-wave GEMM kernel for Transformer Engine.
+"""FlyDSL half-precision (FP16/BF16) TN/NN/NT 4-wave GEMM kernel for Transformer Engine.
 
-All supported layouts share one source-level kernel generator while compiling
-to separate cached binaries:
+FP16 and BF16 share one source-level kernel generator: the algorithm is
+identical and only the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode differs. That
+opcode is selected at compile time via ``mfma_suffix``, so each (dtype, K,
+output, layout) combination still compiles to its own cached binary with no
+runtime dtype branch.
+
+All supported layouts share the same generator while compiling to separate
+cached binaries:
 
     TN: A [M,K] normal read,    B [N,K] normal read
     NN: A [M,K] normal read,    B [K,N] transpose read
@@ -26,21 +32,28 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
-    compute_global_fp16_transpose_swizzle,
+    compute_global_transpose_swizzle,
     compute_global_swizzle,
-    make_fp16_byte_buffer_tensor,
+    divmod,
+    make_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
+    xcd_swizzle,
+    barrier,
 )
+
+# FP16 and BF16 differ only in the MFMA opcode suffix.
+_MFMA_SUFFIX = {torch.float16: "f16", torch.bfloat16: "bf16"}
 
 
 _BLOCK_M = 256
@@ -56,7 +69,7 @@ NUM_THREADS = 256
 WARP_SIZE = 64
 NUM_WAVES = NUM_THREADS // WARP_SIZE
 
-SUBTILE_M = 64 
+SUBTILE_M = 64
 SUBTILE_N = 64
 
 MFMA_M = 16
@@ -81,13 +94,6 @@ LOAD_PASSES_A_SUBTILE = LOAD_PASSES_A // 2
 LOAD_PASSES_B_SUBTILE = LOAD_PASSES_B // 2
 PASSES_PER_A_MI = LOAD_PASSES_A_SUBTILE // MFMA_M_PER_SUBTILE
 
-LDS_SYM_A0 = "fp16_pp_smem_a0"
-LDS_SYM_A1 = "fp16_pp_smem_a1"
-LDS_SYM_B0 = "fp16_pp_smem_b0"
-LDS_SYM_B1 = "fp16_pp_smem_b1"
-LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "fp16_pp_lds">'
-SCOPE_IDS = ("a0", "a1", "b0", "b1")
-
 assert BLOCK_K == 64
 # DO NOT CHANGE THE FOLLOWING LINE.
 assert NUM_THREADS == 256
@@ -97,112 +103,39 @@ assert LOAD_PASSES_A % 2 == 0
 assert LOAD_PASSES_B % 2 == 0
 
 
-
-def swizzle_xor16(row, col_in_bytes):
-    """XOR swizzle for the LDS K-byte coordinate."""
-    chunk = col_in_bytes // fx.Index(VEC_BYTES)
-    byte_in_chunk = col_in_bytes % fx.Index(VEC_BYTES)
-    row_bits = (row % fx.Index(16)) // fx.Index(2)
-    swz_chunk = chunk ^ row_bits
-    return swz_chunk * fx.Index(VEC_BYTES) + byte_in_chunk
-
-
-def _encode_waitcnt(vmcnt=63, lgkmcnt=15):
-    """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
-
-    ``rocdl.s_waitcnt`` accepts the raw 16-bit immediate operand of the
-    32-bit ``S_WAITCNT`` ISA instruction. On CDNA4, that SIMM16 field is:
-
-        SIMM16[3:0]   = vmcnt[3:0]
-        SIMM16[6:4]   = expcnt[2:0]
-        SIMM16[11:8]  = lgkmcnt[3:0]
-        SIMM16[15:14] = vmcnt[5:4]
-
-    ``vmcnt`` is therefore one six-bit counter split across two noncontiguous
-    fields; bits [5:4] are placed in SIMM16[15:14], while bits [3:0] remain
-    in SIMM16[3:0].
-
-    A wait-counter field set to its maximum representable value is effectively
-    unconstrained: the instruction does not wait on that counter. This helper
-    always encodes ``expcnt=7`` and defaults to ``vmcnt=63`` and ``lgkmcnt=15``,
-    so callers specify only the counters on which they intend to wait.
-
-    For example, ``_encode_waitcnt(lgkmcnt=0)`` returns ``0xC07F``, which the
-    assembler renders as ``s_waitcnt lgkmcnt(0)``.
-    See: https://llvm.org/docs/AMDGPU/gfx9_waitcnt.html
-    """
-    if not 0 <= vmcnt <= 63:
-        raise ValueError(f"vmcnt must be in [0, 63], got {vmcnt}")
-    if not 0 <= lgkmcnt <= 15:
-        raise ValueError(f"lgkmcnt must be in [0, 15], got {lgkmcnt}")
-
-    return (
-        (7 << 4)  # expcnt=7 -> SIMM16[6:4] (unconstrained)
-        | (vmcnt & 0x0F)  # vmcnt[3:0] -> SIMM16[3:0]
-        | ((lgkmcnt & 0x0F) << 8)  # lgkmcnt[3:0] -> SIMM16[11:8]
-        | ((vmcnt & 0x30) << 10)  # vmcnt[5:4] -> SIMM16[15:14]
-    )
-
-
-# Keep the documented gfx950 encoding invariant executable and import-time cheap.
-assert _encode_waitcnt(lgkmcnt=0) == 0xC07F
-
-
-def _barrier(vmcnt=63, lgkmcnt=15):
-    if vmcnt != 63 or lgkmcnt != 15:
-        rocdl.s_waitcnt(_encode_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt))
-    rocdl.s_barrier()
-
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _divmod(a, b):
-    return a // b, a % b
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
-
-    # Simple row-major path.
-    simple_m, simple_n = _divmod(wgid, num_pid_n)
-
-    # XCD-remapped grouped-M path.
-    intra_xcd, xcd = _divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = _divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = _divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (
-        arith.select(use_simple, simple_m, pid_m),
-        arith.select(use_simple, simple_n, pid_n),
-    )
-
-
 def _compile_kernel(
     K: int,
     output_dtype: torch.dtype,
     layout: str,
+    mfma_suffix: str,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
-    """Build one compile-time-specialized TN, NN, or NT FP16 kernel.
+    """Build one compile-time-specialized TN, NN, or NT half-precision kernel.
 
+    ``mfma_suffix`` selects the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode.
     ``K`` must contain at least four K64 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       GELU(A@B), saving the pre-activation to the Aux output
+        GELU_AUX_BIAS  GELU(A@B + bias), saving the pre-activation to Aux
+
+    The GELU modes write a second M x N output (pre-activation, tanh-approx
+    GELU applied to C) for the backward pass.
     """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 kernel layout: {layout}")
+        raise ValueError(f"Unsupported half-precision kernel layout: {layout}")
+    if mfma_suffix not in ("f16", "bf16"):
+        raise ValueError(f"Unsupported MFMA suffix: {mfma_suffix}")
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported half-precision epilogue: {epilogue}")
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
     a_transpose_read = layout == "NT"
     b_transpose_read = layout in ("NN", "NT")
@@ -236,7 +169,7 @@ def _compile_kernel(
         output_fx_dtype = fx.Float32
     else:
         raise TypeError(
-            "FlyDSL FP16 GEMM output dtype must be torch.float16, "
+            "FlyDSL half-precision GEMM output dtype must be torch.float16, "
             f"torch.bfloat16, or torch.float32, got {output_dtype}"
         )
 
@@ -252,7 +185,9 @@ def _compile_kernel(
 
     assert K % BLOCK_K == 0, f"K must be a multiple of {BLOCK_K}, got {K}"
     NUM_K_TILES = K // BLOCK_K
-    assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K64 tiles; the two-page pipeline needs at least 4"
+    assert (
+        NUM_K_TILES >= 4
+    ), f"K={K} gives {NUM_K_TILES} K64 tiles; the two-page pipeline needs at least 4"
 
     LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
     LDS_BYTES_HALF = LDS_ELEMS_HALF * ELEM_BYTES
@@ -264,15 +199,14 @@ def _compile_kernel(
     PREFETCH_SCHED_DSRD = 8 if a_transpose_read else 4
 
     if a_transpose_read:
+
         def _a_leading_dim_bytes(c_m):
             return c_m * ELEM_BYTES
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
-            return (
-                k_base * fx.Index(c_m * ELEM_BYTES)
-                + (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
-                * fx.Index(ELEM_BYTES)
-            )
+            return k_base * fx.Index(c_m * ELEM_BYTES) + (
+                bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))
+            ) * fx.Index(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -292,18 +226,18 @@ def _compile_kernel(
                 - fx.Index(sm * (BLOCK_M // 2))
             )
             return load_transposed_frag_half(lds_a[sm], local_m_tile, half)
+
     else:
+
         def _a_leading_dim_bytes(c_m):
             del c_m
             return K * ELEM_BYTES
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
             del c_m
-            return (
-                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
-                * fx.Index(K * ELEM_BYTES)
-                + k_base * fx.Index(ELEM_BYTES)
-            )
+            return (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -317,11 +251,7 @@ def _compile_kernel(
         ):
             del load_transposed_frag_half
             subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = (
-                subtile_m_idx * fx.Index(SUBTILE_M)
-                + fx.Index(mi * MFMA_M)
-                + lane_mod_16
-            )
+            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
             half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
             return load_frag_half_at_byte_base(
                 lds_a[sm],
@@ -330,15 +260,14 @@ def _compile_kernel(
             )
 
     if b_transpose_read:
+
         def _b_leading_dim_bytes(c_n):
             return c_n * ELEM_BYTES
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
-            return (
-                k_base * fx.Index(c_n * ELEM_BYTES)
-                + (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
-                * fx.Index(ELEM_BYTES)
-            )
+            return k_base * fx.Index(c_n * ELEM_BYTES) + (
+                by_n_idx + fx.Index(subtile * (BLOCK_N // 2))
+            ) * fx.Index(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -357,18 +286,18 @@ def _compile_kernel(
                 - fx.Index(sn * (BLOCK_N // 2))
             )
             return load_transposed_frag(lds_b[sn], local_n_tile)
+
     else:
+
         def _b_leading_dim_bytes(c_n):
             del c_n
             return K * ELEM_BYTES
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
             del c_n
-            return (
-                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
-                * fx.Index(K * ELEM_BYTES)
-                + k_base * fx.Index(ELEM_BYTES)
-            )
+            return (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -381,25 +310,24 @@ def _compile_kernel(
         ):
             del load_transposed_frag
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row_addr = (
-                subtile_n_idx * fx.Index(SUBTILE_N)
-                + fx.Index(ni * MFMA_N)
-                + lane_mod_16
-            )
+            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
             return load_normal_b_frag(lds_b, b_row_addr, sn)
 
     # Resolve global staging maps before FlyDSL captures ``kernel_gemm``.
-    # FP16 uses K64, so each transpose-read half-page is two independent
+    # Half-precision uses K64, so each transpose-read half-page is two independent
     # [K64, X64] slices with 128-byte physical rows.
     if a_transpose_read:
+
         def _a_global_offsets(lane, wave_id, c_m):
-            return compute_global_fp16_transpose_swizzle(
+            return compute_global_transpose_swizzle(
                 lane,
                 wave_id,
                 _a_leading_dim_bytes(c_m),
                 LOAD_PASSES_HALF,
             )
+
     else:
+
         def _a_global_offsets(lane, wave_id, c_m):
             del c_m
             return compute_global_swizzle(
@@ -411,14 +339,17 @@ def _compile_kernel(
             )
 
     if b_transpose_read:
+
         def _b_global_offsets(lane, wave_id, c_n):
-            return compute_global_fp16_transpose_swizzle(
+            return compute_global_transpose_swizzle(
                 lane,
                 wave_id,
                 _b_leading_dim_bytes(c_n),
                 LOAD_PASSES_HALF,
             )
+
     else:
+
         def _b_global_offsets(lane, wave_id, c_n):
             del c_n
             return compute_global_swizzle(
@@ -431,7 +362,7 @@ def _compile_kernel(
 
     @fx.struct
     class SharedStorage:
-        # Preserve the passing TN byte-staging contract exactly.  A FP16 K64
+        # Preserve the passing TN byte-staging contract exactly.  A half-precision K64
         # half-page is 128 rows x 128 bytes = 16 KiB.
         a0_0: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
         a0_1: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
@@ -447,6 +378,8 @@ def _compile_kernel(
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -457,10 +390,10 @@ def _compile_kernel(
         lds_b1 = (lds.b1_0, lds.b1_1)
 
         # A/B arrive as contiguous uint8 byte views of the original
-        # row-major FP16 tensors. This preserves the validated 16-byte
+        # row-major half-precision tensors. This preserves the validated 16-byte
         # BufferCopyLDS128b path and byte-based address arithmetic.
-        gA = make_fp16_byte_buffer_tensor(A)
-        gB = make_fp16_byte_buffer_tensor(B)
+        gA = make_byte_buffer_tensor(A)
+        gB = make_byte_buffer_tensor(B)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         tx = gpu.thread_id("x")
@@ -469,7 +402,7 @@ def _compile_kernel(
         num_blocks_n = c_n // BLOCK_N
 
         if const_expr(use_xcd_remap):
-            pid_m, pid_n = _xcd_swizzle(num_blocks_m, num_blocks_n)
+            pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
         else:
             pid_m, pid_n = divmod(fx.block_idx.x, num_blocks_n)
 
@@ -490,7 +423,7 @@ def _compile_kernel(
         lane = tx_i32 % fx.Int32(WARP_SIZE)
 
         # Offsets are always bytes.  TN uses the original 128-byte XOR
-        # swizzle.  NN/NT stage K-major BF16 data as two [K64, X64] slices for
+        # swizzle.  NN/NT stage K-major 16-bit data as two [K64, X64] slices for
         # ds_read_b64_tr_b16; the layout choice was resolved before capture.
         gl_off_a = _a_global_offsets(lane, wave_id, c_m)
         gl_off_b = _b_global_offsets(lane, wave_id, c_n)
@@ -516,18 +449,58 @@ def _compile_kernel(
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
-        # C can exceed the signed-i32 element/byte offset range for large M*N.
-        # Bias the buffer descriptor base once per CTA using an index/i64 GEP,
-        # then store with only tile-local i32 offsets.  This keeps the hot store
-        # instruction form unchanged while avoiding i32 wrap in buffer_store().
-        c_n_idx_for_base = fx.Index(c_n)
-        c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
-        c_rsrc = buffer_ops.create_buffer_resource(
-            C,
-            max_size=True,
-            base_byte_offset=c_tile_base_bytes,
+        # Per-CTA tile base in C elements, folded into each store's linear
+        # coordinate below (matching the scale-load addressing on this build;
+        # add_offset on a dynamic Index is unsupported here).
+        c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
+        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
+        c_store_atom = fx.make_copy_atom(
+            fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+            output_fx_dtype,
         )
+
+        # Bias is a length-N fp32 vector indexed by the global output-feature
+        # (N) coordinate and broadcast across the M/token rows. const_expr folds
+        # this compile-time flag at trace time so the setup (and load_bias) are
+        # inlined into the kernel scope with no runtime dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
+
+        # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
+        # output so the backward pass can recompute the GELU gradient. Same tile
+        # base / store atom shape as C; DEFAULT gets a dummy 1-element tensor.
+        if const_expr(has_gelu):
+            gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
+            aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
+            aux_store_atom = fx.make_copy_atom(
+                fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                output_fx_dtype,
+            )
+
+            def gelu_tanh(x):
+                # tanh-approx GELU (matches PyTorch approximate='tanh' and the
+                # FlyDSL preshuffle reference), expressed through a non-positive
+                # exponent so exp() cannot overflow:
+                #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
+                half_f32 = fx.Float32(0.5)
+                one_f32 = fx.Float32(1.0)
+                zero_f32 = fx.Float32(0.0)
+                two_f32 = fx.Float32(2.0)
+                x3 = x * x * x
+                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                denom = one_f32 + e_neg2abs
+                numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                return half_f32 * x * (numerator * (one_f32 / denom))
 
         PIN_ACC_BASE = 0
 
@@ -620,15 +593,11 @@ def _compile_kernel(
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x64 half-page (16 KiB). Each half has its own LDS base.
-            global_base = _a_global_base_bytes(
-                k_base, subtile, c_m, bx_m_idx
-            )
+            global_base = _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx)
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = _b_global_base_bytes(
-                k_base, subtile, c_n, by_n_idx
-            )
+            global_base = _b_global_base_bytes(k_base, subtile, c_n, by_n_idx)
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -664,31 +633,27 @@ def _compile_kernel(
             )
 
         def load_transposed_frag_half(lds_page, local_x_tile, half):
-            # FP16 uses v_mfma_f32_16x16x32_f16, not the MXFP8 K128
+            # Half-precision uses v_mfma_f32_16x16x32_{f16,bf16}, not the MXFP8 K128
             # instruction.  A 128-X half-page is therefore two independent
-            # swizzled [K64, X64] FP16 slices. One ds_read_b64_tr_b16 returns
-            # four FP16 values/lane; two reads form one K32 MFMA fragment.
+            # swizzled [K64, X64] half-precision slices. One ds_read_b64_tr_b16 returns
+            # four half-precision values/lane; two reads form one K32 MFMA fragment.
             local_x_i32 = fx.Int32(local_x_tile)
             slice_idx = local_x_i32 // fx.Int32(64)
             x_in_slice = local_x_i32 % fx.Int32(64)
             lane_div16_i32 = fx.Int32(lane_div_16)
             lane_in16_i32 = fx.Int32(lane_mod_16)
 
-            source_k = (
-                lane_div16_i32 * fx.Int32(8)
-                + lane_in16_i32 // fx.Int32(4)
-            )
-            source_x_byte = (
-                x_in_slice * fx.Int32(ELEM_BYTES)
-                + (lane_in16_i32 % fx.Int32(4)) * fx.Int32(8)
-            )
+            source_k = lane_div16_i32 * fx.Int32(8) + lane_in16_i32 // fx.Int32(4)
+            source_x_byte = x_in_slice * fx.Int32(ELEM_BYTES) + (
+                lane_in16_i32 % fx.Int32(4)
+            ) * fx.Int32(8)
 
             physical_k, physical_x = swizzle_128(source_k, source_x_byte)
             slice_base = slice_idx * fx.Int32(64 * 128)
             base = slice_base + physical_k * fx.Int32(128) + physical_x
             other = base ^ fx.Int32(0x220)
             immediate_offset = 0 if half == 0 else 0x1000
-            return s2r.load_one_transpose_fp16(
+            return s2r.load_one_transpose(
                 lds_page,
                 base,
                 other,
@@ -701,11 +666,13 @@ def _compile_kernel(
             return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
-            return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            return (
+                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            )
 
-        def _fp16_k32_frag(full_frag, k32):
-            # A/B 16x64 FP16 wave fragments are i32x8. Each K32 MFMA
-            # consumes one contiguous i32x4 slice (eight FP16 values/lane).
+        def _k32_frag(full_frag, k32):
+            # A/B 16x64 half-precision wave fragments are i32x8. Each K32 MFMA
+            # consumes one contiguous i32x4 slice (eight half-precision values/lane).
             lo = k32 * 4
             v = Vec(full_frag)
             return Vec.from_elements(
@@ -713,31 +680,26 @@ def _compile_kernel(
                 fx.Int32,
             )
 
-        def _pinned_fp16_mfma_once(acc_idx, a_k32, b_k32):
+        def _pinned_mfma_once(acc_idx, a_k32, b_k32):
             acc_pin = PIN_ACC_BASE + acc_idx * 4
             llvm.InlineAsmOp(
                 None,
                 [arith._to_raw(a_k32), arith._to_raw(b_k32)],
-                (
-                    f"v_mfma_f32_16x16x32_f16 "
-                    f"a[{acc_pin}:{acc_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}]"
-                ),
-                (
-                    f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
-                    f"~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"
-                ),
+                f"v_mfma_f32_16x16x32_{mfma_suffix} "
+                f"a[{acc_pin}:{acc_pin + 3}], "
+                "$0, $1, "
+                f"a[{acc_pin}:{acc_pin + 3}]",
+                f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
                 has_side_effects=True,
             )
 
         def pinned_mfma(acc_idx, a_frag, b_frag):
-            """Accumulate one logical 16x16x64 FP16 product into pinned AGPRs."""
+            """Accumulate one logical 16x16x64 half-precision product into pinned AGPRs."""
             for k32 in range_constexpr(2):
-                _pinned_fp16_mfma_once(
+                _pinned_mfma_once(
                     acc_idx,
-                    _fp16_k32_frag(a_frag, k32),
-                    _fp16_k32_frag(b_frag, k32),
+                    _k32_frag(a_frag, k32),
+                    _k32_frag(b_frag, k32),
                 )
 
         def pinned_final_mfma(dst_slot, old_acc_idx, a_frag, b_frag):
@@ -760,12 +722,12 @@ def _compile_kernel(
             a_frags = (a0, a1, a2, a3)
             b_frags = (b0, b1)
             for mi in range_constexpr(4):
-                a_k32 = _fp16_k32_frag(a_frags[mi], k32)
+                a_k32 = _k32_frag(a_frags[mi], k32)
                 for nj in range_constexpr(2):
-                    _pinned_fp16_mfma_once(
+                    _pinned_mfma_once(
                         _acc_idx(subtile_id, mi, n_base + nj),
                         a_k32,
-                        _fp16_k32_frag(b_frags[nj], k32),
+                        _k32_frag(b_frags[nj], k32),
                     )
 
         def mfma_4n_4mi_k32(subtile_id, k32, a0, a1, a2, a3, b0, b1, b2, b3):
@@ -773,12 +735,12 @@ def _compile_kernel(
             a_frags = (a0, a1, a2, a3)
             b_frags = (b0, b1, b2, b3)
             for mi in range_constexpr(4):
-                a_k32 = _fp16_k32_frag(a_frags[mi], k32)
+                a_k32 = _k32_frag(a_frags[mi], k32)
                 for ni in range_constexpr(4):
-                    _pinned_fp16_mfma_once(
+                    _pinned_mfma_once(
                         _acc_idx(subtile_id, mi, ni),
                         a_k32,
-                        _fp16_k32_frag(b_frags[ni], k32),
+                        _k32_frag(b_frags[ni], k32),
                     )
 
         def store_acc_vector_for_logical_idx(logical_acc_idx, acc):
@@ -793,14 +755,39 @@ def _compile_kernel(
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column (global index by_n_idx + col) and reuse across the
+            # four M rows below.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
-                c_idx = row * fx.Index(c_n) + col
+                c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator, in order, before
+                # the output-dtype narrowing:
+                #   value = acc [+ bias]           (pre-activation)
+                #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
                 value = Vec(acc)[ii]
+                if const_expr(has_bias):
+                    value = value + bias_value
+
+                if const_expr(has_gelu):
+                    aux_val = value
+                    if const_expr(output_dtype != torch.float32):
+                        aux_val = aux_val.to(output_fx_dtype)
+                    aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                    fx.memref_store_vec(Vec.filled(1, aux_val, output_fx_dtype), aux_reg)
+                    fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
+                    value = gelu_tanh(value)
+
                 if const_expr(output_dtype != torch.float32):
                     value = value.to(output_fx_dtype)
-                buffer_ops.buffer_store(value, c_rsrc, c_idx)
-
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
+                fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -880,7 +867,7 @@ def _compile_kernel(
         ):
 
             # Wait only far enough for the current page; the next-page refill may remain in flight.
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             # A-top and B-left are both carried as complete 64-row register tiles,
@@ -939,7 +926,7 @@ def _compile_kernel(
             # overwrite the current page's A-bottom half-page. Keep this wait as
             # late as possible to maximize read/compute overlap.
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10 = pack_frag_halves(a10_x0, a10_x1)
@@ -976,7 +963,7 @@ def _compile_kernel(
             # Leave exactly the K+2 refill and scale loads outstanding. The following
             # LDS reads consume the already-ready next page, not the page being refilled.
             rocdl.sched_barrier(0)
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00 = load_a_subtile_mi_regs(next_a, 0, 0)
@@ -1011,7 +998,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs
 
         def hk_one_k_tail_with_next(cur_a, cur_b, next_a, next_b, a0_regs, b0_regs):
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
 
             a00, a01, a02, a03 = a0_regs
             b00, b01, b02, b03 = b0_regs
@@ -1027,7 +1014,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(0, 3, 0), a03, b00, b01, b02, b03)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10 = load_a_subtile_mi_regs(cur_a, 1, 0)
@@ -1041,7 +1028,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(1, 3, 0), a03, b10, b11, b12, b13)
 
             rocdl.sched_barrier(0)
-            _barrier(LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00 = load_a_subtile_mi_regs(next_a, 0, 0)
@@ -1076,7 +1063,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs
 
         def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs):
-            _barrier(vmcnt=0, lgkmcnt=0)
+            barrier(vmcnt=0, lgkmcnt=0)
 
             a00, a01, a02, a03 = a0_regs
             b00, b01, b02, b03 = b0_regs
@@ -1089,7 +1076,7 @@ def _compile_kernel(
             b13 = load_b_subtile_ni_regs(cur_b, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10 = load_a_subtile_mi_regs(cur_a, 1, 0)
@@ -1098,7 +1085,7 @@ def _compile_kernel(
             a13 = load_a_subtile_mi_regs(cur_a, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
@@ -1108,7 +1095,7 @@ def _compile_kernel(
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
@@ -1164,13 +1151,13 @@ def _compile_kernel(
         stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         a0_regs = load_a_subtile_regs(lds_a0, 0)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         b0_regs = load_b_subtile_regs(lds_b0, 0)
@@ -1226,12 +1213,13 @@ def _compile_kernel(
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs)
 
-
     @flyc.jit
     def launch_gemm(
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1242,6 +1230,8 @@ def _compile_kernel(
             A,
             B,
             C,
+            Bias,
+            Aux,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -1249,22 +1239,27 @@ def _compile_kernel(
 
     return launch_gemm
 
+
 @functools.lru_cache(maxsize=None)
 def _cached_launch(
     K: int,
     output_dtype: torch.dtype,
     layout: str,
+    mfma_suffix: str,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
     return _compile_kernel(
         K,
         output_dtype,
         layout,
+        mfma_suffix,
         use_xcd_remap=use_xcd_remap,
+        epilogue=epilogue,
     )
 
 
-def fp16_matmul(
+def _half_prec_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
@@ -1273,24 +1268,31 @@ def fp16_matmul(
     m: int,
     n: int,
     k: int,
+    input_dtype: torch.dtype,
+    label: str,
     stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
-    """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
+    """Validate operands and launch a half-precision TN/NN/NT specialization.
+
+    ``input_dtype`` is the required FP16/BF16 operand dtype and ``label`` is the
+    human-readable kernel name used in error messages.
+    """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 layout: {layout}")
+        raise ValueError(f"Unsupported {label} layout: {layout}")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL BF16 expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
+            f"FlyDSL {label} expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
-    if a.dtype != torch.float16 or b.dtype != torch.float16:
+    if a.dtype != input_dtype or b.dtype != input_dtype:
         raise TypeError(
-            "FlyDSL FP16 GEMM expects torch.float16 operands, "
-            f"got A={a.dtype}, B={b.dtype}"
+            f"FlyDSL {label} GEMM expects {input_dtype} operands, got A={a.dtype}, B={b.dtype}"
         )
     if not a.is_contiguous() or not b.is_contiguous():
         raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 {layout} requires original contiguous row-major "
+            f"FlyDSL {label} {layout} requires original contiguous row-major "
             f"operands, got A stride={tuple(a.stride())}, "
             f"B stride={tuple(b.stride())}"
         )
@@ -1307,7 +1309,7 @@ def fp16_matmul(
     expected_a, expected_b = expected_shapes[layout]
     if tuple(a.shape) != expected_a or tuple(b.shape) != expected_b:
         raise ValueError(
-            f"FlyDSL BF16 {layout} physical operands do not match contract: "
+            f"FlyDSL {label} {layout} physical operands do not match contract: "
             f"A{tuple(a.shape)} expected {expected_a}; "
             f"B{tuple(b.shape)} expected {expected_b}"
         )
@@ -1316,16 +1318,14 @@ def fp16_matmul(
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            "FlyDSL FP16 output must be float16, bfloat16, or float32, "
-            f"got {c.dtype}"
+            f"FlyDSL {label} output must be float16, bfloat16, or float32, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
-            f"A, B, and C must be on the same device, got "
-            f"{a.device}, {b.device}, and {c.device}"
+            f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
-        raise ValueError("FlyDSL FP16 GEMM requires contiguous output storage")
+        raise FlyDSLUnsupportedError(f"FlyDSL {label} GEMM requires contiguous output storage")
 
     doGemm(
         a,
@@ -1335,8 +1335,78 @@ def fp16_matmul(
         m=m,
         n=n,
         k=k,
+        input_dtype=input_dtype,
+        label=label,
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
+        aux=aux,
     )
+
+
+def fp16_matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
+    stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
+):
+    """Launch the wrapper-selected FP16 TN/NN/NT specialization."""
+    _half_prec_matmul(
+        a,
+        b,
+        c,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        input_dtype=torch.float16,
+        label="FP16",
+        stream=stream,
+        epilogue=epilogue,
+        bias=bias,
+        aux=aux,
+    )
+
+
+def bf16_matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
+    stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
+):
+    """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
+    _half_prec_matmul(
+        a,
+        b,
+        c,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        input_dtype=torch.bfloat16,
+        label="BF16",
+        stream=stream,
+        epilogue=epilogue,
+        bias=bias,
+        aux=aux,
+    )
+
 
 def doGemm(
     A: torch.Tensor,
@@ -1347,10 +1417,15 @@ def doGemm(
     m: int,
     n: int,
     k: int,
+    input_dtype: torch.dtype,
+    label: str,
     stream=None,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
-    """Launch one cached K/output/layout-specialized FP16 core.
+    """Launch one cached K/output/layout-specialized half-precision core.
 
     A and B are passed unchanged from ``gemm_wrappers.py``. Their pointers
     reference the original rowwise allocations:
@@ -1363,46 +1438,63 @@ def doGemm(
     ``ds_read_b64_tr_b16`` only.
     """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 layout: {layout}")
+        raise ValueError(f"Unsupported {label} layout: {layout}")
 
     M_runtime = int(m)
     N_runtime = int(n)
     K_runtime = int(k)
 
-    if A.dtype != torch.float16 or B.dtype != torch.float16:
+    if A.dtype != input_dtype or B.dtype != input_dtype:
         raise TypeError(
-            f"BF16 {layout} requires BF16 inputs, got {A.dtype} and {B.dtype}"
+            f"{label} {layout} requires {input_dtype} inputs, got {A.dtype} and {B.dtype}"
         )
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"Unsupported FP16 output dtype: {C.dtype}")
+        raise FlyDSLUnsupportedError(f"Unsupported {label} output dtype: {C.dtype}")
 
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP16 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
-        )
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP16 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
-        )
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP16 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
-        )
-
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP16 GEMM requires at least 4 K{_BLOCK_K} tiles, "
-            f"got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label=f"{label} GEMM",
+    )
+    require_launch_size(f"{label} GEMM", ("A", A), ("B", B), ("C", C))
 
     if tuple(C.shape) != (M_runtime, N_runtime):
-        raise ValueError(
-            f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}"
-        )
+        raise ValueError(f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}")
+
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported {label} epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"{label} epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"{label} bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(f"{label} bias length {bias.numel()} != N (out_features) {N_runtime}")
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"{label} epilogue {epilogue} does not accept a bias tensor")
+
+    needs_aux = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+    if needs_aux:
+        # Pre-activation output for the backward pass: caller-allocated M x N,
+        # same dtype as C, filled in place through its buffer descriptor.
+        if aux is None:
+            raise ValueError(f"{label} epilogue {epilogue} requires an aux output tensor")
+        if tuple(aux.shape) != (M_runtime, N_runtime):
+            raise ValueError(f"{label} aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}")
+        if aux.dtype != C.dtype:
+            raise TypeError(f"{label} aux dtype {aux.dtype} != C dtype {C.dtype}")
+        if aux.device != A.device:
+            raise ValueError("aux must be on the same device as A, B, and C")
+    elif aux is not None:
+        raise ValueError(f"{label} epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -1411,7 +1503,9 @@ def doGemm(
         K_runtime,
         C.dtype,
         layout,
+        _MFMA_SUFFIX[input_dtype],
         bool(use_xcd_remap),
+        epilogue,
     )
     # Preserve the original validated byte-addressed G2L path. These are
     # metadata-only dtype/flatten views of the already-contiguous row-major
@@ -1419,11 +1513,22 @@ def doGemm(
     A_arg = A.view(torch.uint8).view(-1)
     B_arg = B.view(torch.uint8).view(-1)
     C_arg = C.view(-1)
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+    if needs_aux:
+        Aux_arg = aux.view(-1)
+    else:
+        Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
 
     launch(
         A_arg,
         B_arg,
         C_arg,
+        Bias_arg,
+        Aux_arg,
         M_runtime,
         N_runtime,
         stream=stream,

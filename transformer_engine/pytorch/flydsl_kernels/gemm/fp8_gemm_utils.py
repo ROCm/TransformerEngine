@@ -1,36 +1,32 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted by AMD from the FlyDSL project's GEMM utility helpers.
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
-# ceildiv is the canonical cdiv from the shared layer
-def cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
-
-
-ceildiv = cdiv
-
-def divmod(a, b):
-    """Integer divmod that works on DSL values (e.g. ``Int32``).
-
-    The builtin ``divmod`` rejects DSL scalar types, so this uses the overloaded
-    ``//`` / ``%`` operators to emit the corresponding ops.
-    """
-    return (a // b, a % b)
-
-
-def preshuffle_b(b_t):
-    """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
-    n, k = b_t.shape[-2:]
-    assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
-    return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
+# Dtype-independent primitives live in the shared module; re-export them so the
+# GEMM kernels can keep importing them from this per-dtype module unchanged.
+from .gemm_common_utils import (
+    barrier,
+    cdiv,
+    ceildiv,
+    compute_global_swizzle,
+    divmod,
+    encode_waitcnt,
+    min,
+    pack_i32x4_i32x8,
+    swizzle_128,
+    xcd_swizzle,
+)
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
@@ -47,48 +43,6 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     )
     iter_f8 = fx.recast_iter(f8_buf_ptr_ty, iter_i8)
     return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
-
-
-def swizzle_128(row, col):
-    offset = row * 128 + col
-    swizzle = ((offset % (16 * 128)) >> 8) << 4
-    swizzled_offset = offset ^ swizzle
-    return swizzled_offset // 128, swizzled_offset % 128
-
-
-def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds):
-        if const_expr(preshuffled):
-            row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
-            col = (lane_id // 8) * 16
-            offsets.append(
-                (row // 16) * (K * 16) + (row % 16) * 16 + (col // 64) * 1024 + ((col % 64) // 16) * 256 + (col % 16)
-            )
-        else:
-            row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
-            col = (lane_id % 8) * 16
-            r, c = swizzle_128(row, col)
-            offsets.append(r * K + c)
-    return offsets
-
-
-def compute_global_linear_128x128(lane_id, wave_id, leading_dim, n_rounds):
-    """Offsets for an unswizzled row-major 128x128 tile.
-
-    This uses the same 16-byte/thread DMA decomposition as
-    ``compute_global_swizzle`` but does not XOR-permute the logical source
-    coordinates. It is used by the NN A path, whose LDS page is physically
-    [K128, M128] for the CDNA4 transpose-read instruction.
-    """
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds):
-        row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
-        col = (lane_id % 8) * 16
-        offsets.append(row * leading_dim + col)
-    return offsets
 
 
 class G2SLoader:
@@ -118,75 +72,6 @@ class G2SLoader:
         src = fx.slice(self.gl_src, (None, fx.Int32(self.gl_offsets[step])))
         dst = self._lds_dst_at(lds_dst, step)
         fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
-
-
-class G2STransposeLoader:
-    """Stage a row-major 128x128 byte tile as swizzled physical [K, N].
-
-    The source is a row-major byte matrix ``[N, K]``. Each thread loads one
-    contiguous 16-byte K vector from global memory, then scatters those bytes
-    into the 128-byte XOR-swizzled LDS image consumed by
-    ``ds_read_b64_tr_b8``.
-
-    One ``load_one`` call covers one of the four 4-KiB staging passes for a
-    128x128 half-page.
-    """
-
-    def __init__(self, gl_src, leading_dim, wave_id):
-        self.gl_rsrc = buffer_ops.create_buffer_resource(gl_src, max_size=True)
-        self.leading_dim = fx.Int32(leading_dim)
-        self.wave_id = fx.Int32(wave_id)
-        self.lane_id = fx.thread_idx.x % 64
-        self.n_waves = fx.block_dim.x // 64
-        self.i8_lds_ptr_t = fx.PointerType.get(
-            elem_ty=ir.IntegerType.get_signless(8),
-            address_space=2,
-            alignment=1,
-        )
-
-    def _store_u8(self, lds_dst, byte_offset, value):
-        base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr))
-        addr_i32 = base_i32 + fx.Int32(byte_offset)
-        i8_ptr = fx.inttoptr(self.i8_lds_ptr_t, addr_i32)
-        view = fx.make_view(i8_ptr, fx.make_layout(1, 1))
-        fx.memref_store_vec(Vec.filled(1, value, fx.Uint8), view)
-
-    def load_one(self, lds_dst, global_n_base, k_base, step):
-        """Load one 16-byte/thread pass and transpose it into LDS.
-
-        ``global_n_base`` is the first source N row of this 128-row half-page.
-        ``k_base`` is the first global K byte of the current K128 tile.
-        """
-        row = (
-            self.lane_id // fx.Int32(8)
-            + self.wave_id * fx.Int32(8)
-            + fx.Int32(step) * fx.Int32(self.n_waves * 8)
-        )
-        col = (self.lane_id % fx.Int32(8)) * fx.Int32(16)
-
-        global_byte = (
-            (fx.Int32(global_n_base) + row) * self.leading_dim
-            + fx.Int32(k_base)
-            + col
-        )
-        packed_i32x4 = buffer_ops.buffer_load(
-            self.gl_rsrc,
-            global_byte // fx.Int32(4),
-            vec_width=4,
-            dtype=T.i32,
-        )
-        packed_u8x16 = Vec(packed_i32x4).bitcast(fx.Uint8)
-
-        for byte_i in range_constexpr(16):
-            logical_k = col + fx.Int32(byte_i)
-            physical_k, physical_n = swizzle_128(logical_k, row)
-            lds_byte = physical_k * fx.Int32(128) + physical_n
-            self._store_u8(lds_dst, lds_byte, packed_u8x16[byte_i])
-
-
-def pack_i32x4_i32x8(lo, hi):
-    # Pack two i32x4 as one i32x8
-    return lo.shuffle(hi, list(range(8)))
 
 
 class S2RLoader:
@@ -293,125 +178,3 @@ class S2RLoader:
             immediate_offset,
         )
         return lo.shuffle(hi, [0, 1, 2, 3])
-
-
-class StoreC:
-    def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b):
-        self.c_rows = c_rows
-        self.c_cols = c_cols
-        self.lane_id = fx.thread_idx.x % 64
-        self.c_idx_fn = c_idx_fn
-        self.n_tiles_a = n_tiles_a
-        self.n_tiles_b = n_tiles_b
-        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
-        # ``num_records_bytes`` is required when ``max_size=False`` -- see
-        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
-        c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
-        sa_nbytes = c_rows * 4  # Float32 row-wise scale
-        sb_nbytes = c_cols * 4  # Float32 col-wise scale
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
-        self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
-        self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
-        self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
-
-        self.scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-        self.scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-        self.out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
-        self.reg_f32_4 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
-        self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-        self.reg_bf16_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.BFloat16)
-
-    def _load_scale_vec4(self, row):
-        fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), self.reg_f32_4)
-        return Vec(fx.memref_load_vec(self.reg_f32_4))
-
-    def _load_scale_scalar(self, col):
-        fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), self.reg_f32_1)
-        return Vec(fx.memref_load_vec(self.reg_f32_1))[0]
-
-    def _store_bf16(self, value_bf16, c_index):
-        fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
-        fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
-
-    def store(self, c_frag, base_row, base_col):
-        a_scales = [
-            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
-        ]
-        b_scales = [
-            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
-        ]
-        for ti in range_constexpr(self.n_tiles_a):
-            row = base_row + ti * 16 + (self.lane_id // 16) * 4
-            for tj in range_constexpr(self.n_tiles_b):
-                col = base_col + tj * 16 + self.lane_id % 16
-                col_valid = col < self.c_cols
-                oob = fx.Int32(self.c_rows * self.c_cols)
-                vec_f32 = Vec(c_frag[self.c_idx_fn(ti, tj)])
-                for i in range_constexpr(4):
-                    scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
-                    c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
-
-
-def wait_barrier(count):
-    _llvm.inline_asm(
-        res=None,
-        operands_=[],
-        asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
-        constraints="",
-        has_side_effects=True,
-    )
-
-
-class Mfma16x16x128:
-    def __init__(self, n_tiles_a, n_tiles_b):
-        self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
-        self.n_tiles_a = n_tiles_a
-        self.n_tiles_b = n_tiles_b
-
-    def idx(self, i, j):
-        return i * self.n_tiles_b + j
-
-    def _make_operand_frag(self, value):
-        frag = fx.make_rmem_tensor(8, fx.Int32)
-        frag.store(Vec(value))
-        return frag
-
-    def _make_accum_frag(self, value):
-        frag = fx.make_rmem_tensor(4, fx.Float32)
-        frag.store(Vec(value))
-        return frag
-
-    def _do_mma(self, a, b, c):
-        a_frag = self._make_operand_frag(a)
-        b_frag = self._make_operand_frag(b)
-        c_frag = self._make_accum_frag(c)
-        fx.gemm(self.atom, c_frag, a_frag, b_frag, c_frag)
-        return c_frag.load().ir_value()
-
-    def call(self, a, b, c, *, set_prio=True):
-        assert len(a) == self.n_tiles_a
-        assert len(b) == self.n_tiles_b
-        assert len(c) == self.n_tiles_a * self.n_tiles_b
-
-        a_frags = [self._make_operand_frag(a[idx]) for idx in range_constexpr(self.n_tiles_a)]
-        b_frags = [self._make_operand_frag(b[idx]) for idx in range_constexpr(self.n_tiles_b)]
-        c_frags = [self._make_accum_frag(c[idx]) for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
-        if const_expr(set_prio):
-            rocdl.s_setprio(1)
-        for i in range_constexpr(self.n_tiles_a):
-            for j in range_constexpr(self.n_tiles_b):
-                cf = c_frags[self.idx(i, j)]
-                fx.gemm(self.atom, cf, a_frags[i], b_frags[j], cf)
-        if const_expr(set_prio):
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
-        return [c_frags[idx].load().ir_value() for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
-
-    def call_one(self, a, b, c, i, j):
-        assert i < self.n_tiles_a and j < self.n_tiles_b
-
-        return self._do_mma(a[i], b[j], c[self.idx(i, j)])

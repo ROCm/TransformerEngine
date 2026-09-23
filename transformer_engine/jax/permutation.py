@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -54,8 +56,10 @@ try:
     )
 
     _TRITON_PERMUTATION_AVAILABLE = True
-except ImportError:
+    _TRITON_PERMUTATION_IMPORT_ERROR = None
+except (ImportError, RuntimeError, ValueError) as _triton_permutation_import_error:
     _TRITON_PERMUTATION_AVAILABLE = False
+    _TRITON_PERMUTATION_IMPORT_ERROR = _triton_permutation_import_error
     make_row_id_map = None
     permute_with_mask_map = None
     permute_with_mask_map_and_pad = None
@@ -81,7 +85,7 @@ def _require_triton_permutation():
             " ``transformer_engine.jax.triton_extensions.permutation`` (which"
             " in turn requires ``triton``). Either install Triton or use"
             " PermutationBackend.PURE_JAX."
-        )
+        ) from _TRITON_PERMUTATION_IMPORT_ERROR
 
 
 __all__ = [
@@ -253,6 +257,7 @@ def _token_dispatch_fwd_rule(
     Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, bool],
 ]:
     """Forward pass rule for token_dispatch."""
+    _require_triton_permutation()
     # Validate input dimensions
     assert inp.ndim in [2, 3], f"inp must be 2D or 3D, got {inp.ndim}D"
     assert routing_map.ndim in [2, 3], f"routing_map must be 2D or 3D, got {routing_map.ndim}D"
@@ -470,6 +475,7 @@ def _token_combine_fwd_rule(
     ],
 ]:
     """Forward pass rule for token_combine."""
+    _require_triton_permutation()
     # Infer dimensions from row_id_map shape: [num_tokens, num_experts * 2 + 1]
     num_tokens = row_id_map.shape[0]
     num_experts = (row_id_map.shape[1] - 1) // 2
@@ -662,6 +668,7 @@ def _sort_chunks_by_index_fwd_rule(
     sorted_indices: jnp.ndarray,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int, int]]:
     """Forward pass rule for sort_chunks_by_index."""
+    _require_triton_permutation()
     # Validate input dimensions
     assert inp.ndim in [2, 3], f"inp must be 2D or 3D, got {inp.ndim}D"
 

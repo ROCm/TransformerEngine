@@ -52,7 +52,7 @@ DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
 class TestDistributedSelfAttn:
 
     def generate_collectives_count_ref(
-        self, mesh_shape, mesh_axes, mesh_resource, with_bias, shape, dtype
+        self, mesh_shape, mesh_axes, mesh_resource, with_bias, shape, dtype, softmax_type
     ):
         jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
         _, seqlen, heads, _ = shape
@@ -64,8 +64,13 @@ class TestDistributedSelfAttn:
 
         all_reduce_loss_bytes = 4  # 1 * FP32
         bias_bytes = int(with_bias) * (heads // tp_size) * seqlen * seqlen * jax_dtype.itemsize
-        allreduce_total_bytes = all_reduce_loss_bytes + (bias_bytes * is_dp_enabled)
-        # for loss and dbias
+        # dsoftmax_offset is [1, heads, 1, 1] and always FP32, regardless of the QKV dtype
+        with_softmax_offset = softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        softmax_offset_bytes = int(with_softmax_offset) * (heads // tp_size) * 4
+        allreduce_total_bytes = all_reduce_loss_bytes + (
+            (bias_bytes + softmax_offset_bytes) * is_dp_enabled
+        )
+        # for loss, dbias and dsoftmax_offset
         return generate_collectives_count(allreduce=allreduce_total_bytes, allgather=0, other=0)
 
     def impl_test_self_attn(
@@ -111,6 +116,7 @@ class TestDistributedSelfAttn:
             attn_bias_type != AttnBiasType.NO_BIAS,
             data_shape,
             dtype,
+            softmax_type,
         )
         runner = FusedAttnRunner(
             batch,
@@ -200,10 +206,23 @@ DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {
 
 class TestDistributedCrossAttn:
 
-    def generate_collectives_count_ref(self):
-        # for loss
+    def generate_collectives_count_ref(
+        self, mesh_shape, mesh_axes, mesh_resource, shape, softmax_type
+    ):
+        _, _, heads, _ = shape
+        is_dp_enabled = mesh_resource.dp_resource is not None
+        tp_size = 1
+        if mesh_resource.tpsp_resource is not None:
+            idx = mesh_axes.index(mesh_resource.tpsp_resource)
+            tp_size = mesh_shape[idx]
+
         all_reduce_loss_bytes = 4  # 1 * FP32
-        return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
+        # dsoftmax_offset is [1, heads, 1, 1] and always FP32, regardless of the QKV dtype
+        with_softmax_offset = softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        softmax_offset_bytes = int(with_softmax_offset) * (heads // tp_size) * 4
+        allreduce_total_bytes = all_reduce_loss_bytes + (softmax_offset_bytes * is_dp_enabled)
+        # for loss and dsoftmax_offset
+        return generate_collectives_count(allreduce=allreduce_total_bytes, allgather=0, other=0)
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_CROSS_ATTN_DATA_SHAPES)
@@ -256,7 +275,13 @@ class TestDistributedCrossAttn:
         ):
             pytest.skip("No FusedAttn backend found")
 
-        col_ref = self.generate_collectives_count_ref()
+        col_ref = self.generate_collectives_count_ref(
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            softmax_type,
+        )
         runner = FusedAttnRunner(
             batch,
             seqlen,

@@ -9,12 +9,9 @@ import os
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.utils import get_device_compute_capability
-
 from .exceptions import FlyDSLUnsupportedError
 
-from .bf16_gemm import bf16_matmul
-from .fp16_gemm import fp16_matmul
+from .half_prec_gemm import bf16_matmul, fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
@@ -25,6 +22,7 @@ from .mxfp8_gemm import mxfp8_matmul
 # integrations stabilize, factor the genuinely common pieces into a shared
 # GEMM wrapper utility module while preserving backend-specific layout and
 # storage canonicalization.
+
 
 def _product(shape):
     """Return the product of dimensions in ``shape``."""
@@ -63,28 +61,22 @@ def reinterpret_as_fp8_tensor(
     a: torch.Tensor,
     dtype: tex.DType,
 ) -> torch.Tensor:
-    """View TE's uint8 payload as the native torch FP8 dtype for this GPU."""
-    capability = get_device_compute_capability()
+    """View TE's uint8 payload as the native torch FP8 dtype.
 
-    # gfx950 uses OCP FP8. gfx942 and earlier ROCm architectures use FNUZ.
-    use_ocp_fp8 = capability == (9, 5)
-
+    FlyDSL dispatch is gated to gfx950 (CDNA4), which supports only OCP FP8
+    (e4m3fn / e5m2); the hardware has no FNUZ format. FNUZ is gfx94x-only, so
+    the fnuz torch dtypes cannot occur on this path. TODO: add the FNUZ mapping
+    when gfx942 support is added to the FlyDSL GEMM backends in a future PR.
+    """
     if dtype == tex.DType.kFloat8E4M3:
-        torch_dtype = (
-            torch.float8_e4m3fn
-            if use_ocp_fp8
-            else torch.float8_e4m3fnuz
-        )
+        torch_dtype = torch.float8_e4m3fn
     elif dtype == tex.DType.kFloat8E5M2:
-        torch_dtype = (
-            torch.float8_e5m2
-            if use_ocp_fp8
-            else torch.float8_e5m2fnuz
-        )
+        torch_dtype = torch.float8_e5m2
     else:
         raise TypeError(f"Unsupported TE FP8 dtype: {dtype}")
 
     return a.view(torch_dtype)
+
 
 def _validate_common_epilogue(
     *,
@@ -96,28 +88,64 @@ def _validate_common_epilogue(
     alpha,
     beta,
 ):
-    """Validate features not yet implemented by the FlyDSL GEMM backend."""
+    """Validate features not yet implemented by the FlyDSL GEMM backend.
+
+    Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
+    backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) and
+    DGELU (fused GELU gradient) are not implemented anywhere yet.
+
+    Unsupported configurations raise ``FlyDSLUnsupportedError`` so
+    ``general_gemm`` transparently falls back to the C++ backend rather than
+    crashing -- these are valid GEMM requests, just not ones FlyDSL can serve.
+    """
     if quantizer is not None:
-        raise NotImplementedError(
-            "FlyDSL GEMM output quantization is not implemented"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM output quantization is not implemented")
 
     if float(alpha) != 1.0 or float(beta) != 0.0:
-        raise NotImplementedError(
-            "FlyDSL GEMM currently supports only alpha=1 and beta=0"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1 and beta=0")
 
     # TODO: Add accumulate option
     if accumulate:
-        raise NotImplementedError(
-            "FlyDSL GEMM accumulation is not implemented"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM accumulation is not implemented")
 
-    # TODO: Add fused bias and BGRADB epilogues
-    if bias is not None and bias.numel() != 0:
-        raise NotImplementedError(
-            "FlyDSL GEMM bias is not implemented"
-        )
+    # Forward BIAS is implemented across all backends; the fused bias-gradient
+    # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
+    if grad and bias is not None and bias.numel() != 0:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM fused bias gradient (BGRADB) is not implemented")
+
+    # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
+    # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
+    if gelu and grad:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM fused GELU gradient (DGELU) is not implemented")
+
+
+def _resolve_bias(bias, n):
+    """Normalize a TE bias into the kernel's ``(epilogue, bias_arg)`` contract.
+
+    FlyDSL kernels index bias by the output-feature (N) axis and expect a
+    contiguous length-N fp32 vector. TE may hand bias in the output dtype.
+    Returns ``("DEFAULT", None)`` when no bias is present.
+    """
+    if bias is None or bias.numel() == 0:
+        return "DEFAULT", None
+    if bias.numel() != n:
+        raise ValueError(f"FlyDSL GEMM bias length {bias.numel()} != N (out_features) {n}")
+    return "BIAS", bias.reshape(-1).to(torch.float32).contiguous()
+
+
+def _resolve_epilogue(bias, n, gelu=False):
+    """Resolve the ``(epilogue, bias_arg)`` contract including fused GELU.
+
+    Combines the bias vector (see :func:`_resolve_bias`) with an optional
+    forward GELU into one of DEFAULT / BIAS / GELU_AUX / GELU_AUX_BIAS. The
+    GELU epilogues additionally produce a pre-activation aux output, which the
+    caller allocates and passes to the kernel.
+    """
+    bias_epilogue, bias_arg = _resolve_bias(bias, n)
+    has_bias = bias_epilogue == "BIAS"
+    if gelu:
+        return ("GELU_AUX_BIAS" if has_bias else "GELU_AUX"), bias_arg
+    return bias_epilogue, bias_arg
 
 
 def _classify_input(t):
@@ -127,6 +155,7 @@ def _classify_input(t):
         from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
             Float8TensorStorage,
         )
+
         if isinstance(t, (Float8Tensor, Float8TensorStorage)):
             return "fp8", t
     except ImportError:
@@ -137,6 +166,7 @@ def _classify_input(t):
         from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
             MXFP8TensorStorage,
         )
+
         if isinstance(t, (MXFP8Tensor, MXFP8TensorStorage)):
             return "mxfp8", t
     except ImportError:
@@ -146,12 +176,13 @@ def _classify_input(t):
         from transformer_engine.pytorch.quantized_tensor import (
             QuantizedTensorStorage,
         )
+
         if isinstance(t, QuantizedTensorStorage):
             raise ValueError(
-                f"The FlyDSL GEMM backend does not support "
+                "The FlyDSL GEMM backend does not support "
                 f"{type(t).__name__}. Only Float8Tensor / "
-                f"Float8TensorStorage and MXFP8Tensor / "
-                f"MXFP8TensorStorage are implemented."
+                "Float8TensorStorage and MXFP8Tensor / "
+                "MXFP8TensorStorage are implemented."
             )
     except ImportError:
         pass
@@ -162,17 +193,13 @@ def _classify_input(t):
 def _reinterpret_fp8_payload(data, fp8_dtype, name):
     """Reinterpret TE's uint8 payload using its ``tex.DType`` metadata."""
     if data is None:
-        raise FlyDSLUnsupportedError(
-            f"{name} does not contain the required FP8 payload"
-        )
+        raise FlyDSLUnsupportedError(f"{name} does not contain the required FP8 payload")
 
     if fp8_dtype not in (
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
     ):
-        raise TypeError(
-            f"{name} has unsupported TE FP8 dtype metadata: {fp8_dtype}"
-        )
+        raise TypeError(f"{name} has unsupported TE FP8 dtype metadata: {fp8_dtype}")
 
     # TE stores Float8Tensor payloads as uint8. Use TE's shared conversion
     # helper so ROCm's correct native torch FP8 type is selected from tex.DType.
@@ -239,79 +266,18 @@ def _fp8_scale_debug(name: str, scale: torch.Tensor) -> None:
     )
 
 
-def _canonicalize_blas_pair(
-    A_data: torch.Tensor,
-    transa: bool,
-    B_data: torch.Tensor,
-    transb: bool,
-):
-    """Swap TE BLAS operand ownership without changing either tensor layout."""
-    del transa, transb
-    return B_data, A_data
-
-
 def _flatten_rowwise(t: torch.Tensor, name: str) -> torch.Tensor:
     """Flatten all leading dimensions while preserving the final dimension."""
     if t.ndim < 2:
-        raise ValueError(
-            f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}"
-        )
+        raise ValueError(f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}")
     return t.reshape(-1, t.shape[-1])
 
 
 def _flatten_columnwise(t: torch.Tensor, name: str) -> torch.Tensor:
     """Flatten TE columnwise storage while preserving its leading dimension."""
     if t.ndim < 2:
-        raise ValueError(
-            f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}"
-        )
+        raise ValueError(f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}")
     return t.reshape(t.shape[0], -1)
-
-
-def _canonicalize_blas_operands(
-    A_data: torch.Tensor,
-    transa: bool,
-    B_data: torch.Tensor,
-    transb: bool,
-):
-    """Convert TE's BLAS-shaped operands to FlyDSL row-major operands.
-
-    TE's generic GEMM interface follows BLAS column-major interpretation.
-    FlyDSL kernels consume ordinary row-major matrices:
-
-        a_flydsl: [M, K]
-        b_flydsl: [K, N]
-
-    Operand ownership is swapped without creating tensor transpose views:
-
-        a_flydsl = B
-        b_flydsl = A
-    """
-    if transa and transb:
-        raise NotImplementedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
-
-    A_flat = _flatten_rowwise(A_data, "A")
-    B_flat = _flatten_rowwise(B_data, "B")
-
-    a_flydsl, b_flydsl = _canonicalize_blas_pair(
-        A_flat,
-        transa,
-        B_flat,
-        transb,
-    )
-
-    m, k = a_flydsl.shape
-    kb, n = b_flydsl.shape
-    if kb != k:
-        layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
-        raise ValueError(
-            f"FlyDSL {layout} canonicalization produced incompatible operands: "
-            f"{tuple(a_flydsl.shape)} @ {tuple(b_flydsl.shape)}"
-        )
-
-    return a_flydsl, b_flydsl, m, n, k
 
 
 def _validate_or_allocate_output(
@@ -326,21 +292,15 @@ def _validate_or_allocate_output(
         return torch.empty(shape, dtype=dtype, device=device)
 
     if tuple(D.shape) != tuple(shape):
-        raise ValueError(
-            f"D shape {tuple(D.shape)} does not match expected {tuple(shape)}"
-        )
+        raise ValueError(f"D shape {tuple(D.shape)} does not match expected {tuple(shape)}")
     if D.dtype != dtype:
-        raise TypeError(
+        raise FlyDSLUnsupportedError(
             f"FlyDSL {backend_name} requires {dtype} output, got {D.dtype}"
         )
     if D.device != device:
-        raise ValueError(
-            f"D must be on {device}, got {D.device}"
-        )
+        raise ValueError(f"D must be on {device}, got {D.device}")
     if not D.is_contiguous():
-        raise ValueError(
-            f"FlyDSL {backend_name} requires contiguous output storage"
-        )
+        raise FlyDSLUnsupportedError(f"FlyDSL {backend_name} requires contiguous output storage")
     return D
 
 
@@ -352,6 +312,8 @@ def _run_bf16_gemm(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
+    gelu=False,
 ):
     """Dispatch BF16 using the original row-major operand allocations.
 
@@ -365,13 +327,10 @@ def _run_bf16_gemm(
         raise TypeError("FlyDSL BF16 GEMM expects plain torch.Tensor operands")
     if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
         raise TypeError(
-            "FlyDSL BF16 GEMM requires torch.bfloat16 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
+            f"FlyDSL BF16 GEMM requires torch.bfloat16 inputs, got A={A.dtype} and B={B.dtype}"
         )
     if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
+        raise ValueError(f"A and B must be on the same device, got {A.device} and {B.device}")
 
     dispatch = {
         (True, False): "TN",
@@ -438,6 +397,8 @@ def _run_bf16_gemm(
         backend_name=f"BF16 {layout}",
     )
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     bf16_matmul(
         a_flydsl,
         b_flydsl,
@@ -446,9 +407,11 @@ def _run_bf16_gemm(
         m=m,
         n=n,
         k=k,
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
-
+    return D, aux
 
 
 def _run_fp16_gemm(
@@ -459,6 +422,8 @@ def _run_fp16_gemm(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
+    gelu=False,
 ):
     """Dispatch FP16 using the original row-major operand allocations.
 
@@ -472,13 +437,10 @@ def _run_fp16_gemm(
         raise TypeError("FlyDSL FP16 GEMM expects plain torch.Tensor operands")
     if A.dtype != torch.float16 or B.dtype != torch.float16:
         raise TypeError(
-            "FlyDSL FP16 GEMM requires torch.float16 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
+            f"FlyDSL FP16 GEMM requires torch.float16 inputs, got A={A.dtype} and B={B.dtype}"
         )
     if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
+        raise ValueError(f"A and B must be on the same device, got {A.device} and {B.device}")
 
     dispatch = {
         (True, False): "TN",
@@ -545,6 +507,8 @@ def _run_fp16_gemm(
         backend_name=f"FP16 {layout}",
     )
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     fp16_matmul(
         a_flydsl,
         b_flydsl,
@@ -553,8 +517,11 @@ def _run_fp16_gemm(
         m=m,
         n=n,
         k=k,
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _run_fp32_gemm(
@@ -563,64 +530,64 @@ def _run_fp32_gemm(
     B,
     transb,
     D,
+    *,
+    bias=None,
+    gelu=False,
 ):
     """Normalize FP32 TN/NN/NT inputs to the current kernel's TN interface.
 
-    The existing FP32 entry point expects ordinary row-major GEMM operands:
+    The private FP32 core is TN-only and, like every other dtype backend,
+    consumes its operands as:
 
         a_tn: [M, K]
-        b_tn: [K, N]
+        b_tn: [N, K]
 
     TE provides BLAS-shaped operands, so ownership is swapped and only the
     operands whose BLAS transpose flags require it are materialized:
 
         TN: a_tn = B
-            b_tn = A.T
+            b_tn = A
 
         NN: a_tn = B
-            b_tn = A
+            b_tn = A.T
 
         NT: a_tn = B.T
-            b_tn = A
+            b_tn = A.T
 
     ``transpose(...).contiguous()`` is therefore used only for the FP32
-    operands that are not already in the current TN kernel orientation.
-    BF16/FP16/FP8/MXFP8 dispatch is unchanged.
+    operands that are not already in the TN kernel orientation. The core
+    performs no internal transpose. BF16/FP16/FP8/MXFP8 dispatch is unchanged.
     """
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
         raise TypeError("FlyDSL FP32 GEMM expects plain torch.Tensor operands")
     if A.dtype != torch.float32 or B.dtype != torch.float32:
         raise TypeError(
-            "FlyDSL FP32 GEMM requires torch.float32 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
+            f"FlyDSL FP32 GEMM requires torch.float32 inputs, got A={A.dtype} and B={B.dtype}"
         )
     if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
+        raise ValueError(f"A and B must be on the same device, got {A.device} and {B.device}")
     if bool(transa) and bool(transb):
-        raise FlyDSLUnsupportedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
     output_shape = _get_gemm_output_shape(A, transa, B, transb)
 
     A_flat = _flatten_rowwise(A, "A")
     B_flat = _flatten_rowwise(B, "B")
 
-    # Standard BLAS-column-major -> row-major conversion:
-    # swap operands, then apply the original operand transpose flags.
-    # TODO: Optimize FP32 NN/NT execution. These layouts are currently
-    # materialized into the TN kernel contract with explicit transpose copies.
+    # Swap TE's BLAS operands into the core's TN ownership and materialize the
+    # NN/NT layouts into the [M, K] x [N, K] kernel contract with explicit
+    # transpose copies here in the wrapper. The core (like every other dtype
+    # backend) consumes b as [N, K] directly and performs no internal transpose.
+    # TODO: Optimize FP32 NN/NT execution.
     if bool(transb):
         a_tn = B_flat.transpose(0, 1).contiguous()
     else:
         a_tn = B_flat
 
     if bool(transa):
-        b_tn = A_flat.transpose(0, 1).contiguous()
-    else:
         b_tn = A_flat
+    else:
+        b_tn = A_flat.transpose(0, 1).contiguous()
 
     if not a_tn.is_contiguous():
         a_tn = a_tn.contiguous()
@@ -629,12 +596,12 @@ def _run_fp32_gemm(
 
     if a_tn.ndim != 2 or b_tn.ndim != 2:
         raise RuntimeError(
-            f"FlyDSL FP32 TN normalization produced rank mismatch: "
+            "FlyDSL FP32 TN normalization produced rank mismatch: "
             f"a={tuple(a_tn.shape)}, b={tuple(b_tn.shape)}"
         )
 
     m, k = a_tn.shape
-    kb, n = b_tn.shape
+    n, kb = b_tn.shape
     if kb != k:
         layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
         raise FlyDSLUnsupportedError(
@@ -656,22 +623,24 @@ def _run_fp32_gemm(
         backend_name="FP32 via TN core",
     )
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     fp32_matmul(
         a_tn,
         b_tn,
         D.view(m, n),
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
-
+    return D, aux
 
 
 def _get_fp8_rowwise_payload(t, name):
     """Return TE's existing rowwise ``_data`` payload without copying."""
     data = getattr(t, "_data", None)
     if data is None:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 requires existing {name} rowwise (_data) storage"
-        )
+        raise FlyDSLUnsupportedError(f"FlyDSL FP8 requires existing {name} rowwise (_data) storage")
     return _reinterpret_fp8_payload(
         data,
         getattr(t, "_fp8_dtype", None),
@@ -753,9 +722,7 @@ def _select_mxfp8_data_and_scale(
     )
 
     if data is None or scale is None:
-        raise RuntimeError(
-            f"{name} does not contain required {orientation} MXFP8 data and scales"
-        )
+        raise RuntimeError(f"{name} does not contain required {orientation} MXFP8 data and scales")
 
     _mxfp8_debug(
         f"{name} selected data shape={tuple(data.shape)}, "
@@ -777,10 +744,9 @@ def _mxfp8_logical_shape(t, name: str) -> torch.Size:
     if data is None:
         data = getattr(t, "_columnwise_data", None)
     if data is None:
-        raise FlyDSLUnsupportedError(
-            f"{name} has neither rowwise nor columnwise MXFP8 data"
-        )
+        raise FlyDSLUnsupportedError(f"{name} has neither rowwise nor columnwise MXFP8 data")
     return torch.Size(data.shape)
+
 
 def _flatten_mxfp8_scale(
     t: torch.Tensor,
@@ -797,10 +763,7 @@ def _flatten_mxfp8_scale(
         [K/32, ...] -> [K/32, outer]
     """
     if t.ndim < 2:
-        raise ValueError(
-            f"FlyDSL MXFP8 expects {name} scale rank >= 2, "
-            f"got {tuple(t.shape)}"
-        )
+        raise ValueError(f"FlyDSL MXFP8 expects {name} scale rank >= 2, got {tuple(t.shape)}")
 
     original_shape = tuple(t.shape)
     if source_colwise:
@@ -826,6 +789,8 @@ def _run_mxfp8(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
+    gelu=False,
 ):
     """Dispatch MXFP8 through exact TN/NN/NT physical contracts.
 
@@ -851,10 +816,7 @@ def _run_mxfp8(
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
     )
-    if (
-        a_fp8_dtype not in supported_fp8_dtypes
-        or b_fp8_dtype not in supported_fp8_dtypes
-    ):
+    if a_fp8_dtype not in supported_fp8_dtypes or b_fp8_dtype not in supported_fp8_dtypes:
         raise FlyDSLUnsupportedError(
             "FlyDSL MXFP8 supports E4M3 and E5M2 independently for A/B; "
             f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
@@ -979,9 +941,7 @@ def _run_mxfp8(
         )
 
     if k % 32 != 0:
-        raise ValueError(
-            f"K={k} must be divisible by MXFP8 scale group size 32"
-        )
+        raise FlyDSLUnsupportedError(f"K={k} must be divisible by MXFP8 scale group size 32")
 
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
@@ -1029,6 +989,11 @@ def _run_mxfp8(
         f"M={m}, N={n}, K={k}"
     )
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    # GELU_AUX modes emit a pre-activation aux output (M x N, output dtype)
+    # for the backward pass; the wrapper allocates it and the kernel fills it
+    # in place. Return it so the dispatcher can hand it back as gelu_input.
+    aux = torch.empty_like(D) if gelu else None
     mxfp8_matmul(
         a_flydsl,
         a_scale,
@@ -1036,8 +1001,11 @@ def _run_mxfp8(
         b_scale,
         D.view(m, n),
         layout=kernel_layout,
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1087,9 +1055,7 @@ def _select_fp8_storage_for_layout(A, transa, B, transb):
         B_data = _flatten_columnwise(B_payload, B_storage)
 
     else:
-        raise FlyDSLUnsupportedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
     return (
         A_data,
@@ -1109,6 +1075,8 @@ def _run_fp8(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
+    gelu=False,
 ):
     """Normalize tensor-wise FP8 storage and invoke the common FP8 core."""
     supported_fp8_dtypes = (
@@ -1117,10 +1085,7 @@ def _run_fp8(
     )
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
     b_fp8_dtype = getattr(B, "_fp8_dtype", None)
-    if (
-        a_fp8_dtype not in supported_fp8_dtypes
-        or b_fp8_dtype not in supported_fp8_dtypes
-    ):
+    if a_fp8_dtype not in supported_fp8_dtypes or b_fp8_dtype not in supported_fp8_dtypes:
         raise FlyDSLUnsupportedError(
             "FlyDSL FP8 supports E4M3 and E5M2 independently for A/B; "
             f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
@@ -1231,14 +1196,19 @@ def _run_fp8(
     _fp8_debug(f"derived M={m}, N={n}, K={k}")
     _fp8_tensor_debug("output/D", D)
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     matmul(
         a_flydsl,
         a_scale,
         b_flydsl,
         b_scale,
         D.view(m, n),
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def te_generic_gemm_flydsl(
@@ -1281,20 +1251,33 @@ def te_generic_gemm_flydsl(
       - FP16 input with FP16, BF16, or FP32 output
       - FP32 input with FP32 output
     """
+    # These are hints or unused given the epilogue/dtype guards below: bias_type
+    # is inferred, gelu_in is only for DGELU (rejected), and FlyDSL has no
+    # separate workspace or split-accumulator path.
     del bias_type
     del gelu_in
     del workspace
     del workspaceSize
     del use_split_accumulator
-    del comm_overlap
-    del comm_type
-    del extra_output
-    del bulk_overlap
+
+    # Comm+GEMM overlap (tensor-parallel) is not implemented. These carry real
+    # side effects -- extra_output is the reduce-scatter destination -- so they
+    # must be rejected, not dropped: silently discarding them would no-op the
+    # collective and return wrong results. Raise FlyDSLUnsupportedError so
+    # general_gemm falls back to the C++ backend.
+    if (
+        comm_overlap is not None
+        or comm_type is not None
+        or extra_output is not None
+        or bulk_overlap
+    ):
+        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support comm+GEMM overlap")
 
     if transa and transb:
-        raise NotImplementedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
+        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
+
+    a_kind, _ = _classify_input(A)
+    b_kind, _ = _classify_input(B)
 
     _validate_common_epilogue(
         quantizer=quantizer,
@@ -1306,20 +1289,21 @@ def te_generic_gemm_flydsl(
         beta=beta,
     )
 
-    a_kind, _ = _classify_input(A)
-    b_kind, _ = _classify_input(B)
-
     if a_kind == "mxfp8" or b_kind == "mxfp8":
-         # Validate both are MXFP8
+        # Validate both are MXFP8
         if a_kind != b_kind:
-            raise ValueError(
-                "Mixed MXFP8 and non-MXFP8 FlyDSL GEMM inputs are not supported"
-            )
+            raise ValueError("Mixed MXFP8 and non-MXFP8 FlyDSL GEMM inputs are not supported")
 
         # Sanity: both operands must have at least one pre-quantized copy.
-        if getattr(A, '_rowwise_data', None) is None and getattr(A, '_columnwise_data', None) is None:
+        if (
+            getattr(A, "_rowwise_data", None) is None
+            and getattr(A, "_columnwise_data", None) is None
+        ):
             raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
-        if getattr(B, '_rowwise_data', None) is None and getattr(B, '_columnwise_data', None) is None:
+        if (
+            getattr(B, "_rowwise_data", None) is None
+            and getattr(B, "_columnwise_data", None) is None
+        ):
             raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
 
         mxfp8_output_dtypes = {
@@ -1329,26 +1313,25 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in mxfp8_output_dtypes:
-            raise NotImplementedError(
-                "FlyDSL MXFP8 supports FP16, BF16, or FP32 output, "
-                f"got {output_dtype}"
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP8 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
 
-        D = _run_mxfp8(
+        D, gelu_input = _run_mxfp8(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=mxfp8_output_dtypes[output_dtype],
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if a_kind == "fp8" or b_kind == "fp8":
         if a_kind != b_kind:
-            raise ValueError(
-                "Mixed regular FP8 and non-FP8 FlyDSL GEMM inputs are not supported"
-            )
+            raise ValueError("Mixed regular FP8 and non-FP8 FlyDSL GEMM inputs are not supported")
 
         fp8_output_dtypes = {
             None: torch.float16,
@@ -1357,30 +1340,28 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in fp8_output_dtypes:
-            raise NotImplementedError(
-                "FlyDSL tensor-wise FP8 supports FP16, BF16, or FP32 output, "
-                f"got {output_dtype}"
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL tensor-wise FP8 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
 
-        D = _run_fp8(
+        D, gelu_input = _run_fp8(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=fp8_output_dtypes[output_dtype],
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if a_kind != "regular" or b_kind != "regular":
         raise TypeError(
-            "Unsupported FlyDSL GEMM operand types: "
-            f"{type(A).__name__} and {type(B).__name__}"
+            f"Unsupported FlyDSL GEMM operand types: {type(A).__name__} and {type(B).__name__}"
         )
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
-        raise TypeError(
-            "FlyDSL regular GEMM expects plain torch.Tensor operands"
-        )
+        raise TypeError("FlyDSL regular GEMM expects plain torch.Tensor operands")
 
     if A.dtype == torch.bfloat16 and B.dtype == torch.bfloat16:
         bf16_output_dtypes = {
@@ -1390,19 +1371,20 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in bf16_output_dtypes:
-            raise NotImplementedError(
-                "FlyDSL BF16 supports FP16, BF16, or FP32 output, "
-                f"got {output_dtype}"
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL BF16 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
-        D = _run_bf16_gemm(
+        D, gelu_input = _run_bf16_gemm(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=bf16_output_dtypes[output_dtype],
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if A.dtype == torch.float16 and B.dtype == torch.float16:
         fp16_output_dtypes = {
@@ -1412,36 +1394,38 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in fp16_output_dtypes:
-            raise NotImplementedError(
-                "FlyDSL FP16 supports FP16, BF16, or FP32 output, "
-                f"got {output_dtype}"
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL FP16 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
-        D = _run_fp16_gemm(
+        D, gelu_input = _run_fp16_gemm(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=fp16_output_dtypes[output_dtype],
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if A.dtype == torch.float32 and B.dtype == torch.float32:
         if output_dtype not in (None, tex.DType.kFloat32):
-            raise NotImplementedError(
-                "FlyDSL FP32 currently supports only FP32 output, "
-                f"got {output_dtype}"
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL FP32 currently supports only FP32 output, got {output_dtype}"
             )
-        D = _run_fp32_gemm(
+        D, gelu_input = _run_fp32_gemm(
             A,
             transa,
             B,
             transb,
             D,
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
-    raise NotImplementedError(
+    raise FlyDSLUnsupportedError(
         "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, "
         "BF16, FP16, or FP32 inputs; "
         f"got A={A.dtype} and B={B.dtype}"

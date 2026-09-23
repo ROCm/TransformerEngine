@@ -18,6 +18,7 @@ from ...module.base import (
     _2X_ACC_WGRAD,
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    ub_overlap_disabled,
     using_cublasmp_backend,
 )
 from ...quantized_tensor import Quantizer
@@ -677,6 +678,12 @@ class UserbuffersBackwardLinear(FusedOperation):
                 continue
             linear = window[0]
             if linear._userbuffers_options is None:
+                continue
+            # No buffer was registered for these names, so there is nothing to overlap with.
+            comm_name = linear._userbuffers_options["comm_name"]
+            if ub_overlap_disabled(comm_name + "_dgrad") or ub_overlap_disabled(
+                comm_name + "_wgrad"
+            ):
                 continue
 
             # Check if next op is bias

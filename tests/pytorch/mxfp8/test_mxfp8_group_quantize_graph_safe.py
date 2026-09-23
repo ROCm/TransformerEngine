@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,12 +11,19 @@ from transformer_engine.pytorch import MXFP8Quantizer
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import random
 import math
 
 from mxfp8_utils import swizzle_mxfp8_scale, get_mxfp8_scale_shape_no_padding
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
+
+
+_ROCM_NO_SWIZZLE_FUSION = (
+    "MXFP8 scale swizzle fusion (optimize_for_gemm) is not implemented on ROCm;"
+    " the quantizer silently returns unswizzled scales"
+)
 
 
 def generate_random_multiples_sum(total=8192, n=4, multiple=64):
@@ -368,6 +377,9 @@ def test_grouped_tensor_mxfp8_versus_reference(
     optimize_for_gemm: bool,
 ) -> None:
 
+    if optimize_for_gemm and IS_HIP_EXTENSION:
+        pytest.skip(_ROCM_NO_SWIZZLE_FUSION)
+
     split_sections = generate_split_sections(M, N, edge_cases)
 
     if quantize_mode == "rowwise_only":
@@ -432,6 +444,9 @@ def test_grouped_tensor_mxfp8_with_paged_stashing(
     quantize_mode: str,
     optimize_for_gemm: bool,
 ) -> None:
+
+    if optimize_for_gemm and IS_HIP_EXTENSION:
+        pytest.skip(_ROCM_NO_SWIZZLE_FUSION)
 
     # paged stashing means that the sum of total tokens is less than
     # or equal to the buffer size, you can have buffer [2048, 1024]

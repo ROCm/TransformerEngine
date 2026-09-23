@@ -6,6 +6,7 @@
 
 import math
 import os
+import warnings
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -17,6 +18,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -890,7 +892,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path, weights_only=False))
+        loaded_state_dict = torch.load(path, weights_only=False)
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        try:
+            block.load_state_dict(loaded_state_dict)
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
         torch.set_rng_state(_cpu_rng_state)
         torch.cuda.set_rng_state(_cuda_rng_state)
 
@@ -1343,19 +1353,37 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         recipe.MXFP8BlockScaling(),
     ],
 )
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_linear_accuracy_flydsl(
     dtype,
     bs,
     model,
     fp8_recipe,
+    fp8_model_params,
 ):
     """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
 
-    if not IS_HIP_EXTENSION:
-        pytest.skip("FlyDSL GEMM is only supported on HIP.")
+    # FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py. On any
+    # other arch NVTE_GEMM_BACKEND=FLYDSL is a no-op and the FlyDSL path would
+    # just be the native backend compared against itself, so skip rather than
+    # pass vacuously.
+    if not IS_HIP_EXTENSION or get_device_compute_capability() != (9, 5):
+        pytest.skip("FlyDSL GEMM is only supported on gfx950.")
+    # flydsl is only installed when the FlyDSL backend is built in; without it
+    # the lazy import in general_gemm raises, so skip instead of erroring.
+    pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
 
     fp8 = fp8_recipe is not None
     config = model_configs[model]
+
+    # Low-precision (fp8) weight init only makes sense under an fp8 recipe;
+    # without one it is identical to the fp8_model_params=False run.
+    if fp8_model_params and not fp8:
+        pytest.skip("fp8_model_params requires an FP8 recipe.")
+
+    # "small" is the designated fallback case (not a config this PR claims to
+    # support); every other model is expected to run on FlyDSL.
+    expect_fallback = model == "small"
 
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         if not mxfp8_available:
@@ -1366,9 +1394,13 @@ def test_linear_accuracy_flydsl(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    # Validate the GEMM backend, not quantized parameter storage.
-    # FlyDSL GEMM does not currently support bias.
-    with quantized_model_init(enabled=False, recipe=fp8_recipe):
+    # fp8_model_params controls low-precision (fp8) weight storage; the FlyDSL
+    # path is exercised both with high-precision params (fp8 autocast only) and
+    # fp8-initialized params (fp8 init + fp8 autocast).
+    # bias=False: FlyDSL implements the forward BIAS epilogue but not the fused
+    # bias-gradient (BGRADB), so a bias=True backward wgrad GEMM would fall back
+    # to the native backend on the non-fp8 path.
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=fp8_recipe):
         linear_ref = Linear(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1404,7 +1436,7 @@ def test_linear_accuracy_flydsl(
 
     try:
         # Native TE backend.
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
 
         reset_rng_states()
@@ -1417,22 +1449,37 @@ def test_linear_accuracy_flydsl(
         torch.cuda.synchronize()
 
         # FlyDSL backend.
-        os.environ["NVTE_USE_FLYDSL"] = "1"
+        os.environ["NVTE_GEMM_BACKEND"] = "FLYDSL"
         os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
 
         reset_rng_states()
         FP8GlobalStateManager.reset()
 
-        with autocast(enabled=fp8, recipe=fp8_recipe):
-            out_flydsl = linear_flydsl(inp_flydsl)
+        # Capture the [FLYDSL WARNING] fallback notices emitted by
+        # cpp_extensions/gemm.py so we can tell whether FlyDSL actually ran.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with autocast(enabled=fp8, recipe=fp8_recipe):
+                out_flydsl = linear_flydsl(inp_flydsl)
 
-        out_flydsl.sum().backward()
-        torch.cuda.synchronize()
+            out_flydsl.sum().backward()
+            torch.cuda.synchronize()
+
+        fell_back = any("[FLYDSL WARNING]" in str(w.message) for w in caught)
 
     finally:
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
+
+    # A silent fallback on a supported config means FlyDSL never ran, so the
+    # correctness asserts below would pass vacuously (native vs native).
+    if not expect_fallback and fell_back:
+        pytest.fail(
+            "FlyDSL GEMM unexpectedly fell back to the native backend for "
+            f"model={model}, dtype={dtype}, fp8_recipe={fp8_recipe}; "
+            "the FlyDSL path was not exercised."
+        )
 
     tols = dtype_tols(dtype)
     atol = tols["atol"]
@@ -2270,8 +2317,25 @@ def test_gpt_cuda_graph(dtype, bs, model):
         for param1, param2 in zip(block.parameters(), graphed_block.parameters()):
             param2.copy_(param1)
 
-    out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
-    graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    # WAR (ROCm): torch>=2.12 (pytorch/pytorch#179053) makes hipBLASLt handles
+    # per-(device, stream). The graph-capture stream's handle is created lazily
+    # during capture, and hipblasLtCreate performs an internal hipMalloc that is
+    # illegal mid-capture, failing with HIP error 900 ("operation not permitted
+    # when stream is capturing"). The capture_begin pre-init
+    # (pytorch/pytorch#180692) only covers the calling thread, not the autograd
+    # backward thread, so torch's own bmm in the captured backward still trips it.
+    # Route torch's matmul/bmm off hipBLASLt for this test until PyTorch
+    # extends the pre-init to cover it.
+    _prev_blas_library = None
+    if IS_HIP_EXTENSION:
+        _prev_blas_library = torch.backends.cuda.preferred_blas_library()
+        torch.backends.cuda.preferred_blas_library("cublas")
+    try:
+        out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
+        graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    finally:
+        if _prev_blas_library is not None:
+            torch.backends.cuda.preferred_blas_library(_prev_blas_library)
     params = list(block.parameters())
     graphed_params = list(graphed_block.parameters())
 

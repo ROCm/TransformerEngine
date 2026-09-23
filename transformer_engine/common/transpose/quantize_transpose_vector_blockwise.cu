@@ -147,7 +147,7 @@ Step 3 (if columnwise transpose is False, COMPACT format): Skip Transpose, cast 
 */
 // clang-format on
 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__GFX12__)
 constexpr size_t kThreadsPerWarp = 64;
 #else
 constexpr size_t kThreadsPerWarp = 32;
@@ -159,7 +159,7 @@ constexpr int kNVecIn = 8;     // The number of elements each LDG touches
 constexpr int kNVecOut = 16;   // The number of elements each STG touches
 constexpr int kNVecSMem = 2;   // The number of elements each LDS/STS touches
 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__GFX12__)
 constexpr int kThreadsPerBlock = 512;  // Thread block size, 8 warps (wave64) in total
 #else
 constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
