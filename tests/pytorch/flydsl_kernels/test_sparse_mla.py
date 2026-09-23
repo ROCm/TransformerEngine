@@ -301,3 +301,15 @@ def test_disabled_without_env_flag():
     idx = torch.zeros(8, 32, device="cuda", dtype=torch.int32)
     with pytest.raises(FlyDSLUnsupportedError, match="NVTE_USE_FLYDSL"):
         sparse_mla_attn_fwd(q, kv, idx)
+
+
+@requires_sparse_mla_support
+@pytest.mark.parametrize("installed", ["0.2.4", "0.4.0"])
+def test_rejects_unsupported_flydsl_version(monkeypatch, installed):
+    """An out-of-range flydsl is refused before the kernel module is imported."""
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: installed)
+    q, kv, idx = make_inputs(64, 64, 256, 64)
+    with pytest.raises(FlyDSLUnsupportedError, match=f"flydsl {installed} is installed"):
+        sparse_mla_attn_fwd(q, kv, idx)

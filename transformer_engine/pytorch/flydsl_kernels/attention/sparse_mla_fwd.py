@@ -35,9 +35,15 @@ transposed via ``ds_read_tr16`` for PV).
    by ~40%). Callers must fold RoPE into the 512-wide latent themselves; this is
    **not** a drop-in MLA forward.
 
-Kept deliberately close to upstream so re-syncs stay cheap: the kernel body is
-byte-identical to the pinned commit. Only the header, this docstring, and the
-host-side dispatch (moved to ``attention_wrappers.py``) differ.
+Kept deliberately close to upstream so re-syncs stay cheap. Beyond the header,
+this docstring, and the host-side dispatch (moved to ``attention_wrappers.py``),
+the only difference from the pinned commit is a FlyDSL 0.3 port (upstream
+targets FlyDSL 0.2.x, whose ``flydsl.expr.buffer_ops`` 0.3 no longer ships):
+global loads/stores use the 0.3 ``make_buffer_tensor`` + ``BufferCopy`` copy-atom
+API, and the LDS pointers for ``ds_read_tr16`` come from a local ``_lds_ptr``.
+The access pattern (offsets, widths, descriptor byte extents) is unchanged, and
+the port was verified bitwise-identical to the 0.2.x kernel on every dispatch
+path. The kernel body is otherwise byte-identical.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -53,7 +59,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
@@ -177,25 +183,44 @@ def build_fwd(
         head_wave_base = hg * fx.Index(BLOCK_H) + wave * fx.Index(HPW)
         head_A = head_wave_base + lo
 
-        q_rsrc = buffer_ops.create_buffer_resource(
-            Q, max_size=False, num_records_bytes=_raw(fx.Index(T) * Hn * fx.Index(DQK * 2))
-        )
-        kv_rsrc = buffer_ops.create_buffer_resource(
-            KV, max_size=False, num_records_bytes=_raw(fx.Index(NKV) * fx.Index(DQK * 2))
-        )
-        tk_rsrc = buffer_ops.create_buffer_resource(
-            TOPK, max_size=False, num_records_bytes=_raw(fx.Index(T) * fx.Index(topk_len * 4))
-        )
-        o_rsrc = buffer_ops.create_buffer_resource(
-            O, max_size=False, num_records_bytes=_raw(fx.Index(T) * Hn * fx.Index(D * 2))
-        )
-        lse_rsrc = buffer_ops.create_buffer_resource(
-            LSE, max_size=False, num_records_bytes=_raw(fx.Index(T) * Hn * fx.Index(4))
-        )
+        def _buffer_view(t, n_elems, elem_bytes):
+            # Flat 1-D buffer view: a linear slice coordinate is then the element offset.
+            # (logical_divide walks a multi-D layout colexicographically.) The descriptor
+            # carries the exact byte extent for hardware OOB checking.
+            flat = fx.Tensor(fx.make_view(fx.get_iter(t), fx.make_layout(fx.Int32(n_elems), 1)))
+            buf = fx.rocdl.make_buffer_tensor(flat, num_records_bytes=fx.Int64(n_elems * fx.Index(elem_bytes)))
+            return fx.logical_divide(buf, fx.make_layout(1, 1))
+
+        q_div = _buffer_view(Q, fx.Index(T) * Hn * fx.Index(DQK), 2)
+        kv_div = _buffer_view(KV, fx.Index(NKV) * fx.Index(DQK), 2)
+        tk_div = _buffer_view(TOPK, fx.Index(T) * fx.Index(topk_len), 4)
+        o_div = _buffer_view(O, fx.Index(T) * Hn * fx.Index(D), 2)
+        lse_div = _buffer_view(LSE, fx.Index(T) * Hn, 4)
         if const_expr(has_sink):
-            sink_rsrc = buffer_ops.create_buffer_resource(
-                SINK, max_size=False, num_records_bytes=_raw(Hn * fx.Index(4))
-            )
+            sink_div = _buffer_view(SINK, Hn, 4)
+
+        ld_v8_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem)
+        ld_f32_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        ld_i32_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+        st_v4_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), elem)
+        st_f32_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+        def _load(div, atom, off, n, dtype):
+            # n-wide buffer load at element offset `off`; returns the raw vector.
+            reg = fx.make_rmem_tensor(fx.make_layout(n, 1), dtype)
+            fx.copy(atom, fx.slice(div, (None, fx.Int32(off))), reg)
+            return _raw(fx.memref_load_vec(reg))
+
+        def _load_scalar(div, atom, off, dtype):
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), dtype)
+            fx.copy(atom, fx.slice(div, (None, fx.Int32(off))), reg)
+            return dtype(fx.memref_load_vec(reg)[0])
+
+        _lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+
+        def _lds_ptr(addr):
+            # i64 LDS byte address -> !llvm.ptr<3> for the raw ds_read_tr16 intrinsic.
+            return llvm.IntToPtrOp(_lds_ptr_ty, _raw(addr)).result
 
         c_log2e = fx.Float32(_LOG2E)
         c_scale = fx.Float32(scale)
@@ -208,9 +233,7 @@ def build_fwd(
         # ---- Q register-resident (A operand): head=head_A ----
         q_row = token * Hn * fx.Index(DQK) + head_A * fx.Index(DQK)
         q_packs = [
-            buffer_ops.buffer_load(
-                q_rsrc, q_row + fx.Index(ks * 32) + grp * fx.Index(8), vec_width=8, dtype=elem
-            )
+            _load(q_div, ld_v8_atom, q_row + fx.Index(ks * 32) + grp * fx.Index(8), 8, elem)
             for ks in range_constexpr(KS)
         ]
 
@@ -219,9 +242,7 @@ def build_fwd(
         # stalling the epilogue. head=head_wave_base+lo.
         sink_top = None
         if const_expr(has_sink and hoist_sink):
-            sink_top = fx.Float32(
-                buffer_ops.buffer_load(sink_rsrc, head_wave_base + lo, vec_width=1, dtype=fx.Float32)
-            )
+            sink_top = _load_scalar(sink_div, ld_f32_atom, head_wave_base + lo, fx.Float32)
 
         g_row = tid // fx.Index(CHUNKS)
         g_within = tid % fx.Index(CHUNKS)
@@ -229,9 +250,7 @@ def build_fwd(
 
         def load_topk(tbase):
             # one gathered-row topk index for this thread's g_row (int32, 1 VGPR to carry)
-            return fx.Int32(
-                buffer_ops.buffer_load(tk_rsrc, tk_row + tbase + g_row, vec_width=1, dtype=fx.Int32)
-            )
+            return _load_scalar(tk_div, ld_i32_atom, tk_row + tbase + g_row, fx.Int32)
 
         def gather_load(idx):
             # Cross-tile prefetch: load this gathered KV row into VGPRs (no LDS store yet).
@@ -240,11 +259,12 @@ def build_fwd(
             valid = ArithValue(idx >= fx.Int32(0))
             src = fx.Index(valid.select(idx, fx.Int32(0)))
             return [
-                buffer_ops.buffer_load(
-                    kv_rsrc,
+                _load(
+                    kv_div,
+                    ld_v8_atom,
                     src * fx.Index(DQK) + g_within * fx.Index(ECHUNK) + fx.Index(c * 8),
-                    vec_width=8,
-                    dtype=elem,
+                    8,
+                    elem,
                 )
                 for c in range_constexpr(V8PT)
             ]
@@ -292,11 +312,12 @@ def build_fwd(
             kv, valid = kv_and_valid_b(t_val)
             src = fx.Index(valid.select(kv, fx.Int32(0)))
             return [
-                buffer_ops.buffer_load(
-                    kv_rsrc,
+                _load(
+                    kv_div,
+                    ld_v8_atom,
                     src * fx.Index(DQK) + g_within * fx.Index(ECHUNK) + fx.Index(c * 8),
-                    vec_width=8,
-                    dtype=elem,
+                    8,
+                    elem,
                 )
                 for c in range_constexpr(V8PT)
             ]
@@ -411,20 +432,17 @@ def build_fwd(
             # (o[dt][i]=O[head=lo,d=dt*16+grp*4+i], 4 consecutive d/lane).
             head_i = head_wave_base + lo
             ov = Vec(o_v4) * Vec(scal_v)
-            base = (
-                token * Hn * fx.Index(D) + head_i * fx.Index(D) + fx.Index(dt * 16) + grp * fx.Index(4)
-            ) * fx.Index(2)
+            base = token * Hn * fx.Index(D) + head_i * fx.Index(D) + fx.Index(dt * 16) + grp * fx.Index(4)
             pk0 = rocdl.cvt_pk_bf16_f32(_raw(Vec(ov)[0]), _raw(Vec(ov)[1]))
             pk1 = rocdl.cvt_pk_bf16_f32(_raw(Vec(ov)[2]), _raw(Vec(ov)[3]))
-            buffer_ops.buffer_store(
-                _raw(Vec.from_elements([fx.Int32(_raw(pk0)), fx.Int32(_raw(pk1))], fx.Int32)),
-                o_rsrc,
-                base,
-                offset_is_bytes=True,
+            reg = fx.make_rmem_tensor(fx.make_layout(4, 1), elem)
+            fx.memref_store_vec(
+                Vec.from_elements([fx.Int32(_raw(pk0)), fx.Int32(_raw(pk1))], fx.Int32).bitcast(elem), reg
             )
+            fx.copy(st_v4_atom, reg, fx.slice(o_div, (None, fx.Int32(base))))
 
         def _tr(pv_base, dt):
-            ptr = buffer_ops.create_llvm_ptr(_raw(pv_base + fx.Int64(dt * 32)), address_space=3)
+            ptr = _lds_ptr(pv_base + fx.Int64(dt * 32))
             return _raw(Vec(rocdl.ds_read_tr16_b64(v4, ptr).result).bitcast(fx.Int16))
 
         def _pv_prefetch(buf_off):
@@ -535,8 +553,8 @@ def build_fwd(
             return _base(buf_a), _base(buf_b)
 
         def _v32(base_a, base_b, dt):
-            pa = buffer_ops.create_llvm_ptr(_raw(base_a + fx.Int64(dt * 32)), address_space=3)
-            pb = buffer_ops.create_llvm_ptr(_raw(base_b + fx.Int64(dt * 32)), address_space=3)
+            pa = _lds_ptr(base_a + fx.Int64(dt * 32))
+            pb = _lds_ptr(base_b + fx.Int64(dt * 32))
             va = Vec(rocdl.ds_read_tr16_b64(v4, pa).result).bitcast(fx.Int16)
             vb = Vec(rocdl.ds_read_tr16_b64(v4, pb).result).bitcast(fx.Int16)
             return _raw(
@@ -575,9 +593,7 @@ def build_fwd(
                 if const_expr(hoist_sink):
                     sink = sink_top
                 else:
-                    sink = fx.Float32(
-                        buffer_ops.buffer_load(sink_rsrc, head_i, vec_width=1, dtype=fx.Float32)
-                    )
+                    sink = _load_scalar(sink_div, ld_f32_atom, head_i, fx.Float32)
                 mf = fx.Float32(arith.MaxNumFOp(_raw(mrs), _raw(sink)).result)
                 af = fx.Float32(_raw(ArithValue(_raw((mrs - mf) * c_log2e)).exp2()))
                 st = fx.Float32(_raw(ArithValue(_raw((sink - mf) * c_log2e)).exp2()))
@@ -598,13 +614,10 @@ def build_fwd(
             head_i = head_wave_base + lo
             lse_val = fx.Float32(m_f) + fmath.log(l_t)
             lse_out = fx.Float32(lp.select(_raw(lse_val), _raw(c_neg_inf)))
-            buffer_ops.buffer_store(
-                lse_out,
-                lse_rsrc,
-                (token * Hn + head_i) * fx.Index(4),
-                mask=_raw(ArithValue(grp == fx.Index(0))),
-                offset_is_bytes=True,
-            )
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+            fx.memref_store_vec(Vec.filled(1, lse_out, fx.Float32), reg)
+            if grp == fx.Index(0):
+                fx.copy(st_f32_atom, reg, fx.slice(lse_div, (None, fx.Int32(token * Hn + head_i))))
 
         def _write_out(m_f, l_t, lp, scal, o_final):
             scal_v = Vec.from_elements([scal, scal, scal, scal], fx.Float32)

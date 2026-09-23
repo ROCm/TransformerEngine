@@ -12,6 +12,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 from ..exceptions import FlyDSLUnsupportedError
+from ..version import _check_flydsl_version
 
 # Kernel contract constants. Mirrored here so the whole request can be validated
 # before importing the kernel module (which imports FlyDSL at import time).
@@ -283,7 +284,8 @@ def sparse_mla_attn_fwd(
       ``S/P >= 64`` -> closed-form ``SWA[128] + pool[P]`` band.
 
     Raises:
-        FlyDSLUnsupportedError: the build, GPU or request shape is unsupported.
+        FlyDSLUnsupportedError: the build, GPU, flydsl version or request shape
+            is unsupported.
             There is no C++ sparse-MLA backend to fall back to, so this is raised
             rather than swallowed.
     """
@@ -294,6 +296,13 @@ def sparse_mla_attn_fwd(
 
     if scale is None:
         scale = 1.0 / (D_QK**0.5)
+
+    # Checked before the kernel import: an unsupported flydsl otherwise fails
+    # there with an opaque missing-symbol ImportError.
+    try:
+        _check_flydsl_version("sparse-MLA attention")
+    except ImportError as exc:
+        raise FlyDSLUnsupportedError(str(exc)) from exc
 
     # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
     from .sparse_mla_fwd import SparseMLASpec, get_compiled_fwd

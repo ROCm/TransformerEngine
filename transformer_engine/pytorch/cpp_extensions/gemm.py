@@ -542,7 +542,7 @@ def general_gemm(
                 )
             except ImportError as exc:
                 # NVTE_GEMM_BACKEND=FLYDSL was requested but the flydsl package is
-                # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
+                # missing or too old (see flydsl_kernels.version._MIN_FLYDSL). This
                 # is a misconfiguration, not an unsupported GEMM config, so always
                 # warn (once) regardless of the opt-in fallback flag before
                 # degrading to the default backend.

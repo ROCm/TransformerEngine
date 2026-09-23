@@ -84,7 +84,7 @@ requires_triton_backend = pytest.mark.skipif(
 )
 
 # FlyDSL is gfx950-only (matching the C++ dispatch) and version-gated at import
-# time (_MIN_FLYDSL/_MAX_FLYDSL in flydsl_kernels.gemm). find_spec only proves
+# time (_MIN_FLYDSL/_MAX_FLYDSL in flydsl_kernels.version). find_spec only proves
 # the top-level package exists; the version window is enforced when the dispatch
 # imports the submodule.
 _flydsl_available = _CAP == (9, 5) and importlib.util.find_spec("flydsl") is not None
