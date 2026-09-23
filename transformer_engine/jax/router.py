@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -342,11 +344,17 @@ def _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff):
 def _fused_moe_aux_loss_bwd(topk, coeff, residuals, g):
     del topk, coeff
     const_buf, tokens_per_expert, num_tokens = residuals
+    # Rank-0, matching FusedMoEAuxLossBwdPrimitive's shardy sharding rule, which
+    # declares this operand with no factor labels. The rule can only name one
+    # rank, and the other caller (moe.py's aux-loss backward) already passes a
+    # rank-0 scalar. Reshaping to (1,) here instead makes the rule disagree with
+    # the operand and fails at global view.
+    grad_aux_loss = g.reshape(())
 
     grad_probs = fused_moe_aux_loss_bwd(
         const_buf,
         tokens_per_expert,
-        g,
+        grad_aux_loss,
         num_tokens,
     )
     return grad_probs, None
