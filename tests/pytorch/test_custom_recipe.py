@@ -1,8 +1,11 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import pytest
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import torch
 
 import transformer_engine.pytorch as te
@@ -29,6 +32,13 @@ from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import 
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
 )
+
+
+_ROCM_MXFP8_K_MULTIPLE = (
+    "hipBLASLt MXFP8 GEMM on gfx950 requires K to be a multiple of 128; this test uses"
+    " smaller K. See the TODO in transformer_engine/common/gemm/rocm_gemm.cu."
+)
+_ROCM_NO_FP8_DPA = "FP8 fused attention is not supported on ROCm"
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -422,6 +432,7 @@ def test_factory_matches_current_scaling():
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_MXFP8_K_MULTIPLE)
 def test_factory_matches_mxfp8():
     """mxfp8_quantizer_factory should produce bit-identical results
     to the built-in MXFP8BlockScaling recipe."""
@@ -477,6 +488,7 @@ def test_factory_matches_nvfp4():
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_MXFP8_K_MULTIPLE)
 def test_custom_recipe_quantization_targets():
     """Validate fine-grained per-module quantization targeting via QuantizerRole.
 
@@ -1062,6 +1074,7 @@ def test_role_change_does_not_invalidate_when_role_unchanged():
     ), "Setting role to an equal value should be a no-op (frozen-dataclass __eq__)"
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_FP8_DPA)
 def test_custom_recipe_dpa_fp8():
     """DotProductAttention forward+backward with CustomRecipe and role-based mixed quantizers.
 
@@ -1187,6 +1200,7 @@ def test_custom_recipe_dpa_fp8():
             ), f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_FP8_DPA)
 def test_custom_recipe_dpa_mxfp8():
     """DotProductAttention forward+backward with CustomRecipe and MXFP8 attention.
 
