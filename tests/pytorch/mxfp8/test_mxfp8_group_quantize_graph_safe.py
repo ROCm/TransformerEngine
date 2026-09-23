@@ -358,6 +358,8 @@ def test_grouped_tensor_mxfp8_2d_quantization_versus_reference(
     optimize_for_gemm: bool,
 ) -> None:
     """Grouped MXFP8 should match independent 2D quantization of each tensor."""
+    if optimize_for_gemm and IS_HIP_EXTENSION:
+        pytest.skip(_ROCM_NO_SWIZZLE_FUSION)
     return_rowwise = quantize_mode != "columnwise_only"
     return_transpose = quantize_mode != "rowwise_only"
     check_grouped_tensor_mxfp8_versus_reference(
@@ -788,6 +790,7 @@ def _requantize_setup(M: int = 1024, N: int = 256):
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_SWIZZLE_FUSION)
 def test_prequantized_requantize_passes_through_gemm_ready_input():
     """A tensor already GEMM-ready in both directions is left untouched."""
     x, splits, num_groups = _requantize_setup()
@@ -808,6 +811,7 @@ def test_prequantized_requantize_passes_through_gemm_ready_input():
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_SWIZZLE_FUSION)
 def test_prequantized_requantize_skips_columnwise_when_not_needed():
     """columnwise_usage=False (frozen weights) swizzles rowwise without building columnwise."""
     x, splits, num_groups = _requantize_setup()
@@ -823,6 +827,7 @@ def test_prequantized_requantize_skips_columnwise_when_not_needed():
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_SWIZZLE_FUSION)
 def test_prequantized_requantize_rejects_dequantized_from_gemm_ready_input():
     """Bias grads cannot be served from an already-swizzled input, so this must raise."""
     x, splits, num_groups = _requantize_setup()

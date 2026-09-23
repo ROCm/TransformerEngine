@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -37,6 +38,8 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine_torch as tex
 
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 # Import utility functions
 from utils import (
     assert_close,
@@ -74,6 +77,11 @@ if mxfp8_available:
     _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
+
+_ROCM_NO_GROUPED_BIAS_ADD = (
+    "Fused grouped-MLP bias epilogue (nvte_grouped_bias_add) is not implemented on ROCm; the"
+    " fused grouped GEMM runs bias-free only. Pre-existing dev-side gap. See post_ifu_rocm_backlog."
+)
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -974,6 +982,8 @@ class TestGroupedMLPFusedOp:
 
         # Skip invalid configurations
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        if bias and IS_HIP_EXTENSION:
+            pytest.skip(_ROCM_NO_GROUPED_BIAS_ADD)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (

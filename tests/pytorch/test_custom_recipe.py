@@ -51,6 +51,11 @@ _ROCM_MXFP8_K_MULTIPLE = (
     " smaller K. See the TODO in transformer_engine/common/gemm/rocm_gemm.cu."
 )
 _ROCM_NO_FP8_DPA = "FP8 fused attention is not supported on ROCm"
+_ROCM_NO_HYBRID_QUANTIZER = (
+    "HybridQuantizer (composite MXFP8-fwd/NVFP4-bwd) has no C++ representation and its fused"
+    " tex.* dispatch path is not yet ported to ROCm; convert_quantizer rejects the undecomposed"
+    " hybrid. MXFP8 and NVFP4 are each supported individually."
+)
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -1963,8 +1968,13 @@ def test_custom_recipe_quantization_alignment_contract():
         pytest.param(
             mxfp8_fwd_nvfp4_bwd_factory,
             marks=pytest.mark.skipif(
-                not (_alignment_mxfp8_available and _alignment_nvfp4_available),
-                reason=f"MXFP8: {_alignment_mxfp8_reason}; NVFP4: {_alignment_nvfp4_reason}",
+                IS_HIP_EXTENSION
+                or not (_alignment_mxfp8_available and _alignment_nvfp4_available),
+                reason=(
+                    _ROCM_NO_HYBRID_QUANTIZER
+                    if IS_HIP_EXTENSION
+                    else f"MXFP8: {_alignment_mxfp8_reason}; NVFP4: {_alignment_nvfp4_reason}"
+                ),
             ),
             id="hybrid_mxfp8_nvfp4",
         ),
