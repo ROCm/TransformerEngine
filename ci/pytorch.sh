@@ -87,6 +87,10 @@ run_test_config(){
     run 1 test_numerics.py
     check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
+    # Permute-free MoE grouped GEMM (ROCm FlyDSL, gfx950). The file self-gates on gfx950 +
+    # FlyDSL at collection time and enables NVTE_PERMUTE_FREE_GROUPED_GEMM per test, so it
+    # skips cleanly elsewhere and needs no env here.
+    run_default_fa 1 test_perm_free_grouped_linear.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
