@@ -568,7 +568,9 @@ class TestNorm:
 
         precise_comparison = True
 
-        if (get_cudnn_version() < (9, 10, 0) or is_hip_extension()) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if (
+            get_cudnn_version() < (9, 10, 0) or is_hip_extension()
+        ) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
             precise_comparison = False
@@ -1518,7 +1520,6 @@ class TestDense:
             # Check for third GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, k, n, m, use_bias)
 
-
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
             primitive_out = dense(
                 x, w, bias, contracting_dims=contracting_dims, quantizer_set=quantizer_set
@@ -1563,8 +1564,8 @@ class TestDense:
 def random_inputs_fixture(shape):
     key = jax.random.PRNGKey(0)
     subkeys = jax.random.split(key, 4)
-    #FP8 SRELU+Linear activation tests cause ROCm FP8 value range overflow
-    #Decrease input values to fit  
+    # FP8 SRELU+Linear activation tests cause ROCm FP8 value range overflow
+    # Decrease input values to fit
     rng = (4, 7) if is_hip_extension() else (5, 8)
     out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, rng[0], rng[1])
     return out
@@ -1819,6 +1820,66 @@ GROUPED_DENSE_INPUT_SHAPES = [
 ]
 
 
+class TestGroupedDbias:
+    """`grouped_dbias` on a ragged buffer, i.e. sum(group_sizes) < n_rows.
+
+    `TestGroupedDense._generate_grouped_dense_input` asserts
+    `group_sizes.sum() == m`, so nothing else here exercises a padded tail. That
+    is the shape the MoE path actually passes: the routed buffer is sized for the
+    worst case, so rows past sum(group_sizes) are padding and must not be
+    reduced. It is also the only case where the out-of-range segment id matters.
+    """
+
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16, jnp.float32])
+    @pytest_parametrize_wrapper("impl", ["scatter", "scatter_sorted", "contract"])
+    @pytest_parametrize_wrapper(
+        "n_rows,live_rows",
+        [
+            (2048, 768),  # padded tail, the MoE case
+            (2048, 2048),  # exactly full, no padding
+            (2048, 0),  # every row is padding
+        ],
+    )
+    def test_ragged_buffer(self, dtype, impl, n_rows, live_rows, monkeypatch):
+        """Every lowering must agree with a reference that ignores the tail."""
+        monkeypatch.setenv("NVTE_JAX_GROUPED_DBIAS_IMPL", impl)
+
+        n_groups, n = 8, 256
+        subkeys = jax.random.split(jax.random.PRNGKey(0), 2)
+
+        # Random group sizes summing to live_rows, with one deliberately empty.
+        cuts = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, live_rows + 1))
+        group_sizes = jnp.diff(
+            jnp.concatenate([jnp.array([0]), cuts, jnp.array([live_rows])])
+        ).astype(jnp.int32)
+        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1]).at[1].set(0)
+        assert int(jnp.sum(group_sizes)) == live_rows
+
+        grad = jax.random.uniform(subkeys[1], (n_rows, n), dtype=dtype)
+        out = tex.grouped_dbias(grad, group_sizes)
+
+        assert out.shape == (n_groups, n)
+        assert out.dtype == grad.dtype
+
+        # Reference: sum each group's own rows in fp32, ignore the padded tail.
+        grad_fp32 = jnp.asarray(grad, dtype=jnp.float32)
+        offsets = jnp.concatenate([jnp.array([0]), jnp.cumsum(group_sizes)])
+        ref = jnp.stack(
+            [
+                jnp.sum(grad_fp32[int(offsets[g]) : int(offsets[g + 1])], axis=0)
+                for g in range(n_groups)
+            ]
+        ).astype(dtype)
+        assert_allclose(out, ref, dtype=dtype)
+
+    def test_impl_rejects_unknown_value(self, monkeypatch):
+        monkeypatch.setenv("NVTE_JAX_GROUPED_DBIAS_IMPL", "nonsense")
+        grad = jnp.zeros((8, 4), dtype=jnp.bfloat16)
+        group_sizes = jnp.array([8, 0], dtype=jnp.int32)
+        with pytest.raises(ValueError, match="NVTE_JAX_GROUPED_DBIAS_IMPL"):
+            tex.grouped_dbias(grad, group_sizes)
+
+
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
@@ -2023,7 +2084,10 @@ class TestGroupedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize(
         "fwd_bwd_dtype",
-        [(jnp_float8_e4m3_type, jnp_float8_e4m3_type), (jnp_float8_e4m3_type, jnp_float8_e5m2_type)],
+        [
+            (jnp_float8_e4m3_type, jnp_float8_e4m3_type),
+            (jnp_float8_e4m3_type, jnp_float8_e5m2_type),
+        ],
     )
     @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
