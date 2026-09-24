@@ -147,18 +147,82 @@ if IS_HIP_EXTENSION:
         )
 
 
+def _shuffle_weight_16x16(x: torch.Tensor) -> torch.Tensor:
+    """Pre-shuffle an FP4 weight tensor into AITER's (16, 16) MFMA layout.
+
+    Mirrors ``aiter.ops.shuffle.shuffle_weight(x, layout=(16, 16))`` for the
+    non-interleaved case that the a4w4 GEMM uses. It is a pure view/permute of
+    the packed bytes, so it is reproduced here rather than pulled from the
+    ``aiter`` package: QoLA's kernel libraries are torch-free by construction
+    and cannot host a torch-level helper.
+    """
+    x_type = x.dtype
+    if x_type == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+
+    IN, IK = 16, 16
+    BN = IN
+    BK = IK * 2
+    K = 16 // x.element_size()
+    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} != 0"
+    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} != 0"
+
+    x_ = x.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+    x_ = x_.permute(0, 1, 3, 4, 2, 5)
+    x_ = x_.contiguous()
+    x_ = x_.view(*x.shape)
+    return x_.view(x_type)
+
+
+@functools.lru_cache(maxsize=1)
+def _fp4_tuned_gemm_table():
+    """Load the a4w4 tuned-GEMM table staged next to the QoLA kernel libs.
+
+    QoLA copies AITER's tuning CSVs into its build output and TE installs them
+    alongside the a4w4 shared objects, so the table is versioned with the
+    kernels it describes. Reading it here keeps the ``aiter`` Python package
+    out of the runtime dependency set.
+
+    Returns a ``{(M, N, K): (kernel_name, split_k)}`` mapping, empty when the
+    table is absent (callers then fall back to the AITER heuristic).
+    """
+    import csv
+
+    csv_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "lib",
+        "configs",
+        "a4w4_blockscale_tuned_gemm.csv",
+    )
+    table = {}
+    if not os.path.exists(csv_path):
+        return table
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                key = (int(row["M"]), int(row["N"]), int(row["K"]))
+            except (KeyError, ValueError):
+                continue
+            kernel_name = (row.get("kernelName") or "").strip()
+            if not kernel_name:
+                continue
+            try:
+                split_k = int(row.get("splitK") or 0)
+            except ValueError:
+                split_k = 0
+            table[key] = (kernel_name, split_k)
+    return table
+
+
 def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
     """Select kernel via tuned CSV lookup, falling back to AITER heuristic."""
-    from aiter.ops.gemm_op_a4w4 import get_GEMM_config
-
     kernel_name = ""
     split_k = 0
 
     if _FP4_USE_TUNED_GEMM:
-        cfg = get_GEMM_config(M, N, K)
+        cfg = _fp4_tuned_gemm_table().get((M, N, K))
         if cfg is not None:
-            kernel_name = cfg["kernelName"]
-            split_k = int(cfg.get("splitK", 0))
+            kernel_name, split_k = cfg
 
     if _FP4_LOG_SHAPES:
         print(f"[FP4-GEMM] {layout} grad={grad} M={M} N={N} K={K} "
@@ -169,24 +233,16 @@ def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
 
 
 def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
-                    out_buffer=None, kernel_name="", b_pre_shuffled=True, log2_k_split=0):
+                    out_buffer=None, kernel_name="", b_pre_shuffled=True, split_k=0):
     """Core FP4 GEMM via AITER a4w4 kernels.
 
-    Routes to the ASM backend when ``kernel_name`` is an ASM-mangled symbol
-    (starts with ``_ZN``) or empty (heuristic). Otherwise routes to the CK
-    blockscale backend, matching AITER's own ``gemm_a4w4`` dispatcher.
+    ``kernel_name``/``split_k`` come from the tuned-GEMM table (empty/0 means
+    heuristic); TE core picks the CK or ASM backend from ``kernel_name``.
     """
-    import aiter
-    from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.gemm_op_a4w4 import gemm_a4w4_blockscale
+    A_fp4 = A_fp4.view(torch.uint8)
+    B_fp4 = B_fp4.view(torch.uint8)
 
-    _fp4_dtype = torch.float4_e2m1fn_x2
-    A_fp4 = A_fp4.view(_fp4_dtype) if A_fp4.dtype != _fp4_dtype else A_fp4
-    B_fp4 = B_fp4.view(_fp4_dtype) if B_fp4.dtype != _fp4_dtype else B_fp4
-    A_scales_uint8 = A_scales.view(torch.uint8)
-    B_scales_uint8 = B_scales.view(torch.uint8)
-
-    B_shuffled = B_fp4 if b_pre_shuffled else shuffle_weight(B_fp4, layout=(16, 16))
+    B_shuffled = B_fp4 if b_pre_shuffled else _shuffle_weight_16x16(B_fp4)
 
     M = A_fp4.shape[0]
     N = B_fp4.shape[0]
@@ -197,20 +253,12 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
         padded_M = (M + 31) // 32 * 32
         out_hp = torch.empty((padded_M, N), dtype=out_dtype, device=A_fp4.device)
 
-    use_ck = bool(kernel_name) and kernel_name.find("_ZN") == -1
-    if use_ck:
-        result = gemm_a4w4_blockscale(
-            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8, out_hp,
-            splitK=log2_k_split,
-        )
-    else:
-        result = aiter.gemm_a4w4_asm(
-            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8,
-            out_hp, kernel_name, None,
-            bpreshuffle=True, log2_k_split=log2_k_split,
-        )
+    tex.gemm_a4w4(
+        A_fp4, A_scales.view(torch.uint8), B_shuffled, B_scales.view(torch.uint8), out_hp,
+        kernel_name=kernel_name, split_k=split_k,
+    )
 
-    return result[:M, :] if result.shape[0] > M else result
+    return out_hp[:M, :] if out_hp.shape[0] > M else out_hp
 
 
 def mxfp4_gemm(
@@ -280,7 +328,7 @@ def mxfp4_gemm(
             A_fp4, A_scales, B_fp4, B_scales,
             out_dtype=out_flat.dtype, out_buffer=None,
             kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-            log2_k_split=split_k,
+            split_k=split_k,
         )
         out_flat.add_(result)
         result = out_flat
@@ -289,7 +337,7 @@ def mxfp4_gemm(
             A_fp4, A_scales, B_fp4, B_scales,
             out_dtype=out_dtype, out_buffer=out_flat,
             kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-            log2_k_split=split_k,
+            split_k=split_k,
         )
 
     if bias is not None and layout == "TN" and not grad:

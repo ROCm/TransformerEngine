@@ -8,7 +8,6 @@ This module tests native MXFP4 GEMM implementations against Python reference GEM
 - AITER a4w4 kernels
 - hipBLASLt F4F4 kernels
 
-Requires the aiter package (ROCm gfx950 only).
 Requires the hipBLASLt>=1.3.0 (ROCm gfx950 only).
 """
 
@@ -21,14 +20,6 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import MXFP4Qu
 
 
 recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=True)
-
-try:
-    import aiter  # noqa: F401
-
-    _aiter_available = True
-except ImportError:
-    _aiter_available = False
-
 
 def _mxfp4_quant(src, *, shuffle_rowwise=False, shuffle_columnwise=False, swizzled_scales=False):
     """Quantize a BF16 tensor to MXFP4 with both row-wise and column-wise buffers."""
@@ -120,9 +111,8 @@ _SHAPES = [
 ]
 
 
-# AITER a4w4 backend: shuffled FP4 data + swizzled scales, TN only. Requires the aiter package.
+# AITER a4w4 backend: shuffled FP4 data + swizzled scales, TN only.
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
 @pytest.mark.parametrize("M, K, N", _SHAPES)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])

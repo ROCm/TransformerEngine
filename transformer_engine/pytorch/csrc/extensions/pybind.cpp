@@ -256,6 +256,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+#ifdef USE_ROCM
+  m.def("gemm_a4w4", &transformer_engine::pytorch::gemm_a4w4, "AITER a4w4 (MXFP4) GEMM",
+        py::arg("A"), py::arg("A_scale"), py::arg("B"), py::arg("B_scale"), py::arg("D"),
+        py::arg("kernel_name") = "", py::arg("split_k") = 0);
+#endif  // USE_ROCM
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
         py::arg("quantizer"));

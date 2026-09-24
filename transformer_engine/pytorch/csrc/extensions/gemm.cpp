@@ -16,6 +16,9 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#ifdef USE_ROCM
+#include "transformer_engine/aiter_gemm.h"
+#endif
 #include "util.h"
 
 #include <torch/version.h>
@@ -904,4 +907,40 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   return py::reinterpret_borrow<py::object>(D);
 }
 #endif  // !USE_ROCM
+
+#ifdef USE_ROCM
+
+namespace {
+
+// Wrap a packed FP4 buffer ([rows, K/2] bytes) and its E8M0 scales as an MXFP4 TE tensor.
+TensorWrapper make_mxfp4_operand(const at::Tensor &data, const at::Tensor &scale_inv) {
+  NVTE_CHECK(data.dim() == 2 && data.is_contiguous(), "a4w4 GEMM operand must be 2D contiguous");
+  NVTE_CHECK(scale_inv.dim() == 2 && scale_inv.is_contiguous(),
+             "a4w4 GEMM scale_inv must be 2D contiguous");
+  TensorWrapper ret(NVTE_MXFP4_1D_SCALING);
+  ret.set_rowwise_data(data.data_ptr(), DType::kFloat4E2M1,
+                       std::vector<size_t>{static_cast<size_t>(data.size(0)),
+                                           static_cast<size_t>(data.size(1)) * 2});
+  ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0, getTensorShape(scale_inv));
+  return ret;
+}
+
+}  // namespace
+
+// AITER a4w4 GEMM: D = A * B^T. B must already be shuffled; backend selection
+// (CK vs ASM) happens in TE core based on kernel_name.
+void gemm_a4w4(at::Tensor A, at::Tensor A_scale, at::Tensor B, at::Tensor B_scale, at::Tensor D,
+               std::string kernel_name, int64_t split_k) {
+  NVTE_CHECK(D.is_contiguous(), "a4w4 GEMM output must be contiguous");
+  auto a = make_mxfp4_operand(A, A_scale);
+  auto b = make_mxfp4_operand(B, B_scale);
+  auto d = makeTransformerEngineTensor(D);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_aiter_gemm_a4w4(a.data(), b.data(), d.data(), kernel_name.c_str(),
+                         static_cast<int>(split_k), at::cuda::getCurrentCUDAStream());
+  });
+}
+
+#endif  // USE_ROCM
+
 }  // namespace transformer_engine::pytorch
