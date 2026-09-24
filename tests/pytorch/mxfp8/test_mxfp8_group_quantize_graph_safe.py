@@ -26,6 +26,13 @@ _ROCM_NO_SWIZZLE_FUSION = (
 )
 
 
+_ROCM_NO_GROUPED_SWIZZLE = (
+    "Variable-shape grouped scale swizzling is not supported on ROCm"
+    " (swizzle.hip:swizzle_grouped_scaling_factors hard-errors); both the fused"
+    " optimize_for_gemm path and the standalone tex.grouped_swizzle_for_gemm op abort"
+)
+
+
 def generate_random_multiples_sum(total=8192, n=4, multiple=64):
     if total % multiple != 0:
         raise ValueError(f"Total ({total}) must be a multiple of {multiple}")
@@ -723,6 +730,7 @@ def check_prequantized_requantize_versus_reference(
         "imbalanced_avg_misaligned",
     ],
 )
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_prequantized_requantize_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -761,6 +769,7 @@ def test_prequantized_requantize_versus_reference(
         "imbalanced_avg_misaligned",
     ],
 )
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_prequantized_requantize_with_paged_stashing(
     x_dtype: torch.dtype,
     M: int,
@@ -845,6 +854,7 @@ def test_prequantized_requantize_rejects_dequantized_from_gemm_ready_input():
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_prequantized_requantize_rejects_swizzled_without_columnwise():
     """Swizzled rowwise scales with no columnwise copy: it can no longer be rebuilt."""
     x, splits, num_groups = _requantize_setup()
@@ -884,6 +894,7 @@ def test_prequantized_requantize_rejects_dtype_mismatch():
     ],
     ids=["imbalanced", "imbalanced_with_empty"],
 )
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_grouped_swizzle_variable_shape_preserves_scale_capacity(
     columnwise: bool, split_sections: list[int]
 ):

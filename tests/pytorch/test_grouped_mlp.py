@@ -80,7 +80,13 @@ if nvfp4_available:
 
 _ROCM_NO_GROUPED_BIAS_ADD = (
     "Fused grouped-MLP bias epilogue (nvte_grouped_bias_add) is not implemented on ROCm; the"
-    " fused grouped GEMM runs bias-free only. Pre-existing dev-side gap. See post_ifu_rocm_backlog."
+    " fused grouped GEMM runs bias-free only."
+)
+
+_ROCM_NO_SINGLE_GROUPED_PARAM = (
+    "single_grouped_weight/single_grouped_bias require the native grouped-tensor GroupedLinear"
+    " path, which TE-ROCm force-disables (use_grouped_tensor downgraded True->False), so single"
+    " grouped parameters are unsupported on ROCm."
 )
 
 
@@ -984,6 +990,8 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if bias and IS_HIP_EXTENSION:
             pytest.skip(_ROCM_NO_GROUPED_BIAS_ADD)
+        if (single_grouped_weight or single_grouped_bias) and IS_HIP_EXTENSION:
+            pytest.skip(_ROCM_NO_SINGLE_GROUPED_PARAM)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (

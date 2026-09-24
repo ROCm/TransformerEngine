@@ -1,5 +1,6 @@
 # pylint: disable=missing-function-docstring
 
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +12,10 @@ import os
 
 import triton
 import triton.language as tl
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import get_device_compute_capability
 
 MAX_GRID_DIM_Y = 65535  # Maximum grid dimension in Y direction for current CUDA architectures
 
@@ -52,6 +57,9 @@ def projection_prune_fwd(configs, named_args, **kwargs):
         step_k = [256]
         warps = [2, 8]
         stages = [3, 4]
+
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4):
+            step_k = [64]  # Higher step sizes exceed LDS size on gfx942
 
         pruned_configs = []
         for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):

@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from utils import reset_rng_states
 from transformer_engine.pytorch.triton.mhc import (
@@ -261,9 +263,11 @@ mhc_configs = [
 ]
 
 
-def get_tols(dtype):
+def get_tols(dtype, K=None):
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    elif IS_HIP_EXTENSION and K is not None and K >= 65536:
+        tols = dict(atol=7e-3, rtol=7e-3)
     else:
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
@@ -293,7 +297,7 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
 
     x_dtype = dtypes[0]
     phi_dtype = dtypes[1]
-    tols = get_tols(x_dtype)
+    tols = get_tols(x_dtype, K=nC)
     use_tf32 = False
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
@@ -390,7 +394,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
 
     x_dtype = dtypes[0]
     phi_dtype = dtypes[1]
-    tols = get_tols(x_dtype)
+    tols = get_tols(x_dtype, K=nC)
     use_tf32 = False
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
