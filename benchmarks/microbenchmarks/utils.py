@@ -794,7 +794,7 @@ def _gpu_pci():
 
 
 def _dashboard_run_meta():
-    """Run metadata: git sha/date, week date, GPU model, visible GPU id, host."""
+    """Run metadata: run timestamp, git sha/date, GPU model, visible GPU id, host."""
     import datetime
     import subprocess
 
@@ -813,8 +813,10 @@ def _dashboard_run_meta():
 
     sha = git("rev-parse", "HEAD")
     gpu = (os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0].strip() or "0"
+    now = datetime.datetime.now().astimezone()
     return {
-        "week": datetime.date.today().isoformat(),
+        "run_ts": now.isoformat(timespec="seconds"),
+        "stamp": now.strftime("%Y-%m-%dT%H-%M-%S"),
         "sha": sha,
         "short": sha[:12] or "unknown",
         "cdate": git("show", "-s", "--format=%cI", "HEAD"),
@@ -862,11 +864,11 @@ def _write_run_info(path, meta):
 
 
 def _dashboard_run_dir(out_base, meta):
-    """Run dir path from run metadata: ``<out_base>/<node>/<week>_<commit>/``."""
+    """Run dir path from run metadata: ``<out_base>/<node>/<datetime>_<commit>/``."""
     node = f"{meta['model']}_{meta['host']}_gpu{meta['gpu']}"
     if meta["gpu_bdf"]:
         node += "_" + meta["gpu_bdf"].replace(":", "-").replace(".", "-")
-    return Path(out_base) / node / f"{meta['week']}_{meta['short']}"
+    return Path(out_base) / node / f"{meta['stamp']}_{meta['short']}"
 
 
 def dashboard_run_plan(out_base="results"):
@@ -878,7 +880,7 @@ def dashboard_run_plan(out_base="results"):
 def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=None):
     """Write one dashboard run and return the run dir.
 
-    Layout: ``<out_base>/<arch>_<host>_gpu<id>_<pci>/<week>_<commit>/``. Per-family
+    Layout: ``<out_base>/<arch>_<host>_gpu<id>_<pci>/<datetime>_<commit>/``. Per-family
     CSVs are born-tagged with run_week/commit_sha/commit_date (so dashboard_ingest.py
     consumes them directly); per-iteration samples land untagged under ``samples/``;
     ``run_info.txt`` records versions + machine. Pass *meta* from
@@ -892,7 +894,7 @@ def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=Non
     (run_dir / "samples").mkdir(parents=True, exist_ok=True)
     _write_run_info(run_dir / "run_info.txt", meta)
 
-    tag = {"run_week": meta["week"], "commit_sha": meta["sha"], "commit_date": meta["cdate"]}
+    tag = {"run_ts": meta["run_ts"], "commit_sha": meta["sha"], "commit_date": meta["cdate"]}
     tag_cols = list(tag)
     for family, fam in store.items():
         if not fam.rows:
