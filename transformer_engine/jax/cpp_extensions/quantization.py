@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
 import operator
+import os
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math
@@ -1394,7 +1395,22 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     # jnp.repeat pads leftover rows with the last group id when
     # sum(group_sizes) < M. Those rows are ragged-buffer padding, not the last group.
     segment_ids = jnp.where(jnp.arange(n_rows) < jnp.sum(group_sizes), segment_ids, n_groups)
-    grad_fp32 = grad.astype(jnp.float32)
-    dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=n_groups)
+
+    # The padding rows carry the out-of-range id `n_groups`, and one_hot
+    # emits an all-zero row for it, so they drop out without a second mask.
+    # fp8 and other sub-16-bit grads are widened, matching the f32
+    # accumulation the scatter path gets from its explicit upcast.
+    compute_dtype = (
+        grad.dtype
+        if jnp.issubdtype(grad.dtype, jnp.floating) and grad.dtype.itemsize >= 2
+        else jnp.float32
+    )
+    one_hot = jax.nn.one_hot(segment_ids, n_groups, dtype=compute_dtype)
+    dbias_fp32 = jax.lax.dot_general(
+        one_hot,
+        grad.astype(compute_dtype),
+        (((0,), (0,)), ((), ())),
+        preferred_element_type=jnp.float32,
+    )
     dbias = dbias_fp32.astype(grad.dtype)
     return dbias
