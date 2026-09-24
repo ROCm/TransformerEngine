@@ -1,0 +1,114 @@
+name: Perf dashboard (weekly)
+
+# Weekly perf snapshot: every Sunday night (Central Time) run the microbenchmarks
+# once on the self-hosted AMD GPU runner, append the result as a new weekly data
+# point, rebuild the single-file dashboard.html, and publish it to the external
+# GitHub Pages repo (AMD-ROCm-Internal/TE-dashboard) -- this repo has no gh-pages.
+#
+# Companion to perf-dashboard.yml (the opt-in, per-PR/commit run). This one is
+# time-driven and always targets dev, so the Trends view gains one fresh point
+# per week without anyone asking.
+#
+# Cron is UTC-only and Central Time has no fixed offset (CST=UTC-6, CDT=UTC-5),
+# so 04:00 UTC Monday lands on Sunday 22:00 (CST) / 23:00 (CDT) -- Sunday night
+# year-round. Bump the hour if you want it later; DST will shift it by one hour.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'          # Mon 04:00 UTC == Sun night Central Time
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'GPU model label override (blank = auto-detect on the runner)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read                 # this repo is only read; the external push uses a PAT
+
+# Target GitHub Pages repo that serves the dashboard (this repo has no gh-pages).
+# The push authenticates with the TE_DASHBOARD_TOKEN secret -- a PAT / fine-grained
+# token with contents:write on that repo.
+env:
+  DASH_REPO: AMD-ROCm-Internal/TE-dashboard
+  DASH_BRANCH: main
+
+# Serialize publishers: any workflow that pushes to the dashboard repo shares this
+# group so two runs never push concurrently.
+concurrency:
+  group: perf-dashboard
+  cancel-in-progress: false
+
+jobs:
+  weekly-snapshot:
+    runs-on: [self-hosted, linux, gfx950]        # your AMD GPU runner label(s)
+    # If TE isn't in the runner's base env, run the job inside your TE container:
+    # container:
+    #   image: <your-rocm-te-image>
+    #   options: --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 16g
+    steps:
+      - name: Checkout code (dev)
+        uses: actions/checkout@v4
+        with:
+          ref: dev                # the weekly series tracks dev, not the default branch
+
+      - name: Checkout the TE-dashboard Pages repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DASH_REPO }}
+          ref: ${{ env.DASH_BRANCH }}
+          token: ${{ secrets.TE_DASHBOARD_TOKEN }}   # PAT with contents:write on DASH_REPO
+          path: site
+
+      - name: Run weekly perf snapshot
+        working-directory: benchmarks/microbenchmarks
+        env:
+          NVTE_FRAMEWORK: pytorch
+        # Writes results/<date>_<sha>/benchmark_*.csv tagged with run_week /
+        # commit_sha / commit_date -- the per-row metadata the ingest reads for
+        # this point's timestamp and commit.
+        run: bash run_single_dashboard_run.sh "${RUNNER_TEMP}/perf-run"
+
+      - name: Ingest as a new weekly point into the TE-dashboard shards
+        working-directory: benchmarks/microbenchmarks
+        env:
+          MODEL_OVERRIDE: ${{ github.event.inputs.model }}
+          RUNNER_NAME: ${{ runner.name }}
+          SITE_DATA: ${{ github.workspace }}/site/data
+        run: |
+          set -euo pipefail
+          run_dir="$(ls -d "${RUNNER_TEMP}/perf-run"/*/ | head -1)"
+          echo "ingesting weekly point from ${run_dir}"
+          # Model auto-detects on the runner (it is the real machine); override
+          # only via the manual-dispatch input. Passed through env to avoid
+          # interpolating user input straight into the shell.
+          args=( "${run_dir}"/benchmark_*.csv
+                 --out-dir "${SITE_DATA}" --ref dev --runner "${RUNNER_NAME}" )
+          if [ -n "${MODEL_OVERRIDE:-}" ]; then
+            args+=( --model "${MODEL_OVERRIDE}" )
+          fi
+          python dashboard_ingest.py "${args[@]}"
+
+      - name: Regenerate the single-file dashboard.html
+        working-directory: benchmarks/microbenchmarks
+        # Inlines the front-end from this checkout + embeds the (now-appended)
+        # shards from the Pages repo, so the published page reflects the new point.
+        run: |
+          python build_bundle.py \
+            --data-dir "${GITHUB_WORKSPACE}/site/data" \
+            --out "${GITHUB_WORKSPACE}/site/dashboard.html"
+
+      - name: Commit & push to the TE-dashboard repo
+        working-directory: site
+        run: |
+          set -euo pipefail
+          git config user.name  "perf-bot"
+          git config user.email "perf-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to publish"; exit 0
+          fi
+          git commit -m "perf(weekly): ${GITHUB_SHA::8} $(date -u +%FT%TZ)"
+          # Serialized by `concurrency`, but rebase-then-push is cheap insurance.
+          git pull --rebase origin "${DASH_BRANCH}" || true
+          git push origin "HEAD:${DASH_BRANCH}"
