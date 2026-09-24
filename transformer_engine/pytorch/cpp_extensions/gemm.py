@@ -233,21 +233,14 @@ def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
 
 
 def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
-                    out_buffer=None, kernel_name="", b_pre_shuffled=True, log2_k_split=0):
+                    out_buffer=None, kernel_name="", b_pre_shuffled=True, split_k=0):
     """Core FP4 GEMM via AITER a4w4 kernels.
 
-    Routes to the ASM backend when ``kernel_name`` is an ASM-mangled symbol
-    (starts with ``_ZN``) or empty (heuristic). Otherwise routes to the CK
-    blockscale backend, matching AITER's own ``gemm_a4w4`` dispatcher.
-
-    Everything runs through TE's torch-free AITER libs (``tex``); the ``aiter``
-    Python package is not needed at runtime.
+    ``kernel_name``/``split_k`` come from the tuned-GEMM table (empty/0 means
+    heuristic); TE core picks the CK or ASM backend from ``kernel_name``.
     """
-    _fp4_dtype = torch.float4_e2m1fn_x2
-    A_fp4 = A_fp4.view(_fp4_dtype) if A_fp4.dtype != _fp4_dtype else A_fp4
-    B_fp4 = B_fp4.view(_fp4_dtype) if B_fp4.dtype != _fp4_dtype else B_fp4
-    A_scales_uint8 = A_scales.view(torch.uint8)
-    B_scales_uint8 = B_scales.view(torch.uint8)
+    A_fp4 = A_fp4.view(torch.uint8)
+    B_fp4 = B_fp4.view(torch.uint8)
 
     B_shuffled = B_fp4 if b_pre_shuffled else _shuffle_weight_16x16(B_fp4)
 
@@ -260,21 +253,12 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
         padded_M = (M + 31) // 32 * 32
         out_hp = torch.empty((padded_M, N), dtype=out_dtype, device=A_fp4.device)
 
-    use_ck = bool(kernel_name) and kernel_name.find("_ZN") == -1
-    if use_ck:
-        tex.gemm_a4w4_blockscale(
-            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8, out_hp,
-            split_k=log2_k_split, kernel_name=kernel_name,
-        )
-    else:
-        tex.gemm_a4w4_asm(
-            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8, out_hp,
-            bias=None, kernel_name=kernel_name,
-            alpha=1.0, beta=0.0, bpreshuffle=True, log2_k_split=log2_k_split,
-        )
+    tex.gemm_a4w4(
+        A_fp4, A_scales.view(torch.uint8), B_shuffled, B_scales.view(torch.uint8), out_hp,
+        kernel_name=kernel_name, split_k=split_k,
+    )
 
-    result = out_hp
-    return result[:M, :] if result.shape[0] > M else result
+    return out_hp[:M, :] if out_hp.shape[0] > M else out_hp
 
 
 def mxfp4_gemm(
@@ -344,7 +328,7 @@ def mxfp4_gemm(
             A_fp4, A_scales, B_fp4, B_scales,
             out_dtype=out_flat.dtype, out_buffer=None,
             kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-            log2_k_split=split_k,
+            split_k=split_k,
         )
         out_flat.add_(result)
         result = out_flat
@@ -353,7 +337,7 @@ def mxfp4_gemm(
             A_fp4, A_scales, B_fp4, B_scales,
             out_dtype=out_dtype, out_buffer=out_flat,
             kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-            log2_k_split=split_k,
+            split_k=split_k,
         )
 
     if bias is not None and layout == "TN" and not grad:

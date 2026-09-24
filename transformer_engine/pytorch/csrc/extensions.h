@@ -194,14 +194,10 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
                                                     bool use_split_accumulator, int math_sm_count);
 
 #ifdef USE_ROCM
-// AITER a4w4 (FP4) GEMM executors. Kernel selection + weight/scale shuffle are
-// done in Python; these take a resolved kernel name and already-shuffled inputs.
-void gemm_a4w4_blockscale(at::Tensor XQ, at::Tensor WQ, at::Tensor x_scale, at::Tensor w_scale,
-                          at::Tensor Y, int64_t split_k, std::string kernel_name);
-
-void gemm_a4w4_asm(at::Tensor A, at::Tensor B, at::Tensor a_scale, at::Tensor b_scale,
-                   at::Tensor out, std::optional<at::Tensor> bias, std::string kernel_name,
-                   double alpha, double beta, bool bpreshuffle, int64_t log2_k_split);
+// AITER a4w4 (FP4) GEMM. Kernel selection + weight shuffle are done in Python;
+// TE core picks the CK or ASM backend from the resolved kernel name.
+void gemm_a4w4(at::Tensor A, at::Tensor A_scale, at::Tensor B, at::Tensor B_scale, at::Tensor D,
+               std::string kernel_name, int64_t split_k);
 #endif  // USE_ROCM
 
 /***************************************************************************************************
