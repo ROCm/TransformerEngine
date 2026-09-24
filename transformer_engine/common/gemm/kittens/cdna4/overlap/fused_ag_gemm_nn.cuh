@@ -613,8 +613,13 @@ constexpr int BLOCK_K = 128;
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
 
 // Reads the pre-packed lane-native scale for group lg on this lane
+// The lane index is re-derived at every call so the compiler cannot hoist each (tile, group)
+// address out of the K loop as a VGPR of its own: in this kernel those spill, and every reload
+// waits on vmcnt(0), draining the in-flight prefetches.
 __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg) {
-    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
+    int lane = kittens::laneid();
+    asm volatile("" : "+v"(lane));
+    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + lane];
 }
 
 // Epilogue for the AG path: C is [M, N_TOTAL], the convention fused_ag_gemm_nn.cuh uses, so the
@@ -781,8 +786,17 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
         // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
         // this guard. The standalone GEMM includes the same file without defining it.
+        //
+        // The K loop is NOT unrolled here. The loop is convergent (s_barrier) with a runtime trip
+        // count, which older LLVM refused to unroll, so the shared "#pragma unroll 2" was silently
+        // dropped; since llvm/llvm-project#192819 (ROCm 7.14) it is honoured. Unrolled, tic/toc
+        // fold to constants and every per-phase LDS/prefetch address is kept live across the loop.
+        // With the persistent-loop state on top that exceeds this kernel's 256 VGPRs, and the
+        // resulting in-loop reloads each wait on vmcnt(0), draining the prefetches.
 #define MXFP8_AG_SKEW_CLOSE 1
+#define MXFP8_NN_K_UNROLL 1
 #include "../mxfp8_nn_mainloop.inc"
+#undef MXFP8_NN_K_UNROLL
 #undef MXFP8_AG_SKEW_CLOSE
 
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
