@@ -741,18 +741,7 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None):
             written.append(out)
         if csv_samples is not None:
             sout = _dest(csv_samples, family, f"{family}_samples.csv")
-            sample_rows = []
-            for case_params, records, _node in fam.case_metrics:
-                for metric in records:
-                    m = metric.get("measurement")
-                    if m is None:
-                        continue
-                    for i, t in enumerate(m.times):
-                        sr = dict(case_params)
-                        sr["label"] = metric["label"]
-                        sr["sample_idx"] = i
-                        sr["time_ms"] = t * 1e3
-                        sample_rows.append(sr)
+            sample_rows = _sample_rows(fam)
             if sample_rows:
                 pd.DataFrame(
                     sample_rows,
@@ -760,6 +749,152 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None):
                 ).to_csv(sout, index=False)
                 written.append(sout)
     return written
+
+
+def _sample_rows(fam):
+    """Flatten a family's per-iteration timing measurements into long rows."""
+    rows = []
+    for case_params, records, _node in fam.case_metrics:
+        for metric in records:
+            m = metric.get("measurement")
+            if m is None:
+                continue
+            for i, t in enumerate(m.times):
+                sr = dict(case_params)
+                sr["label"] = metric["label"]
+                sr["sample_idx"] = i
+                sr["time_ms"] = t * 1e3
+                rows.append(sr)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Dashboard run: one pytest session -> one run dir of born-tagged CSVs + samples/
+# + run_info.txt, ready for the TE-dashboard ingest. Replaces the shell runner.
+# ---------------------------------------------------------------------------
+
+def _detect_gpu_model():
+    """Short GPU token (e.g. ``MI355X``) from torch's device name, else UNKNOWN."""
+    import re
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        return "UNKNOWN"
+    m = re.search(r"MI\s?\d{3,4}[A-Za-z]*", name)
+    return m.group(0).replace(" ", "").upper() if m else "UNKNOWN"
+
+
+def _gpu_pci():
+    """PCI BDF of the active GPU (torch device 0), e.g. ``0000:75:00.0``; '' if unknown."""
+    try:
+        p = torch.cuda.get_device_properties(0)
+        return "%04x:%02x:%02x.0" % (p.pci_domain_id, p.pci_bus_id, p.pci_device_id)
+    except Exception:
+        return ""
+
+
+def _dashboard_run_meta():
+    """Run metadata: git sha/date, week date, GPU model, visible GPU id, host."""
+    import datetime
+    import subprocess
+
+    here = Path(__file__).resolve().parent
+
+    def git(*args):
+        # safe.directory=* bypasses git's dubious-ownership guard when the repo
+        # is bind-mounted into a container under a different uid.
+        try:
+            return subprocess.check_output(
+                ["git", "-c", "safe.directory=*", "-C", str(here), *args],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+
+    sha = git("rev-parse", "HEAD")
+    gpu = (os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0].strip() or "0"
+    return {
+        "week": datetime.date.today().isoformat(),
+        "sha": sha,
+        "short": sha[:12] or "unknown",
+        "cdate": git("show", "-s", "--format=%cI", "HEAD"),
+        "model": _detect_gpu_model(),
+        "gpu": gpu,
+        "gpu_bdf": _gpu_pci(),
+        "host": os.uname().nodename.split(".")[0],
+    }
+
+
+def _write_run_info(path, meta):
+    """Write a small version/machine manifest alongside a run's CSVs."""
+    import datetime
+    import importlib
+
+    def ver(mod):
+        try:
+            return getattr(importlib.import_module(mod), "__version__", "?")
+        except Exception:
+            return "?"
+
+    def read(p):
+        try:
+            return Path(p).read_text().strip()
+        except OSError:
+            return ""
+
+    rocm = read("/opt/rocm/.info/version") or getattr(torch.version, "hip", "") or "?"
+    info = {
+        "date": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "host": meta["host"],
+        "gpu_id": meta["gpu"],
+        "gpu_bdf": meta.get("gpu_bdf") or "?",
+        "arch": meta["model"],
+        "te_commit": meta["sha"],
+        "te": ver("transformer_engine"),
+        "pytorch": ver("torch"),
+        "triton": ver("triton"),
+        "jax": ver("jax"),
+        "rocm": rocm,
+        "amdgpu_drv": read("/sys/module/amdgpu/version") or "?",
+        "kernel": os.uname().release,
+    }
+    path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
+
+
+def write_dashboard_run(store, *, out_base="results", csv_samples=None):
+    """Write one dashboard run and return the run dir.
+
+    Layout: ``<out_base>/<arch>_<host>_gpu<id>_<pci>/<week>_<commit>/``. Per-family
+    CSVs are born-tagged with run_week/commit_sha/commit_date (so dashboard_ingest.py
+    consumes them directly); per-iteration samples land untagged under ``samples/``;
+    ``run_info.txt`` records versions + machine.
+    """
+    import pandas as pd
+
+    meta = _dashboard_run_meta()
+    node = f"{meta['model']}_{meta['host']}_gpu{meta['gpu']}"
+    if meta["gpu_bdf"]:
+        node += "_" + meta["gpu_bdf"].replace(":", "-").replace(".", "-")
+    run_dir = Path(out_base) / node / f"{meta['week']}_{meta['short']}"
+    (run_dir / "samples").mkdir(parents=True, exist_ok=True)
+    _write_run_info(run_dir / "run_info.txt", meta)
+
+    tag = {"run_week": meta["week"], "commit_sha": meta["sha"], "commit_date": meta["cdate"]}
+    tag_cols = list(tag)
+    for family, fam in store.items():
+        if not fam.rows:
+            continue
+        rows = [{**tag, **row} for row in fam.rows]
+        pd.DataFrame(rows, columns=tag_cols + fam.param_columns + fam.metric_columns).to_csv(
+            run_dir / f"{family}.csv", index=False
+        )
+        if csv_samples is not None:
+            sample_rows = _sample_rows(fam)
+            if sample_rows:
+                pd.DataFrame(
+                    sample_rows, columns=fam.param_columns + ["label", "sample_idx", "time_ms"]
+                ).to_csv(run_dir / "samples" / f"{family}_samples.csv", index=False)
+    return run_dir
 
 
 def _times_ms(measurement):

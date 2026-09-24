@@ -43,6 +43,7 @@ from utils import (
     print_case,
     record_bench,
     write_bench_outputs,
+    write_dashboard_run,
 )
 
 
@@ -80,6 +81,17 @@ def pytest_addoption(parser):
     group.addoption(
         "--run-flydsl", action="store_true", default=False,
         help="Run FlyDSL-backed cases (marked @pytest.mark.flydsl); skipped by default due to long compile times.",
+    )
+    group.addoption(
+        "--dashboard-run", action="store_true", default=False,
+        help="Collect all families into one run dir (born-tagged CSVs + samples/ + "
+             "run_info.txt) under --dashboard-out, for the TE dashboard.",
+    )
+    group.addoption(
+        "--dashboard-out", default="results", metavar="DIR",
+        help="Base output dir for --dashboard-run; a "
+             "<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/ run dir is created under it "
+             "(default: results).",
     )
 
 
@@ -170,6 +182,14 @@ def pytest_sessionfinish(session, exitstatus):
     config = session.config
     store = getattr(config, "_microbench_store", None)
     if not store:
+        return
+    if config.getoption("--dashboard-run"):
+        run_dir = write_dashboard_run(
+            store,
+            out_base=config.getoption("--dashboard-out"),
+            csv_samples=config.getoption("--csv-samples"),
+        )
+        print(f"microbench: dashboard run -> {run_dir}")
         return
     written = write_bench_outputs(
         store,
