@@ -94,6 +94,11 @@ def pytest_addoption(parser):
              "<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/ run dir is created under it "
              "(default: results).",
     )
+    group.addoption(
+        "--gpu-model", default=None, metavar="NAME",
+        help="Override the detected GPU model/arch name (e.g. MI400X) used in the "
+             "--dashboard-run dir + run_info; use when auto-detect returns UNKNOWN.",
+    )
 
 
 def pytest_configure(config):
@@ -118,7 +123,8 @@ def pytest_configure(config):
     # Resolve the dashboard run dir up front so pytest_report_header can show it
     # and write_dashboard_run can reuse the same metadata at session end.
     if config.getoption("--dashboard-run"):
-        config._dashboard_plan = dashboard_run_plan(config.getoption("--dashboard-out"))
+        config._dashboard_plan = dashboard_run_plan(
+            config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"))
 
 
 def pytest_report_header(config):

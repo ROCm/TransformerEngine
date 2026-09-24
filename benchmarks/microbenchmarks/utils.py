@@ -793,8 +793,11 @@ def _gpu_pci():
         return ""
 
 
-def _dashboard_run_meta():
-    """Run metadata: run timestamp, git sha/date, GPU model, visible GPU id, host."""
+def _dashboard_run_meta(model=None):
+    """Run metadata: run timestamp, git sha/date, GPU model, visible GPU id, host.
+
+    *model* overrides the auto-detected GPU model when given (e.g. --gpu-model).
+    """
     import datetime
     import subprocess
 
@@ -820,7 +823,7 @@ def _dashboard_run_meta():
         "sha": sha,
         "short": sha[:12] or "unknown",
         "cdate": git("show", "-s", "--format=%cI", "HEAD"),
-        "model": _detect_gpu_model(),
+        "model": model or _detect_gpu_model(),
         "gpu": gpu,
         "gpu_bdf": _gpu_pci(),
         "host": os.uname().nodename.split(".")[0],
@@ -871,17 +874,17 @@ def _dashboard_run_dir(out_base, meta):
     return Path(out_base) / node / f"{meta['stamp']}_{meta['short']}"
 
 
-def dashboard_run_plan(out_base="results"):
+def dashboard_run_plan(out_base="results", model=None):
     """Resolve (meta, run_dir) for a dashboard run without writing anything."""
-    meta = _dashboard_run_meta()
+    meta = _dashboard_run_meta(model=model)
     return SimpleNamespace(meta=meta, run_dir=_dashboard_run_dir(out_base, meta))
 
 
-def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=None):
+def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=None, model=None):
     """Write one dashboard run and return the run dir.
 
     Layout: ``<out_base>/<arch>_<host>_gpu<id>_<pci>/<datetime>_<commit>/``. Per-family
-    CSVs are born-tagged with run_week/commit_sha/commit_date (so dashboard_ingest.py
+    CSVs are born-tagged with run_ts/commit_sha/commit_date (so dashboard_ingest.py
     consumes them directly); per-iteration samples land untagged under ``samples/``;
     ``run_info.txt`` records versions + machine. Pass *meta* from
     :func:`dashboard_run_plan` to reuse the metadata resolved at session start.
@@ -889,7 +892,7 @@ def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=Non
     import pandas as pd
 
     if meta is None:
-        meta = _dashboard_run_meta()
+        meta = _dashboard_run_meta(model=model)
     run_dir = _dashboard_run_dir(out_base, meta)
     (run_dir / "samples").mkdir(parents=True, exist_ok=True)
     _write_run_info(run_dir / "run_info.txt", meta)
