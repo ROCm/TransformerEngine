@@ -6,7 +6,12 @@
 //! fused AG+GEMM (overlap/fused_ag_gemm_nn.cuh); only the C writeback is left to the caller.
 //! Slots are FLIPPED: the A slot holds the ACTIVATION (K-contiguous, plain subtile_inplace reads),
 //! the B slot the WEIGHT (K-major, so it takes the ds_read_*_tr path via b_col_off).
+//! MXFP8_NN_K_UNROLL lets a caller override the K-loop unroll factor (default 2).
+#ifdef MXFP8_NN_K_UNROLL
+#pragma unroll MXFP8_NN_K_UNROLL
+#else
 #pragma unroll 2
+#endif
         for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
             if (k + 1 < k_iters) {
                 G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
