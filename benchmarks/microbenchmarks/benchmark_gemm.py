@@ -42,17 +42,18 @@ BENCHMARK_LABEL = "GEMM"
 RECIPES = build_recipes()
 
 # Env recipes to force a dense-GEMM kernel backend (None unsets the var). Per the
-# C++ dispatch: bf16 defaults to hipBLASLt, forced to Triton via NVTE_USE_GEMM_TRITON;
-# mxfp8 defaults to HipKittens, forced to hipBLASLt via NVTE_ROCM_USE_HIPBLASLT_MXFP8
-# (rocm_gemm.cu). fp8 has a single backend. FlyDSL (gfx950-only, BF16/FP8/MXFP8) is
-# the Python dispatch selected by NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
+# dispatch: bf16 defaults to hipBLASLt; Triton is NVTE_GEMM_BACKEND=TRITON (PR #676,
+# unified selector) or the legacy NVTE_USE_GEMM_TRITON=1 toggle (PR #667), resolved
+# per build by _triton_gemm_env. mxfp8 defaults to HipKittens, forced to hipBLASLt via
+# NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. FlyDSL
+# (gfx950-only, BF16/FP8/MXFP8) is NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
 _GEMM_TRITON = "NVTE_USE_GEMM_TRITON"
 _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 _GEMM_BACKEND = "NVTE_GEMM_BACKEND"
 
+# Triton's env is resolved at runtime by _triton_gemm_env (mechanism varies by build).
 GEMM_BACKENDS = {
     "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None},
-    "triton":     {_GEMM_TRITON: "1", _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
     "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
     "flydsl":     {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: "FLYDSL"},
 }
@@ -70,10 +71,21 @@ def _backends_for(precision):
 
 
 @functools.lru_cache(maxsize=1)
+def _triton_gemm_env():
+    """Env that forces the Triton GEMM backend on the installed build, or None.
+
+    PR #676 unified selection under NVTE_GEMM_BACKEND=TRITON; older builds (PR
+    #667) use the legacy NVTE_USE_GEMM_TRITON=1 toggle. Prefer the unified selector.
+    """
+    if te_honors_env(_GEMM_BACKEND):
+        return {_GEMM_BACKEND: "TRITON", _GEMM_TRITON: None, _HIPBLASLT_MXFP8: None}
+    if te_honors_env(_GEMM_TRITON):
+        return {_GEMM_TRITON: "1", _GEMM_BACKEND: None, _HIPBLASLT_MXFP8: None}
+    return None
+
+
 def _triton_gemm_supported():
-    # The triton GEMM backend + its NVTE_USE_GEMM_TRITON dispatch landed together
-    # in PR #667; older TE builds silently ignore the env and run hipBLASLt.
-    return te_honors_env("NVTE_USE_GEMM_TRITON")
+    return _triton_gemm_env() is not None
 
 
 @functools.lru_cache(maxsize=1)
@@ -199,7 +211,9 @@ def test_gemm(microbench, case, monkeypatch):
         pytest.skip("HipKittens GEMM needs 256-aligned N/K")
     if case["Backend"] == "flydsl" and not _flydsl_gemm_supported():
         pytest.skip("FlyDSL GEMM backend not available (needs gfx950 + flydsl package)")
-    apply_backend_env(monkeypatch, GEMM_BACKENDS[case["Backend"]])
+    # Triton's selector varies by TE version (NVTE_GEMM_BACKEND=TRITON or legacy toggle).
+    backend_env = _triton_gemm_env() if case["Backend"] == "triton" else GEMM_BACKENDS[case["Backend"]]
+    apply_backend_env(monkeypatch, backend_env)
     microbench.run(
         case,
         lambda: bench_gemm(

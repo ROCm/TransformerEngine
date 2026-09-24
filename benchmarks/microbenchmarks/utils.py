@@ -647,6 +647,28 @@ def _te_py_source():
     return "\n".join(chunks)
 
 
+@functools.lru_cache(maxsize=1)
+def _te_loaded_libs():
+    """Paths of libtransformer_engine*.so mapped into this process.
+
+    Catches the compiled lib that a source/editable install keeps at the repo
+    root -- outside the package dir _te_install_root scans.
+    """
+    libs = []
+    seen = set()
+    try:
+        with open("/proc/self/maps") as fh:
+            for line in fh:
+                parts = line.split(None, 5)
+                path = parts[5].strip() if len(parts) >= 6 else ""
+                if path.endswith(".so") and "libtransformer_engine" in path and path not in seen:
+                    seen.add(path)
+                    libs.append(Path(path))
+    except OSError:
+        pass
+    return libs
+
+
 @functools.lru_cache(maxsize=None)
 def te_honors_env(varname):
     """True if the installed TE build reads *varname* (python dispatch or compiled .so).
@@ -662,7 +684,10 @@ def te_honors_env(varname):
     if varname in _te_py_source():
         return True
     needle = varname.encode()
-    for so in root.rglob("*.so"):
+    # Include the compiled TE lib actually loaded into the process: a source/
+    # editable install keeps libtransformer_engine.so at the repo root, outside
+    # the package dir _te_install_root scans.
+    for so in list(root.rglob("*.so")) + _te_loaded_libs():
         try:
             with open(so, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                 if mm.find(needle) != -1:
