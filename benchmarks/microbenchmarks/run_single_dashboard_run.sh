@@ -34,6 +34,26 @@ mkdir -p "${run_dir}"
 model="$(amd-smi static --asic 2>/dev/null | grep -oiE 'MI[0-9]{3,4}[A-Z]*' | head -1)"
 [[ -n "${model}" ]] || model="$(python3 -c 'import torch,re; n=torch.cuda.get_device_name(0); m=re.search(r"MI\s?\d{3,4}[A-Za-z]*", n); print(m.group(0).replace(" ","").upper() if m else "")' 2>/dev/null)"
 [[ -n "${model}" ]] || model="UNKNOWN"
+host="$(hostname -s 2>/dev/null || hostname)"
+gpu="${HIP_VISIBLE_DEVICES:-}"; gpu="${gpu%%,*}"; gpu="${gpu:-0}"   # first visible GPU id (or 0)
+dest="${model}_${host}_gpu${gpu}"                                   # TE-dashboard results/<...> dir name
+
+# Per-run manifest (versions + machine context) archived alongside the CSVs.
+_pyver() { python -c "import ${1} as _m; print(getattr(_m, '__version__', '?'))" 2>/dev/null || echo '?'; }
+{
+  echo "date:       $(date -Is)"
+  echo "host:       ${host}"
+  echo "gpu_id:     ${gpu}"
+  echo "arch:       ${model}"
+  echo "te_commit:  ${sha}"
+  echo "te:         $(_pyver transformer_engine)"
+  echo "pytorch:    $(_pyver torch)"
+  echo "triton:     $(_pyver triton)"
+  echo "jax:        $(_pyver jax)"
+  echo "rocm:       $(cat /opt/rocm/.info/version 2>/dev/null || python -c 'import torch; print(torch.version.hip)' 2>/dev/null || echo '?')"
+  echo "amdgpu_drv: $(cat /sys/module/amdgpu/version 2>/dev/null || echo '?')"
+  echo "kernel:     $(uname -r)"
+} > "${run_dir}/run_info.txt"
 
 kp=""; [[ "${KERNEL_PROFILE}" == "1" ]] && kp="--kernel-profile"
 fly=""; [[ "${RUN_FLYDSL}" == "1" ]] && fly="--run-flydsl"
@@ -78,7 +98,9 @@ shopt -u nullglob
 
 echo
 echo "CSVs ready in ${run_dir}"
+echo "Run manifest:  ${run_dir}/run_info.txt"
 [[ "${SAMPLES}" == "1" ]] && echo "Per-iteration samples archived in ${run_dir}/samples/ (not ingested yet)"
-echo "Ingest (from a checkout that has the dashboard tooling):"
-echo "  python dashboard_ingest.py ${run_dir}/benchmark_*.csv --model ${model} --runner local --ref dev"
+echo "Publish in a TE-dashboard checkout (github.com/AMD-ROCm-Internal/TE-dashboard):"
+echo "  cp -r ${run_dir} <TE-dashboard>/results/${dest}/"
+echo "  python dashboard_ingest.py results/${dest}/$(basename "${run_dir}")/benchmark_*.csv --model ${model}"
 echo "  python build_bundle.py"
