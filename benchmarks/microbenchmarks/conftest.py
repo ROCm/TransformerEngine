@@ -38,6 +38,7 @@ import pytest
 from utils import (
     configure_kernel_profile,
     configure_rotating,
+    dashboard_run_plan,
     format_aggregate_table,
     format_results_table,
     print_case,
@@ -114,6 +115,29 @@ def pytest_configure(config):
             print("WARNING: GPU interference check skipped -- amdsmi package not available "
                   "(pip install amdsmi, or pass --no-gpu-interference-check to silence).")
 
+    # Resolve the dashboard run dir up front so pytest_report_header can show it
+    # and write_dashboard_run can reuse the same metadata at session end.
+    if config.getoption("--dashboard-run"):
+        config._dashboard_plan = dashboard_run_plan(config.getoption("--dashboard-out"))
+
+
+def pytest_report_header(config):
+    plan = getattr(config, "_dashboard_plan", None)
+    if plan is None:
+        return None
+    extras = [name for name, opt in (
+        ("kernel-profile", "--kernel-profile"),
+        ("flydsl", "--run-flydsl"),
+        ("samples", "--csv-samples"),
+    ) if config.getoption(opt)]
+    m = plan.meta
+    return [
+        f"dashboard-run -> {plan.run_dir}",
+        f"  {m['model']} on {m['host']} gpu{m['gpu']} "
+        f"({m['gpu_bdf'] or 'no pci'}) @ {m['short']}; "
+        f"extras: {', '.join(extras) or 'none (wall only)'}",
+    ]
+
 
 def pytest_collection_modifyitems(config, items):
     # FlyDSL cases are opt-in: skip anything marked @pytest.mark.flydsl unless
@@ -184,10 +208,12 @@ def pytest_sessionfinish(session, exitstatus):
     if not store:
         return
     if config.getoption("--dashboard-run"):
+        plan = getattr(config, "_dashboard_plan", None)
         run_dir = write_dashboard_run(
             store,
             out_base=config.getoption("--dashboard-out"),
             csv_samples=config.getoption("--csv-samples"),
+            meta=plan.meta if plan else None,
         )
         print(f"microbench: dashboard run -> {run_dir}")
         return

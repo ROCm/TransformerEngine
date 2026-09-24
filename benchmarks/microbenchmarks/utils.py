@@ -861,21 +861,34 @@ def _write_run_info(path, meta):
     path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
 
 
-def write_dashboard_run(store, *, out_base="results", csv_samples=None):
+def _dashboard_run_dir(out_base, meta):
+    """Run dir path from run metadata: ``<out_base>/<node>/<week>_<commit>/``."""
+    node = f"{meta['model']}_{meta['host']}_gpu{meta['gpu']}"
+    if meta["gpu_bdf"]:
+        node += "_" + meta["gpu_bdf"].replace(":", "-").replace(".", "-")
+    return Path(out_base) / node / f"{meta['week']}_{meta['short']}"
+
+
+def dashboard_run_plan(out_base="results"):
+    """Resolve (meta, run_dir) for a dashboard run without writing anything."""
+    meta = _dashboard_run_meta()
+    return SimpleNamespace(meta=meta, run_dir=_dashboard_run_dir(out_base, meta))
+
+
+def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=None):
     """Write one dashboard run and return the run dir.
 
     Layout: ``<out_base>/<arch>_<host>_gpu<id>_<pci>/<week>_<commit>/``. Per-family
     CSVs are born-tagged with run_week/commit_sha/commit_date (so dashboard_ingest.py
     consumes them directly); per-iteration samples land untagged under ``samples/``;
-    ``run_info.txt`` records versions + machine.
+    ``run_info.txt`` records versions + machine. Pass *meta* from
+    :func:`dashboard_run_plan` to reuse the metadata resolved at session start.
     """
     import pandas as pd
 
-    meta = _dashboard_run_meta()
-    node = f"{meta['model']}_{meta['host']}_gpu{meta['gpu']}"
-    if meta["gpu_bdf"]:
-        node += "_" + meta["gpu_bdf"].replace(":", "-").replace(".", "-")
-    run_dir = Path(out_base) / node / f"{meta['week']}_{meta['short']}"
+    if meta is None:
+        meta = _dashboard_run_meta()
+    run_dir = _dashboard_run_dir(out_base, meta)
     (run_dir / "samples").mkdir(parents=True, exist_ok=True)
     _write_run_info(run_dir / "run_info.txt", meta)
 
