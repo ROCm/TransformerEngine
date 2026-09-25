@@ -464,6 +464,19 @@ def compile_triton(
         target = tc.GPUTarget("cuda", compute_capability, 32)
         binary_key = "ptx"
 
+    # Every array parameter is launched with a 16-byte divisibility guarantee
+    # (create_array_parameter(0, 16) in triton_call_lowering, which jaxlib checks
+    # at launch), so tell the compiler, as Triton's JIT does for aligned tensors.
+    # Without it loads are not vectorized, and reductions then sum in a
+    # different order than the same kernel launched from PyTorch.
+    attrs = None
+    if is_hip:
+        attrs = {
+            (kernel_fn.arg_names.index(name),): [["tt.divisibility", 16]]
+            for name, ty in signature_with_constexpr.items()
+            if ty.startswith("*")
+        }
+
     # Gluon uses GluonASTSource, which (unlike ASTSource) requires every constexpr
     # parameter to be listed in the signature.
     if is_gluon:
@@ -485,12 +498,14 @@ def compile_triton(
             fn=kernel_fn,
             constexprs=constants,
             signature=gluon_signature,
+            attrs=attrs,
         )
     else:
         src = tc.ASTSource(
             fn=kernel_fn,
             constexprs=constants,
             signature=signature_with_constexpr,
+            attrs=attrs,
         )
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
@@ -542,6 +557,7 @@ def triton_call_lowering(
     constexprs: Mapping[str, Any] = None,
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
+    enable_fp_fusion: bool = False,
 ):
     """Helper for MLIR lowering that calls a Triton kernel.
 
@@ -570,6 +586,9 @@ def triton_call_lowering(
                     layouts; default 4). Ignored when autotuned.
         num_stages: Pipeline stages for non-autotuned kernels (default 3). Ignored
                     when autotuned.
+        enable_fp_fusion: Allow FMA contraction (default False for accuracy). Pass
+                    True to match a kernel launched from PyTorch, where Triton
+                    enables it by default.
 
     Returns:
         MLIR lowering result
@@ -698,7 +717,7 @@ def triton_call_lowering(
                 config_num_stages,
                 config_num_ctas,
                 compute_capability,
-                enable_fp_fusion=False,
+                enable_fp_fusion=enable_fp_fusion,
             )
 
             # Create kernel call for this config
@@ -768,7 +787,7 @@ def triton_call_lowering(
             num_stages,
             num_ctas,
             compute_capability,
-            enable_fp_fusion=False,
+            enable_fp_fusion=enable_fp_fusion,
         )
 
         kernel_params = []
