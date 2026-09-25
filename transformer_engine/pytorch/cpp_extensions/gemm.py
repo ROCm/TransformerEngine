@@ -622,6 +622,12 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
+    if any(isinstance(t, Float8BlockwiseQTensorStorage) for t in A) or any(
+        isinstance(t, Float8BlockwiseQTensorStorage) for t in B
+    ):
+        # FP8 block-scaling requires split accumulator
+        use_split_accumulator = True
+
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
         raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
