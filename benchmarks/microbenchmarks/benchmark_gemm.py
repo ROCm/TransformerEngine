@@ -104,6 +104,22 @@ def _flydsl_gemm_supported():
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def _device_cc():
+    """(major, minor) compute capability of the current GPU, or None."""
+    try:
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+        return get_device_compute_capability()
+    except Exception:
+        return None
+
+
+def _mxfp8_gemm_k_multiple():
+    """Multiple hipBLASLt requires for an MXFP8 GEMM's contraction dim: 128 on
+    gfx950 (swizzled scales unsupported), 32 on gfx1250 (see rocm_gemm.cu)."""
+    return 32 if _device_cc() == (12, 5) else 128
+
+
 def _flydsl_fell_back(fn):
     """Run *fn* once with FlyDSL fallback warnings on; True if FlyDSL fell back to C++."""
     prev = os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK")
@@ -142,6 +158,31 @@ def generate_cases():
 
 def _case_id(c):
     return f"{c['Case']}-{c['Precision']}-{c['Backend']}-{c['Direction']}-M{c['M']}"
+
+
+def _known_hipblaslt_qkv_xfail(c):
+    """Llama3.1-405B/TP8-QKV bf16/nvfp4 hipBLASLt GEMM hits a hipBLASLt algo bug --
+    the top heuristic algo returns HIPBLASLT status 6 (INTERNAL_ERROR) at small M on
+    gfx950. nvfp4 dequantizes to bf16, same GEMM."""
+    return (
+        c["Case"] == "Llama3.1-405B/TP8-QKV"
+        and c["Backend"] == "hipblaslt"
+        and c["Precision"] in ("bf16", "nvfp4")
+        and c["M"] in (1024, 2048)
+        and _device_cc() == (9, 5)
+    )
+
+
+def _marks_for(c):
+    """pytest marks for one case: the flydsl marker plus a temporary xfail for the
+    known hipBLASLt QKV bug (remove once hipBLASLt / hipblaslt_gemm is fixed)."""
+    marks = [pytest.mark.flydsl] if c["Backend"] == "flydsl" else []
+    if _known_hipblaslt_qkv_xfail(c):
+        marks.append(pytest.mark.xfail(
+            reason="known hipBLASLt algo bug on Llama3.1-405B/TP8-QKV bf16/nvfp4 at "
+                   "small M (gfx950, HIPBLASLT status 6)",
+            raises=RuntimeError, strict=False))
+    return tuple(marks)
 
 
 def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
@@ -188,10 +229,7 @@ def pytest_generate_tests(metafunc):
     if "case" in metafunc.fixturenames:
         cases = generate_cases()
         params = [
-            pytest.param(
-                c, id=_case_id(c),
-                marks=pytest.mark.flydsl if c["Backend"] == "flydsl" else (),
-            )
+            pytest.param(c, id=_case_id(c), marks=_marks_for(c))
             for c in cases
         ]
         metafunc.parametrize("case", params)
@@ -203,6 +241,17 @@ def test_gemm(microbench, case, monkeypatch):
         dim % 32 for dim in (case["M"], case["N"], case["K"])
     ):
         pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
+    if case["Precision"] == "mxfp8":
+        # Block-quantize needs every operand dim divisible by 32; the GEMM needs
+        # each contraction dim divisible by _mxfp8_gemm_k_multiple() -- K for fwd,
+        # plus N and M for the bwd dgrad/wgrad.
+        if any(dim % 32 for dim in (case["M"], case["N"], case["K"])):
+            pytest.skip("MXFP8 GEMM needs M/N/K divisible by 32")
+        kmul = _mxfp8_gemm_k_multiple()
+        contraction = ((case["K"],) if case["Direction"] == "fwd"
+                       else (case["K"], case["N"], case["M"]))
+        if any(dim % kmul for dim in contraction):
+            pytest.skip(f"MXFP8 GEMM needs the contraction dim divisible by {kmul}")
     if case["Backend"] == "triton" and not _triton_gemm_supported():
         pytest.skip("Triton GEMM backend not available in this TE build")
     if case["Backend"] == "hipkittens" and not te_honors_env(_HIPBLASLT_MXFP8):

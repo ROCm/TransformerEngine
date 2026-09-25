@@ -6,6 +6,7 @@
 ###############################################################################
 """Shared utilities for microbenchmarks: model configs, timing, throughput, CSV output."""
 
+import csv
 import functools
 import importlib.util
 import itertools
@@ -737,11 +738,16 @@ def print_case(case_params, metric_records):
     _print_metric_records(metric_records)
 
 
+def _write_csv(path, rows, columns):
+    """Write list-of-dict *rows* to *path* with header *columns*."""
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def write_bench_outputs(store, *, csv=None, csv_samples=None):
     """Write per-family CSV / samples outputs; return paths written."""
-    import pandas as pd
-    from pathlib import Path
-
     # When an explicit filename is given but several families run in one session
     # (e.g. `pytest .`), insert the family name so they don't overwrite each other.
     multi = sum(1 for fam in store.values() if fam.rows) > 1
@@ -760,18 +766,14 @@ def write_bench_outputs(store, *, csv=None, csv_samples=None):
             continue
         if csv is not None:
             out = _dest(csv, family, f"{family}.csv")
-            pd.DataFrame(fam.rows, columns=fam.param_columns + fam.metric_columns).to_csv(
-                out, index=False
-            )
+            _write_csv(out, fam.rows, fam.param_columns + fam.metric_columns)
             written.append(out)
         if csv_samples is not None:
             sout = _dest(csv_samples, family, f"{family}_samples.csv")
             sample_rows = _sample_rows(fam)
             if sample_rows:
-                pd.DataFrame(
-                    sample_rows,
-                    columns=fam.param_columns + ["label", "sample_idx", "time_ms"],
-                ).to_csv(sout, index=False)
+                _write_csv(sout, sample_rows,
+                           fam.param_columns + ["label", "sample_idx", "time_ms"])
                 written.append(sout)
     return written
 
@@ -788,7 +790,7 @@ def _sample_rows(fam):
                 sr = dict(case_params)
                 sr["label"] = metric["label"]
                 sr["sample_idx"] = i
-                sr["time_ms"] = t * 1e3
+                sr["time_ms"] = round(t * 1e3, 6)
                 rows.append(sr)
     return rows
 
@@ -914,8 +916,6 @@ def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=Non
     ``run_info.txt`` records versions + machine. Pass *meta* from
     :func:`dashboard_run_plan` to reuse the metadata resolved at session start.
     """
-    import pandas as pd
-
     if meta is None:
         meta = _dashboard_run_meta(model=model)
     run_dir = _dashboard_run_dir(out_base, meta)
@@ -928,15 +928,13 @@ def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=Non
         if not fam.rows:
             continue
         rows = [{**tag, **row} for row in fam.rows]
-        pd.DataFrame(rows, columns=tag_cols + fam.param_columns + fam.metric_columns).to_csv(
-            run_dir / f"{family}.csv", index=False
-        )
+        _write_csv(run_dir / f"{family}.csv", rows,
+                   tag_cols + fam.param_columns + fam.metric_columns)
         if csv_samples is not None:
             sample_rows = _sample_rows(fam)
             if sample_rows:
-                pd.DataFrame(
-                    sample_rows, columns=fam.param_columns + ["label", "sample_idx", "time_ms"]
-                ).to_csv(run_dir / "samples" / f"{family}_samples.csv", index=False)
+                _write_csv(run_dir / "samples" / f"{family}_samples.csv", sample_rows,
+                           fam.param_columns + ["label", "sample_idx", "time_ms"])
     return run_dir
 
 
