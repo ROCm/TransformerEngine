@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""JAX driver for the Kimi Delta Attention (KDA) Triton kernels. Forward only.
+"""JAX driver for the Kimi Delta Attention (KDA) Triton kernels.
 
 Mirrors ``transformer_engine.pytorch.triton.kda``: the same kernels from
-``transformer_engine.common.triton.kda`` (and ``kda_gluon`` on gfx950), the
-same launch configs and the same FlashKDA / general-pipeline routing, so the
-two frameworks produce the same results.
+``transformer_engine.common.triton.kda`` / ``kda_bwd`` (and ``kda_gluon`` on
+gfx950), the same launch configs and the same FlashKDA / general-pipeline
+routing, so the two frameworks produce the same results.
 
 Every launch goes through one generic primitive, ``te_kda_triton_call``, whose
 lowering is ``triton_call_lowering``. Kernels take their tensor inputs first
@@ -60,10 +60,20 @@ from transformer_engine.common.triton.kda import (
     kda_num_cus,
     kda_varlen_max_chunks,
 )
+from transformer_engine.common.triton.kda_bwd import (
+    _kda_bwd_beta_sigmoid_kernel,
+    _kda_bwd_dav_kernel,
+    _kda_bwd_dhu_kernel,
+    _kda_bwd_gate_kernel,
+    _kda_bwd_intra_kernel,
+    _kda_bwd_l2norm_kernel,
+    _kda_bwd_reverse_cumsum_kernel,
+    _kda_bwd_wy_dqkg_kernel,
+)
 from ..util import is_hip_extension
 from .utils import triton_call_lowering
 
-__all__ = ["kda_fwd"]
+__all__ = ["kda_fwd", "kda_bwd"]
 
 _DEFAULT_CHUNK_SIZE = 64
 
@@ -237,7 +247,7 @@ def _varlen_plan(cu_seqlens, chunk_size: int, max_chunks: int, chunks_per_seg=No
         num_warps=4,
         num_stages=2,
     )
-    return r["chunk_indices"], r["chunk_offsets"], r.get("seg_desc"), r.get("seq_seg_off")
+    return (r["chunk_indices"], r["chunk_offsets"], r.get("seg_desc"), r.get("seq_seg_off"))
 
 
 def _fixed_segments(B: int, T: int, C: int, chunks_per_seg: int):
@@ -252,7 +262,8 @@ def _fixed_segments(B: int, T: int, C: int, chunks_per_seg: int):
 def _mask_tail(o, cu_seqlens):
     """Zero tokens past ``cu_seqlens[-1]``, which no kernel writes."""
     tok = jnp.arange(o.shape[1], dtype=jnp.int32)
-    return jnp.where((tok < cu_seqlens[-1])[None, :, None, None], o, jnp.zeros_like(o))
+    keep = (tok < cu_seqlens[-1]).reshape((1, -1) + (1,) * (o.ndim - 2))
+    return jnp.where(keep, o, jnp.zeros_like(o))
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +306,7 @@ def _beta_sigmoid(x, arch):
     )["y"]
 
 
-def _general_fwd(
+def _general_states(
     q,
     k,
     v,
@@ -317,6 +328,7 @@ def _general_fwd(
     state_v_first,
     arch,
 ):
+    """The general pipeline up to (not including) the output kernel; see the PyTorch driver."""
     B, T, H, K = q.shape
     HV, V = v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -543,23 +555,45 @@ def _general_fwd(
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
     )
-    h, v_new, final_state = r["h"], r["v_new"], r.get("ht")
+    return {
+        "q": q,
+        "k": k,
+        "beta": beta,
+        "g_cumsum": g_cumsum,
+        "Aqk": Aqk,
+        "Akk": Akk,
+        "w": w,
+        "kg": kg,
+        "h": r["h"],
+        "v_new": r["v_new"],
+        "final_state": r.get("ht"),
+        "chunk_indices": chunk_indices,
+        "chunk_offsets": chunk_offsets,
+        "N": N,
+        "NT": NT,
+    }
 
+
+def _general_fwd(q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens, **kwargs):
+    st = _general_states(q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens, **kwargs)
+    B, T, H, K = q.shape
+    HV, V = v.shape[2], v.shape[-1]
+    scale, BT, arch = kwargs["scale"], kwargs["chunk_size"], kwargs["arch"]
     cfg = kda_launch_config("gla_fwd_o", arch)
     BV = cfg.kwargs["BV"]
     o = _call(
         _kda_gla_fwd_o_kernel,
         [
-            ("q", q),
-            ("v", v_new),
-            ("g", g_cumsum),
-            ("h", h),
-            ("A", Aqk),
+            ("q", st["q"]),
+            ("v", st["v_new"]),
+            ("g", st["g_cumsum"]),
+            ("h", st["h"]),
+            ("A", st["Aqk"]),
             ("cu_seqlens", cu_seqlens),
-            ("chunk_indices", chunk_indices),
+            ("chunk_indices", st["chunk_indices"]),
         ],
         [("o", v.shape, v.dtype)],
-        (triton.cdiv(V, BV), NT, B * HV),
+        (triton.cdiv(V, BV), st["NT"], B * HV),
         {
             "scale": scale,
             "T": T,
@@ -570,12 +604,12 @@ def _general_fwd(
             "BT": BT,
             "BK": cfg.kwargs["BK"],
             "BV": BV,
-            "IS_VARLEN": is_varlen,
+            "IS_VARLEN": cu_seqlens is not None,
         },
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
     )["o"]
-    return o, final_state
+    return o, st["final_state"]
 
 
 # ---------------------------------------------------------------------------
@@ -929,3 +963,307 @@ def kda_fwd(
     if cu_seqlens is not None:
         o = _mask_tail(o, cu_seqlens)
     return o, final_state
+
+
+def kda_bwd(
+    do,
+    dht,
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A_log=None,
+    dt_bias=None,
+    initial_state=None,
+    cu_seqlens=None,
+    *,
+    scale: float,
+    chunk_size: Optional[int] = None,
+    safe_gate: bool = False,
+    lower_bound: Optional[float] = None,
+    use_gate_in_kernel: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
+    state_v_first: bool = False,
+    **_,
+):
+    """KDA backward; recomputes the general pipeline's intermediates. See the PyTorch driver.
+
+    Returns ``(dq, dk, dv, dg, dbeta, dA_log, ddt_bias, dh0)``, ``None`` for absent inputs.
+    """
+    if chunk_size is None:
+        chunk_size = _DEFAULT_CHUNK_SIZE
+    B, T, H, K = q.shape
+    HV, V = v.shape[2], v.shape[-1]
+    BT = chunk_size
+    is_varlen = cu_seqlens is not None
+    arch = kda_device_arch(0)
+    st = _general_states(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        A_log,
+        dt_bias,
+        initial_state,
+        cu_seqlens,
+        scale=scale,
+        output_final_state=False,
+        chunk_size=BT,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        state_v_first=state_v_first,
+        arch=arch,
+    )
+    qn, kn, bn, gc = st["q"], st["k"], st["beta"], st["g_cumsum"]
+    chunk_indices, N, NT = st["chunk_indices"], st["N"], st["NT"]
+    tables = [("cu_seqlens", cu_seqlens), ("chunk_indices", chunk_indices)]
+    a_shape = (B, T, HV, BT)
+    # Kernels leave tokens past cu_seqlens[-1] unwritten; mask every result.
+    mask = (lambda x: _mask_tail(x, cu_seqlens)) if is_varlen else (lambda x: x)
+
+    cfg = kda_launch_config("bwd_dav", arch)
+    r = _call(
+        _kda_bwd_dav_kernel,
+        [("v", st["v_new"]), ("A", st["Aqk"]), ("do", do)] + tables,
+        [("dA", a_shape, jnp.float32), ("dv", v.shape, v.dtype)],
+        (NT, B * HV),
+        {
+            "scale": scale,
+            "T": T,
+            "HV": HV,
+            "V": V,
+            "BT": BT,
+            "BV": cfg.kwargs["BV"],
+            "IS_VARLEN": is_varlen,
+        },
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )
+    dAqk, dv = r["dA"], r["dv"]
+
+    cfg = kda_launch_config("bwd_dhu", arch)
+    BV = cfg.kwargs["BV"]
+    r = _call(
+        _kda_bwd_dhu_kernel,
+        [
+            ("q", qn),
+            ("g", gc),
+            ("k", st["kg"]),
+            ("w", st["w"]),
+            ("dht", dht),
+            ("do", do),
+            ("dv", dv),
+            ("cu_seqlens", cu_seqlens),
+            ("chunk_offsets", st["chunk_offsets"]),
+        ],
+        [
+            ("dh", (B, NT, HV, K, V), q.dtype),
+            ("dh0", initial_state.shape if initial_state is not None else None, jnp.float32),
+            ("dv2", v.shape, v.dtype),
+        ],
+        (triton.cdiv(V, BV), N * HV),
+        {
+            "scale": scale,
+            "T": T,
+            "H": H,
+            "HV": HV,
+            "K": K,
+            "V": V,
+            "BT": BT,
+            "BV": BV,
+            "USE_INITIAL_STATE": initial_state is not None,
+            "USE_FINAL_STATE_GRADIENT": dht is not None,
+            "IS_VARLEN": is_varlen,
+            "TRANSPOSE_STATE": state_v_first,
+        },
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )
+    dh, dh0, dv = r["dh"], r.get("dh0"), r["dv2"]
+
+    cfg = kda_launch_config("bwd_wy_dqkg", arch)
+    kv_shape = (B, T, HV, K)
+    r = _call(
+        _kda_bwd_wy_dqkg_kernel,
+        [
+            ("q", qn),
+            ("k", kn),
+            ("v", v),
+            ("v_new", st["v_new"]),
+            ("g", gc),
+            ("beta", bn),
+            ("A", st["Akk"]),
+            ("h", st["h"]),
+            ("do", do),
+            ("dh", dh),
+            ("dv", dv),
+        ]
+        + tables,
+        [
+            ("dq", kv_shape, jnp.float32),
+            ("dk", kv_shape, jnp.float32),
+            ("dv2", v.shape, v.dtype),
+            ("dg", kv_shape, jnp.float32),
+            ("db", (B, T, HV), jnp.float32),
+            ("dA", a_shape, jnp.float32),
+        ],
+        (NT, B * HV),
+        {
+            "scale": scale,
+            "T": T,
+            "H": H,
+            "HV": HV,
+            "K": K,
+            "V": V,
+            "BT": BT,
+            "BK": cfg.kwargs["BK"],
+            "BV": cfg.kwargs["BV"],
+            "IS_VARLEN": is_varlen,
+        },
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )
+    dv, db = r["dv2"], r["db"]
+
+    cfg = kda_launch_config("bwd_intra", arch)
+    BC = min(KDA_SUB_CHUNK, BT)
+    BK = min(cfg.kwargs["BK"], triton.next_power_of_2(K))
+    NC = triton.cdiv(BT, BC)
+    NK = triton.cdiv(K, BK)
+    r = _call(
+        _kda_bwd_intra_kernel,
+        [
+            ("q", qn),
+            ("k", kn),
+            ("g", gc),
+            ("beta", bn),
+            ("dAqk", dAqk),
+            ("dAkk", r["dA"]),
+            ("dq", r["dq"]),
+            ("dk", r["dk"]),
+            ("dg", r["dg"]),
+        ]
+        + tables,
+        [
+            ("dq2", kv_shape, jnp.float32),
+            ("dk2", kv_shape, jnp.float32),
+            ("dg2", kv_shape, jnp.float32),
+            ("db", (NK, B, T, HV), jnp.float32),
+        ],
+        (NK * NC, NT, B * HV),
+        {
+            "B": B,
+            "T": T,
+            "H": H,
+            "HV": HV,
+            "K": K,
+            "BT": BT,
+            "BC": BC,
+            "BK": BK,
+            "NC": NC,
+            "IS_VARLEN": is_varlen,
+            "SAFE_GATE": safe_gate,
+        },
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )
+    dq, dk = mask(r["dq2"]), mask(r["dk2"])
+    db = mask(r["db"].sum(0) + db)
+    if HV > H:
+        dq = dq.reshape(B, T, H, HV // H, K).sum(3)
+        dk = dk.reshape(B, T, H, HV // H, K).sum(3)
+
+    cfg = kda_launch_config("bwd_reverse_cumsum", arch)
+    BS = cfg.kwargs["BS"]
+    dg = _call(
+        _kda_bwd_reverse_cumsum_kernel,
+        [("s", r["dg2"])] + tables,
+        [("o", kv_shape, jnp.float32)],
+        (triton.cdiv(K, BS), NT, B * HV),
+        {"T": T, "H": HV, "S": K, "BT": BT, "BS": BS, "IS_VARLEN": is_varlen},
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )["o"]
+    dg = mask(dg)
+    dA_log = ddt_bias = None
+    if use_gate_in_kernel:
+        cfg = kda_launch_config("bwd_gate", arch)
+        BTg = cfg.kwargs["BT"]
+        n_tok = B * T
+        r = _call(
+            _kda_bwd_gate_kernel,
+            [("g", g), ("A_log", A_log), ("dt_bias", dt_bias), ("dyg", dg)],
+            [("dg", kv_shape, jnp.float32), ("dA", (triton.cdiv(n_tok, BTg), HV), jnp.float32)],
+            (triton.cdiv(n_tok, BTg), HV),
+            {
+                "lower_bound": 0.0 if lower_bound is None else float(lower_bound),
+                "T": n_tok,
+                "H": HV,
+                "D": K,
+                "BT": BTg,
+                "BD": triton.next_power_of_2(K),
+                "HAS_BIAS": dt_bias is not None,
+                "USE_LOWER_BOUND": lower_bound is not None,
+            },
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
+        )
+        dg = r["dg"]
+        dA_log = r["dA"].sum(0).astype(A_log.dtype)
+        if dt_bias is not None:
+            ddt_bias = dg.reshape(-1, HV * K).sum(0).astype(dt_bias.dtype)
+
+    if use_qk_l2norm_in_kernel:
+        dq = _l2norm_bwd(q, dq, arch)
+        dk = _l2norm_bwd(k, dk, arch)
+    if use_beta_sigmoid_in_kernel:
+        db = _beta_sigmoid_bwd(beta, db, arch)
+    return (
+        dq.astype(q.dtype),
+        dk.astype(k.dtype),
+        mask(dv),
+        dg.astype(g.dtype),
+        db.astype(beta.dtype),
+        dA_log,
+        ddt_bias,
+        dh0.astype(initial_state.dtype) if dh0 is not None else None,
+    )
+
+
+def _l2norm_bwd(x, dy, arch):
+    D = x.shape[-1]
+    x2 = x.reshape(-1, D)
+    T = x2.shape[0]
+    cfg = kda_launch_config("bwd_l2norm", arch)
+    BT = cfg.kwargs["BT"]
+    dx = _call(
+        _kda_bwd_l2norm_kernel,
+        [("X", x2), ("DY", dy.reshape(-1, D))],
+        [("DX", x2.shape, x2.dtype)],
+        (triton.cdiv(T, BT),),
+        {"eps": 1e-6, "T": T, "D": D, "BD": triton.next_power_of_2(D), "BT": BT},
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )["DX"]
+    return dx.reshape(x.shape)
+
+
+def _beta_sigmoid_bwd(x, dy, arch):
+    n = x.size
+    cfg = kda_launch_config("bwd_beta_sigmoid", arch)
+    bs = cfg.kwargs["BLOCK_SIZE"]
+    return _call(
+        _kda_bwd_beta_sigmoid_kernel,
+        [("x", x), ("dy", dy)],
+        [("dx", x.shape, x.dtype)],
+        (triton.cdiv(n, bs),),
+        {"n_elements": n, "BLOCK_SIZE": bs},
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
+    )["dx"]

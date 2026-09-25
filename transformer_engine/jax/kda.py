@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Kimi Delta Attention (KDA) for JAX. Forward only for now.
+"""Kimi Delta Attention (KDA) for JAX.
 
 The Triton-backed implementation lives in
 ``transformer_engine.jax.triton_extensions.kda`` and shares its kernels with the
@@ -44,12 +44,30 @@ def _kda(q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens, cfg):
 
 def _kda_vjp_fwd(q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens, cfg):
     out = _kda_fwd_impl(q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens, cfg)
-    return out, None
+    # Only the inputs are saved; the backward recomputes the intermediates.
+    return out, (q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens)
 
 
 def _kda_vjp_bwd(cfg, res, grads):
-    del cfg, res, grads
-    raise NotImplementedError("The KDA backward pass is not implemented yet.")
+    from .triton_extensions.kda import kda_bwd  # pylint: disable=import-outside-toplevel
+
+    q, k, v, g, beta, A_log, dt_bias, initial_state, cu_seqlens = res
+    do, dht = grads
+    dq, dk, dv, dg, dbeta, dA_log, ddt_bias, dh0 = kda_bwd(
+        do.astype(v.dtype),
+        dht,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        A_log,
+        dt_bias,
+        initial_state,
+        cu_seqlens,
+        **cfg._asdict(),
+    )
+    return dq, dk, dv, dg, dbeta, dA_log, ddt_bias, dh0, None
 
 
 _kda.defvjp(_kda_vjp_fwd, _kda_vjp_bwd)
@@ -76,7 +94,7 @@ def kimi_delta_attn(
     cu_seqlens: Optional[jnp.ndarray] = None,
     max_seqlen: Optional[int] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-    r"""Chunked Kimi Delta Attention forward pass. The backward is not implemented yet.
+    r"""Chunked Kimi Delta Attention, differentiable w.r.t. every float input.
 
     Same arguments and semantics as
     ``transformer_engine.pytorch.triton.kda.kimi_delta_attn``; all non-array

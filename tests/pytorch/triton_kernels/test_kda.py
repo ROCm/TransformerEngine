@@ -246,12 +246,136 @@ def test_max_seqlen_bound():
     assert _err_ratio(o1, o2) < _ERR_RATIO and _err_ratio(s1, s2) < _ERR_RATIO
 
 
-def test_backward_not_implemented():
-    x, cu = _inputs(1, 128, 2, 2, 128, 128, False)
-    x["q"].requires_grad_(True)
-    o, _ = kimi_delta_attn(**x, **_FLASH)
-    with pytest.raises(NotImplementedError):
-        o.float().sum().backward()
+_SOFTPLUS = dict(
+    use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, use_beta_sigmoid_in_kernel=True
+)
+_BWD_CASES = {
+    # name: (B, T, H, HV, K, V, varlen, state, opts)
+    "flash": (2, 256, 2, 2, 128, 128, False, "h0", _FLASH),
+    "flash_varlen_vfirst": (3, 300, 2, 2, 128, 128, True, "h0_vfirst", _FLASH),
+    "safe_chunk64": (2, 200, 2, 2, 128, 128, False, "h0", dict(_FLASH, chunk_size=64)),
+    "softplus_gva_varlen": (3, 250, 2, 4, 64, 64, True, "h0", _SOFTPLUS),
+    "softplus_chunk32_k256": (
+        1,
+        130,
+        2,
+        2,
+        256,
+        128,
+        False,
+        "none",
+        dict(_SOFTPLUS, chunk_size=32),
+    ),
+    "precomputed_gate": (
+        2,
+        150,
+        2,
+        2,
+        128,
+        128,
+        False,
+        "h0_vfirst",
+        dict(use_qk_l2norm_in_kernel=True, use_beta_sigmoid_in_kernel=True),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_BWD_CASES))
+def test_backward(case):
+    """Gradients of every input match autograd through the fp32 recurrence."""
+    B, T, H, HV, K, V, varlen, state, opts = _BWD_CASES[case]
+    opts = dict(opts, state_v_first=state == "h0_vfirst")
+    x, cu = _inputs(
+        B,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        varlen,
+        h0=state != "none",
+        v_first=state == "h0_vfirst",
+        precomputed_gate="use_gate_in_kernel" not in opts,
+        seed=1,
+    )
+    if "use_gate_in_kernel" not in opts:
+        del x["A_log"], x["dt_bias"]
+    leaves = {n: t.detach().clone().requires_grad_(True) for n, t in x.items()}
+    gen = torch.Generator(device="cuda").manual_seed(7)
+    o, s = kimi_delta_attn(**leaves, cu_seqlens=cu, output_final_state=True, **opts)
+    do = torch.randn(o.shape, device="cuda", generator=gen)
+    ds = torch.randn(s.shape, device="cuda", generator=gen) * 0.1
+    ((o.float() * do).sum() + (s.float() * ds).sum()).backward()
+
+    ref = {n: t.detach().double().requires_grad_(True) for n, t in x.items()}
+    ro, rs = _ref_kda(
+        ref["q"],
+        ref["k"],
+        ref["v"],
+        ref["g"],
+        ref["beta"],
+        ref.get("A_log"),
+        ref.get("dt_bias"),
+        K**-0.5,
+        ref.get("initial_state"),
+        cu,
+        opts,
+    )
+    ((ro * do).sum() + (rs * ds).sum()).backward()
+    for n in x:
+        grad, ref_grad = leaves[n].grad, ref[n].grad
+        assert grad is not None and grad.dtype == x[n].dtype and torch.isfinite(grad).all(), n
+        if n == "A_log":
+            # A sum over every token of one head that largely cancels: bound the
+            # error by the size of the terms, not of the (small) sum.
+            gate_in = x["g"].double() + x["dt_bias"].double().view(HV, K)
+            terms = (ref["g"].grad * gate_in).abs().sum((0, 1, 3))
+            assert ((grad.double() - ref_grad).abs() <= 1e-3 * terms).all(), n
+        else:
+            assert _err_ratio(ref_grad, grad) < _ERR_RATIO, n
+
+
+def test_backward_flash_matches_general(monkeypatch):
+    """The backward does not depend on which implementation ran the forward."""
+    x, cu = _inputs(2, 300, 2, 2, 128, 128, True, h0=True)
+    grads = []
+    for flash in ("1", "0"):
+        monkeypatch.setenv("NVTE_KDA_FLASH", flash)
+        leaves = {n: t.detach().clone().requires_grad_(True) for n, t in x.items()}
+        o, _ = kimi_delta_attn(**leaves, cu_seqlens=cu, **_FLASH)
+        o.float().square().sum().backward()
+        grads.append({n: t.grad for n, t in leaves.items()})
+    for n in x:
+        assert _err_ratio(grads[1][n], grads[0][n]) < _ERR_RATIO, n
+
+
+def test_backward_varlen_cuda_graph():
+    """The backward has no host syncs: forward + backward replay from new ``cu_seqlens``."""
+    x, cu = _inputs(4, 600, 2, 2, 128, 128, True, h0=True)
+    leaves = {n: t.detach().clone().requires_grad_(True) for n, t in x.items()}
+    do = torch.randn(1, 600, 2, 128, device="cuda")
+
+    def step():
+        for t in leaves.values():
+            t.grad = None
+        o, _ = kimi_delta_attn(**leaves, cu_seqlens=cu, **_FLASH)
+        (o.float() * do).sum().backward()
+        return {n: t.grad for n, t in leaves.items()}
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = step()
+    cu.copy_(torch.tensor([0, 100, 350, 351, 600], dtype=cu.dtype, device=cu.device))
+    graph.replay()
+    replayed = {n: g.clone() for n, g in captured.items()}
+    eager = step()
+    for n in x:
+        assert torch.equal(replayed[n], eager[n]), n
 
 
 def test_aiter_parity():

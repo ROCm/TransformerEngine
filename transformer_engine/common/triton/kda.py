@@ -8,7 +8,10 @@
 
 # pylint: disable=possibly-used-before-assignment
 
-"""Framework-agnostic Triton kernels for Kimi Delta Attention (KDA), forward only.
+"""Framework-agnostic Triton kernels for the Kimi Delta Attention (KDA) forward pass.
+
+The backward kernels, which reuse the default pipeline's intermediates, live
+in ``kda_bwd.py``.
 
 Two implementations of the same forward pass live here:
 
@@ -1739,6 +1742,16 @@ _KDA_CONFIGS = {
             {"BW": 32, "MIN_BLOCKS_PER_CU": 0}, num_warps=2, num_stages=2
         ),
         "flash_gluon_k2_narrow": KDALaunchConfig({"BW": 32}, num_warps=2, num_stages=2),
+        # Backward (kda_bwd.py). Swept on gfx950 (MI355X) over FlashKDA and
+        # general-pipeline shapes; no other arch measured yet.
+        "bwd_dav": KDALaunchConfig({"BV": 64}, num_warps=4, num_stages=2),
+        "bwd_dhu": KDALaunchConfig({"BV": 32}, num_warps=2, num_stages=2),
+        "bwd_wy_dqkg": KDALaunchConfig({"BK": 64, "BV": 32}, num_warps=2, num_stages=1),
+        "bwd_intra": KDALaunchConfig({"BK": 64}, num_warps=2, num_stages=2),
+        "bwd_reverse_cumsum": KDALaunchConfig({"BS": 32}, num_warps=4, num_stages=2),
+        "bwd_gate": KDALaunchConfig({"BT": 16}, num_warps=2, num_stages=2),
+        "bwd_l2norm": KDALaunchConfig({"BT": 32}, num_warps=2, num_stages=2),
+        "bwd_beta_sigmoid": KDALaunchConfig({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=2),
     },
     "gfx942": {
         "gla_fwd_o": KDALaunchConfig({"BK": 32, "BV": 128}, num_warps=4, num_stages=2),
