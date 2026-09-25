@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
 import operator
-import os
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math

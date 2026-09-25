@@ -1334,6 +1334,28 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   std::vector<void *> zero_out_dptr_list;
   std::vector<size_t> zero_out_size_list;
 
+  // Output regions no GEMM writes, collected here and filled after the GEMMs.
+  // Callers append in increasing address order, so a range that starts where the
+  // previous one ended just extends it. That matters in the wgrad layout, where
+  // group_sizes is the ragged *contraction* extent: each group still owns a full
+  // [m, n] slot whatever its token count, so an empty group leaves a hole in the
+  // middle and a run of consecutive empty experts becomes one memset, not one
+  // each.
+  auto push_zero_out = [&zero_out_dptr_list, &zero_out_size_list](uint8_t *ptr, size_t bytes) {
+    if (bytes == 0) {
+      return;
+    }
+    if (!zero_out_dptr_list.empty()) {
+      auto *prev_end = static_cast<uint8_t *>(zero_out_dptr_list.back()) + zero_out_size_list.back();
+      if (prev_end == ptr) {
+        zero_out_size_list.back() += bytes;
+        return;
+      }
+    }
+    zero_out_dptr_list.push_back(ptr);
+    zero_out_size_list.push_back(bytes);
+  };
+
   for (size_t i = 0; i < num_gemms; i++) {
     // Matrix data shapes
     size_t m_i = dim_list_host[i];
@@ -1355,8 +1377,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     size_t out_size = out_shape_i[0] * out_shape_i[1];
     bool is_empty_gemm = lhs_size == 0 || rhs_size == 0;
     if (is_empty_gemm && out_size > 0) {
-      zero_out_dptr_list.push_back(out_ptr);
-      zero_out_size_list.push_back(out_size * out_dtype_bytes);
+      push_zero_out(out_ptr, out_size * out_dtype_bytes);
     }
 
     // Set matrix data pointers
@@ -1450,14 +1471,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     pre_gelu_list.push_back(pre_gelu_wrapper_list.back().data());
     out_list.push_back(out_wrapper_list.back().data());
   }
-  
+
   // Fwd/dgrad write [M, N] with a ragged M. Rows past sum(group_sizes) are not
   // produced by any GEMM; leaving them untouched leaks NaNs into GLU / dgrad of
   // the other grouped GEMM / grouped_dbias (which pads leftover rows onto the
   // last expert via jnp.repeat). Zero only the leftover, not the computed prefix.
   if (any_ragged && !is_rhs_ragged && sum_group_sizes < m) {
-    zero_out_dptr_list.push_back(out_ptr);
-    zero_out_size_list.push_back((m - sum_group_sizes) * n * out_dtype_bytes);
+    push_zero_out(out_ptr, (m - sum_group_sizes) * n * out_dtype_bytes);
   }
 
   auto workspace_shape = std::vector<size_t>{workspace_size};
@@ -1497,20 +1517,66 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 #endif
 
 
-  // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
-  size_t num_zero_outs = zero_out_dptr_list.size();
-  for (int i = 0; i < num_zero_outs; i++) {
-    int stream_id = i % num_streams;
-    cudaStream_t stream_i = nvte_get_compute_stream(stream_id);
-    void *dptr = zero_out_dptr_list[i];
-    size_t count = zero_out_size_list[i];
-    NVTE_CHECK_CUDA(cudaMemsetAsync(dptr, 0, count, stream_i));
+  // Rows no GEMM writes have to be zeroed, or GLU / dgrad / grouped_dbias read
+  // whatever the allocator handed back. The fill runs on the compute streams so
+  // it overlaps the GEMM tail, which needs its own fork/join: we cannot borrow
+  // nvte_multi_tensor_gemm's, because that only forks on the multi-stream cuBLAS
+  // path. With NVTE_USE_CK_GROUPED_GEMM / _HIPKITTENS_ / _CUTLASS_ set it takes a
+  // single-launch path that stays on `stream` and never touches a compute stream
+  // (cublaslt_gemm.cu, the use_cutlass dispatch), so a borrowed fork would not
+  // exist and the fill would be unordered against whatever produced this buffer.
+  //
+  // The fork event is recorded before the GEMMs are enqueued, so the fills wait
+  // only for the work already on `stream`, not for the GEMMs themselves.
+  //
+  // num_non_empty_gemms == 0 is the one case with no compute stream to use at
+  // all: every group is empty, so the whole output is padding and one contiguous
+  // fill goes straight onto `stream`.
+  const size_t num_zero_outs = zero_out_dptr_list.size();
+  int num_active_streams = static_cast<int>(num_non_empty_gemms);
+  if (num_active_streams > num_streams) {
+    num_active_streams = num_streams;
+  }
+  const bool use_main_stream = num_active_streams == 0;
+  const bool fork_compute_streams = !use_main_stream && num_zero_outs > 0;
+
+  cudaEvent_t zero_out_fork = nullptr;
+  if (fork_compute_streams) {
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&zero_out_fork, cudaEventDisableTiming));
+    NVTE_CHECK_CUDA(cudaEventRecord(zero_out_fork, stream));
   }
 
   nvte_multi_tensor_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
                          pre_gelu_list.data(), num_non_empty_gemms, rhs_is_trans, lhs_is_trans,
                          grad, workspace_list.data(), accumulate, use_split_accumulator,
                          num_math_sm, stream);
+
+  if (fork_compute_streams) {
+    for (int s = 0; s < num_active_streams; s++) {
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(nvte_get_compute_stream(s), zero_out_fork));
+    }
+  }
+
+  for (size_t i = 0; i < num_zero_outs; i++) {
+    cudaStream_t stream_i =
+        use_main_stream ? stream : nvte_get_compute_stream(i % num_active_streams);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(zero_out_dptr_list[i], 0, zero_out_size_list[i], stream_i));
+  }
+
+  // Join every active stream, not just the ones a memset landed on. With fewer
+  // ranges than streams the extra ones cost two API calls and nothing else: the
+  // record completes immediately on a stream with no new work, and the wait just
+  // repeats what the GEMM's own join already established.
+  if (fork_compute_streams) {
+    for (int s = 0; s < num_active_streams; s++) {
+      NVTE_CHECK_CUDA(
+          cudaEventRecord(nvte_get_compute_stream_event(s), nvte_get_compute_stream(s)));
+    }
+    for (int s = 0; s < num_active_streams; s++) {
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, nvte_get_compute_stream_event(s)));
+    }
+    NVTE_CHECK_CUDA(cudaEventDestroy(zero_out_fork));
+  }
 
   return ffi_with_cuda_error_check();
 }
