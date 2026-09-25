@@ -979,6 +979,17 @@ int rs_comm_wg_tn(int tokens, int hidden, int k_local) {
     return COMM_WG;
 }
 
+// MXFP8 finishes the GEMM ~1.5x sooner than bf16 at the same shape, so the reduce needs more
+// workgroups to keep pace: rs_comm_wg_tn's K >= 4096 -> 4 starves it. Swept on MI350X, 24 shapes.
+int rs_comm_wg_tn_mxfp8(int tokens, int hidden, int k_local) {
+    const int tiles = (tokens / hk_rs_tn::BLOCK_ROW) * (hidden / hk_rs_tn::BLOCK_COL);
+    const int waves = tiles / hk_rs_tn::GRID_CAP;
+    if (k_local >= 4096) return 5;
+    if (k_local >= 3072) return waves >= 16 ? 8 : 7;
+    if (k_local <= 768) return waves >= 16 ? 14 : (waves >= 8 ? 10 : COMM_WG);
+    return waves >= 16 ? 10 : COMM_WG;
+}
+
 bool run_fused_rs(const KittensRsGemmArgs &args) {
     using namespace hk_rs_tn;
 
@@ -1139,9 +1150,9 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
         args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
 
     RsLaunchCfg cfg;
-    // rs_comm_wg_tn is (tokens, hidden, k_local); under this path's BLAS roles N_TOTAL is the
-    // token axis and M the hidden one, the opposite of run_fused_rs's naming.
-    cfg.comm_wg    = rs_comm_wg_tn(N_TOTAL, M, K);
+    // rs_comm_wg_tn_mxfp8 is (tokens, hidden, k_local); under this path's BLAS roles N_TOTAL is
+    // the token axis and M the hidden one, the opposite of run_fused_rs's naming.
+    cfg.comm_wg    = rs_comm_wg_tn_mxfp8(N_TOTAL, M, K);
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();
 
