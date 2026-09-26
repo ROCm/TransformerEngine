@@ -15,7 +15,6 @@
 namespace te_kittens::cdna4::blockwise_fp8 {
 
 #include "blockwise_fp8_gemm_helper.cuh"
-#include "blockwise_fp8_gemm_sta_helper.cuh"
 
 constexpr int NUM_WARPS   = 8;
 constexpr int WARPS_ROW   = 2;
