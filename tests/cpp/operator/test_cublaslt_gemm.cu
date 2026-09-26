@@ -16,6 +16,7 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
+#include "../../../transformer_engine/common/util/math.h"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipblaslt/hipblaslt.h>  // HIPBLASLT_VERSION_{MAJOR,MINOR} for the MXFP4 capability gate
@@ -447,12 +448,21 @@ static void run_reference(
 constexpr size_t kBlockLen = 128;
 
 // Blockwise FP8 reference, TN layout: D[j*m + i] = sum_kk sA * sB * A[i*k + kk] * B[j*k + kk]
-__global__ void blockwise_ref_kernel(const fp8e4m3* __restrict__ a,
-                                     const fp8e4m3* __restrict__ b,
+// Both FP8 encodings occupy one byte, so the operands are read as bytes and decoded per
+// element.  A template parameter would work too, but every extra axis here multiplies with the
+// output type, and the decode is not what this kernel spends its time on.
+__device__ inline float ref_fp8_read(const uint8_t* p, size_t idx, bool is_e5m2) {
+  if (is_e5m2) return static_cast<float>(reinterpret_cast<const fp8e5m2*>(p)[idx]);
+  return static_cast<float>(reinterpret_cast<const fp8e4m3*>(p)[idx]);
+}
+
+__global__ void blockwise_ref_kernel(const uint8_t* __restrict__ a,
+                                     const uint8_t* __restrict__ b,
                                      const float* __restrict__ a_scale,
                                      const float* __restrict__ b_scale,
                                      size_t m, size_t k, size_t n, bool a_2d,
-                                     bf16* __restrict__ d) {
+                                     bool a_is_e5m2, bool b_is_e5m2,
+                                     float* __restrict__ d) {
   const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
   if (i >= m || j >= n) return;
@@ -462,10 +472,43 @@ __global__ void blockwise_ref_kernel(const fp8e4m3* __restrict__ a,
   for (size_t kk = 0; kk < k; ++kk) {
     const size_t kb = kk / kBlockLen;
     const float sa = a_2d ? a_scale[(i / kBlockLen) * k_blocks + kb] : a_scale[kb * m + i];
-    acc += sa * b_scale[kb * n + j] * static_cast<float>(a[i * k + kk]) *
-           static_cast<float>(b[j * k + kk]);
+    acc += sa * b_scale[kb * n + j] * ref_fp8_read(a, i * k + kk, a_is_e5m2) *
+           ref_fp8_read(b, j * k + kk, b_is_e5m2);
   }
-  d[j * m + i] = static_cast<bf16>(acc);
+  // FP32, not the output type: the epilogue runs on the unrounded product.
+  d[j * m + i] = acc;
+}
+
+// The fused epilogue, applied to that product and then converted to the output type.
+//
+// The order is the kernel's, and it is not arbitrary: the accumulate term rounds to the output
+// type before adding, so that the sum matches what an add performed after the store would have
+// produced, and moving bias across that rounding would change the result.
+//
+// `d` is laid out [n][m], so the element at (i, j) is d[j * m + i].  bias is indexed by the
+// contiguous axis, which is i -- getting that backwards is the mistake a transposed epilogue
+// makes, and it is why the cases below give bias a profile that varies along i.
+template <typename OutType>
+__global__ void blockwise_ref_epilogue(const float* __restrict__ product,
+                                       const bf16* __restrict__ bias,
+                                       const OutType* __restrict__ gelu_aux,
+                                       const OutType* __restrict__ d_prior, float beta,
+                                       size_t m, size_t n, OutType* __restrict__ d) {
+  const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i >= m || j >= n) return;
+  const size_t idx = j * m + i;
+
+  float x = product[idx];
+  if (bias != nullptr) x += static_cast<float>(bias[i]);
+  if (beta != 0.0f) {
+    x = static_cast<float>(static_cast<OutType>(x));
+    x += beta * static_cast<float>(d_prior[idx]);
+  }
+  if (gelu_aux != nullptr) {
+    x *= transformer_engine::dgelu<float, float>(static_cast<float>(gelu_aux[idx]), {});
+  }
+  d[idx] = static_cast<OutType>(x);
 }
 
 
@@ -1315,6 +1358,19 @@ struct BlockwiseParams {
   float amax_epsilon;
   bool degenerate;
   float src_scale;
+  // Fused epilogue, output type and operand types.  Defaulted, so the cases that predate them
+  // read exactly as they did.
+  //
+  // The combinations are constrained by nvte_cublas_gemm itself, which rejects bias with grad,
+  // requires grad for dgelu, and requires a bf16 output for dgelu.  use_gelu therefore implies
+  // grad, which in turn forbids bias; the case list follows those rules rather than restating
+  // them.
+  bool use_bias = false;
+  bool use_gelu = false;
+  bool accumulate = false;
+  DType out_dtype = DType::kBFloat16;
+  DType a_dtype = DType::kFloat8E4M3;
+  DType b_dtype = DType::kFloat8E4M3;
 };
 
 void scale_source(Tensor* src, size_t n_elems, float factor) {
@@ -1340,13 +1396,14 @@ void inject_degenerate_kblocks(Tensor* src, size_t rows, size_t cols) {
 
 Tensor make_blockwise_operand(const std::string& name, const std::vector<size_t>& shape,
                               NVTEScalingMode mode, bool force_pow2, float amax_epsilon,
-                              bool degenerate, float src_scale) {
+                              bool degenerate, float src_scale,
+                              DType dtype = DType::kFloat8E4M3) {
   Tensor src(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&src);
   if (src_scale != 0.0f) scale_source(&src, shape[0] * shape[1], src_scale);
   if (degenerate) inject_degenerate_kblocks(&src, shape[0], shape[1]);
 
-  Tensor out(name, shape, DType::kFloat8E4M3, /*rowwise=*/true, /*columnwise=*/false, mode);
+  Tensor out(name, shape, dtype, /*rowwise=*/true, /*columnwise=*/false, mode);
   QuantizationConfigWrapper cfg;
   cfg.set_force_pow_2_scales(force_pow2);
   cfg.set_amax_epsilon(amax_epsilon);
@@ -1384,36 +1441,90 @@ void performBlockwiseTest(const BlockwiseParams& p) {
       p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
 
   Tensor A = make_blockwise_operand("A", {p.m, p.k}, a_mode, force_pow2, p.amax_epsilon,
-                                    p.degenerate, p.src_scale);
+                                    p.degenerate, p.src_scale, p.a_dtype);
   Tensor B = make_blockwise_operand("B", {p.n, p.k}, NVTE_BLOCK_SCALING_1D, force_pow2,
-                                    p.amax_epsilon, p.degenerate, /*src_scale=*/0.0f);
+                                    p.amax_epsilon, p.degenerate, /*src_scale=*/0.0f, p.b_dtype);
 
-  Tensor D("D", TShape{p.n, p.m}, DType::kBFloat16);
-  Tensor RefD("RefD", TShape{p.n, p.m}, DType::kBFloat16);
+  Tensor D("D", TShape{p.n, p.m}, p.out_dtype);
+  Tensor RefD("RefD", TShape{p.n, p.m}, p.out_dtype);
+  // The FP32 product, kept separate so the epilogue is applied before any rounding.
+  Tensor Product("Product", TShape{p.n, p.m}, DType::kFloat32);
 
   const dim3 block(16, 16);
   const dim3 grid(static_cast<unsigned>((p.n + block.x - 1) / block.x),
                   static_cast<unsigned>((p.m + block.y - 1) / block.y));
   blockwise_ref_kernel<<<grid, block, 0, 0>>>(
-      static_cast<const fp8e4m3*>(A.rowwise_dptr()),
-      static_cast<const fp8e4m3*>(B.rowwise_dptr()),
+      static_cast<const uint8_t*>(A.rowwise_dptr()),
+      static_cast<const uint8_t*>(B.rowwise_dptr()),
       static_cast<const float*>(A.rowwise_scale_inv_dptr()),
       static_cast<const float*>(B.rowwise_scale_inv_dptr()),
-      p.m, p.k, p.n, p.a_2d_scaled, static_cast<bf16*>(RefD.rowwise_dptr()));
+      p.m, p.k, p.n, p.a_2d_scaled,
+      p.a_dtype == DType::kFloat8E5M2, p.b_dtype == DType::kFloat8E5M2,
+      static_cast<float*>(Product.rowwise_dptr()));
   NVTE_CHECK_CUDA(cudaGetLastError());
 
+  // The epilogue operands.  bias is indexed by the output's contiguous axis, which is m here,
+  // and is given a profile whose period divides neither the 4 elements a lane holds nor the 16
+  // or 128 of a tile: a constant or tile-periodic bias would pass even if the epilogue put it
+  // on the wrong column.
   Tensor bias;
+  if (p.use_bias) {
+    bias = Tensor("bias", TShape{p.m}, DType::kBFloat16);
+    std::vector<bf16> h(p.m);
+    for (size_t i = 0; i < p.m; ++i) {
+      h[i] = static_cast<bf16>(0.5f * std::sin(0.37f * static_cast<float>(i)) +
+                               0.03f * static_cast<float>(i % 7));
+    }
+    NVTE_CHECK_CUDA(cudaMemcpy(bias.rowwise_dptr(), h.data(), p.m * sizeof(bf16),
+                               cudaMemcpyHostToDevice));
+  }
+
+  // dgelu's argument.  Filled rather than left uninitialised because dgelu is not linear: a
+  // denormal or a NaN here would not merely shift the result, it would decide whether the
+  // comparison means anything.
   Tensor pre_gelu_out;
+  if (p.use_gelu) {
+    pre_gelu_out = Tensor("pre_gelu_out", TShape{p.n, p.m}, p.out_dtype);
+    fillUniform(&pre_gelu_out);
+  }
+
+  // accumulate is beta = 1 against whatever D already holds, so D needs a defined value and the
+  // reference needs the same one.  Filling D and copying it verbatim is the only way to be sure
+  // they agree -- filling both with the same generator would rely on the generator's state.
+  Tensor DPrior;
+  if (p.accumulate) {
+    fillUniform(&D);
+    DPrior = Tensor("DPrior", TShape{p.n, p.m}, p.out_dtype);
+    NVTE_CHECK_CUDA(cudaMemcpy(DPrior.rowwise_dptr(), D.rowwise_dptr(),
+                               p.n * p.m * (typeToNumBits(p.out_dtype) / 8), cudaMemcpyDeviceToDevice));
+  }
+
+  // dgelu is fused into a backward GEMM, and bias is rejected there, so the two never coincide.
+  const bool grad = p.use_gelu;
+  const float beta = p.accumulate ? 1.0f : 0.0f;
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(p.out_dtype, OutType,
+    blockwise_ref_epilogue<OutType><<<grid, block, 0, 0>>>(
+        static_cast<const float*>(Product.rowwise_dptr()),
+        p.use_bias ? static_cast<const bf16*>(bias.rowwise_dptr()) : nullptr,
+        p.use_gelu ? static_cast<const OutType*>(pre_gelu_out.rowwise_dptr()) : nullptr,
+        p.accumulate ? static_cast<const OutType*>(DPrior.rowwise_dptr()) : nullptr,
+        beta, p.m, p.n, static_cast<OutType*>(RefD.rowwise_dptr()));
+  );
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
   Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
 
   nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
-                   /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
-                   /*accumulate=*/false, /*use_split_accumulator=*/true,
+                   /*transa=*/true, /*transb=*/false, grad, Workspace.data(),
+                   p.accumulate, /*use_split_accumulator=*/true,
                    prop.multiProcessorCount, /*stream=*/0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   RefD.to_cpu();
-  compareResults("D", D, RefD.rowwise_cpu_dptr<bf16>(), /*rowwise=*/true,
-                 /*atol=*/1e-3, /*rtol=*/6e-2);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(p.out_dtype, OutType,
+    compareResults("D", D, RefD.rowwise_cpu_dptr<OutType>(), /*rowwise=*/true,
+                   /*atol=*/1e-3, /*rtol=*/6e-2);
+  );
 }
 
 }  // namespace
@@ -1433,6 +1544,13 @@ static std::string BlockwiseTestName(
   name += p.amax_epsilon > 0.0f ? "xeps" : "xnoeps";
   if (p.degenerate) name += "xdegenerate";
   if (p.src_scale != 0.0f) name += "xsmallmagnitude";
+  if (p.use_bias) name += "xbias";
+  if (p.use_gelu) name += "xdgelu";
+  if (p.accumulate) name += "xaccumulate";
+  if (p.out_dtype == DType::kFloat32) name += "xoutfp32";
+  if (p.out_dtype == DType::kFloat16) name += "xoutfp16";
+  if (p.a_dtype == DType::kFloat8E5M2) name += "xae5m2";
+  if (p.b_dtype == DType::kFloat8E5M2) name += "xbe5m2";
   return name;
 }
 
@@ -1450,9 +1568,70 @@ INSTANTIATE_TEST_SUITE_P(
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, true,  0.0f},
         BlockwiseParams{256, 512, 256, false, true,  0.0f,  true,  0.0f},
         BlockwiseParams{256, 512, 256, false, false, 0.0f,  true,  0.0f},
-        // Real-wgrad magnitudes: pins kMinScaleInv from above.
+        // Real-wgrad magnitudes.
         BlockwiseParams{256, 512, 256, false, true,  0.0f,  false, 1e-9f},
-        BlockwiseParams{256, 512, 256, false, false, 0.0f,  false, 1e-9f}),
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  false, 1e-9f},
+
+        // ---- fused epilogue ------------------------------------------------------------
+        //
+        // The suite above reaches two kernel instantiations, both with no epilogue, e4m3 on
+        // both operands and a bf16 output.  Everything below exists because a te.Linear with a
+        // bias runs the BIAS instantiation on every forward step, and nothing here tested it.
+        //
+        // Each is given under both recipes and both scale kinds, because the epilogue is a
+        // template parameter: the instantiations share no generated code, and a pass under one
+        // says nothing about another.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, false, false, 1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, true,  false, 1e-4f, false, 0.0f, true},
+        // Partial tiles on both output axes.  The GEMM requires m to be a multiple of 16, and
+        // the kernel indexes bias by m, so the merged four-element read is always in range --
+        // its guarded scalar fallback is unreachable through this entry point.  What this does
+        // reach is the tile-level edge: 272 = 256 + 16, so the last block along each axis is
+        // short and the epilogue has to stop where the output does.
+        BlockwiseParams{272, 512, 272, false, true,  1e-4f, false, 0.0f, true},
+
+        // dgelu.  Fused into a backward GEMM, so it implies grad and forbids bias, and
+        // nvte_cublas_gemm requires a bf16 output for it.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true},
+
+        // accumulate, alone and with bias.  Worth both: the kernel rounds to the output type
+        // before adding the prior value, so bias landing on the wrong side of that rounding is
+        // a difference the accumulate-only case cannot see.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, true},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, true},
+        // dgelu together with accumulate.  The heaviest epilogue: it is the one that has both a
+        // per-element auxiliary input and the prior output live at once, which is where register
+        // pressure peaks, so it is the case most likely to behave differently from the others.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true,  true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true,  true},
+
+        // ---- output types --------------------------------------------------------------
+        //
+        // The kernel is instantiated for fp32 and fp16 as well as bf16, and neither was reached.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat32},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat16},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
+                        DType::kFloat32},
+
+        // ---- e5m2 operands -------------------------------------------------------------
+        //
+        // These select the MFMA's cbsz/blgp codes.  A recipe with fp8_format=HYBRID quantises
+        // the backward grad to e5m2, so these are the instantiations a real backward pass runs;
+        // both operands e5m2 at once is rejected by the GEMM and so is not listed.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E4M3, DType::kFloat8E5M2},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3}),
     BlockwiseTestName);
 
 #endif  // __HIP_PLATFORM_AMD__

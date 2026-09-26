@@ -15,6 +15,7 @@
 namespace te_kittens::cdna4::blockwise_fp8 {
 
 #include "blockwise_fp8_gemm_helper.cuh"
+#include "blockwise_fp8_gemm_sta_helper.cuh"
 
 constexpr int NUM_WARPS   = 8;
 constexpr int WARPS_ROW   = 2;
@@ -81,6 +82,8 @@ template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
           GemmEpilogue EPILOGUE = GemmEpilogue::DEFAULT>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
+    // `auto` here only because the spelled-out type is kittens::gl<fp8e4m3, -1, -1, -1, -1>,
+    // which is already named by the _gl_*_t aliases above and adds nothing at the use site.
     const auto A = g.a;
     const auto B = g.b;
     const auto C = g.c;
@@ -95,18 +98,37 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     using ST_B = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
     using RT_A = kittens::rt_fp8e4m3<REG_M, MFMA_K>;
     using RT_B = kittens::rt_fp8e4m3<REG_N, MFMA_K>;
-    using RT_C = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
+    // The accumulator holds C transposed: GEMM N on the tile rows, GEMM M on the tile columns.
+    // 32 x 64 of FP32 per wave -- height 2, width 4, the same 8 tiles of 16 x 16 and the same
+    // 32 VGPRs as the untransposed 64 x 32, just indexed the other way.
+    //
+    // The point is what a single lane ends up holding.  Hardware fixes the MFMA output as
+    // D[4*(l/16) + r][l % 16]: four consecutive rows of one column.  Swapping the operands puts
+    // N on the rows, so a lane holds four consecutive N at one M -- and the 1x128 activation
+    // scale, which varies along M, becomes one value per lane per tile instead of four.
+    using RT_CT = kittens::rt_fl<REG_N, REG_M, kittens::col_l, kittens::rt_16x16_s>;
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
-    __shared__ alignas(16) float smem_sa_prev[BLOCK_M];
-    __shared__ alignas(16) float smem_sa_curr[BLOCK_M];
-    __shared__ alignas(16) float smem_a_ratio[2][BLOCK_M];
+    // Double buffered because k-block k's scales are folded while k+1's are still in flight.
+    __shared__ alignas(16) float smem_sa[2][BLOCK_M];
+    // The column scales get the same treatment: one float per column of the output block per
+    // k-block, double buffered on the same tic/toc.  1 KB per buffer, 2 KB in all.
+    __shared__ alignas(16) float smem_sb[2][BLOCK_N];
 
     RT_A a;
     RT_B b0, b1;
-    RT_C cA, cB, cC, cD;
+    RT_CT cA, cB, cC, cD;
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
+
+    // Each MFMA cluster calls mma_scale_then_accumulate, which forms this k-block's product in a
+    // temporary local to that call and folds it in scaled.  The temporary is RT_C-shaped, so
+    // 32 VGPRs are live from the MFMA to the fold on top of the four accumulators' 128 -- the
+    // register cost of forming each k-block's product before scaling it in.
+    //
+    // The fold consumes the MFMA result, so it cannot begin until that MFMA retires.  Hiding it
+    // would need a second temporary, so that tile k's fold overlaps tile k+1's MFMA; this kernel
+    // does not do that, and the s_nop counts in the fold are sized for the exposed case.
 
     const int tiles_M = (M + BLOCK_M - 1) / BLOCK_M;
     const int tiles_N = (N + BLOCK_N - 1) / BLOCK_N;
@@ -116,6 +138,12 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const int group_id = wgid / num_wgid_in_group;
     const int first_pid_m = group_id * WGM;
     const int group_size_m = min(tiles_M - first_pid_m, WGM);
+    // Which 256 x 256 output block this workgroup owns, in block coordinates.  Grouped eight
+    // rows at a time (WGM) so that neighbouring workgroups share B tiles in L2, and permuted by
+    // chiplet_transform_chunked so consecutive blockIdx land on different XCDs.
+    //
+    // readfirstlane because both are workgroup-uniform: it tells the compiler so, which keeps
+    // them in SGPRs and lets every address derived from them be scalar rather than per-lane.
     const int block_row = __builtin_amdgcn_readfirstlane(first_pid_m + ((wgid % num_wgid_in_group) % group_size_m));
     const int block_col = __builtin_amdgcn_readfirstlane((wgid % num_wgid_in_group) / group_size_m);
     const int block_m = block_row * BLOCK_M;
@@ -127,329 +155,354 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
 
     const int sb_h0_idx = block_n / SCALE_BLOCK;
     const int sb_h1_idx = sb_h0_idx + 1;
-    const int local_n0 = block_n + warp_n * REG_N;
-    const int local_n1 = block_n + HALF_COL + warp_n * REG_N;
     const int a_row_h0 = warp_m * REG_M;
     const int a_row_h1 = HALF_ROW + warp_m * REG_M;
 
+    // How many buffer_load ... lds instructions one tile takes, and the swizzled LDS offsets
+    // each of them writes to.  A tile is 128 x 128 fp8 = 16 KB; 512 threads move 16 B each, so
+    // 8 KB per instruction and copies_A = copies_B = 2.  (Confirmed in the disassembly: the
+    // prologue issues eight buffer_load_dwordx4 ... lds for its four tiles.)
+    //
+    // The offsets are hoisted out of the loop because the swizzle depends only on the thread
+    // and the tile shape, both loop-invariant.
     using T = kittens::fp8e4m3;
-    constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
-    constexpr int bpm = bpt * NUM_THREADS;
-    constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
-    constexpr int copies_B = HALF_COL * BLOCK_K * sizeof(T) / bpm;
+    constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;   // 16 B, one dwordx4
+    constexpr int bpm = bpt * NUM_THREADS;                           // 8 KB moved per instruction
+    constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;   // 2
+    constexpr int copies_B = HALF_COL * BLOCK_K * sizeof(T) / bpm;   // 2
     uint32_t sw_A[copies_A], sw_B[copies_B];
+    // The swizzle is a bank-conflict permutation, not a transpose.  This is a TN GEMM -- A is
+    // [M][K] and B is [N][K], both K-major -- so the MFMA already wants K contiguous per lane
+    // and no ds_read_b64_tr is needed.  What it protects is the *ds_read* that feeds the MFMA:
+    // lanes reading the same column offset of neighbouring rows would otherwise land on one
+    // bank, so st_16x128 stores the tile permuted by `offset ^ ((offset >> 8) << 4)`, which
+    // rotates the 16 B chunk each row starts at.
+    //
+    // These are *global* byte offsets, not LDS ones.  buffer_load ... lds writes LDS at a
+    // hardware-fixed address (M0 plus a fixed per-lane stride) and cannot permute it, so the
+    // permutation is applied to the read side instead: each lane fetches whichever global
+    // element belongs at its fixed LDS slot.  prefill_swizzled_offsets computes exactly that --
+    // it takes the lane's natural LDS position, swizzles it, and converts back to global.
+    //
+    // arrangement the other way round: natural global reads, swizzled ds_write addresses.
+    //
+    // Hoisted out of the k-loop because the permutation depends only on thread and tile shape.
     G::prefill_swizzled_offsets(As[0][0], A, sw_A);
     G::prefill_swizzled_offsets(Bs[0][0], B, sw_B);
 
-    const T *a_base = (const T *)&A[{0, 0, 0, 0}];
-    const T *b_base = (const T *)&B[{0, 0, 0, 0}];
+    const T *a_base_ptr = (const T *)&A[{0, 0, 0, 0}];
+    const T *b_base_ptr = (const T *)&B[{0, 0, 0, 0}];
     const int a_row_stride = A.template stride<2>() * sizeof(T);
     const int b_row_stride = B.template stride<2>() * sizeof(T);
+    // Buffer resource descriptors for the A and B loads.  The SRD carries base, extent and
+    // stride, and the hardware returns zero for anything past the extent -- which is how the
+    // ragged last block along M or N is handled without a branch in the inner loop.
+    //
+    // On a partial block the stride is forced to 0 so that every out-of-range row maps to the
+    // same in-range address rather than walking off the end of the allocation.
     const bool a_partial_m = (block_row + 1) * BLOCK_M > M;
     const bool b_partial_n = (block_col + 1) * BLOCK_N > N;
     kittens::i32x4 a_srd = a_partial_m
-        ? kittens::make_srsrc(a_base, M * a_row_stride, 0)
-        : kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
+        ? kittens::make_srsrc(a_base_ptr, M * a_row_stride, 0)
+        : kittens::make_srsrc(a_base_ptr, M * a_row_stride, a_row_stride);
     kittens::i32x4 b_srd = b_partial_n
-        ? kittens::make_srsrc(b_base, N * b_row_stride, 0)
-        : kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
+        ? kittens::make_srsrc(b_base_ptr, N * b_row_stride, 0)
+        : kittens::make_srsrc(b_base_ptr, N * b_row_stride, b_row_stride);
 
+    // LDS destination addresses for buffer_load ... lds, which takes its destination from M0
+    // rather than from an operand.  As / Bs are the storage; these are addresses into it.
+    //
+    // One base each rather than four apiece: As[i][j] is an element of a C++ array, so its
+    // offset from As[0][0] is the compile-time constant (i * 2 + j) * sizeof(ST_A), and at
+    // every call site j is a literal and i is tic or toc.  Only the per-wave term is runtime,
+    // so holding four addresses would spend registers to save an s_add.
+    //
+    // readfirstlane because M0 is an SGPR and the address is wave-uniform.
     const int wid = kittens::warpid() % NUM_WARPS;
-    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
-    uint32_t a_lds[2][2], b_lds[2][2];
-    for (int i = 0; i < 2; i++)
-        for (int j = 0; j < 2; j++) {
-            a_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-                reinterpret_cast<uintptr_t>(&As[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
-            b_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-                reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
-        }
+    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;   // 1024, compile-time
+    constexpr uint32_t kAsTileStride = sizeof(ST_A);
+    constexpr uint32_t kBsTileStride = sizeof(ST_B);
+    const uint32_t As_LDS_base_addr = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + wid * elem_per_warp * sizeof(T)));
+    const uint32_t Bs_LDS_base_addr = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + wid * elem_per_warp * sizeof(T)));
 
-    const float *sb0_p = scale_B + sb_h0_idx * scale_K;
-    const float *sb1_p = scale_B + sb_h1_idx * scale_K;
+    // The two 16-wide N tiles of each accumulator sit at these bases, local to the block.
+    const int n_base_b0 = warp_n * REG_N;
+    const int n_base_b1 = HALF_COL + warp_n * REG_N;
+    // 1Dx2D reads scale_B as one scalar per (n-block, k-block) straight into an SGPR; 1Dx1D
+    // stages [k_blocks][N] through LDS.  Both are set up: the unused one is a pointer and an
+    // SRD, not a load, and having both lets every read site below be the same text.
+    const float *sb0_ptr = scale_B + (block_n / SCALE_BLOCK) * scale_K;
+    const float *sb1_ptr = sb0_ptr + scale_K;
+    kittens::i32x4 sb_srd = kittens::make_srsrc((const void *)scale_B, (uint32_t)(scale_K * N * (int)sizeof(float)));
 
     kittens::i32x4 sa_srd = kittens::make_srsrc((const void *)scale_A, (uint32_t)(scale_K * M * (int)sizeof(float)));
     const int sa_warp = tid / kittens::WARP_THREADS;
     const int sa_lane = tid % kittens::WARP_THREADS;
-    const uint32_t sa_curr_lds_warp = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(&smem_sa_curr[sa_warp * kittens::WARP_THREADS])));
+    // The M0 destination address for row_scales_load_dma's buffer_load ... lds, offset to this
+    // wave's 64 of the block's 256 rows.
+    //
+    // One base plus a stride rather than an array of two: the two buffers are adjacent, so the
+    // second address is the first plus a compile-time constant, and holding both would burn a
+    // register to save an s_add.  The compiler already does exactly this on the read side --
+    // `s_lshl_b32 s60, s27, 10 ; s_add_i32 s60, s60, 0x20000` in the disassembly.
+    constexpr uint32_t kScaleBufStride = BLOCK_M * sizeof(float);   // 1024 B
+    const uint32_t sa_lds_base = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&smem_sa[0][sa_warp * kittens::WARP_THREADS])));
+    constexpr uint32_t kScaleBufStrideN = BLOCK_N * sizeof(float);   // 1024 B
+    const uint32_t sb_lds_base = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&smem_sb[0][sa_warp * kittens::WARP_THREADS])));
+    // Rows of this block that exist; the last block along M is short when M % 256 != 0.
+    const int m_valid = min(BLOCK_M, M - block_m);
 
+    // One index pair for everything: the scale buffers are double-buffered on the same schedule
+    // as the tiles, and flip at the same points, so a second pair would only ever hold the same
+    // values.
     int tic = 0, toc = 1;
-    int rtic = 0, rtoc = 1;
 
     // Prologue
-    G::load(Bs[tic][0], B, {0, 0, block_col * 2, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A, {0, 0, block_row * 2, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A, {0, 0, block_row * 2 + 1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+    G::load(Bs[tic][0], B, {0, 0, block_col * 2, 0}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (tic * 2 + 0) * kBsTileStride);
+    G::load(As[tic][0], A, {0, 0, block_row * 2, 0}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (tic * 2 + 0) * kAsTileStride);
+    G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, 0}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (tic * 2 + 1) * kBsTileStride);
+    G::load(As[tic][1], A, {0, 0, block_row * 2 + 1, 0}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (tic * 2 + 1) * kAsTileStride);
 
+    // The ping-pong stagger: one half of the waves takes an extra barrier here, so from now on
+    // the two halves sit one cluster apart and the MFMA of one overlaps the memory work of the
+    // other.
     if (warp_m == 1) __builtin_amdgcn_s_barrier();
-    asm volatile("s_waitcnt vmcnt(4)");
+    // No wait here, and none after the next three loads either.  Nothing between here and the
+    // k-loop reads As or Bs --
+    // the instructions that follow are three more G::loads, into the *other* double-buffer
+    // slot, so there is not even a WAR hazard -- and the vmcnt(0) below, which the scale load
+    // needs anyway, subsumes both.  Verified: with both turned into no-ops the harness still
+    // passes all six shapes, determinism included.
+    //
+    // The barriers stay.  They are not about data: they are the ping-pong stagger, set up by
+    // the extra barrier one wave group takes above, and removing one would change the phase
+    // the two groups run at.
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A, {0, 0, block_row * 2, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B, {0, 0, block_col * 2, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B, {0, 0, block_col * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-    asm volatile("s_waitcnt vmcnt(6)");
+    G::load(As[toc][0], A, {0, 0, block_row * 2, 1}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (toc * 2 + 0) * kAsTileStride);
+    G::load(Bs[toc][0], B, {0, 0, block_col * 2, 1}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (toc * 2 + 0) * kBsTileStride);
+    G::load(Bs[toc][1], B, {0, 0, block_col * 2 + 1, 1}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (toc * 2 + 1) * kBsTileStride);
     __builtin_amdgcn_s_barrier();
 
-    if (tid < BLOCK_M) smem_sa_prev[tid] = 1.0f;
-    load_scales_to_curr<BLOCK_M>(sa_srd, sa_curr_lds_warp, tid, 0, M, block_m, sa_warp, sa_lane);
-    float curr_sb_h0, curr_sb_h1, prev_sb_h0, prev_sb_h1;
-    ColScale<RT_C::width> curr_cs0, curr_cs1, prev_cs0, prev_cs1;
-    if constexpr (IS_1D2D) {
-        curr_sb_h0 = load_scaleB_scalar(sb0_p, 0);
-        curr_sb_h1 = load_scaleB_scalar(sb1_p, 0);
-    } else {
-        curr_cs0 = load_scaleB_col<RT_C>(scale_B + 0 * N, local_n0, N);
-        curr_cs1 = load_scaleB_col<RT_C>(scale_B + 0 * N, local_n1, N);
-    }
+    // k-block 0's activation scales land in buffer tic; each loop iteration then stages the
+    // next block's into toc while folding out of tic.
+    row_scales_load_dma<BLOCK_M>(sa_srd, sa_lds_base + tic * kScaleBufStride, tid, 0, M, block_m, sa_warp, sa_lane);
+    if constexpr (!IS_1D2D) col_scales_load_dma<BLOCK_N>(sb_srd, sb_lds_base + tic * kScaleBufStrideN, tid, 0, N, block_n, sa_warp, sa_lane);
+    // This is the wait that matters: it retires every prologue load, A and B tiles included,
+    // and the barrier after it is what makes all eight waves' loads visible to each other.
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    compute_a_ratios_and_promote<BLOCK_M>(tid, smem_sa_prev, smem_sa_curr, smem_a_ratio[rtic]);
-    __builtin_amdgcn_s_barrier();
-
-    if constexpr (IS_1D2D) {
-        prev_sb_h0 = 1.0f; prev_sb_h1 = 1.0f;
-    } else {
-        #pragma unroll
-        for (int j = 0; j < RT_C::width; j++) {
-            prev_cs0.v[j] = 1.0f;
-            prev_cs1.v[j] = 1.0f;
-        }
-    }
-
+    // Two k-blocks per trip, as at 1Dx2D.  This was `unroll 1` on the reasoning that the per-N
+    // scales left no room for a second k-block's operands, and the register report agrees: 15
+    // spills and 64 B/lane of scratch, against none at unroll 1.
+    //
+    // But every one of those scratch instructions is in the prologue or the drain.  The
+    // steady-state loop, taken as the span of the widest backward branch, holds 64 MFMAs and
+    // zero scratch, so the spill executes once rather than once per trip and never serialises
+    // against the prefetch the way in-loop scratch would -- scratch is vmcnt-tracked.
+    //
+    // Worth 3.0 / 5.4 / 4.8 / 4.9 percent at 4096^3 / 6144^3 / 8192^3 / 16384^3, with both
+    // settings alternating in one timed window and their output bitwise identical.
     #pragma unroll 2
-    for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, rtic ^= 1, rtoc ^= 1) {
-        float sb_ratio_h0; ColScale<RT_C::width> cr0;
-        if constexpr (IS_1D2D) sb_ratio_h0 = prev_sb_h0 / curr_sb_h0;
-        else                   cr0 = col_scale_ratio(prev_cs0, curr_cs0);
-
-        auto rr_h0 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0);
-        load_scales_to_curr<BLOCK_M>(sa_srd, sa_curr_lds_warp, tid, k + 1, M, block_m, sa_warp, sa_lane);
-        float nxt_sb_h0, nxt_sb_h1;
-        ColScale<RT_C::width> nxt_cs0, nxt_cs1;
-        if constexpr (IS_1D2D) {
-            nxt_sb_h0 = load_scaleB_scalar(sb0_p, k + 1);
-            nxt_sb_h1 = load_scaleB_scalar(sb1_p, k + 1);
-        } else {
-            nxt_cs0 = load_scaleB_col<RT_C>(scale_B + (k + 1) * N, local_n0, N);
-            nxt_cs1 = load_scaleB_col<RT_C>(scale_B + (k + 1) * N, local_n1, N);
-        }
-
-        // cluster 0
+    for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
+        // ---- cluster 0 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        // This k-block's own scales.  No ratio and no rotation: each is read once, used once.
+        const auto sb_h0 = load_block_scale_b<IS_1D2D, RT_CT>(sb0_ptr, k, smem_sb[tic], n_base_b0);
+        const auto sb_h1 = load_block_scale_b<IS_1D2D, RT_CT>(sb1_ptr, k, smem_sb[tic], n_base_b1);
+        RowScaleT<RT_CT::width> rs_h0 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h0, m_valid);
+        row_scales_load_dma<BLOCK_M>(sa_srd, sa_lds_base + toc * kScaleBufStride, tid, k + 1, M, block_m, sa_warp, sa_lane);
+        if constexpr (!IS_1D2D) col_scales_load_dma<BLOCK_N>(sb_srd, sb_lds_base + toc * kScaleBufStrideN, tid, k + 1, N, block_n, sa_warp, sa_lane);
         kittens::load(b0, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0}));
         kittens::load(a,  kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0}));
-        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
-        asm volatile("s_waitcnt lgkmcnt(8)");
-        __builtin_amdgcn_s_barrier();
-
-        // cluster 1
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cA, rr_h0, sb_ratio_h0);
-        else                   apply_row_col_ratio(cA, rr_h0, cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cA, a, b0);
-        __builtin_amdgcn_s_setprio(0);
-        __builtin_amdgcn_s_barrier();
+        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (toc * 2 + 1) * kAsTileStride);
+        // (0), and that is derived rather than conservative.  The ISA issues 20 LDS reads ahead
+        // of this point -- 2 + 2 for the column scales, 4 for the row scales, 4 for b0 and 8 for
+        // a -- and the newest of them is part of `a`, which cluster 1 reads immediately below.
+        // lgkmcnt retires in order, so waiting for the newest waits for all of them: no larger
+        // count is correct here.
+        asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
 
-        // cluster 2
-        float sb_ratio_h1; ColScale<RT_C::width> cr1;
-        if constexpr (IS_1D2D) sb_ratio_h1 = prev_sb_h1 / curr_sb_h1;
-        else                   cr1 = col_scale_ratio(prev_cs1, curr_cs1);
+        // ---- cluster 1 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cA, b0, a, rs_h0, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+
+        // ---- cluster 2 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(b1, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0}));
-        G::load(As[tic][0], A, {0, 0, block_row * 2, k + 2}, sw_A, a_srd, a_base, a_lds[tic][0]);
+        G::load(As[tic][0], A, {0, 0, block_row * 2, k + 2}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (tic * 2 + 0) * kAsTileStride);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-
-        // cluster 3
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cB, rr_h0, sb_ratio_h1);
-        else                   apply_row_col_ratio(cB, rr_h0, cr1);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cB, a, b1);
-        __builtin_amdgcn_s_setprio(0);
-        __builtin_amdgcn_s_barrier();
-
-        // cluster 4
-        kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
-        G::load(Bs[tic][0], B, {0, 0, block_col * 2, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        auto rr_h1 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1);
-        __builtin_amdgcn_s_barrier();
-        
-        // cluster 5
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cC, rr_h1, sb_ratio_h0);
-        else                   apply_row_col_ratio(cC, rr_h1, cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cC, a, b0);
-        __builtin_amdgcn_s_setprio(0);
-        __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
 
-        // cluster 6
-        G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
+        // ---- cluster 3 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cB, b1, a, rs_h0, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+
+        // ---- cluster 4 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
+        G::load(Bs[tic][0], B, {0, 0, block_col * 2, k + 2}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (tic * 2 + 0) * kBsTileStride);
+        RowScaleT<RT_CT::width> rs_h1 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h1, m_valid);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+
+        // ---- cluster 5 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        mma_fold_cluster<CBSZ, BLGP>(cC, b0, a, rs_h1, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+
+        // ---- cluster 6 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (tic * 2 + 1) * kBsTileStride);
+        // (6), derived from the ISA rather than inherited.  A trip issues ten vector-memory
+        // operations in this order: the two scale DMAs, then As[toc][1], As[tic][0], Bs[tic][0]
+        // and Bs[tic][1], two each.  Before reaching any other vmcnt the next trip reads
+        // smem_sa[toc], smem_sb[toc] and As[toc][1], so those three must be retired here.  They
+        // are the four oldest of the trip, and leaving the six newest outstanding is exactly
+        // vmcnt(6).  vmcnt(8) would retire the scales but not As[toc][1].
         asm volatile("s_waitcnt vmcnt(6)");
-        compute_a_ratios_and_promote<BLOCK_M>(tid, smem_sa_prev, smem_sa_curr, smem_a_ratio[rtoc]);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 7
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cD, rr_h1, sb_ratio_h1);
-        else                   apply_row_col_ratio(cD, rr_h1, cr1);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cD, a, b1);
-        __builtin_amdgcn_s_setprio(0);
+        // ---- cluster 7 ------------------------------------------------------------------
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cD, b1, a, rs_h1, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
 
-        if constexpr (IS_1D2D) {
-            prev_sb_h0 = curr_sb_h0; prev_sb_h1 = curr_sb_h1;
-            curr_sb_h0 = nxt_sb_h0; curr_sb_h1 = nxt_sb_h1;
-        } else {
-            prev_cs0 = curr_cs0; prev_cs1 = curr_cs1;
-            curr_cs0 = nxt_cs0; curr_cs1 = nxt_cs1;
-        }
         __builtin_amdgcn_s_barrier();
     }
 
-    // Epilogue k = k_iters - 1
+    // Drain, first half: k-block k_iters - 2.  Still stages the last block's scales.
     {
-        int k = k_iters - 2;
-        float sb_ratio_h0, sb_ratio_h1;
-        ColScale<RT_C::width> cr0, cr1;
-        if constexpr (IS_1D2D) {
-            sb_ratio_h0 = prev_sb_h0 / curr_sb_h0;
-            sb_ratio_h1 = prev_sb_h1 / curr_sb_h1;
-        } else {
-            cr0 = col_scale_ratio(prev_cs0, curr_cs0);
-            cr1 = col_scale_ratio(prev_cs1, curr_cs1);
-        }
-        load_scales_to_curr<BLOCK_M>(sa_srd, sa_curr_lds_warp, tid, k + 1, M, block_m, sa_warp, sa_lane);
-        float nxt_sb_h0, nxt_sb_h1;
-        ColScale<RT_C::width> nxt_cs0, nxt_cs1;
-        if constexpr (IS_1D2D) {
-            nxt_sb_h0 = load_scaleB_scalar(sb0_p, k + 1);
-            nxt_sb_h1 = load_scaleB_scalar(sb1_p, k + 1);
-        } else {
-            nxt_cs0 = load_scaleB_col<RT_C>(scale_B + (k + 1) * N, local_n0, N);
-            nxt_cs1 = load_scaleB_col<RT_C>(scale_B + (k + 1) * N, local_n1, N);
-        }
+        const int k = k_iters - 2;
+        // This k-block's own scales.  No ratio and no rotation: each is read once, used once.
+        const auto sb_h0 = load_block_scale_b<IS_1D2D, RT_CT>(sb0_ptr, k, smem_sb[tic], n_base_b0);
+        const auto sb_h1 = load_block_scale_b<IS_1D2D, RT_CT>(sb1_ptr, k, smem_sb[tic], n_base_b1);
+        RowScaleT<RT_CT::width> rs_h0 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h0, m_valid);
+        row_scales_load_dma<BLOCK_M>(sa_srd, sa_lds_base + toc * kScaleBufStride, tid, k + 1, M, block_m, sa_warp, sa_lane);
+        if constexpr (!IS_1D2D) col_scales_load_dma<BLOCK_N>(sb_srd, sb_lds_base + toc * kScaleBufStrideN, tid, k + 1, N, block_n, sa_warp, sa_lane);
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(b0, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0}));
         kittens::load(a,  kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0}));
-        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
+        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base_ptr, As_LDS_base_addr + (toc * 2 + 1) * kAsTileStride);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cA, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), sb_ratio_h0);
-        else                   apply_row_col_ratio(cA, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cA, a, b0);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cA, b0, a, rs_h0, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         kittens::load(b1, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0}));
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cB, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), sb_ratio_h1);
-        else                   apply_row_col_ratio(cB, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), cr1);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cB, a, b1);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cB, b1, a, rs_h0, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
+        RowScaleT<RT_CT::width> rs_h1 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h1, m_valid);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cC, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), sb_ratio_h0);
-        else                   apply_row_col_ratio(cC, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cC, a, b0);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cC, b0, a, rs_h1, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(b0, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[toc][0], {warp_n, 0}));
-        asm volatile("s_waitcnt vmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cD, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), sb_ratio_h1);
-        else                   apply_row_col_ratio(cD, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), cr1);
-        compute_a_ratios_and_promote<BLOCK_M>(tid, smem_sa_prev, smem_sa_curr, smem_a_ratio[rtoc]);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cD, a, b1);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cD, b1, a, rs_h1, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
 
-        if constexpr (IS_1D2D) {
-            prev_sb_h0 = curr_sb_h0; prev_sb_h1 = curr_sb_h1;
-            curr_sb_h0 = nxt_sb_h0; curr_sb_h1 = nxt_sb_h1;
-        } else {
-            prev_cs0 = curr_cs0; prev_cs1 = curr_cs1;
-            curr_cs0 = nxt_cs0; curr_cs1 = nxt_cs1;
-        }
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        tic ^= 1; toc ^= 1; rtic ^= 1; rtoc ^= 1;
+        tic ^= 1; toc ^= 1;
     }
 
-    // Epilogue k = k_iters - 2
+    // Drain, second half: the last k-block.  Nothing left to prefetch or stage.
     {
-        float sb_ratio_h0, sb_ratio_h1;
-        ColScale<RT_C::width> cr0, cr1;
-        if constexpr (IS_1D2D) {
-            sb_ratio_h0 = prev_sb_h0 / curr_sb_h0;
-            sb_ratio_h1 = prev_sb_h1 / curr_sb_h1;
-        } else {
-            cr0 = col_scale_ratio(prev_cs0, curr_cs0);
-            cr1 = col_scale_ratio(prev_cs1, curr_cs1);
-        }
+        const int k = k_iters - 1;
+        // This k-block's own scales.  No ratio and no rotation: each is read once, used once.
+        const auto sb_h0 = load_block_scale_b<IS_1D2D, RT_CT>(sb0_ptr, k, smem_sb[tic], n_base_b0);
+        const auto sb_h1 = load_block_scale_b<IS_1D2D, RT_CT>(sb1_ptr, k, smem_sb[tic], n_base_b1);
+        RowScaleT<RT_CT::width> rs_h0 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h0, m_valid);
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0}));
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cA, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), sb_ratio_h0);
-        else                   apply_row_col_ratio(cA, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cA, a, b0);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cA, b0, a, rs_h0, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(b1, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0}));
         asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cB, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), sb_ratio_h1);
-        else                   apply_row_col_ratio(cB, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0), cr1);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cB, a, b1);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cB, b1, a, rs_h0, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
+        __builtin_amdgcn_sched_barrier(0);
         kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
+        RowScaleT<RT_CT::width> rs_h1 = load_row_scale_t<RT_CT>(smem_sa[tic], a_row_h1, m_valid);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cC, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), sb_ratio_h0);
-        else                   apply_row_col_ratio(cC, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), cr0);
-        __builtin_amdgcn_s_setprio(2);
-        mma_accum<CBSZ, BLGP>(cC, a, b0);
-        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cC, b0, a, rs_h1, sb_h0);
+        __builtin_amdgcn_sched_barrier(0);
 
-        if constexpr (IS_1D2D) apply_row_ratio_sb(cD, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), sb_ratio_h1);
-        else                   apply_row_col_ratio(cD, load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1), cr1);
-        mma_accum<CBSZ, BLGP>(cD, a, b1);
+        __builtin_amdgcn_sched_barrier(0);
+        mma_fold_cluster<CBSZ, BLGP>(cD, b1, a, rs_h1, sb_h1);
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
     }
 
@@ -458,20 +511,36 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
     const int n_off1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
 
-    OType *c_ptr = C.raw_ptr;
+    OType *c_out_ptr = C.raw_ptr;
 
-    // Sequential per-accumulator store; batching all 4 spills reg and halves perf.
-    auto finish = [&](RT_C &c, int a_row, float sb, const ColScale<RT_C::width> &cs, int m_off, int n_off) {
-        if constexpr (IS_1D2D) apply_row_ratio_sb(c, load_row_ratio<RT_C>(smem_sa_prev, a_row), sb);
-        else                   apply_row_col_ratio(c, load_row_ratio<RT_C>(smem_sa_prev, a_row), cs);
-        if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
-            apply_epilogue<OType, EPILOGUE>(c, m_off, n_off, M, N, g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
-        store_output(c_ptr, c, m_off, n_off, M, N);
-    };
-    finish(cA, a_row_h0, curr_sb_h0, curr_cs0, m_off0, n_off0);
-    finish(cB, a_row_h0, curr_sb_h1, curr_cs1, m_off0, n_off1);
-    finish(cC, a_row_h1, curr_sb_h0, curr_cs0, m_off1, n_off0);
-    finish(cD, a_row_h1, curr_sb_h1, curr_cs1, m_off1, n_off1);
+    // The accumulators are already in true units -- every k-block was scaled as it was folded
+    // in -- so there is nothing left to apply before the store.
+    //
+    // Stored one at a time rather than batched.  Batching all four was reported to spill
+    // registers and halve throughput, but that was measured on a different kernel, so the
+    // choice is inherited here rather than verified.
+    //
+    // This is the kernel's peak-pressure point either way: all four accumulators are live and
+    // final at the same moment, 128 VGPRs of results plus whatever the address arithmetic
+    // needs, and none of them can be retired earlier because none is complete until the last
+    // k-block.  Reducing it means holding fewer accumulators, i.e. a smaller output tile --
+    // the 256 -> 224 -> 192 knob -- not a different store order.
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
+        apply_epilogue_t<OType, EPILOGUE>(cA, m_off0, n_off0, M, N, g.bias, g.bias_dtype,
+                                          g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
+    store_output_t(c_out_ptr, cA, m_off0, n_off0, M, N);
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
+        apply_epilogue_t<OType, EPILOGUE>(cB, m_off0, n_off1, M, N, g.bias, g.bias_dtype,
+                                          g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
+    store_output_t(c_out_ptr, cB, m_off0, n_off1, M, N);
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
+        apply_epilogue_t<OType, EPILOGUE>(cC, m_off1, n_off0, M, N, g.bias, g.bias_dtype,
+                                          g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
+    store_output_t(c_out_ptr, cC, m_off1, n_off0, M, N);
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
+        apply_epilogue_t<OType, EPILOGUE>(cD, m_off1, n_off1, M, N, g.bias, g.bias_dtype,
+                                          g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
+    store_output_t(c_out_ptr, cD, m_off1, n_off1, M, N);
 }
 
 template <typename OType, int CBSZ, int BLGP,

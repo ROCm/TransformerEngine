@@ -1,0 +1,366 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
+
+// Device helpers for the scale-then-accumulate blockwise FP8 GEMM (micro_tk).
+//
+// These sit alongside blockwise_fp8_gemm_helper.cuh rather than inside it because they serve one
+// kernel: the accumulator here holds C transposed, so every scale load, fold and store is indexed
+// the other way round from the untransposed helpers next door.  Mixing the two sets in one file
+// would put two spellings of the same operation under one roof with nothing marking which is which.
+//
+// The epilogue is the exception and lives in the other file, next to the untransposed
+// apply_epilogue it mirrors, so the two can be read against each other.
+
+#pragma once
+
+#include <type_traits>
+#include "kittens.cuh"
+
+// Activation scales in the layout a transposed accumulator wants them.
+//
+// The MFMA output layout is fixed by hardware: lane l holds D[4*(l/16) + r][l % 16] for
+// r = 0..3, four consecutive rows of one column.  With the operands swapped the accumulator
+// holds C^T, so those four consecutive indices run along N and the single fixed index is M.
+// A 1x128 activation scale varies along M, so it is the same value for all four -- one float
+// per 16-wide M tile, which is one per accumulator *width*.
+//
+// Untransposed it was four floats per accumulator *height*, and this is the whole point of
+// the transpose: 16 floats per accumulator become 4.
+//
+// The 128x128 weight scale is unaffected.  It varies along N in blocks of 128, and a wave's
+// 32 columns sit inside one such block, so it stays a single scalar either way.
+template <int WIDTH>
+struct RowScaleT { float v[WIDTH]; };
+
+
+
+
+// One activation scale per M tile.  The lane's M index is fixed within a tile at
+// `local_m_base + 16*w + (lane % 16)`, so this is one LDS read per width instead of four.
+template <typename AccType>
+__device__ inline RowScaleT<AccType::width> load_row_scale_t(
+    const float *sa_row_k, int local_m_base, int m_valid) {
+    RowScaleT<AccType::width> rs;
+    const int col_g = kittens::laneid() % 16;
+    #pragma unroll
+    for (int w = 0; w < AccType::width; w++) {
+        const int m = local_m_base + w * 16 + col_g;
+        rs.v[w] = sa_row_k[m < m_valid ? m : m_valid - 1];
+    }
+    return rs;
+}
+
+
+
+
+
+using as3_u32_ptr_ = uint32_t __attribute__((address_space(3)))*;
+using i32x4_v_ = int32_t __attribute__((ext_vector_type(4)));
+extern "C" __device__ void
+raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
+    __asm("llvm.amdgcn.raw.buffer.load.lds");
+
+// HBM -> LDS: k-block `k`'s row scales for this output block, one float per row of the 256,
+// landing in one of the two scale buffers.  A buffer_load ... lds, so it is a DMA in the same
+// sense the A and B tile loads are: no VGPR round trip, completion tracked by vmcnt.
+//
+// Named for that: it is a DMA of one k-block's row scales, and there is no second buffer of
+// earlier scales for it to be named against.
+template <int BLOCK_M>
+__device__ __forceinline__ void row_scales_load_dma(
+        kittens::i32x4 sa_srd, uint32_t lds_warp, int tid, int k, int M, int block_m,
+        int sa_warp, int sa_lane) {
+    if (tid < BLOCK_M)
+        load_scale_to_lds(sa_srd, lds_warp,
+                          (k * M + block_m + sa_warp * kittens::WARP_THREADS + sa_lane) * 4);
+}
+
+
+// ---------------------------------------------------------------------------------------
+// One MFMA cluster, hand-scheduled.  There are two, one per recipe, and they are written to be
+// read side by side: same eight slots, same rotation, same drain.  Only the scale differs.
+//
+//     mfma  t[k%2] = tile k          issue 4
+//     <wait>                         the MFMA -> VALU hazard, see below
+//     fmac  acc[k-1] += t * scale    4 x 4 = 16
+//     mfma  t[(k+1)%2] = tile k+1    the next slot
+//
+// Two measured facts on gfx950 hold it up:
+//
+//   * the MFMA -> VALU hazard is satisfied by elapsed cycles, not by a count of independent
+//     instructions.  The fold of tile k-1 issues 48 cycles after its MFMA with two instructions
+//     in between, which a slot-counting reading would forbid.
+//   * a VALU issued directly after an MFMA costs 12 cycles (median, n=1055) but only 4 if an
+//     s_nop intervenes (median, n=868), so a short s_nop pays for itself.
+//
+// No register is named anywhere below, and the temporaries are ordinary C++ values the allocator
+// places where it likes.  That works because the MFMA is a builtin and only the fold is asm: the
+// builtin's result type carries the register class, so the compiler allocates the aligned quad
+// itself -- the same mechanism hipkittens' mfma1616128 relies on -- and passing t[0]..t[3] into
+// the fold as four "v" inputs costs nothing, since element i already lives in the i-th register
+// of that quad.  Verified on gfx950: the MFMA writes v[4:7] and the four v_fmac_f32 read v4, v5,
+// v6, v7, with no v_mov between them.
+//
+// Writing the MFMA in asm too would hide the quad and leave no way to name one register of it,
+// which is why an earlier version had to pin registers by hand.
+//
+// What the split costs is that the hazard padding is ours to get right: with the fold in asm the
+// compiler does not pad the hazard itself (checked -- it emits the fold directly after the MFMA
+// with nothing in between).  The paired sched_barrier around each fold is what keeps the builtin
+// from drifting away from the fold it is meant to overlap.
+
+// The wait is spelled out by the caller rather than given as a count, because the two recipes
+// want different ones and "no wait at all" has to be expressible and visibly distinct from
+// s_nop 0.
+#define FP8_NOP(n) "s_nop " #n "\n\t"
+#define FP8_NO_NOP ""
+
+// One fold, one shared scale: tile += t * s.
+#define FP8_FOLD(WAIT, tq, tile, s)                                                \
+    asm volatile(WAIT                                                              \
+                 "v_fmac_f32 %0, %4, %8\n\t"                                       \
+                 "v_fmac_f32 %1, %5, %8\n\t"                                       \
+                 "v_fmac_f32 %2, %6, %8\n\t"                                       \
+                 "v_fmac_f32 %3, %7, %8\n\t"                                       \
+                 : "+v"((tile).data[0].x), "+v"((tile).data[0].y),                 \
+                   "+v"((tile).data[1].x), "+v"((tile).data[1].y)                  \
+                 : "v"((tq)[0]), "v"((tq)[1]), "v"((tq)[2]), "v"((tq)[3]), "v"(s))
+
+// One fold, four distinct scales.
+#define FP8_FOLD4(WAIT, tq, tile, s0, s1, s2, s3)                                  \
+    asm volatile(WAIT                                                              \
+                 "v_fmac_f32 %0, %4, %8\n\t"                                       \
+                 "v_fmac_f32 %1, %5, %9\n\t"                                       \
+                 "v_fmac_f32 %2, %6, %10\n\t"                                      \
+                 "v_fmac_f32 %3, %7, %11\n\t"                                      \
+                 : "+v"((tile).data[0].x), "+v"((tile).data[0].y),                 \
+                   "+v"((tile).data[1].x), "+v"((tile).data[1].y)                  \
+                 : "v"((tq)[0]), "v"((tq)[1]), "v"((tq)[2]), "v"((tq)[3]),         \
+                   "v"(s0), "v"(s1), "v"(s2), "v"(s3))
+
+// The eight MFMA operands of one cluster, in the order the slots consume them.  Tile i uses
+// b.tiles[i / 4][0] and a.tiles[i % 4][0] and lands in acc.tiles[i / 4][i % 4].
+#define FP8_CLUSTER_OPERANDS(b, a)                                                             \
+    using OperandT = int __attribute__((ext_vector_type(8)));                                  \
+    typedef float floatx4_t __attribute__((ext_vector_type(4)));                               \
+    const OperandT bq[2] = {*reinterpret_cast<const OperandT *>(&(b).tiles[0][0].data[0]),     \
+                            *reinterpret_cast<const OperandT *>(&(b).tiles[1][0].data[0])};    \
+    const OperandT aq[4] = {*reinterpret_cast<const OperandT *>(&(a).tiles[0][0].data[0]),     \
+                            *reinterpret_cast<const OperandT *>(&(a).tiles[1][0].data[0]),     \
+                            *reinterpret_cast<const OperandT *>(&(a).tiles[2][0].data[0]),     \
+                            *reinterpret_cast<const OperandT *>(&(a).tiles[3][0].data[0])};    \
+    const floatx4_t zero = {0.f, 0.f, 0.f, 0.f};                                               \
+    floatx4_t t[2]
+
+// The two format codes tell the MFMA how to decode each operand: 0 for e4m3, 1 for e5m2.  The
+// builtin's first code describes its first operand, and this cluster feeds it `b` first and `a`
+// second -- the operand swap that transposes the accumulator.  So the codes swap with them.
+// Passing CBSZ (which names A's format) in the first slot would decode the weights as if they
+// carried the activations' format, which is silent: same 8 bits, different exponent bias.
+#define FP8_CLUSTER_MFMA(i, B_FMT, A_FMT)                                                      \
+    t[(i) & 1] = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(                             \
+            bq[(i) >> 2], aq[(i) & 3], zero, (B_FMT), (A_FMT), 0, 0, 0, 0)
+
+#define FP8_CLUSTER_SHAPE(RT_CT)                                                               \
+    static_assert(RT_CT::height == 2 && RT_CT::width == 4,                                     \
+                  "the schedule is written out for eight tiles arranged 2 x 4")
+
+// The weight scale for one k-block, in whichever form the recipe supplies it: a single value
+// for the whole wave when the weights are blocked 128x128, and four values per accumulator
+// height when they are blocked 1x128.  Returning the type rather than branching at the fold is
+// what keeps the kernel's twelve fold sites identical under both recipes.
+// acc += (b . a^T) * (row * col), weights blocked 128x128.
+//
+// The weights are blocked 128x128, so `sb` is one value for the whole wave and the product with
+// the row scale is four scalars per k-block.  They are hoisted out of the slots because nothing
+// in the slot depends on them, which leaves the fold pure fma -- and leaves the slot's wait with
+// nothing else to hide behind, hence s_nop 2.
+template <int CBSZ, int BLGP, typename RT_CT, typename RT_B, typename RT_A>
+__device__ __forceinline__ void mma_fold_cluster(
+        RT_CT &acc, const RT_B &b, const RT_A &a,
+        const RowScaleT<RT_CT::width> &rs, float sb) {
+    FP8_CLUSTER_SHAPE(RT_CT);
+    FP8_CLUSTER_OPERANDS(b, a);
+
+    float sc[RT_CT::width];
+    #pragma unroll
+    for (int w = 0; w < RT_CT::width; w++) sc[w] = rs.v[w] * sb;
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        FP8_CLUSTER_MFMA(i, BLGP, CBSZ);
+        __builtin_amdgcn_sched_barrier(0);
+        if (i > 0) {
+            const int j = i - 1;
+            FP8_FOLD(FP8_NOP(2), t[j & 1], acc.tiles[j >> 2][j & 3], sc[j & 3]);
+        }
+        __builtin_amdgcn_sched_barrier(0);
+    }
+    // Drain: tile 7's fold has no following MFMA to hide behind.  From that MFMA's issue, 4 for
+    // its own slot + 12 for the s_nop 2 at the head of tile 6's fold + 16 for that fold's four
+    // v_fmac_f32 = 32 have elapsed, so 16 more reach the 48 the hazard needs, and 16 is s_nop 3.
+    FP8_FOLD(FP8_NOP(3), t[1], acc.tiles[1][3], sc[3]);
+}
+
+// Store a transposed accumulator to a row-major C.
+//
+// This is where the transpose pays for itself a second time.  Untransposed, a lane held four
+// consecutive M at one N, which in a row-major C is four elements a full row apart -- four
+// separate stores.  Transposed it holds four consecutive N at one M, which are four
+// *adjacent* elements of one row of C.
+//
+// So the four are merged into one 8-byte store when they can be: they are in range, and the
+// row start is 4-element aligned, which needs N divisible by 4 since the row base is m*N.
+// Otherwise it falls back to four guarded scalar stores, which is what the ragged last block
+// along N gets.
+template <typename OType, typename AccType>
+__device__ inline void store_output_t(OType *c_ptr, const AccType &acc,
+                                      int m_off, int n_off, int M, int N) {
+    const int lane = kittens::laneid();
+    const int n_g = 4 * (lane / 16);   // which four consecutive N this lane holds
+    const int m_g = lane % 16;         // the single M it holds
+    #pragma unroll
+    for (int w = 0; w < AccType::width; w++) {
+        const int m = m_off + w * 16 + m_g;
+        if (m >= M) continue;
+        OType *row = c_ptr + (size_t)m * N;
+        #pragma unroll
+        for (int h = 0; h < AccType::height; h++) {
+            const int n0 = n_off + h * 16 + n_g;
+            const float v[4] = {acc.tiles[h][w].data[0].x, acc.tiles[h][w].data[0].y,
+                                acc.tiles[h][w].data[1].x, acc.tiles[h][w].data[1].y};
+            OType out[4];
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                if constexpr (std::is_same_v<OType, kittens::bf16>) {
+                    out[r] = __float2bfloat16(v[r]);
+                } else {
+                    out[r] = kittens::base_types::convertor<OType, float>::convert(v[r]);
+                }
+            }
+            if (n0 + 3 < N && (N % 4) == 0) {
+                struct alignas(8) Quad { OType e[4]; };
+                *reinterpret_cast<Quad *>(row + n0) = *reinterpret_cast<const Quad *>(out);
+            } else {
+                #pragma unroll
+                for (int r = 0; r < 4; r++) {
+                    if (n0 + r < N) row[n0 + r] = out[r];
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 1Dx1D: the weight scale is 1x128 as well, so it varies along N and is no longer one value
+// for the whole wave.  Everything below exists only for that recipe.
+//
+// What a lane needs, with the transposed accumulator: the row scale depends only on M, which is
+// fixed within a tile, so it stays one value per accumulator width.  The col scale depends on N,
+// and a lane holds four consecutive N per tile (n = 4*(lane/16) + r), so it is four values per
+// accumulator height.  For the 2 x 4 accumulator used here that is 4 row and 8 col values, and
+// a wave covering four 16-wide N tiles holds 16 col values in all.
+//
+// The product row * col cannot be pre-multiplied to one scalar per tile the way 1Dx2D does:
+// s[h][w][r] = row[w] * col[h][r] is 32 distinct values per k-block rather than 4.
+
+template <int HEIGHT>
+struct ColScaleT { float v[HEIGHT][4]; };
+
+// The same DMA as row_scales_load_dma, over N instead of M: one float per column of this output
+// block for k-block `k`, from a scale_B laid out [k_blocks][N].
+template <int BLOCK_N>
+__device__ __forceinline__ void col_scales_load_dma(
+        kittens::i32x4 sb_srd, uint32_t lds_warp, int tid, int k, int N, int block_n,
+        int sb_warp, int sb_lane) {
+    if (tid < BLOCK_N)
+        load_scale_to_lds(sb_srd, lds_warp,
+                          (k * N + block_n + sb_warp * kittens::WARP_THREADS + sb_lane) * 4);
+}
+
+// The lane's four N within each 16-wide tile are consecutive, so each height is one 16-byte LDS
+// read rather than four scalar ones.
+//
+// No bounds clamp: the LDS buffer is BLOCK_N floats and every index below lands inside it, so
+// the read is always in range.  Columns past the end of a partial block hold whatever the DMA
+// fetched, and a buffer resource returns 0 out of range, which only ever reaches lanes whose
+// output is masked off at the store.
+template <typename AccType>
+__device__ inline ColScaleT<AccType::height> load_col_scale_t(
+        const float *sb_col_k, int local_n_base) {
+    ColScaleT<AccType::height> cs;
+    const int lane_n = 4 * (kittens::laneid() / 16);
+    #pragma unroll
+    for (int h = 0; h < AccType::height; h++) {
+        *reinterpret_cast<float4 *>(&cs.v[h][0]) =
+            *reinterpret_cast<const float4 *>(&sb_col_k[local_n_base + h * 16 + lane_n]);
+    }
+    return cs;
+}
+
+// Both recipes' arguments are taken and one pair is discarded, rather than the caller choosing.
+// They are addresses and an index -- nothing is loaded for the branch not taken -- and it buys
+// call sites that read the same under either recipe, which is the whole point of the exercise.
+template <bool IS_1D2D, typename RT_CT>
+__device__ inline auto load_block_scale_b(const float *sb_global, int k,
+                                          const float *sb_smem, int n_base) {
+    if constexpr (IS_1D2D) {
+        return load_scaleB_scalar(sb_global, k);
+    } else {
+        return load_col_scale_t<RT_CT>(sb_smem, n_base);
+    }
+}
+
+// acc += (b . a^T) * (row * col), weights blocked 1x128.
+//
+// One MFMA per slot with its fold one slot behind, as at 1Dx2D, but with a much shorter wait
+// between them: the four v_mul that produce this fold's scales already occupy that gap, so the
+// s_nop 2 the 1Dx2D fold needs is 12 cycles of nothing here.
+//
+// The wait is s_nop 0 rather than none at all, and that is measured, not reasoned.  Sweeping it
+// at 8192^3 gives 1751 / 1862 / 1840 / 1811 / 1741 / 1539 TFLOP/s for none / 0 / 1 / 2 / 4 / 8 --
+// an optimum at one wait state with both ends worse.  Removing it entirely shortens the slot to
+// exactly the 44 cycles the arithmetic predicts, and the wave still gets *longer*: the compute
+// phase is not the critical path, so issuing more densely only takes issue bandwidth from the
+// partner wave, which is in its memory phase on the same SIMD.
+//
+// The folds are hazard-free with margin, which is checked rather than assumed: over the 2048
+// folds of one wave in the ATT trace, the distance from an MFMA to the first v_fmac_f32 that
+// reads it is 64 cycles at minimum and 80 at the median, against the 48 the hazard needs.  None
+// of the 2048 is below it.  The four products are ordinary C++ and the compiler places their
+// v_mul wherever it likes; the paired sched_barrier around each fold is what keeps them inside
+// the slot rather than hoisted to the top of the k loop.  Placing them by hand is a separate
+// change, deliberately not made here: this one exists to measure what the extra live values do
+// to register pressure, with the schedule held fixed.
+template <int CBSZ, int BLGP, typename RT_CT, typename RT_B, typename RT_A>
+__device__ __forceinline__ void mma_fold_cluster(
+        RT_CT &acc, const RT_B &b, const RT_A &a,
+        const RowScaleT<RT_CT::width> &rs, const ColScaleT<RT_CT::height> &cs) {
+    FP8_CLUSTER_SHAPE(RT_CT);
+    FP8_CLUSTER_OPERANDS(b, a);
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        FP8_CLUSTER_MFMA(i, BLGP, CBSZ);
+        __builtin_amdgcn_sched_barrier(0);
+        if (i > 0) {
+            const int j = i - 1, h = j >> 2, w = j & 3;
+            const float rw = rs.v[w];
+            FP8_FOLD4(FP8_NOP(0), t[j & 1], acc.tiles[h][w],
+                      rw * cs.v[h][0], rw * cs.v[h][1], rw * cs.v[h][2], rw * cs.v[h][3]);
+        }
+        __builtin_amdgcn_sched_barrier(0);
+    }
+    // Drain: tile 7's fold has no following MFMA to hide behind.  Counting from that MFMA's
+    // issue, the slot ahead of this one contributes 4 for the MFMA, 24 for its four v_mul and
+    // 16 for its four v_fmac_f32 -- 44 -- and this fold's own four products add 16 more before
+    // it issues, so the 48 the hazard needs is already covered.  The s_nop 1 is a margin
+    // against the compiler placing those products elsewhere, not a requirement.
+    {
+        const float rw = rs.v[3];
+        FP8_FOLD4(FP8_NOP(1), t[1], acc.tiles[1][3],
+                  rw * cs.v[1][0], rw * cs.v[1][1], rw * cs.v[1][2], rw * cs.v[1][3]);
+    }
+}
