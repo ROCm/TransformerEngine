@@ -67,6 +67,7 @@ from ..utils import (
     get_device_compute_capability,
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -1316,6 +1317,46 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
         )
+
+    def _enable_weight_preswizzle(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> bool:
+        """Whether to fuse scale-factor swizzling into weight quantization.
+
+        When enabled, scales are preswizzled during quantization instead of lazily
+        inside every GEMM. Disabled when primary weights are already quantized
+        (dequant and FSDP2 all-gather expect the unswizzled layout). For NVFP4,
+        enabled only for shapes/architectures where the fused swizzle+quantize
+        kernel is supported. Weight quantization always uses the single-tensor
+        kernel (including GroupedLinear's cached weights), so NVFP4 RHT
+        eligibility uses that kernel's 64-row alignment.
+        """
+        if IS_HIP_EXTENSION:
+            # ROCm sets scale-swizzling per weight-quantizer in _get_weight_quantizers
+            # (via set_usage/keep_fp8_weight_transpose_cache), not through the upstream
+            # forward-path preswizzle fusion. Keep weight optimize_for_gemm False here so
+            # ROCm quantizers don't request with_gemm_swizzled_scales on paths that reject it.
+            return False
+        if self.primary_weights_in_fp8:
+            return False
+        if isinstance(quantizer, MXFP8Quantizer):
+            return True
+        if isinstance(quantizer, NVFP4Quantizer):
+            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            arch_supported = get_device_compute_capability() >= (10, 0)
+            if quantizer.with_rht:
+                return arch_supported and rows % 64 == 0 and cols % 128 == 0
+            return (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        return False
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
