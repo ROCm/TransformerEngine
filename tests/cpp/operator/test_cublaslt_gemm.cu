@@ -16,7 +16,6 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
-#include "../../../transformer_engine/common/util/math.h"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipblaslt/hipblaslt.h>  // HIPBLASLT_VERSION_{MAJOR,MINOR} for the MXFP4 capability gate
@@ -448,9 +447,8 @@ static void run_reference(
 constexpr size_t kBlockLen = 128;
 
 // Blockwise FP8 reference, TN layout: D[j*m + i] = sum_kk sA * sB * A[i*k + kk] * B[j*k + kk]
-// Both FP8 encodings occupy one byte, so the operands are read as bytes and decoded per
-// element.  A template parameter would work too, but every extra axis here multiplies with the
-// output type, and the decode is not what this kernel spends its time on.
+// Both FP8 encodings are one byte, so operands are read as bytes and decoded per element rather
+// than adding a template axis that would multiply with the output type.
 __device__ inline float ref_fp8_read(const uint8_t* p, size_t idx, bool is_e5m2) {
   if (is_e5m2) return static_cast<float>(reinterpret_cast<const fp8e5m2*>(p)[idx]);
   return static_cast<float>(reinterpret_cast<const fp8e4m3*>(p)[idx]);
@@ -479,15 +477,19 @@ __global__ void blockwise_ref_kernel(const uint8_t* __restrict__ a,
   d[j * m + i] = acc;
 }
 
+// dgelu, written out rather than taken from common/util/math.h: a reference that calls the
+// implementation's own function cannot catch a bug in it.
+__device__ inline float ref_dgelu(float x) {
+  const float t = tanhf(0.79788456f * x * (1.f + 0.044715f * x * x));
+  return 0.5f * x * ((1.f - t * t) * (0.79788456f + 0.1070322243f * x * x)) + 0.5f * (1.f + t);
+}
+
 // The fused epilogue, applied to that product and then converted to the output type.
 //
-// The order is the kernel's, and it is not arbitrary: the accumulate term rounds to the output
-// type before adding, so that the sum matches what an add performed after the store would have
-// produced, and moving bias across that rounding would change the result.
+// The order is the kernel's and is not arbitrary: the accumulate term rounds to the output type
+// before adding the prior value, so bias must go in before that rounding.
 //
-// `d` is laid out [n][m], so the element at (i, j) is d[j * m + i].  bias is indexed by the
-// contiguous axis, which is i -- getting that backwards is the mistake a transposed epilogue
-// makes, and it is why the cases below give bias a profile that varies along i.
+// `d` is [n][m], so (i, j) is d[j * m + i] and bias is indexed by i, the contiguous axis.
 template <typename OutType>
 __global__ void blockwise_ref_epilogue(const float* __restrict__ product,
                                        const bf16* __restrict__ bias,
@@ -505,9 +507,7 @@ __global__ void blockwise_ref_epilogue(const float* __restrict__ product,
     x = static_cast<float>(static_cast<OutType>(x));
     x += beta * static_cast<float>(d_prior[idx]);
   }
-  if (gelu_aux != nullptr) {
-    x *= transformer_engine::dgelu<float, float>(static_cast<float>(gelu_aux[idx]), {});
-  }
+  if (gelu_aux != nullptr) x *= ref_dgelu(static_cast<float>(gelu_aux[idx]));
   d[idx] = static_cast<OutType>(x);
 }
 
@@ -1358,13 +1358,9 @@ struct BlockwiseParams {
   float amax_epsilon;
   bool degenerate;
   float src_scale;
-  // Fused epilogue, output type and operand types.  Defaulted, so the cases that predate them
-  // read exactly as they did.
-  //
-  // The combinations are constrained by nvte_cublas_gemm itself, which rejects bias with grad,
-  // requires grad for dgelu, and requires a bf16 output for dgelu.  use_gelu therefore implies
-  // grad, which in turn forbids bias; the case list follows those rules rather than restating
-  // them.
+  // Fused epilogue, output type and operand types; defaulted so the older cases read unchanged.
+  // nvte_cublas_gemm rejects bias with grad and requires grad plus a bf16 output for dgelu, so
+  // use_gelu implies grad and forbids bias.
   bool use_bias = false;
   bool use_gelu = false;
   bool accumulate = false;
@@ -1447,7 +1443,7 @@ void performBlockwiseTest(const BlockwiseParams& p) {
 
   Tensor D("D", TShape{p.n, p.m}, p.out_dtype);
   Tensor RefD("RefD", TShape{p.n, p.m}, p.out_dtype);
-  // The FP32 product, kept separate so the epilogue is applied before any rounding.
+  // FP32, so the epilogue is applied before any rounding.
   Tensor Product("Product", TShape{p.n, p.m}, DType::kFloat32);
 
   const dim3 block(16, 16);
@@ -1463,10 +1459,8 @@ void performBlockwiseTest(const BlockwiseParams& p) {
       static_cast<float*>(Product.rowwise_dptr()));
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  // The epilogue operands.  bias is indexed by the output's contiguous axis, which is m here,
-  // and is given a profile whose period divides neither the 4 elements a lane holds nor the 16
-  // or 128 of a tile: a constant or tile-periodic bias would pass even if the epilogue put it
-  // on the wrong column.
+  // bias is indexed by m, the output's contiguous axis.  Its profile has a period dividing
+  // neither the 4 elements a lane holds nor the 16 or 128 of a tile, so a misplaced bias fails.
   Tensor bias;
   if (p.use_bias) {
     bias = Tensor("bias", TShape{p.m}, DType::kBFloat16);
@@ -1479,18 +1473,16 @@ void performBlockwiseTest(const BlockwiseParams& p) {
                                cudaMemcpyHostToDevice));
   }
 
-  // dgelu's argument.  Filled rather than left uninitialised because dgelu is not linear: a
-  // denormal or a NaN here would not merely shift the result, it would decide whether the
-  // comparison means anything.
+  // Filled rather than left uninitialised: dgelu is not linear, so a NaN here would decide
+  // whether the comparison means anything at all.
   Tensor pre_gelu_out;
   if (p.use_gelu) {
     pre_gelu_out = Tensor("pre_gelu_out", TShape{p.n, p.m}, p.out_dtype);
     fillUniform(&pre_gelu_out);
   }
 
-  // accumulate is beta = 1 against whatever D already holds, so D needs a defined value and the
-  // reference needs the same one.  Filling D and copying it verbatim is the only way to be sure
-  // they agree -- filling both with the same generator would rely on the generator's state.
+  // accumulate is beta = 1 against whatever D holds, so D is filled and copied verbatim -- the
+  // reference must see the same bytes, not the same generator.
   Tensor DPrior;
   if (p.accumulate) {
     fillUniform(&D);
@@ -1574,44 +1566,32 @@ INSTANTIATE_TEST_SUITE_P(
 
         // ---- fused epilogue ------------------------------------------------------------
         //
-        // The suite above reaches two kernel instantiations, both with no epilogue, e4m3 on
-        // both operands and a bf16 output.  Everything below exists because a te.Linear with a
-        // bias runs the BIAS instantiation on every forward step, and nothing here tested it.
-        //
-        // Each is given under both recipes and both scale kinds, because the epilogue is a
-        // template parameter: the instantiations share no generated code, and a pass under one
-        // says nothing about another.
+        // The cases above reach two kernel instantiations, both with no epilogue.  The epilogue
+        // is a template parameter, so each combination below is separately generated code and a
+        // pass under one says nothing about another.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true},
         BlockwiseParams{256, 512, 256, false, false, 1e-4f, false, 0.0f, true},
         BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, true},
         BlockwiseParams{256, 512, 256, true,  false, 1e-4f, false, 0.0f, true},
-        // Partial tiles on both output axes.  The GEMM requires m to be a multiple of 16, and
-        // the kernel indexes bias by m, so the merged four-element read is always in range --
-        // its guarded scalar fallback is unreachable through this entry point.  What this does
-        // reach is the tile-level edge: 272 = 256 + 16, so the last block along each axis is
-        // short and the epilogue has to stop where the output does.
+        // Partial tiles on both axes: 272 = 256 + 16, so the last block along each is short and
+        // the epilogue has to stop where the output does.
         BlockwiseParams{272, 512, 272, false, true,  1e-4f, false, 0.0f, true},
 
-        // dgelu.  Fused into a backward GEMM, so it implies grad and forbids bias, and
-        // nvte_cublas_gemm requires a bf16 output for it.
+        // dgelu: implies grad, forbids bias, bf16 output only.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true},
         BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true},
 
-        // accumulate, alone and with bias.  Worth both: the kernel rounds to the output type
-        // before adding the prior value, so bias landing on the wrong side of that rounding is
-        // a difference the accumulate-only case cannot see.
+        // accumulate, alone and with bias -- the kernel rounds before adding the prior value,
+        // so bias on the wrong side of that rounding is invisible to the accumulate-only case.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, true},
         BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, true},
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, true},
-        // dgelu together with accumulate.  The heaviest epilogue: it is the one that has both a
-        // per-element auxiliary input and the prior output live at once, which is where register
-        // pressure peaks, so it is the case most likely to behave differently from the others.
+        // dgelu with accumulate: the heaviest epilogue, with both a per-element auxiliary input
+        // and the prior output live at once.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true,  true},
         BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true,  true},
 
-        // ---- output types --------------------------------------------------------------
-        //
-        // The kernel is instantiated for fp32 and fp16 as well as bf16, and neither was reached.
+        // ---- output types: fp32 and fp16 were both unreached ----------------------------
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
                         DType::kFloat32},
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
@@ -1619,11 +1599,10 @@ INSTANTIATE_TEST_SUITE_P(
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
                         DType::kFloat32},
 
-        // ---- e5m2 operands -------------------------------------------------------------
+        // ---- e5m2 operands, which select the MFMA's cbsz/blgp codes ---------------------
         //
-        // These select the MFMA's cbsz/blgp codes.  A recipe with fp8_format=HYBRID quantises
-        // the backward grad to e5m2, so these are the instantiations a real backward pass runs;
-        // both operands e5m2 at once is rejected by the GEMM and so is not listed.
+        // fp8_format=HYBRID quantises the backward grad to e5m2, so these run in a real backward
+        // pass.  Both operands e5m2 at once is rejected by the GEMM.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
                         DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,

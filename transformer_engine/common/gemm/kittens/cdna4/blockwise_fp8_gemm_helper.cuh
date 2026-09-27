@@ -355,24 +355,12 @@ static void launch_pack_scales_pow2(const float *scales, uint32_t *packed, int p
 
 
 
-// Activation scales in the layout a transposed accumulator wants them.
-//
-// The MFMA output layout is fixed by hardware: lane l holds D[4*(l/16) + r][l % 16] for
-// r = 0..3, four consecutive rows of one column.  With the operands swapped the accumulator
-// holds C^T, so those four consecutive indices run along N and the single fixed index is M.
-// A 1x128 activation scale varies along M, so it is the same value for all four -- one float
-// per 16-wide M tile, which is one per accumulator *width*.
-//
-// Untransposed it was four floats per accumulator *height*, and this is the whole point of
-// the transpose: 16 floats per accumulator become 4.
-//
-// The 128x128 weight scale is unaffected.  It varies along N in blocks of 128, and a wave's
-// 32 columns sit inside one such block, so it stays a single scalar either way.
+// Activation scales for a transposed accumulator.  Hardware fixes the MFMA output as
+// D[4*(l/16) + r][l % 16]; with the operands swapped those four consecutive indices run along N,
+// so a lane's four outputs share one M.  A 1x128 activation scale varies along M, so it is one
+// value per accumulator width rather than four per height.
 template <int WIDTH>
 struct RowScaleT { float v[WIDTH]; };
-
-
-
 
 // One activation scale per M tile.  The lane's M index is fixed within a tile at
 // `local_m_base + 16*w + (lane % 16)`, so this is one LDS read per width instead of four.
@@ -390,21 +378,14 @@ __device__ inline RowScaleT<AccType::width> load_row_scale_t(
 }
 
 
-
-
-
 using as3_u32_ptr_ = uint32_t __attribute__((address_space(3)))*;
 using i32x4_v_ = int32_t __attribute__((ext_vector_type(4)));
 extern "C" __device__ void
 raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
     __asm("llvm.amdgcn.raw.buffer.load.lds");
 
-// HBM -> LDS: k-block `k`'s row scales for this output block, one float per row of the 256,
-// landing in one of the two scale buffers.  A buffer_load ... lds, so it is a DMA in the same
-// sense the A and B tile loads are: no VGPR round trip, completion tracked by vmcnt.
-//
-// Named for that: it is a DMA of one k-block's row scales, and there is no second buffer of
-// earlier scales for it to be named against.
+// HBM -> LDS for k-block `k`'s row scales, one float per row of the block.  Completion is
+// tracked by vmcnt, like the tile loads.
 template <int BLOCK_M>
 __device__ __forceinline__ void row_scales_load_dma(
         kittens::i32x4 sa_srd, uint32_t lds_warp, int tid, int k, int M, int block_m,
@@ -416,41 +397,25 @@ __device__ __forceinline__ void row_scales_load_dma(
 
 
 // ---------------------------------------------------------------------------------------
-// One MFMA cluster, hand-scheduled.  There are two, one per recipe, and they are written to be
-// read side by side: same eight slots, same rotation, same drain.  Only the scale differs.
+// One MFMA cluster, hand-scheduled.  Two of them, one per recipe, same eight slots:
 //
-//     mfma  t[k%2] = tile k          issue 4
-//     <wait>                         the MFMA -> VALU hazard, see below
-//     fmac  acc[k-1] += t * scale    4 x 4 = 16
-//     mfma  t[(k+1)%2] = tile k+1    the next slot
+//     mfma  t[k%2] = tile k
+//     <wait>                         MFMA -> VALU hazard
+//     fmac  acc[k-1] += t * scale
+//     mfma  t[(k+1)%2] = tile k+1
 //
-// Two measured facts on gfx950 hold it up:
+// The hazard (CDNA4 ISA 7.6) is satisfied by elapsed cycles, not by a count of intervening
+// instructions -- so the s_nop sizes below are cycle budgets, and changing the fold's work
+// changes what they must be.
 //
-//   * the MFMA -> VALU hazard is satisfied by elapsed cycles, not by a count of independent
-//     instructions.  The fold of tile k-1 issues 48 cycles after its MFMA with two instructions
-//     in between, which a slot-counting reading would forbid.
-//   * a VALU issued directly after an MFMA costs 12 cycles (median, n=1055) but only 4 if an
-//     s_nop intervenes (median, n=868), so a short s_nop pays for itself.
-//
-// No register is named anywhere below, and the temporaries are ordinary C++ values the allocator
-// places where it likes.  That works because the MFMA is a builtin and only the fold is asm: the
-// builtin's result type carries the register class, so the compiler allocates the aligned quad
-// itself -- the same mechanism hipkittens' mfma1616128 relies on -- and passing t[0]..t[3] into
-// the fold as four "v" inputs costs nothing, since element i already lives in the i-th register
-// of that quad.  Verified on gfx950: the MFMA writes v[4:7] and the four v_fmac_f32 read v4, v5,
-// v6, v7, with no v_mov between them.
-//
-// Writing the MFMA in asm too would hide the quad and leave no way to name one register of it,
-// which is why an earlier version had to pin registers by hand.
-//
-// What the split costs is that the hazard padding is ours to get right: with the fold in asm the
-// compiler does not pad the hazard itself (checked -- it emits the fold directly after the MFMA
-// with nothing in between).  The paired sched_barrier around each fold is what keeps the builtin
-// from drifting away from the fold it is meant to overlap.
+// The MFMA is a builtin and only the fold is asm.  That is deliberate: the builtin's result type
+// carries the register class, so the compiler allocates the aligned quad and no register has to
+// be named.  Writing the MFMA in asm too would hide the quad and force hand-pinned registers.
+// The compiler does not pad the hazard for an asm fold, so the padding here is ours, and the
+// paired sched_barrier is what keeps the builtin from drifting away from its fold.
 
-// The wait is spelled out by the caller rather than given as a count, because the two recipes
-// want different ones and "no wait at all" has to be expressible and visibly distinct from
-// s_nop 0.
+// Spelled out by the caller rather than given as a count: the two recipes want different waits,
+// and "no wait" has to be expressible and distinct from s_nop 0.
 #define FP8_NOP(n) "s_nop " #n "\n\t"
 #define FP8_NO_NOP ""
 
@@ -504,16 +469,10 @@ __device__ __forceinline__ void row_scales_load_dma(
     static_assert(RT_CT::height == 2 && RT_CT::width == 4,                                     \
                   "the schedule is written out for eight tiles arranged 2 x 4")
 
-// The weight scale for one k-block, in whichever form the recipe supplies it: a single value
-// for the whole wave when the weights are blocked 128x128, and four values per accumulator
-// height when they are blocked 1x128.  Returning the type rather than branching at the fold is
-// what keeps the kernel's twelve fold sites identical under both recipes.
 // acc += (b . a^T) * (row * col), weights blocked 128x128.
 //
-// The weights are blocked 128x128, so `sb` is one value for the whole wave and the product with
-// the row scale is four scalars per k-block.  They are hoisted out of the slots because nothing
-// in the slot depends on them, which leaves the fold pure fma -- and leaves the slot's wait with
-// nothing else to hide behind, hence s_nop 2.
+// `sb` is one value for the whole wave, so the four products are hoisted out of the slots and
+// the fold is pure fma.  That leaves the hazard nothing to hide behind, hence s_nop 2.
 template <int CBSZ, int BLGP, typename RT_CT, typename RT_B, typename RT_A>
 __device__ __forceinline__ void mma_fold_cluster(
         RT_CT &acc, const RT_B &b, const RT_A &a,
@@ -535,23 +494,14 @@ __device__ __forceinline__ void mma_fold_cluster(
         }
         __builtin_amdgcn_sched_barrier(0);
     }
-    // Drain: tile 7's fold has no following MFMA to hide behind.  From that MFMA's issue, 4 for
-    // its own slot + 12 for the s_nop 2 at the head of tile 6's fold + 16 for that fold's four
-    // v_fmac_f32 = 32 have elapsed, so 16 more reach the 48 the hazard needs, and 16 is s_nop 3.
+    // Drain: no following MFMA to hide behind.  32 cycles have elapsed since tile 7's MFMA
+    // (4 slot + 12 s_nop 2 + 16 fmac), so 16 more reach the 48 the hazard needs: s_nop 3.
     FP8_FOLD(FP8_NOP(3), t[1], acc.tiles[1][3], sc[3]);
 }
 
-// Store a transposed accumulator to a row-major C.
-//
-// This is where the transpose pays for itself a second time.  Untransposed, a lane held four
-// consecutive M at one N, which in a row-major C is four elements a full row apart -- four
-// separate stores.  Transposed it holds four consecutive N at one M, which are four
-// *adjacent* elements of one row of C.
-//
-// So the four are merged into one 8-byte store when they can be: they are in range, and the
-// row start is 4-element aligned, which needs N divisible by 4 since the row base is m*N.
-// Otherwise it falls back to four guarded scalar stores, which is what the ragged last block
-// along N gets.
+// Store a transposed accumulator to a row-major C.  A lane's four outputs are adjacent in C, so
+// they merge into one 8-byte store when in range and the row base m*N is 4-aligned; otherwise
+// four guarded scalar stores, which is what a ragged last block along N gets.
 template <typename OType, typename AccType>
 __device__ inline void store_output_t(OType *c_ptr, const AccType &acc,
                                       int m_off, int n_off, int M, int N) {
@@ -591,17 +541,9 @@ __device__ inline void store_output_t(OType *c_ptr, const AccType &acc,
 }
 
 // ---------------------------------------------------------------------------------------
-// 1Dx1D: the weight scale is 1x128 as well, so it varies along N and is no longer one value
-// for the whole wave.  Everything below exists only for that recipe.
-//
-// What a lane needs, with the transposed accumulator: the row scale depends only on M, which is
-// fixed within a tile, so it stays one value per accumulator width.  The col scale depends on N,
-// and a lane holds four consecutive N per tile (n = 4*(lane/16) + r), so it is four values per
-// accumulator height.  For the 2 x 4 accumulator used here that is 4 row and 8 col values, and
-// a wave covering four 16-wide N tiles holds 16 col values in all.
-//
-// The product row * col cannot be pre-multiplied to one scalar per tile the way 1Dx2D does:
-// s[h][w][r] = row[w] * col[h][r] is 32 distinct values per k-block rather than 4.
+// 1Dx1D: the weight scale is 1x128 too, so it varies along N.  A lane holds four consecutive N
+// per tile, so the col scale is four values per accumulator height -- and row * col is 32
+// distinct values per k-block, not the 4 that 1Dx2D can pre-multiply.
 
 template <int HEIGHT>
 struct ColScaleT { float v[HEIGHT][4]; };
@@ -617,13 +559,10 @@ __device__ __forceinline__ void col_scales_load_dma(
                           (k * N + block_n + sb_warp * kittens::WARP_THREADS + sb_lane) * 4);
 }
 
-// The lane's four N within each 16-wide tile are consecutive, so each height is one 16-byte LDS
-// read rather than four scalar ones.
+// One 16-byte LDS read per height: the lane's four N within a tile are consecutive.
 //
-// No bounds clamp: the LDS buffer is BLOCK_N floats and every index below lands inside it, so
-// the read is always in range.  Columns past the end of a partial block hold whatever the DMA
-// fetched, and a buffer resource returns 0 out of range, which only ever reaches lanes whose
-// output is masked off at the store.
+// No bounds clamp is needed -- every index lands inside the BLOCK_N-float buffer.  Columns past
+// a partial block hold whatever the DMA fetched, and only reach lanes masked off at the store.
 template <typename AccType>
 __device__ inline ColScaleT<AccType::height> load_col_scale_t(
         const float *sb_col_k, int local_n_base) {
@@ -637,9 +576,8 @@ __device__ inline ColScaleT<AccType::height> load_col_scale_t(
     return cs;
 }
 
-// Both recipes' arguments are taken and one pair is discarded, rather than the caller choosing.
-// They are addresses and an index -- nothing is loaded for the branch not taken -- and it buys
-// call sites that read the same under either recipe, which is the whole point of the exercise.
+// Takes both recipes' arguments and discards one pair, so the call sites read the same under
+// either recipe.  Nothing is loaded for the branch not taken.
 template <bool IS_1D2D, typename RT_CT>
 __device__ inline auto load_block_scale_b(const float *sb_global, int k,
                                           const float *sb_smem, int n_base) {
@@ -652,25 +590,13 @@ __device__ inline auto load_block_scale_b(const float *sb_global, int k,
 
 // acc += (b . a^T) * (row * col), weights blocked 1x128.
 //
-// One MFMA per slot with its fold one slot behind, as at 1Dx2D, but with a much shorter wait
-// between them: the four v_mul that produce this fold's scales already occupy that gap, so the
-// s_nop 2 the 1Dx2D fold needs is 12 cycles of nothing here.
+// Same eight slots as above, but the four v_mul producing this fold's scales already occupy the
+// hazard gap, so the wait shrinks to s_nop 0.  Zero rather than none is measured, not reasoned:
+// removing it entirely makes the wave longer, because the compute phase is not the critical path
+// and denser issue only takes issue bandwidth from the partner wave on the same SIMD.
 //
-// The wait is s_nop 0 rather than none at all, and that is measured, not reasoned.  Sweeping it
-// at 8192^3 gives 1751 / 1862 / 1840 / 1811 / 1741 / 1539 TFLOP/s for none / 0 / 1 / 2 / 4 / 8 --
-// an optimum at one wait state with both ends worse.  Removing it entirely shortens the slot to
-// exactly the 44 cycles the arithmetic predicts, and the wave still gets *longer*: the compute
-// phase is not the critical path, so issuing more densely only takes issue bandwidth from the
-// partner wave, which is in its memory phase on the same SIMD.
-//
-// The folds are hazard-free with margin, which is checked rather than assumed: over the 2048
-// folds of one wave in the ATT trace, the distance from an MFMA to the first v_fmac_f32 that
-// reads it is 64 cycles at minimum and 80 at the median, against the 48 the hazard needs.  None
-// of the 2048 is below it.  The four products are ordinary C++ and the compiler places their
-// v_mul wherever it likes; the paired sched_barrier around each fold is what keeps them inside
-// the slot rather than hoisted to the top of the k loop.  Placing them by hand is a separate
-// change, deliberately not made here: this one exists to measure what the extra live values do
-// to register pressure, with the schedule held fixed.
+// The v_mul are ordinary C++; the paired sched_barrier is what keeps them inside the slot rather
+// than hoisted to the top of the k loop.
 template <int CBSZ, int BLGP, typename RT_CT, typename RT_B, typename RT_A>
 __device__ __forceinline__ void mma_fold_cluster(
         RT_CT &acc, const RT_B &b, const RT_A &a,
@@ -690,10 +616,8 @@ __device__ __forceinline__ void mma_fold_cluster(
         }
         __builtin_amdgcn_sched_barrier(0);
     }
-    // Drain: tile 7's fold has no following MFMA to hide behind.  Counting from that MFMA's
-    // issue, the slot ahead of this one contributes 4 for the MFMA, 24 for its four v_mul and
-    // 16 for its four v_fmac_f32 -- 44 -- and this fold's own four products add 16 more before
-    // it issues, so the 48 the hazard needs is already covered.  The s_nop 1 is a margin
+    // Drain: 44 cycles have elapsed since tile 7's MFMA (4 slot + 24 v_mul + 16 fmac) and this
+    // fold's own products add 16 more, so the hazard is already covered.  s_nop 1 is margin
     // against the compiler placing those products elsewhere, not a requirement.
     {
         const float rw = rs.v[3];
@@ -702,18 +626,9 @@ __device__ __forceinline__ void mma_fold_cluster(
     }
 }
 
-// The four bias values a lane needs, read as one contiguous run.
-//
-// This is the transpose's bill, and it is worth being precise about what it costs.  Untransposed,
-// a lane's four accumulator entries share one column, so TE's apply_epilogue hoists a single
-// read_elem out of the r loop: one scalar load per tile.  Transposed they are four *consecutive*
-// columns, so the same hoist is not available -- but the four are adjacent, which the scalar path
-// throws away.  Read per element it is four dependent loads per tile, each with its own wait;
-// read as a run it is one, so the load count per tile matches apply_epilogue's again.  Only the
-// bytes differ, four elements against one.
-//
-// The dtype test is also hoisted.  read_elem branches on it per element, which both repeats the
-// test and stops the four loads from being merged.
+// The four bias values a lane needs, read as one contiguous run rather than four dependent
+// scalar loads.  The dtype test is hoisted out for the same reason: read_elem branches on it per
+// element, which stops the four loads being merged.
 template <typename T>
 __device__ __forceinline__ void load4_contig(const void *p, size_t idx, float (&out)[4]) {
     struct alignas(sizeof(T) * 4) Quad { T e[4]; };
@@ -722,11 +637,9 @@ __device__ __forceinline__ void load4_contig(const void *p, size_t idx, float (&
     for (int r = 0; r < 4; r++) out[r] = (float)q.e[r];
 }
 
-// `idx + 3 < limit` is the in-range test.  Alignment holds because the base pointer is aligned
-// and idx is a multiple of 4: within a row it is 4*(lane/16) plus multiples of 16, and for the
-// row-indexed operands the row base is m*N, so it needs N divisible by 4 -- the same condition
-// store_output_t already requires for its merged store.  Out of range, fall back to the scalar
-// reads: that is the ragged last block along N, where some of the four do not exist.
+// idx is a multiple of 4 within a row; for row-indexed operands the row base is m*N, so 4-byte
+// alignment needs N divisible by 4 -- the same condition store_output_t's merged store requires.
+// Out of range, fall back to scalar reads.
 __device__ __forceinline__ void read_elem4(const void *p, int dtype, size_t idx, size_t limit,
                                            bool aligned, float (&out)[4]) {
     if (aligned && idx + 3 < limit) {
@@ -741,23 +654,10 @@ __device__ __forceinline__ void read_elem4(const void *p, int dtype, size_t idx,
     }
 }
 
-// Epilogue for a transposed accumulator.  Same arithmetic as TE's apply_epilogue, same order,
-// only the traversal differs: there a lane holds four consecutive M at one N, here it holds four
-// consecutive N at one M.
-//
-// That flips the cost of the three terms, and neither direction is free:
-//
-//   * bias is indexed by N, so it goes from one read per tile to four.  This is the same
-//     asymmetry the 1x128 weight scale has, for the same reason.
-//   * beta * c_in and gelu_aux are indexed by m * N + n, so the four elements a lane touches are
-//     adjacent rather than a row apart -- four strided reads become one contiguous run.
-//
-// The bounds test also moves: M is now the outer guard and N the inner one, which is why the
-// `continue` on m is hoisted out of the r loop rather than sitting inside it.
-//
-// The loop structure is deliberately the same as store_output_t's, which runs immediately after
-// it on the same accumulator: same lane decomposition, same w-then-h nesting, same guards.  A
-// reader checking one against the other should find nothing to reconcile.
+// Epilogue for a transposed accumulator: same arithmetic and order as apply_epilogue, mirrored
+// traversal.  M is the outer guard here and N the inner one, which is why the `continue` on m
+// sits outside the r loop.  The loop structure matches store_output_t's, which runs immediately
+// after it on the same accumulator.
 template <typename OType, bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, typename AccType>
 __device__ inline void apply_epilogue_t(
     AccType &acc, int m_off, int n_off, int M, int N,
@@ -779,14 +679,11 @@ __device__ inline void apply_epilogue_t(
             float v[4] = {tile.data[0].x, tile.data[0].y, tile.data[1].x, tile.data[1].y};
             // The operands are gathered before the arithmetic so each is one run of four rather
             // than four loads interleaved with the fmas that consume them.
-            // bias is indexed by n alone, so its run starts at a multiple of 4 unconditionally,
-            // and the four values are the same for every w -- one gather serves the whole column.
+            // bias is indexed by n alone, so one gather serves the whole column.
             //
-            // gelu_aux's four are adjacent too, but it is deliberately NOT gathered.  Its index
-            // carries row_base, so a gathered copy is live per tile rather than per column, and
-            // the compiler hoists all eight tiles' worth above the loop: measured, that costs
-            // 588 bytes/lane of scratch and ~800 VGPR spills in GELU_AUX_BETA, against zero
-            // without it.  Three extra loads are the cheaper side of that trade.
+            // gelu_aux's four are adjacent too but are deliberately NOT gathered: its index
+            // carries row_base, so a gathered copy is live per tile rather than per column and
+            // the compiler hoists all eight tiles' worth, which spills.
             float bias_v[4];
             if constexpr (HAS_BIAS) {
                 read_elem4(bias, bias_dtype, (size_t)n0, (size_t)N, true, bias_v);
