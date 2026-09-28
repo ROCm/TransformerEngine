@@ -61,6 +61,7 @@ from transformer_engine.common.triton.kda import (
     kda_device_arch,
     kda_launch_config,
     kda_num_cus,
+    kda_num_xcds,
     kda_varlen_max_chunks,
 )
 from transformer_engine.common.triton.kda_bwd import (
@@ -373,7 +374,7 @@ def _general_states(
             BT=BT,
             BC=BC,
             BH=BH,
-            BK=cfg.kwargs["BK"],
+            BK=triton.next_power_of_2(K),
             IS_VARLEN=is_varlen,
             num_warps=cfg.num_warps,
             num_stages=cfg.num_stages,
@@ -711,6 +712,7 @@ def _flash_fwd(
         "BW": seg_cfg.kwargs["BW"],
         "STATE_V_FIRST": state_v_first,
         "CM_OUT": CM_OUT_STORE,
+        "NUM_XCDS": kda_num_xcds(arch),
         "num_warps": seg_cfg.num_warps,
         "num_stages": seg_cfg.num_stages,
     }
@@ -746,6 +748,7 @@ def _flash_fwd(
                 C=C,
                 BW=bw,
                 **_gluon_module().flash_kda_k2_layouts(nw),
+                NUM_XCDS=kda_num_xcds(arch),
                 num_warps=nw,
                 num_stages=ns,
             )

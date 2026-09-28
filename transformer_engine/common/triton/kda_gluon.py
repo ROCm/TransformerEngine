@@ -2,7 +2,8 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 #
 # Adapted from AITER (ROCm/aiter @ 7d2f6a51a,
-# aiter/ops/triton/_gluon_kernels/gfx950/chunk_delta_attn), MIT licensed.
+# aiter/ops/triton/_gluon_kernels/gfx950/chunk_delta_attn), MIT licensed, plus
+# the XCD remap of pass A from AITER branch zain/kda/xcd-remap (a3c3c2fdd).
 
 """Gluon (gfx950) replacements for FlashKDA's prepare kernel and fused pass A.
 
@@ -16,6 +17,8 @@ import math
 
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+
+from transformer_engine.common.triton.kda import remap_xcd
 
 _BLK_WARP_K: gl.constexpr = gl.BlockedLayout([1, 8], [8, 8], [1, 2], [1, 0])
 _BLK1: gl.constexpr = gl.BlockedLayout([1], [64], [2], [0])
@@ -394,14 +397,19 @@ def flash_kda_k2_ab_fused_gluon(
     B_OP_B: gl.constexpr,
     BLK: gl.constexpr,
     SH_KR: gl.constexpr,
+    NUM_XCDS: gl.constexpr,
 ):
     """Both pass-A recurrences (``b_seg`` and ``A_seg``) in one launch, sharing operand loads.
 
     The two chains are independent, so the scheduler interleaves them, which
     covers the serial dependence each has on its own. Requires ``K == V``.
     """
-    i_w = gl.program_id(0).to(gl.int64)
-    i_sh = gl.program_id(1).to(gl.int64)
+    # Keeps a (segment, head)'s V blocks on one XCD, so their re-reads of the
+    # chunk workspace share an L2. See the Triton K2 for the full reasoning.
+    n_w = gl.num_programs(0)
+    pid = remap_xcd(gl.program_id(1) * n_w + gl.program_id(0), n_w * gl.num_programs(1), NUM_XCDS)
+    i_w = (pid % n_w).to(gl.int64)
+    i_sh = (pid // n_w).to(gl.int64)
     i_seg = i_sh // H
     i_h = i_sh % H
 

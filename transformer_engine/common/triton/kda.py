@@ -36,6 +36,11 @@ from both PyTorch and JAX (``triton_extensions``):
   upper bound (see ``PADDED_CHUNK``).
 * ``_kda_inter_solve_kernel`` writes the upper-triangular blocks of ``Akk``
   as zeros instead of relying on a zero-initialized buffer.
+* ``_kda_intra_token_parallel_kernel`` follows fla (@ 954438d) instead of
+  AITER: token ``i``'s rows are loaded once outside the ``j`` loop and ``BK``
+  spans all of ``K``, and its ``BH``/``num_warps`` are tuned rather than
+  AITER's autotune-off ``BH=1``. It is bitwise identical to fla's kernel and
+  ~5-8x faster than AITER's version, which it no longer matches bitwise.
 """
 
 import functools
@@ -92,6 +97,29 @@ def exp2(x):
 def softplus(x):
     """log(1 + exp(x)), falling back to the identity above x=20 so exp cannot overflow."""
     return tl.where(x < 20.0, tl.log(1.0 + tl.exp(x)), x)
+
+
+@triton.jit
+def remap_xcd(pid, GRID_MN, NUM_XCDS: tl.constexpr = 8):
+    """Renumber a flat program id so each XCD owns a contiguous run of ids.
+
+    Workgroups reach the XCDs round-robin in launch order; after the remap,
+    consecutive ids share an XCD (and its L2). Identity for ``NUM_XCDS == 1``.
+    Copied from AITER's ``pid_preprocessing.remap_xcd``.
+    """
+    # Number of pids per XCD in the new arrangement. When GRID_MN is not a
+    # multiple of NUM_XCDS, the first `tall_xcds` XCDs get one pid more.
+    pids_per_xcd = (GRID_MN + NUM_XCDS - 1) // NUM_XCDS
+    tall_xcds = GRID_MN % NUM_XCDS
+    if tall_xcds == 0:
+        tall_xcds = tl.cast(NUM_XCDS, tall_xcds.type)
+    xcd = pid % NUM_XCDS
+    local_pid = pid // NUM_XCDS
+    if xcd < tall_xcds:
+        pid = xcd * pids_per_xcd + local_pid
+    else:
+        pid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid
+    return pid
 
 
 # ---------------------------------------------------------------------------
@@ -326,43 +354,37 @@ def _kda_intra_token_parallel_kernel(
 
     o_hv = i_hg * BH + tl.arange(0, BH)
     o_h = o_hv // G
+    o_k = tl.arange(0, BK)
     m_hv = o_hv < HV
+    m_k = o_k < K
+    m_hk = m_hv[:, None] & m_k[None, :]
 
+    # Token i's rows are loaded once; BK covers all of K, so each entry is one reduction.
+    p_qk = o_h[:, None] * K + o_k[None, :]
+    b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+    b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+    p_g = g + i_t * HV * K + o_hv[:, None] * K + o_k[None, :]
+    b_g = tl.load(p_g, mask=m_hk, other=0.0).to(tl.float32)
     p_beta = beta + i_t * HV + o_hv
-    b_beta = tl.load(p_beta, mask=m_hv, other=0.0).to(tl.float32)
+    b_k = b_k * tl.load(p_beta, mask=m_hv, other=0.0).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):  # pylint: disable=nested-min-max
-        b_Aqk_j = tl.zeros([BH], dtype=tl.float32)
-        b_Akk_j = tl.zeros([BH], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = o_k < K
-            m_hk = m_hv[:, None] & m_k[None, :]
-            p_qk = o_h[:, None] * K + o_k[None, :]
+        b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+        p_gj = g + j * HV * K + o_hv[:, None] * K + o_k[None, :]
+        b_gj = tl.load(p_gj, mask=m_hk, other=0.0).to(tl.float32)
 
-            b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-            b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-            b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+        b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
+        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
+        b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
 
-            p_g = g + i_t * HV * K + o_hv[:, None] * K + o_k[None, :]
-            p_gj = g + j * HV * K + o_hv[:, None] * K + o_k[None, :]
-            b_g = tl.load(p_g, mask=m_hk, other=0.0).to(tl.float32)
-            b_gj = tl.load(p_gj, mask=m_hk, other=0.0).to(tl.float32)
-
-            b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
-            b_Aqk_j += tl.sum(b_q * b_kgj, axis=1)
-            b_Akk_j += tl.sum(b_k * b_beta[:, None] * b_kgj, axis=1)
-
-        b_Aqk_j *= scale
-        b_Akk_j *= tl.where(j < i_t, 1.0, 0.0)
         tl.store(
             Aqk + i_t * HV * BT + o_hv * BT + j % BT,
-            b_Aqk_j.to(Aqk.dtype.element_ty),
+            b_Aqk.to(Aqk.dtype.element_ty),
             mask=m_hv,
         )
         tl.store(
             Akk + i_t * HV * BC + o_hv * BC + j - i_ts,
-            b_Akk_j.to(Akk.dtype.element_ty),
+            b_Akk.to(Akk.dtype.element_ty),
             mask=m_hv,
         )
 
@@ -1428,6 +1450,7 @@ def _flash_kda_segment_kernel(
     STORE_FINAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     CM_OUT: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
 ):
     """K2: delta-rule recurrence over one segment of chunks, state in registers.
 
@@ -1440,8 +1463,16 @@ def _flash_kda_segment_kernel(
 
     Segments with ``nchunks == 0`` (padding) run no iterations.
     """
-    i_w = tl.program_id(0).to(tl.int64)
-    i_sh = tl.program_id(1).to(tl.int64)
+    # Every V block of one (segment, head) re-reads that segment's whole chunk
+    # workspace. Workgroups reach the XCDs round-robin in launch order, x
+    # fastest, so unmapped those blocks land on different XCDs and each pulls
+    # the workspace through its own L2 -- 6-8x the compulsory traffic at BW=16,
+    # which is what bound this kernel. Renumbered, each XCD owns a contiguous
+    # run of flat ids, so a (segment, head)'s V blocks share an L2.
+    n_w = tl.num_programs(0)
+    pid = remap_xcd(tl.program_id(1) * n_w + tl.program_id(0), n_w * tl.num_programs(1), NUM_XCDS)
+    i_w = (pid % n_w).to(tl.int64)
+    i_sh = (pid // n_w).to(tl.int64)
     i_seg, i_h = i_sh // H, i_sh % H
 
     chunk_base = tl.load(seg_chunk_base + i_seg).to(tl.int64)
@@ -1714,7 +1745,7 @@ class KDALaunchConfig:
         )
 
 
-# What AITER launches with its autotuning off (the default). Keyed by arch;
+# What AITER launches with its autotuning off (the default), except where noted. Keyed by arch;
 # "default" covers devices without a measured entry and must be launchable
 # anywhere (the wide output tile needs more LDS than gfx942 has). Kernels AITER
 # launches without an autotuner get the HIP backend's num_stages default (2);
@@ -1725,7 +1756,9 @@ _KDA_CONFIGS = {
         "beta_sigmoid": KDALaunchConfig({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=2),
         "gate_cumsum": KDALaunchConfig({"BS": 64}, num_warps=2, num_stages=3),
         "local_cumsum": KDALaunchConfig({"BS": 32}, num_warps=2, num_stages=3),
-        "intra_token_parallel": KDALaunchConfig({"BH": 1, "BK": 64}, num_warps=4, num_stages=3),
+        # Not AITER's: BH=1 idles most threads. One config for all shapes; within
+        # 1.24x of the per-shape best on gfx950 (fla autotunes BH x num_warps).
+        "intra_token_parallel": KDALaunchConfig({"BH": 4}, num_warps=1, num_stages=3),
         "intra_sub_chunk": KDALaunchConfig({}, num_warps=1, num_stages=3),
         "inter_solve": KDALaunchConfig({"BK": 32}, num_warps=1, num_stages=3),
         "recompute_w_u": KDALaunchConfig({"BK": 64, "BV": 64}, num_warps=4, num_stages=3),
@@ -1778,6 +1811,11 @@ def kda_num_cus(device_index: int = 0) -> int:
     """Compute-unit count of a device."""
     props = triton.runtime.driver.active.utils.get_device_properties(device_index)
     return props["multiprocessor_count"]
+
+
+def kda_num_xcds(arch: str) -> int:
+    """XCDs per device, for ``remap_xcd``. Not queryable at runtime, so by arch; 1 disables it."""
+    return 8 if arch in ("gfx942", "gfx950") else 1
 
 
 def kda_launch_config(name: str, arch: str) -> KDALaunchConfig:
