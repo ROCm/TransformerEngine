@@ -812,6 +812,16 @@ int rs_comm_wg_bulk(int out_local, int tp_size) {
     return hk_rs_nt::RS_COMM_WG_DEFAULT;
 }
 
+// The MXFP8 GEMM finishes ~1.5-2x sooner than bf16 at the same shape while the bulk payload stays
+// bf16, so the reduce needs more workgroups to finish inside it: rs_comm_wg_bulk's 4 at
+// out_local >= 3584 left 70B-Down 23-29% slower and 405B-Down 6-8% slower than 8, and its 2 at
+// out_local >= 8192 lost 41% to 4. Swept 2-16 on MI355X, 24 shapes plus out_local 8192/16384.
+int rs_comm_wg_bulk_mxfp8(int out_local, int tp_size) {
+    if (tp_size != 8) return hk_rs_nt::RS_COMM_WG_DEFAULT;
+    if (out_local >= 8192) return 4;
+    return 8;
+}
+
 static_assert(hk_rs_nt::BLOCK_SIZE == 256 && hk_rs_nt::K_STEP == 64 && hk_rs_nt::NUM_XCDS == 8,
               "bulk_rs_shape_ok literals are stale against hk_rs_nt geometry");
 
@@ -893,7 +903,7 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     const int K       = args.k;               // tokens
     const int tp_size = args.nranks;
 
-    const int wgs  = (tp_size - 1) * rs_comm_wg_bulk(M, tp_size);
+    const int wgs  = (tp_size - 1) * rs_comm_wg_bulk_mxfp8(M, tp_size);
     const int nred = (wgs + hk_rs_nt::NUM_XCDS - 1) / hk_rs_nt::NUM_XCDS * hk_rs_nt::NUM_XCDS;
 
     if (!bulk_rs_shape_ok_mxfp8(M, N, K, nred)) return false;
