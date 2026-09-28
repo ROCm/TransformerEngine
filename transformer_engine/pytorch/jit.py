@@ -36,9 +36,31 @@ def lazy_compile(func):
     return wrapper
 
 
+# See: https://github.com/ROCm/TransformerEngine/issues/693
+def lazy_compile_dynamic(func):
+    """Lazy compile a function with torch.compile, using dynamic shapes
+
+    Compiling dynamic up front skips the static specialization dynamo would otherwise build on
+    the first shape it sees, leaving one compiled artifact for the process instead of two.
+    """
+    compiled_func = None
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal compiled_func
+        if compiled_func is None:
+            compiled_func = torch.compile(func, dynamic=True)
+        return compiled_func(*args, **kwargs)
+
+    return wrapper
+
+
 jit_fuser = lambda func: func
+jit_fuser_dynamic = lambda func: func
 if torch_version() >= (2, 0, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = lazy_compile
+    # On ROCm, static and dynamic variants of the same kernel can pick different Triton launch configs.
+    jit_fuser_dynamic = lazy_compile_dynamic if IS_HIP_EXTENSION else lazy_compile
 
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
