@@ -21,6 +21,7 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+bulk_available = not IS_HIP_EXTENSION
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -120,9 +121,9 @@ def _run_layer_with_overlap(
     num_layers=1,
     use_cublasmp=False,
 ):
-    # Skip BULK overlap tests on HIP (column parallel or None with overlap_rs_dgrad=False)
-    if IS_HIP_EXTENSION and not overlap_rs_dgrad and linear_parallel_mode in ("column", None):
-        pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
+    # Reduce-scatter comm+GEMM overlap is flaky on gfx950
+    if IS_HIP_EXTENSION and (overlap_rs_dgrad or linear_parallel_mode == "row"):
+        pytest.skip("Reduce-scatter comm+GEMM overlap is flaky on gfx950")
     # On gfx942, non-determinism across the 8 XCDs causes small jitter that compounds
     # This should not affect training convergence, but creates larger numerical differences.
     # TODO: Fix gfx942 issues arising from deterministic bwd attention and other jitter
@@ -212,7 +213,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     _run_gemm_with_overlap("RS", False, p2p, False, False, quantization, use_cublasmp)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Bulk overlap is not yet supported on ROCm.")
+@pytest.mark.skipif(not bulk_available, reason="Bulk overlap is not supported on ROCm.")
 @pytest.mark.parametrize(
     "comm_type, quantization, connections",
     [
@@ -237,6 +238,8 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
     if connections == 8:
+        if IS_HIP_EXTENSION:
+            pytest.skip("CUDA_DEVICE_MAX_CONNECTIONS has no HIP equivalent.")
         if torch.cuda.get_device_properties(0).major != 9:
             pytest.skip(
                 "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"

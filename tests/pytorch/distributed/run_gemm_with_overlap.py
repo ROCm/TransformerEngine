@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,6 +9,7 @@
 import os
 import sys
 import socket
+import hashlib
 import warnings
 import subprocess
 import argparse
@@ -16,6 +19,7 @@ from functools import partial, reduce
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
@@ -59,6 +63,9 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
+    parser.add_argument(
+        "--ffn-hidden-size", type=int, default=0, help="MLP intermediate size; 0 means 4x hidden."
+    )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--quantization",
@@ -75,6 +82,18 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--atomic", action="store_true", default=False, help="Test overlap with atomic GEMM."
+    )
+    parser.add_argument(
+        "--fused",
+        action="store_true",
+        default=False,
+        help="Select the fused AG+GEMM backend (gfx950 only).",
+    )
+    parser.add_argument(
+        "--dgrad",
+        action="store_true",
+        default=False,
+        help="Shape the GEMM like the dgrad of a row-parallel layer (NN layout)"
     )
     parser.add_argument(
         "--aggregate",
@@ -160,7 +179,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the relative-error tolerance used in the numerical check. "
-            "When unset, defaults to 0.125 for FP8/MXFP8 and 0.02 otherwise."
+            "When unset, defaults to 0.125 for FP8/MXFP8, else 0.03 on ROCm / 0.025 on CUDA."
         ),
     )
     parser.add_argument(
@@ -169,7 +188,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the absolute-error tolerance used in the numerical check. "
-            "When unset, defaults to 0.0625 for FP8/MXFP8 and 0.002 otherwise."
+            "When unset, defaults to 0.0625 for FP8/MXFP8, else 0.01 on ROCm / 0.00125 on CUDA."
         ),
     )
     parser.add_argument(
@@ -177,8 +196,21 @@ def _parse_args(argv=None, namespace=None):
     )
     opts = parser.parse_args(argv, namespace)
 
+    if opts.fused and not IS_HIP_EXTENSION:
+        warnings.warn("The fused AG+GEMM backend is ROCm only.")
+        opts.fused = False
+
+    if opts.dgrad:
+        assert not opts.bulk_overlap, "--dgrad is for the non-bulk overlap"
+        assert opts.comm_type == tex.CommOverlapType.AG, "--dgrad requires --comm-type=AG."
+        assert opts.quantization == "none", "--dgrad is bf16 only."
+        assert not opts.atomic, "--dgrad does not cover the atomic GEMM path."
+
     if opts.bulk_overlap:
-        if opts.p2p:
+        if opts.fused:
+            # both fused bulk entry points are CommOverlapP2P methods
+            opts.p2p = True
+        elif opts.p2p:
             warnings.warn("Point-2-point comms are not supported with bulk overlap.")
             opts.p2p = False
         if opts.atomic:
@@ -344,9 +376,11 @@ def _main(opts):
         and opts.comm_type == tex.CommOverlapType.AG
     ):
         buffer_dtype = torch.uint8
+    ub_shape = (outer_size, hidden_size)
+
     if opts.p2p:
         ub_obj = tex.CommOverlapP2P(
-            (outer_size, hidden_size),
+            ub_shape,
             buffer_dtype,
             helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
@@ -357,10 +391,11 @@ def _main(opts):
             atomic_gemm=opts.atomic,
             aggregate=opts.aggregate,
             use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            fused=opts.fused,
         )
     else:
         ub_obj = tex.CommOverlap(
-            (outer_size, hidden_size),
+            ub_shape,
             buffer_dtype,
             helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
@@ -388,7 +423,7 @@ def _main(opts):
             )
         else:
             ub_obj2 = tex.CommOverlap(
-                (outer_size, hidden_size),
+                ub_shape,
                 ub2_buffer_dtype,
                 helper,
                 tp_size,
@@ -404,11 +439,16 @@ def _main(opts):
     # K = MLP intermediate size (usually 4x hidden size)
     # P = number of devices for sequence/tensor parallelism
     # NOTE: TE-GEMM is set up to work with a transposed kernels and  non-transposed inputs.
-    ffn_hidden_size = 4 * hidden_size
+    ffn_hidden_size = opts.ffn_hidden_size if opts.ffn_hidden_size > 0 else 4 * hidden_size
     if opts.bulk_overlap:
         # Bulk overlap weight and input tensors are not relevant so they're globally sized
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)
         local_inp_shape = (outer_size, hidden_size)
+        if opts.fused:
+            local_inp_shape = (outer_size, ffn_hidden_size)
+            if opts.comm_type == tex.CommOverlapType.RS:
+                # NT wgrad: A is (k, m) = (tokens, hidden), B is (k, n)
+                local_kernel_t_shape = (outer_size, hidden_size)
         # Bulk overlap comm tensor is distributed for AG overlap only
         if opts.comm_type == tex.CommOverlapType.AG:
             bulk_inp_shape = (outer_size // tp_size, hidden_size)
@@ -416,8 +456,10 @@ def _main(opts):
             bulk_inp_shape = (outer_size, hidden_size)
     else:
         if opts.comm_type == tex.CommOverlapType.AG:
-            # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
-            local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
+            if opts.dgrad:
+                local_kernel_t_shape = (hidden_size, ffn_hidden_size // tp_size)
+            else:
+                local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
             local_inp_shape = (outer_size // tp_size, hidden_size)
             if ub_obj2 is not None:
                 local_kernel2_t_shape = (hidden_size, ffn_hidden_size // tp_size)
@@ -425,6 +467,13 @@ def _main(opts):
             # (M, K/P) x (N, K/P)^T = (M, N) -> overlapped RS -> (M/P, N)
             local_kernel_t_shape = (hidden_size, ffn_hidden_size // tp_size)
             local_inp_shape = (outer_size, ffn_hidden_size // tp_size)
+
+    if opts.bulk_overlap and opts.fused:
+        gemm_layout = "NT" if opts.comm_type == tex.CommOverlapType.RS else "NN"
+    elif opts.dgrad:
+        gemm_layout = "NN"
+    else:
+        gemm_layout = "TN"
 
     # Initialize distributed input tensor and GEMM kernels
     torch.manual_seed(opts.seed + tp_rank)
@@ -479,7 +528,10 @@ def _main(opts):
             bulk_inp_list = [torch.zeros_like(bulk_inp) for _ in range(tp_size)]
             dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
             # Sum the list together for final global result
-            ref_g = torch.stack(bulk_inp_list).sum(dim=0)
+            ref_acc = torch.zeros_like(bulk_inp, dtype=torch.float32)
+            for bulk_inp_rank in bulk_inp_list:
+                ref_acc += bulk_inp_rank
+            ref_g = ref_acc.to(bulk_inp.dtype)
     else:
         # cuBLASMp always uses split-accumulator internally and does not expose a
         # control to disable it, so force the reference to match when testing the
@@ -491,6 +543,7 @@ def _main(opts):
             ker_g,
             inp_g,
             out_dtype=torch.bfloat16,
+            layout=gemm_layout,
             use_split_accumulator=ref_use_split_accumulator,
         )
         if opts.comm_type == tex.CommOverlapType.RS:
@@ -500,7 +553,10 @@ def _main(opts):
             ref_rs_list = [torch.zeros_like(ref_g) for _ in range(tp_size)]
             dist.all_gather(ref_rs_list, ref_g, group=tp_group)
             # Stack and sum across ranks to get global result
-            ref_global = torch.stack(ref_rs_list, dim=0).sum(dim=0)  # (M, N)
+            ref_global = torch.zeros_like(ref_g, dtype=torch.float32)
+            for ref_rs_rank in ref_rs_list:
+                ref_global += ref_rs_rank
+            ref_global = ref_global.to(ref_g.dtype)  # (M, N)
             # Scatter: each rank keeps its portion (M/P, N)
             start_idx = tp_rank * (outer_size // tp_size)
             end_idx = (tp_rank + 1) * (outer_size // tp_size)
@@ -665,9 +721,11 @@ def _main(opts):
                 ub_obj.copy_into_buffer(bulk_inp_fp8._rowwise_data, local_chunk=False)
 
         gemm_inp = inp_fp8 if with_quantized_compute else inp
-        rs_out = torch.empty(
-            (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
-        )
+        if not (opts.bulk_overlap and opts.fused):
+            # hk_bulk_rs_gemm requires an empty rs_output
+            rs_out = torch.empty(
+                (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+            )
 
     # Wrap GEMM ops in condensed functions to make CUDA Graphs easier to use
     def _fp8_gemm():
@@ -704,12 +762,14 @@ def _main(opts):
             kernel_t,
             gemm_inp,
             out_dtype=torch.bfloat16,
+            layout=gemm_layout,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
         )
+
 
     # Trigger GEMM
     total_iters = opts.warmup_iters + opts.timing_iters
@@ -874,17 +934,29 @@ def _main(opts):
 
         torch.cuda.synchronize()
         dist.barrier(tp_group)
+        # Bit-exact fingerprint of the output.
+        out_bytes = test_out.detach().contiguous().cpu().flatten().view(torch.uint8)
+        out_hash = hashlib.sha256(out_bytes.numpy().tobytes()).hexdigest()
+        all_hashes = [None] * tp_size
+        dist.all_gather_object(all_hashes, out_hash, group=tp_group)
+        dist_print("OUTPUT HASH: " + " ".join(all_hashes), src=0, section=True, info=True,
+                   group=tp_group)
+
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
+        bf16_rtol = 0.03 if IS_HIP_EXTENSION else 0.025
+        bf16_atol = 0.01 if IS_HIP_EXTENSION else 0.00125
         rtol = (
-            opts.rtol if opts.rtol is not None else (0.02 if opts.quantization == "none" else 0.125)
+            opts.rtol
+            if opts.rtol is not None
+            else (bf16_rtol if opts.quantization == "none" else 0.125)
         )
         atol = (
             opts.atol
             if opts.atol is not None
-            else (0.002 if opts.quantization == "none" else 0.0625)
+            else (bf16_atol if opts.quantization == "none" else 0.0625)
         )
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True

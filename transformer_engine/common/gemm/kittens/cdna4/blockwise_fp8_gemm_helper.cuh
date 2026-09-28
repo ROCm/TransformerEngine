@@ -8,6 +8,7 @@
 #include <type_traits>
 #include "kittens.cuh"
 #include "../../../util/math.h"
+using namespace te_kittens::blockwise;  // NOLINT(build/namespaces)
 
 template <int HEIGHT>
 struct RowScale { float2 v[HEIGHT][2]; };
@@ -18,13 +19,17 @@ struct ColScale { float v[WIDTH]; };
 template <int HEIGHT>
 struct RowRatio { float v[HEIGHT][4]; };
 
+constexpr float kMinScaleInv = 1e-13f;
+
+__device__ __forceinline__ float floor_scale_inv(float s) { return fmaxf(s, kMinScaleInv); }
+
 __device__ inline float load_scaleB_scalar(const float *p, int i) {
     float v;
     asm volatile("s_load_dword %0, %1, %2\n"
                  : "=s"(v)
                  : "s"(p), "s"(i * 4)
                  : "memory");
-    return v;
+    return floor_scale_inv(v);
 }
 
 __device__ inline kittens::fp8e8m0_4 load_scaleB_scalar_u32(const kittens::fp8e8m0_4 *p, int i) {
@@ -77,12 +82,6 @@ __device__ inline void store_output(OType *c_ptr, const AccType &acc,
     }
 }
 
-__device__ inline float read_elem(const void *p, int dtype, int idx) {
-    if (dtype == 6) return __bfloat162float(reinterpret_cast<const __hip_bfloat16 *>(p)[idx]);
-    if (dtype == 5) return __half2float(reinterpret_cast<const __half *>(p)[idx]);
-    return reinterpret_cast<const float *>(p)[idx];
-}
-
 template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
@@ -92,26 +91,6 @@ __device__ inline float round_to_out_dtype(float v) {
     } else {
         return __half2float(__float2half(v));
     }
-}
-
-enum struct GemmEpilogue {
-    DEFAULT,
-    BIAS,
-    GELU_AUX,
-    BETA,
-    BIAS_BETA,
-    GELU_AUX_BETA,
-};
-
-__host__ __device__ inline constexpr bool epilogue_has_bias(GemmEpilogue e) {
-    return e == GemmEpilogue::BIAS || e == GemmEpilogue::BIAS_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_gelu(GemmEpilogue e) {
-    return e == GemmEpilogue::GELU_AUX || e == GemmEpilogue::GELU_AUX_BETA;
-}
-__host__ __device__ inline constexpr bool epilogue_has_beta(GemmEpilogue e) {
-    return e == GemmEpilogue::BETA || e == GemmEpilogue::BIAS_BETA
-        || e == GemmEpilogue::GELU_AUX_BETA;
 }
 
 template <typename OType, bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, typename AccType>
@@ -221,7 +200,7 @@ __device__ inline ColScale<AccType::width> load_scaleB_col(
     #pragma unroll
     for (int j = 0; j < AccType::width; j++) {
         const int n0 = local_n_base + j * 16 + col_g;
-        cs.v[j] = n0 < n_valid ? sb_col_k[n0] : 0.f;
+        cs.v[j] = n0 < n_valid ? floor_scale_inv(sb_col_k[n0]) : 1.0f;
     }
     return cs;
 }
@@ -383,6 +362,8 @@ __device__ __forceinline__ void compute_a_ratios_and_promote(
         int e = g * (BLOCK_M / 4) + lt;
         float2 p = reinterpret_cast<const float2 *>(smem_sa_prev)[e];
         float2 c = reinterpret_cast<const float2 *>(smem_sa_curr)[e];
+        c.x = floor_scale_inv(c.x);
+        c.y = floor_scale_inv(c.y);
         float2 r = {p.x / c.x, p.y / c.y};
         reinterpret_cast<float2 *>(smem_a_ratio_dst)[e] = r;
         reinterpret_cast<float2 *>(smem_sa_prev)[e] = c;
@@ -455,4 +436,3 @@ static void launch_pack_scales_pow2(const float *scales, uint32_t *packed, int p
     pack_scales_pow2_kernel<WEIGHT, TRANSPOSE><<<blocks, 256, 0, stream>>>(scales, packed, padded_dim, real_dim, scale_K, k_iters, scale_block);
 }
 
-static inline size_t align_up_pow2ws(size_t x) { return (x + 255) & ~size_t(255); }

@@ -3,120 +3,88 @@
 # See LICENSE for license information.
 #
 # TE CI deps image
-#
-# ROCm installer: https://raw.githubusercontent.com/ROCm/TheRock/release/therock-7.13/dockerfiles/install_rocm_tarball.sh
 
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCK_RELEASE_VERSION=7.13.0
-ARG GPU_ARCH=gfx942
+ARG ROCK_RELEASE_VERSION=7.14.0
 ARG PYTHON_VERSION=3.12
 ARG PYTHON_ABI=cp312
-ARG TORCH_VERSION=2.10.0
-ARG TORCHVISION_VERSION=0.25.0
-ARG TORCHAUDIO_VERSION=2.10.0
-ARG TRITON_VERSION=3.6.0
-ARG JAX_VERSION=0.10.2
-ARG JAX_BRANCH=rocm-jax-v0.10.2
-ARG XLA_BRANCH=rocm-jaxlib-v0.10.2
-ARG FA_VERSION=v2.8.1
+ARG TORCH_VERSION=2.12.0
+ARG TORCHVISION_VERSION=0.27.0
+# triton 3.7.1 ships as a git snapshot: triton-3.7.1+<TRITON_LOCAL>.rocm<rel>
+ARG TRITON_VERSION=3.7.1
+ARG TRITON_LOCAL=git0263a6a6
+ARG JAX_VERSION=0.11.0
+ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
-ARG INSTALL_ROCM_TARBALL_SH_URL=https://raw.githubusercontent.com/ROCm/TheRock/release/therock-7.13/dockerfiles/install_rocm_tarball.sh
+ARG GPU_ARCH=gfx950;gfx942
 
 # Base OS packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
     git vim \
     build-essential cmake ninja-build pkg-config liblzma-dev \
-    openjdk-17-jdk-headless \
+    libnuma1 libnuma-dev \
     python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-# Native ROCm tarball → /opt/rocm
-RUN case "${GPU_ARCH}" in \
-      gfx942) _amd_gpu_family=gfx94X-dcgpu ;; \
-      gfx950) _amd_gpu_family=gfx950-dcgpu ;; \
-    esac \
-    && curl -fsSL -o /tmp/install_rocm_tarball.sh "${INSTALL_ROCM_TARBALL_SH_URL}" \
-    && chmod +x /tmp/install_rocm_tarball.sh \
-    && /tmp/install_rocm_tarball.sh "${ROCK_RELEASE_VERSION}" "${_amd_gpu_family}" stable \
-    && rm -f /tmp/install_rocm_tarball.sh
 
 # Isolated Python env for pip packages
 RUN python${PYTHON_VERSION} -m venv /opt/venv
 
-# Default container env: venv on PATH; /opt/rocm tarball for flash-attention / aiter.
-ENV GPU_ARCH=${GPU_ARCH} \
-    VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Default container env: venv on PATH. ROCm is provided by the pip rocm-sdk and
+# resolved on demand via `rocm-sdk path --root` (no /opt/rocm install).
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-RUN python -m pip install --upgrade pip setuptools wheel \
+RUN python -m pip install --upgrade pip setuptools wheel pyyaml \
     && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
-# Python ROCm SDK + torch from https://repo.amd.com/rocm/whl/<AMD_GPU_FAMILY>/
-RUN case "${GPU_ARCH}" in \
-      gfx942) _amd_gpu_family=gfx94X-dcgpu ;; \
-      gfx950) _amd_gpu_family=gfx950-dcgpu ;; \
-    esac \
-    && W="https://repo.amd.com/rocm/whl/${_amd_gpu_family}" \
-    && LIBS_PKG="rocm-sdk-libraries-$(echo "${_amd_gpu_family}" | tr '[:upper:]' '[:lower:]')" \
+# Python ROCm SDK + torch from https://repo.amd.com/rocm/whl-multi-arch/
+# Multi-arch layout: arch-agnostic wheels (rocm-sdk-libraries, torch, torchvision,
+# triton) installed once, then a per-GPU device wheel (rocm-sdk-device-<arch>,
+# amd_torch_device_<arch>, amd_torchvision_device_<arch>) for every arch in
+# GPU_ARCH (semicolon-separated, overridable via --build-arg).
+RUN W="https://repo.amd.com/rocm/whl-multi-arch" \
     && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
     && pip install --no-cache-dir \
         --extra-index-url "${W}" \
         "rocm-sdk-core==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-devel==${ROCK_RELEASE_VERSION}" \
-        "${LIBS_PKG}==${ROCK_RELEASE_VERSION}" \
+        "rocm-sdk-libraries==${ROCK_RELEASE_VERSION}" \
         "${W}/rocm-${ROCK_RELEASE_VERSION}.tar.gz" \
         "${W}/torch-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
         "${W}/torchvision-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
-        "${W}/torchaudio-${TORCHAUDIO_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
-        "${W}/triton-${TRITON_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl"
+        "${W}/triton-${TRITON_VERSION}%2B${TRITON_LOCAL}.${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+    && for arch in ${GPU_ARCH//;/ }; do \
+         pip install --no-cache-dir --extra-index-url "${W}" \
+           "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" \
+           "${W}/amd_torch_device_${arch}-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+           "${W}/amd_torchvision_device_${arch}-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" ; \
+       done
 
 # Install Jax
-RUN pip install --no-cache-dir patchelf auditwheel numpy scipy \
-    && curl -fsSL -o /usr/local/bin/bazel \
-        https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
-    && chmod +x /usr/local/bin/bazel \
-    && git clone --branch "${JAX_BRANCH}" --depth 1 https://github.com/ROCm/jax.git /tmp/jax-src \
-    && git clone --branch "${XLA_BRANCH}" --depth 1 https://github.com/ROCm/xla.git /tmp/xla-src \
-    && cd /tmp/jax-src \
-    && JAX_DIST=/tmp/jax-dist \
-    && mkdir -p "${JAX_DIST}" \
-    && ROCM_SDK_ROOT="$(rocm-sdk path --root)" \
-    && python build/build.py build \
-        --wheels=jax-rocm-plugin,jax-rocm-pjrt \
-        --bazel_startup_options="--bazelrc=build/rocm/rocm.bazelrc" \
-        --bazel_startup_options="--output_user_root=/tmp/bazel-jax" \
-        --bazel_options=--config=rocm_release_wheel \
-        --bazel_options=--override_repository=xla=/tmp/xla-src \
-        --bazel_options=--override_module=xla=/tmp/xla-src \
-        --bazel_options=--repo_env=ML_WHEEL_TYPE=release \
-        --bazel_options=--//jaxlib/tools:jaxlib_git_hash="$(git rev-parse HEAD)" \
-        --bazel_options=--repo_env=ROCM_PATH="${ROCM_SDK_ROOT}" \
-        --python_version="${PYTHON_VERSION}" \
-        --rocm_path="${ROCM_SDK_ROOT}" \
-        --rocm_version=7 \
-        --rocm_amdgpu_targets="${GPU_ARCH}" \
-        --verbose \
-        --output_path="${JAX_DIST}" \
-    && pip wheel . --no-deps -w "${JAX_DIST}" \
-    && pip install --no-cache-dir "jaxlib==${JAX_VERSION}" "${JAX_DIST}"/*.whl \
-    && pip install --no-cache-dir "jax==${JAX_VERSION}" \
-    && rm -rf /tmp/jax-src /tmp/xla-src /tmp/jax-dist /tmp/bazel-jax
+RUN pip install --no-cache-dir \
+        "jax==${JAX_VERSION}" \
+        "jax-rocm7-pjrt==${JAX_VERSION}" \
+        "jax-rocm7-plugin==${JAX_VERSION}"
 
-RUN git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
+# Install Flash Attention
+RUN export ROCM_PATH="$(rocm-sdk path --root)" \
+    && git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
     && cd /tmp/flash-attention \
-    && ROCM_PATH=/opt/rocm GPU_ARCHS="${GPU_ARCH}" python setup.py install \
+    && GPU_ARCHS="${GPU_ARCH}" python setup.py install \
     && rm -rf /tmp/flash-attention
 
-RUN git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
+# Install Aiter
+RUN export ROCM_PATH="$(rocm-sdk path --root)" \
+    && git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
     && cd /tmp/aiter \
     && git checkout "${AITER_COMMIT}" \
     && git submodule update --init --recursive \
-    && ROCM_PATH=/opt/rocm GPU_ARCHS="${GPU_ARCH}" pip install --no-build-isolation --no-cache-dir . \
+    && pip install --no-build-isolation --no-cache-dir . \
     && rm -rf /tmp/aiter
 
 WORKDIR /workspace/

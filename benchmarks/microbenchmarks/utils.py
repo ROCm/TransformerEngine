@@ -7,6 +7,9 @@
 """Shared utilities for microbenchmarks: model configs, timing, throughput, runner."""
 
 import argparse
+import importlib.util
+import itertools
+import math
 import torch
 import torch.utils.benchmark as benchmark
 
@@ -85,6 +88,91 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 
 
 # ---------------------------------------------------------------------------
+# Low-precision recipe sweep (shared by the dense and grouped GEMM benchmarks)
+# ---------------------------------------------------------------------------
+# Transformer Engine imports are deferred into the helpers so importing
+# utils.py stays free of a GPU / built TE (keeps the non-GEMM benchmarks and
+# offline tooling importable).
+
+
+def _check_mxfp4_support_with_aiter():
+    """MXFP4 gate: device support plus the aiter FP4 GEMM backend.
+
+    The MXFP4 GEMM path calls into aiter's a4w4 kernels, so a missing aiter
+    package would crash at benchmark time even on supported hardware.
+    """
+    from transformer_engine.pytorch.quantization import check_mxfp4_support
+
+    supported, reason = check_mxfp4_support()
+    if not supported:
+        return supported, reason
+    if importlib.util.find_spec("aiter") is None:
+        return False, "aiter is not installed (required for the MXFP4 GEMM backend)."
+    return True, ""
+
+
+def _precision_specs():
+    """Ordered sweep of (name, recipe factory | None, support check | None).
+
+    A ``None`` factory is the bf16 baseline (no autocast). The fp8 entry uses
+    HYBRID delayed scaling and is shared by the dense and grouped GEMM
+    benchmarks so their fp8 numbers stay comparable.
+    """
+    from transformer_engine.common.recipe import (
+        DelayedScaling,
+        Format,
+        MXFP4BlockScaling,
+        MXFP8BlockScaling,
+        NVFP4BlockScaling,
+    )
+    from transformer_engine.pytorch.quantization import (
+        check_fp8_support,
+        check_mxfp8_support,
+        check_nvfp4_support,
+    )
+
+    return (
+        ("bf16", None, None),
+        (
+            "fp8",
+            lambda: DelayedScaling(
+                fp8_format=Format.HYBRID,
+                amax_history_len=16,
+                amax_compute_algo="max",
+            ),
+            check_fp8_support,
+        ),
+        ("mxfp8", MXFP8BlockScaling, check_mxfp8_support),
+        ("mxfp4", MXFP4BlockScaling, _check_mxfp4_support_with_aiter),
+        ("nvfp4", NVFP4BlockScaling, check_nvfp4_support),
+    )
+
+
+def build_recipes(names=None):
+    """Build an ordered ``{name: recipe_or_None}`` sweep of supported precisions.
+
+    ``bf16`` maps to ``None`` (no autocast). Each low-precision entry is
+    included only when its support check passes on the current device;
+    unsupported ones are dropped with a short notice. Pass *names* to restrict
+    and order the sweep, e.g. ``("bf16", "fp8", "mxfp8", "nvfp4")`` for grouped
+    GEMM, which has no MXFP4 grouped kernel.
+    """
+    specs = _precision_specs()
+    if names is not None:
+        by_name = {spec[0]: spec for spec in specs}
+        specs = tuple(by_name[name] for name in names)
+    recipes = {}
+    for name, factory, support_check in specs:
+        if support_check is not None:
+            supported, reason = support_check()
+            if not supported:
+                print(f"Skipping {name} precision: {reason}")
+                continue
+        recipes[name] = factory() if factory is not None else None
+    return recipes
+
+
+# ---------------------------------------------------------------------------
 # Timing helpers
 # ---------------------------------------------------------------------------
 
@@ -104,6 +192,112 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     else:
         m = timer.adaptive_autorange(min_run_time=min_run_time)
     return m.mean * 1e3, m
+
+
+# ---------------------------------------------------------------------------
+# Rotating input buffers (on by default; disable via --no-rotating)
+# ---------------------------------------------------------------------------
+# Benchmark inputs are cycled through a ring of buffers so that back-to-back
+# kernel launches read different input memory and don't benefit from artificial
+# cache residency.  Populated by run_benchmarks() from the parsed CLI args.
+_ROTATE_BUFFERS = True
+_ROTATE_MB = 0  # rotation memory budget in MB; 0 => auto-size to exceed the LLC
+# Ceiling on the rotation ring size. hipBLASLt-bench caps its rotating block
+# count at the iteration count (max(cold_iters, iters)) so it never allocates a
+# buffer it won't revisit. torch.utils.benchmark picks the iteration count
+# adaptively, so there is no fixed value to cap against; we instead bound the
+# ring at a fixed maximum (mirroring hipBLASLt's default cold_iters of 1000).
+# With the auto budget this ceiling is never reached; it only guards a very
+# large explicit --rotating budget on a small buffer, which would otherwise
+# allocate a copy per few MB up to the whole budget.
+_ROTATE_MAX_BUFFERS = 1000
+
+
+def _last_level_cache_bytes():
+    """Bytes of the last-level cache that buffer rotation must exceed.
+
+    HIP reports ``L2_cache_size`` as the small per-XCD L2 (e.g. 4 MB on gfx950),
+    but the real last-level cache is the much larger AMD Infinity Cache.
+
+    Actual last-level/Infinity Cache sizes:
+      - gfx942 / gfx950: 256 MB
+      - gfx1250:         192 MB
+
+    We use 256 MB for all devices: a slightly oversized ring is harmless (it
+    only allocates a little more memory) and avoids per-arch probing.
+    """
+    return 256 * 1024 * 1024
+
+
+def _rotation_count(bytes_per_buffer, cache_mult=2.0, min_buffers=2):
+    """Number of buffers so the rotation ring spans the requested memory budget.
+
+    With an explicit ``--rotating MB`` the budget is that many megabytes; when
+    omitted it is *cache_mult* x the last-level cache (the ~256 MB AMD Infinity
+    Cache), so a buffer is evicted before it is reused.  The ring is floored at
+    *min_buffers* (so enabling rotation always rotates) and capped at
+    ``_ROTATE_MAX_BUFFERS`` (the adaptive-timer analog of hipBLASLt-bench capping
+    its block count at the iteration count, so a huge budget on a small buffer
+    can't allocate an unbounded ring).
+    """
+    if bytes_per_buffer <= 0:
+        return min_buffers
+    if _ROTATE_MB and _ROTATE_MB > 0:
+        budget = _ROTATE_MB * 1024 * 1024
+    else:
+        cache = _last_level_cache_bytes()
+        if not cache:
+            return min_buffers
+        budget = cache_mult * cache
+    count = math.ceil(budget / bytes_per_buffer)
+    if _ROTATE_MAX_BUFFERS and _ROTATE_MAX_BUFFERS > 0:
+        count = min(count, _ROTATE_MAX_BUFFERS)
+    return max(min_buffers, count)
+
+
+def _tensor_nbytes(t):
+    """Byte size of a torch tensor, or 0 if it can't be determined."""
+    numel = getattr(t, "numel", None)
+    element_size = getattr(t, "element_size", None)
+    if callable(numel) and callable(element_size):
+        return int(numel()) * int(element_size())
+    return 0
+
+
+def rotating(build, *, bytes_per_buffer=None):
+    """Return a zero-arg callable yielding an input buffer to time.
+
+    Rotation is on by default: it builds a ring of ``build()`` buffers (spanning
+    the ``--rotating MB`` budget, or ~2x the last-level cache when the size is
+    omitted) and returns the next one on each call.  With ``--no-rotating`` it
+    returns a single cached buffer from ``build()`` on every call, matching the
+    original single-buffer behavior.
+
+    ``build`` is a zero-arg callable returning one fresh buffer.
+    ``bytes_per_buffer`` overrides the auto-sizing hint for buffers whose byte
+    size can't be inferred (e.g. FP8 tensors).
+    """
+    first = build()
+    if not _ROTATE_BUFFERS:
+        return lambda: first
+    nbytes = bytes_per_buffer if bytes_per_buffer is not None else _tensor_nbytes(first)
+    count = _rotation_count(nbytes)
+    buffers = [first] + [build() for _ in range(max(0, count - 1))]
+    ring = itertools.cycle(buffers)
+    return lambda: next(ring)
+
+
+def make_input(shape, dtype, *, device="cuda", requires_grad=False):
+    """Rotation-aware input: a zero-arg callable returning a ``randn`` tensor.
+
+    Honors ``--rotating`` (see :func:`rotating`); on by default, so it returns
+    the next tensor in the ring each call (``--no-rotating`` for a single one).
+    """
+    return rotating(
+        lambda: torch.randn(
+            *shape, dtype=dtype, device=device, requires_grad=requires_grad
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +469,26 @@ def make_parser(**kwargs):
             "--csv-samples is ignored in this mode."
         ),
     )
+    rotating_group = parser.add_mutually_exclusive_group()
+    rotating_group.add_argument(
+        "--rotating", nargs="?", type=int, const=0, default=None, metavar="MB",
+        help=(
+            "Rotate benchmark inputs through a ring of buffers so back-to-back "
+            "launches touch different memory (avoids artificial cache "
+            "residency), like hipBLASLt-bench --rotating. Optionally pass the "
+            "rotating memory budget in MB; omit it to auto-size the ring to "
+            "exceed the last-level cache (the 256 MB Infinity Cache on "
+            "gfx942/gfx950, not just L2). On by default; disable with "
+            "--no-rotating."
+        ),
+    )
+    rotating_group.add_argument(
+        "--no-rotating", action="store_true", default=False,
+        help=(
+            "Disable input buffer rotation (see --rotating) and time a single "
+            "cached input buffer."
+        ),
+    )
     return parser
 
 
@@ -333,6 +547,13 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     """
     if args is None:
         args = make_parser().parse_args()
+
+    global _ROTATE_BUFFERS, _ROTATE_MB
+    _rotating = getattr(args, "rotating", None)
+    if _rotating is not None and _rotating < 0:
+        raise ValueError("--rotating expects a non-negative size in MB")
+    _ROTATE_BUFFERS = not getattr(args, "no_rotating", False)
+    _ROTATE_MB = _rotating or 0
 
     if args.kernel_profile:
         from torch.profiler import profile, ProfilerActivity

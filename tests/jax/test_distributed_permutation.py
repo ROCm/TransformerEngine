@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -75,6 +77,7 @@ ALL_DISPATCH_COMBINE_CASES = [
 ]
 DISPATCH_COMBINE_CASES = {
     "L0": ALL_DISPATCH_COMBINE_CASES[0:1],
+    "L1": ALL_DISPATCH_COMBINE_CASES[0:2],
     "L2": ALL_DISPATCH_COMBINE_CASES,
 }
 
@@ -86,6 +89,7 @@ ALL_DISPATCH_COMBINE_PADDING_CASES = [
 ]
 DISPATCH_COMBINE_PADDING_CASES = {
     "L0": ALL_DISPATCH_COMBINE_PADDING_CASES[0:1],
+    "L1": ALL_DISPATCH_COMBINE_PADDING_CASES[0:2],
     "L2": ALL_DISPATCH_COMBINE_PADDING_CASES,
 }
 
@@ -93,6 +97,7 @@ DISPATCH_COMBINE_PADDING_CASES = {
 ALL_DTYPES = [jnp.float32, jnp.bfloat16]
 DTYPES = {
     "L0": [jnp.float32],
+    "L1": [jnp.float32],
     "L2": ALL_DTYPES,
 }
 

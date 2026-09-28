@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -33,12 +35,18 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
+    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not load each kernel from
+        a single device before returning from lowering. The load works around a race
+        in the ROCm plugin, which unlinks the HSACO it was handed before locking its
+        module cache. Default is "1" (runs when more than one local device is visible).
 """
 
 import hashlib
 import os
+import tempfile
+import threading
 import warnings
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 import zlib
 
 from packaging import version
@@ -56,6 +64,7 @@ from ..version_utils import (
     is_triton_extension_supported,
     jax_version_meet_requirement,
 )
+from ..util import is_hip_extension
 
 
 # Placeholder package version on PyPI that should never be used
@@ -189,8 +198,11 @@ if not is_triton_extension_supported():
 try:
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
-    from triton.backends.nvidia import compiler as cb
     from triton.runtime import autotuner
+
+    if not is_hip_extension():
+        # A Triton built for AMD only ships no triton/backends/nvidia.
+        from triton.backends.nvidia import compiler as cb
 except ImportError as e:
     raise ImportError(
         "Triton is required for transformer_engine.jax.triton_extensions. "
@@ -203,6 +215,94 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
+
+# Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
+_HSACO_TMPDIR = None
+_HSACO_TMPDIR_LOCK = threading.Lock()
+
+# Prewarm state (ROCm only; see _prewarm_kernel_call).
+_PREWARM_PRIM = None
+_PREWARM_PRIM_LOCK = threading.Lock()
+_PREWARMED = set()
+_PREWARM_KEY_LOCKS = {}
+_PREWARM_REGISTRY_LOCK = threading.Lock()
+
+
+def _reset_state_after_fork():
+    """Reset fork-unsafe module state in a child process."""
+    global _HSACO_TMPDIR, _HSACO_TMPDIR_LOCK, _PREWARM_PRIM_LOCK, _PREWARM_REGISTRY_LOCK
+    _HSACO_TMPDIR_LOCK = threading.Lock()
+    _PREWARM_PRIM_LOCK = threading.Lock()
+    _PREWARM_REGISTRY_LOCK = threading.Lock()
+    _PREWARM_KEY_LOCKS.clear()
+    # Detach first: dropping the last reference would delete the parent's directory.
+    if _HSACO_TMPDIR is not None:
+        _HSACO_TMPDIR._finalizer.detach()  # pylint: disable=protected-access
+        _HSACO_TMPDIR = None
+    # The plugin's module cache is not inherited, so nothing here is loaded yet.
+    _PREWARMED.clear()
+
+
+if is_hip_extension() and hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_state_after_fork)
+
+
+def _hsaco_dir():
+    """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
+    global _HSACO_TMPDIR
+    with _HSACO_TMPDIR_LOCK:
+        if _HSACO_TMPDIR is None:
+            _HSACO_TMPDIR = tempfile.TemporaryDirectory(  # pylint: disable=consider-using-with
+                prefix="te_jax_hsaco_"
+            )
+        return _HSACO_TMPDIR.name
+
+
+def _prewarm_primitive():
+    """Primitive that re-emits an already-built Triton custom call for prewarming."""
+    global _PREWARM_PRIM
+    from jax.extend.core import Primitive
+    from jax.interpreters import mlir
+
+    with _PREWARM_PRIM_LOCK:
+        if _PREWARM_PRIM is None:
+            prim = Primitive("te_triton_prewarm")
+            prim.multiple_results = True
+            prim.def_abstract_eval(lambda *_, out_avals, rule: out_avals)
+            mlir.register_lowering(prim, lambda ctx, *args, out_avals, rule: rule(ctx, *args))
+            _PREWARM_PRIM = prim
+        return _PREWARM_PRIM
+
+
+def _prewarm_kernel_call(ctx, rule, key):
+    """Load a kernel into the ROCm plugin from a single device."""
+    with _PREWARM_REGISTRY_LOCK:
+        key_lock = _PREWARM_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        if key in _PREWARMED:
+            return
+        try:
+            _prewarm_launch(ctx, rule)
+        finally:
+            # On failure too: a persistent cause would never succeed and would re-warn.
+            _PREWARMED.add(key)
+
+
+def _prewarm_launch(ctx, rule):
+    """Launch the kernel once and swallow any failure."""
+    try:
+        prim = _prewarm_primitive()
+        device = jax.local_devices()[0]
+        operands = [
+            jax.device_put(jnp.zeros(aval.shape, aval.dtype), device) for aval in ctx.avals_in
+        ]
+        out_avals = tuple(core.ShapedArray(a.shape, a.dtype) for a in ctx.avals_out)
+        # pylint: disable-next=unexpected-keyword-arg,missing-kwoa
+        launch = jax.jit(lambda *xs: prim.bind(*xs, out_avals=out_avals, rule=rule))
+        jax.block_until_ready(launch(*operands))
+    except Exception as e:  # pylint: disable=broad-except
+        # Prewarming is an optimization; a failure here must not break the real compile.
+        warnings.warn(f"Triton kernel prewarm failed ({type(e).__name__}: {e})", RuntimeWarning)
 
 
 def get_triton_info():
@@ -281,23 +381,29 @@ def compile_triton(
     compute_capability: int,
     enable_fp_fusion: bool = False,
 ):
-    """Compile a Triton kernel to PTX.
+    """Compile a Triton or Gluon kernel to a GPU binary (PTX on CUDA, HSACO on ROCm).
 
     Kernels are cached to avoid recompilation.
 
     Args:
-        kernel_fn: Triton kernel function (decorated with @triton.jit)
+        kernel_fn: Triton (@triton.jit) or Gluon (@gluon.jit) kernel function
         signature: Dict mapping arg names to types (e.g., {"x_ptr": "*fp32", "n": "i32"})
         constants: Dict of compile-time constants
         num_warps: Number of warps per block
         num_stages: Number of pipeline stages
         num_ctas: Number of CTAs (cooperative thread arrays)
-        compute_capability: CUDA compute capability
+        compute_capability: CUDA compute capability (CUDA only; ignored on ROCm, whose
+            target is auto-detected from the active GPU)
         enable_fp_fusion: Enable FP fusion optimizations (default False for accuracy)
 
     Returns:
         TritonKernel object for JAX
     """
+    # Backend (CUDA/ROCm) and kernel flavor (Triton/Gluon); only the source and
+    # compile options differ, the resulting binary is handled the same way.
+    is_hip = is_hip_extension()
+    is_gluon = hasattr(kernel_fn, "is_gluon") and kernel_fn.is_gluon()
+
     # Create cache key
     cache_key = hashlib.md5(
         str(
@@ -310,6 +416,8 @@ def compile_triton(
                 num_ctas,
                 enable_fp_fusion,
                 compute_capability,
+                is_hip,
+                is_gluon,
             )
         ).encode()
     ).hexdigest()
@@ -317,36 +425,84 @@ def compile_triton(
     if cache_key in _TRITON_KERNEL_CACHE:
         return _TRITON_KERNEL_CACHE[cache_key]
 
-    # Compile kernel
-    cuda_option_kwargs = {}
-    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
-        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-    options = cb.CUDAOptions(
-        num_warps=num_warps,
-        num_stages=num_stages,
-        num_ctas=num_ctas,
-        debug=False,
-        enable_fp_fusion=enable_fp_fusion,
-        **cuda_option_kwargs,
-    )
-
     # Mark constants as constexpr in signature
     signature_with_constexpr = dict(signature)
     for const_name in constants.keys():
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
-    src = tc.ASTSource(
-        fn=kernel_fn,
-        constexprs=constants,
-        signature=signature_with_constexpr,
-    )
+    if is_hip:
+        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
+        import triton
+        from triton.compiler import make_backend
 
-    compiled = tc.compile(
-        src,
-        target=tc.GPUTarget("cuda", compute_capability, 32),
-        options=options.__dict__,
-    )
+        target = triton.runtime.driver.active.get_current_target()
+        backend = make_backend(target)
+        options = backend.parse_options(
+            {
+                "num_warps": num_warps,
+                "num_ctas": num_ctas,
+                "num_stages": num_stages,
+                "warp_size": target.warp_size,
+                "enable_fp_fusion": enable_fp_fusion,
+            }
+        )
+        binary_key = backend.binary_ext
+    else:
+        cuda_option_kwargs = {}
+        if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
+            cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
+        # cb is bound whenever this branch runs; see the guarded import above.
+        options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
+            num_warps=num_warps,
+            num_stages=num_stages,
+            num_ctas=num_ctas,
+            debug=False,
+            enable_fp_fusion=enable_fp_fusion,
+            **cuda_option_kwargs,
+        )
+        target = tc.GPUTarget("cuda", compute_capability, 32)
+        binary_key = "ptx"
+
+    # Gluon uses GluonASTSource, which (unlike ASTSource) requires every constexpr
+    # parameter to be listed in the signature.
+    if is_gluon:
+        try:
+            from triton.experimental.gluon._runtime import GluonASTSource
+        except ImportError as exc:
+            raise ImportError(
+                "A Gluon kernel was passed but GluonASTSource is unavailable in this "
+                "Triton build (triton.experimental.gluon._runtime). Upgrade to a Triton "
+                "version that ships Gluon, or pass a @triton.jit kernel instead."
+            ) from exc
+
+        gluon_signature = dict(signature_with_constexpr)
+        for name in kernel_fn.arg_names:
+            if name not in gluon_signature and name in constants:
+                gluon_signature[name] = "constexpr"
+
+        src = GluonASTSource(
+            fn=kernel_fn,
+            constexprs=constants,
+            signature=gluon_signature,
+        )
+    else:
+        src = tc.ASTSource(
+            fn=kernel_fn,
+            constexprs=constants,
+            signature=signature_with_constexpr,
+        )
+
+    compiled = tc.compile(src, target=target, options=options.__dict__)
+
+    # The plugin's HIP branch takes a filename, not the blob; it reads the file once, unlinks it,
+    # and serves every later launch from its own cache.
+    binary = compiled.asm[binary_key]
+    if is_hip:
+        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
+        with os.fdopen(fd, "wb") as f:
+            f.write(binary)
+        binary = hsaco_path
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
@@ -356,7 +512,7 @@ def compile_triton(
             num_warps,  # arg1: num_warps (int)
             num_ctas,  # arg2: num_ctas (int)
             compiled.metadata.shared,  # arg3: shared_mem_bytes (int)
-            compiled.asm["ptx"],  # arg4: ptx (str)
+            binary,  # arg4: ptx (str)
             "",  # arg5: ttir (str) - empty
             compute_capability,  # arg6: compute_capability (int)
         )
@@ -365,7 +521,7 @@ def compile_triton(
             compiled.name,
             num_warps,
             compiled.metadata.shared,
-            compiled.asm["ptx"],
+            binary,
             "",  # ttir
             compute_capability,
             1,
@@ -384,6 +540,8 @@ def triton_call_lowering(
     grid,
     input_output_aliases: Mapping[int, int] = None,
     constexprs: Mapping[str, Any] = None,
+    num_warps: Optional[int] = None,
+    num_stages: Optional[int] = None,
 ):
     """Helper for MLIR lowering that calls a Triton kernel.
 
@@ -391,7 +549,8 @@ def triton_call_lowering(
 
     Args:
         ctx: MLIR lowering context
-        kernel_fn: Triton kernel function
+        kernel_fn: Triton (@triton.jit) or Gluon (@gluon.jit) kernel, optionally
+                    wrapped with @triton.autotune
         *array_args: Input arrays (from ctx)
         grid: Grid dimensions. May be either:
             - an int or tuple (fixed grid for every config), or
@@ -407,6 +566,10 @@ def triton_call_lowering(
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
+        num_warps: Warps per block for non-autotuned kernels (required for Gluon
+                    layouts; default 4). Ignored when autotuned.
+        num_stages: Pipeline stages for non-autotuned kernels (default 3). Ignored
+                    when autotuned.
 
     Returns:
         MLIR lowering result
@@ -472,9 +635,13 @@ def triton_call_lowering(
     # larger default (e.g. num_warps=32) over-provisions threads per block,
     # which slashes SM occupancy on non-autotuned kernels — measured as an 8×
     # slowdown on `_make_chunk_sort_map_kernel` vs jax-triton.
+    # Gluon layouts need a matching num_warps, so an explicit value from the
+    # caller wins over the default.
     actual_kernel_fn = kernel_fn
-    num_warps = 4
-    num_stages = 3
+    if num_warps is None:
+        num_warps = 4
+    if num_stages is None:
+        num_stages = 3
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
@@ -635,11 +802,14 @@ def triton_call_lowering(
     if not used_autotuned_launch and jax_version_meet_requirement(
         TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION
     ):
-        rule = jax.ffi.ffi_lowering(
-            "triton_kernel_call_ffi",
-            backend_config={"opaque": ir.StringAttr.get(compressed_call_proto)},
-            operand_output_aliases=ffi_operand_output_aliases,
-        )
+        # Rebuilt per call: an MLIR attribute belongs to the context that made it.
+        def rule(lowering_ctx, *operands, **params):
+            return jax.ffi.ffi_lowering(
+                "triton_kernel_call_ffi",
+                backend_config={"opaque": ir.StringAttr.get(compressed_call_proto)},
+                operand_output_aliases=ffi_operand_output_aliases,
+            )(lowering_ctx, *operands, **params)
+
     else:
         rule = jax.ffi.ffi_lowering(
             "triton_kernel_call",  # Custom call target registered in gpu_triton.py
@@ -647,5 +817,12 @@ def triton_call_lowering(
             backend_config=compressed_call_proto,
             operand_output_aliases=ffi_operand_output_aliases,
         )
+
+    if (
+        is_hip_extension()
+        and len(jax.local_devices()) > 1
+        and os.environ.get("NVTE_JAX_TRITON_PREWARM", "1") != "0"
+    ):
+        _prewarm_kernel_call(ctx, rule, hashlib.md5(compressed_call_proto).hexdigest())
 
     return rule(ctx, *array_args)

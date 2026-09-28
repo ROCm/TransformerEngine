@@ -79,6 +79,10 @@ struct CKAttnCommonArgs {
   void* philox_seed_ptr = nullptr;
   void* philox_offset_ptr = nullptr;
 
+  // Softmax sink (learnable / off-by-one)
+  const void* sink_ptr = nullptr;
+  bool has_sink = false;
+
   // O layout (o_ptr lives in derived because fwd writes it / bwd reads it)
   uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;
 
@@ -134,6 +138,9 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   void* dbias_expanded_ptr = nullptr;
   void* dbias_ptr = nullptr;
 
+  // Softmax sink gradient
+  void* d_sink_ptr = nullptr;
+
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
 
@@ -160,7 +167,9 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 // Probe whether AITER's v3 (asm) path will run for the given config, without
 // launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
 // the v3 path is selected; false means the CK v2 path (or no support) would run.
+#if !(FA_WITH_SINK || FA_WITH_NATIVE_SPLITKV) //see implementation comments
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
+#endif
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
 
 // Gen the number of splits for split-KV support.
@@ -169,6 +178,94 @@ int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
 // Gen the workspace size for fwd config.
 // Extra workspace in particular is needed for split-KV support.
 size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
+
+// Gen the number of splits for split-KV support.
+int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
+
+// Gen the workspace size for fwd config.
+// Extra workspace in particular is needed for split-KV support.
+size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
+
+uint64_t get_runtime_max_seqlen(uint64_t b,
+                                const void* cu_seqlen_ptr,
+                                const void* cu_seqlen_padded_ptr,
+                                void* workspace,
+                                hipStream_t stream);
+
+// ---------------------------------------------------------------------------
+// Small-sequence attention (gfx942/gfx950, NVTE_FUSED_ATTN_CK_SMALLSEQ=1)
+// ---------------------------------------------------------------------------
+size_t small_seq_thd_extra_workspace_bytes();
+
+void ck_attn_smallseq_fwd_thd(size_t batch_size,
+                              size_t num_heads,
+                              size_t head_dim_qk,
+                              size_t max_tokens_q,
+                              size_t max_tokens_kv,
+                              float attn_scale,
+                              const void* q_ptr,
+                              const void* k_ptr,
+                              const void* v_ptr,
+                              void* o_ptr,
+                              void* softmax_lse_ptr,
+                              const void* cu_seqlens_q_ptr,
+                              const void* cu_seqlens_q_padded_ptr,
+                              const void* cu_seqlens_kv_ptr,
+                              const void* cu_seqlens_kv_padded_ptr,
+                              DType dtype,
+                              hipStream_t stream);
+
+void ck_attn_smallseq_bwd_thd(size_t batch_size,
+                              size_t num_heads,
+                              size_t head_dim_qk,
+                              size_t max_tokens_q,
+                              size_t max_tokens_kv,
+                              float attn_scale,
+                              const void* q_ptr,
+                              const void* k_ptr,
+                              const void* v_ptr,
+                              const void* do_ptr,
+                              const void* softmax_lse_ptr,
+                              void* dq_ptr,
+                              void* dk_ptr,
+                              void* dv_ptr,
+                              const void* cu_seqlens_q_ptr,
+                              const void* cu_seqlens_q_padded_ptr,
+                              const void* cu_seqlens_kv_ptr,
+                              const void* cu_seqlens_kv_padded_ptr,
+                              DType dtype,
+                              hipStream_t stream);
+
+void ck_attn_smallseq_fwd_bshd(size_t batch_size,
+                               size_t num_heads,
+                               size_t seqlen_q,
+                               size_t seqlen_kv,
+                               size_t head_dim_qk,
+                               float attn_scale,
+                               const void* q_ptr,
+                               const void* k_ptr,
+                               const void* v_ptr,
+                               void* o_ptr,
+                               void* softmax_lse_ptr,
+                               DType dtype,
+                               hipStream_t stream);
+
+void ck_attn_smallseq_bwd_bshd(size_t batch_size,
+                               size_t num_heads,
+                               size_t seqlen_q,
+                               size_t seqlen_kv,
+                               size_t head_dim_qk,
+                               float attn_scale,
+                               const void* q_ptr,
+                               const void* k_ptr,
+                               const void* v_ptr,
+                               const void* do_ptr,
+                               const void* softmax_lse_ptr,
+                               void* dq_ptr,
+                               void* dk_ptr,
+                               void* dv_ptr,
+                               DType dtype,
+                               hipStream_t stream);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
