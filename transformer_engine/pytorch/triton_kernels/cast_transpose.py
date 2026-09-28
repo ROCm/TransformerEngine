@@ -869,13 +869,13 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
         max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
 
 
-def mxfp8_e4m3_rowwise_downcast(x):
+def mxfp8_e4m3_rowwise_downcast(x, transpose_scale=False):
     """Fused single-pass MXFP8 e4m3 row-wise downcast (Kimi-K3 a8w4 activation).
 
-    ``x`` [M, K] (K a multiple of 32) -> (data [M, K] e4m3, scale [M, K/32] uint8
-    E8M0), using the ceil scale rule ``ceil(log2(amax_block / 448))``. Reuses
-    :func:`_cast_transpose_triton_mxfp8` row-wise only, so it is bit-identical to the
-    torch reference ``_row_operand_mxfp8_torch`` but single-pass.
+    ``x`` [M, K] (K a multiple of 32) -> (data [M, K] e4m3, scale uint8 E8M0), using the
+    ceil scale rule ``ceil(log2(amax_block / 448))``. Reuses :func:`_cast_transpose_triton_mxfp8`
+    row-wise only, so it is bit-identical to the torch reference ``_row_operand_mxfp8_torch``
+    but single-pass.
     """
     assert x.shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0, "K must be a multiple of 32"
     x = x.contiguous()
@@ -883,7 +883,12 @@ def mxfp8_e4m3_rowwise_downcast(x):
     grid_k = K // MXFP8_BLOCK_SCALING_SIZE
     fp8_dtype = tex.DType.kFloat8E4M3
     data = torch.empty((M, K), dtype=te_dtype_to_torch_dtype(fp8_dtype), device=x.device)
-    scale = torch.empty((M, grid_k), dtype=torch.uint8, device=x.device)
+    if transpose_scale:
+        scale = torch.empty((grid_k, M), dtype=torch.uint8, device=x.device)
+        scale_stride_m, scale_stride_k = scale.stride(1), scale.stride(0)
+    else:
+        scale = torch.empty((M, grid_k), dtype=torch.uint8, device=x.device)
+        scale_stride_m, scale_stride_k = scale.stride(0), scale.stride(1)
     rowwise_y = triton.reinterpret(data, te_dtype_to_triton_dtype(fp8_dtype))
     BLOCK_X = BLOCK_Y = 64
     GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
@@ -892,7 +897,7 @@ def mxfp8_e4m3_rowwise_downcast(x):
         x, rowwise_y, None,
         x.stride(0), x.stride(1),
         M, K,
-        scale, scale.stride(0), scale.stride(1),
+        scale, scale_stride_m, scale_stride_k,
         M, grid_k,
         None, 1, 1,
         1, 1,

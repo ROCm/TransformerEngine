@@ -239,3 +239,10 @@ def test_row_operand_mxfp8_fused_matches_torch():
         assert torch.equal(
             d_fused.view(torch.uint8), d_ref.view(torch.uint8)
         ), f"e4m3 data bytes differ at {(M, K)}"
+        # transposed-scale (a8w4 swizzle) path: [K/32, M], must equal the plain scale.T
+        _, s_fused_t = _row_operand_mxfp8(x, transpose_scale=True)
+        _, s_ref_t = _row_operand_mxfp8_torch(x, transpose_scale=True)
+        assert torch.equal(s_fused_t, s_ref_t), f"transposed E8M0 scales differ at {(M, K)}"
+        assert torch.equal(
+            s_fused_t, s_ref.t().contiguous()
+        ), f"transposed scale != plain scale.T at {(M, K)}"

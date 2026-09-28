@@ -999,8 +999,9 @@ class _GroupedLinear(torch.autograd.Function):
         input_quantizer.set_usage(rowwise=True, columnwise=False)
         a_is_mxfp8 = isinstance(input_quantizer, MXFP8E4M3QuantizerRef)
         if a_is_mxfp8:
-            # a8w4 activation: fused single-pass MXFP8 e4m3 downcast on gfx950
-            a_data, a_scale = _row_operand_mxfp8(a)
+            # a8w4 activation: fused single-pass MXFP8 e4m3 downcast on gfx950; emit the
+            # scale transposed ([K/32, M]) for the kernel's swizzle path.
+            a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)
         else:
             aq = input_quantizer.quantize(a)
             a_data, a_scale = aq.data, aq.scale
@@ -1029,6 +1030,9 @@ class _GroupedLinear(torch.autograd.Function):
                     wcol_scales.append(wref.scale_t)
             b_data = torch.stack(b_datas, dim=0)
             b_scale = torch.stack(b_scales, dim=0)
+            if a_is_mxfp8:
+                # a8w4 swizzle: cache the weight scale transposed ([G, K/32, N])
+                b_scale = b_scale.transpose(1, 2).contiguous()
             w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
             w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
             if cache_weight:
@@ -1042,6 +1046,7 @@ class _GroupedLinear(torch.autograd.Function):
             m_splits_list,
             a_is_mxfp8=a_is_mxfp8,
             out_dtype=activation_dtype,
+            scale_transposed=a_is_mxfp8,
         )
 
         if is_grad_enabled:
