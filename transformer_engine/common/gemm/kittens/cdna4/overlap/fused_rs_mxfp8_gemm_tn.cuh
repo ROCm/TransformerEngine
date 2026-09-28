@@ -119,7 +119,7 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
                              int *__restrict__ tile_counter, const RsPeers peers,
                              int my_pe, int ncomm,
                              int bands, int wb_group, 
-                             uint64_t warn_ticks) {
+                             uint64_t warn_ticks, bf16 *__restrict__ next_stage) {
     const int M       = A.rows();
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
@@ -132,7 +132,7 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     if ((int)blockIdx.x < ncomm) {
         // The comm workgroups are the reduce-scatter: they read all eight sources and write `out` once.
         pull_reduce_all_sent<TP, true>(my_pe, ncomm, bands, local_stage, peers, out, band_elems,
-                                       warn_ticks);
+                                       warn_ticks, next_stage);
     }
 
     const int hy_ncw = (int)gridDim.x - ncomm;
@@ -270,6 +270,7 @@ struct RsLaunchCfg {
     int comm_wg  = COMM_WG;
     int wb_group = 1;
     uint64_t warn_ticks = 0;   // 0 disables the fold's stall report
+    bf16 *next_stage = nullptr;   // the other stage half, poisoned in-kernel for the next call
 };
 
 template <int CBSZ, int BLGP>
@@ -305,7 +306,7 @@ static void launch_persistent_rs(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m
 #define RS_LAUNCH(TPV)                                                                                     \
     persistent_rs_mxfp8_gemm<TPV, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(                            \
         A_gl, B_gl, d_local_stage, d_out, C_stage, SA_gl, SB_gl, d_queue, num_tiles, d_tile_counter,        \
-        peers, my_pe, ncomm, bands, cfg.wb_group, cfg.warn_ticks)
+        peers, my_pe, ncomm, bands, cfg.wb_group, cfg.warn_ticks, cfg.next_stage)
 
     switch (tp_size) {
         case 8: RS_LAUNCH(8); break;
