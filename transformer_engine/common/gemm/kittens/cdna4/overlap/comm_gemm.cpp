@@ -1092,7 +1092,10 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     const PlanKey key{3, M, N_TOTAL, K, tp_size, args.rank, 1};
     auto it = g_rs_plans.find(key);
-    if (it == g_rs_plans.end()) {
+    // First call for this plan: nothing has poisoned the stage yet, so the host arms it below.
+    // Every later call finds its half already poisoned by the previous call's kernel.
+    const bool bootstrap = (it == g_rs_plans.end());
+    if (bootstrap) {
         RsPlan plan;
         auto queue = build_rs_work_queue(M, N_TOTAL, K, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
@@ -1120,6 +1123,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     const uint64_t epoch = g_rs_epoch[args.ub]++;
     const size_t stage_off = (epoch & 1ull) ? lay.recv_off : 0;
+    const size_t next_off  = (epoch & 1ull) ? 0 : lay.recv_off;
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
     if (!bases) return false;
@@ -1135,12 +1139,15 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
 
-    // Arms the sentinel, which is what orders a peer's stage read against its epilogue store.
+    // Arms the sentinel, which is what orders a peer's stage read against its epilogue store. Only
+    // the first call arms it here; the kernel's comm workgroups poison the other half for the next.
     if (!sentinel_pattern_agrees()) return false;
-    const size_t stage_dw = lay.stage_bytes / sizeof(unsigned int);
-    if (hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_DW, stage_dw,
-                          args.stream) != hipSuccess) {
-        return false;
+    if (bootstrap) {
+        const size_t stage_dw = lay.stage_bytes / sizeof(unsigned int);
+        if (hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_DW, stage_dw,
+                              args.stream) != hipSuccess) {
+            return false;
+        }
     }
 
     if (!args.arrive_peers || !args.arrive_local) return false;
@@ -1155,6 +1162,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     cfg.comm_wg    = rs_comm_wg_tn_mxfp8(N_TOTAL, M, K);
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();
+    cfg.next_stage = reinterpret_cast<bf16 *>(lb + next_off);
 
     // 4. Operands are MXFP8, not bf16; CBSZ/BLGP travel with them.
     auto launch = get_persistent_rs_fn(args.a_dtype, args.b_dtype);

@@ -371,11 +371,21 @@ unsigned int sent_slot_pending(const int *__restrict__ v) {
 // spinning per 16-byte line until the producing GEMM has replaced the poison. Shared by the bf16 and
 // MXFP8 TN kernels -- they differ in which axis the bands run along, but a band is contiguous in the
 // stage either way, so the fold only ever sees `bands` and `band_elems`.
+//
+// `next_stage`, when set, is this rank's other stage half: the one the next call on this userbuffer
+// works in. As each line folds, the workgroup poisons the same (source, band, line) slots of that
+// half, which covers the whole half exactly once across the comm workgroups, so the host need not
+// arm the sentinel per call. The stores sit on the success path so a line still spinning on the
+// sentinel does not rewrite its poison on every retry. Safe because this call's arrival handshake
+// already proved no peer is still reading that half (it was last used two calls ago), and the next
+// call's handshake, issued after this kernel on the same stream, publishes the poison before any
+// peer pulls from it.
 template <int TP, bool NT>
 __device__ __forceinline__
 void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
                           const kittens::bf16 *__restrict__ local_stage, const RsPeers &peers,
-                          kittens::bf16 *__restrict__ out, size_t band_elems, uint64_t warn_ticks) {
+                          kittens::bf16 *__restrict__ out, size_t band_elems, uint64_t warn_ticks,
+                          kittens::bf16 *__restrict__ next_stage = nullptr) {
     const int w        = (int)blockIdx.x;
     const size_t lines = band_elems / 8;
     typedef int v4i __attribute__((ext_vector_type(4)));
@@ -387,6 +397,8 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
     const size_t g0    = (size_t)w * per_g;
     if (g0 >= lines) return;
     const size_t g1    = (g0 + per_g < lines) ? (g0 + per_g) : lines;
+
+    const v4i poison = {(int)RS_SENT_DW, (int)RS_SENT_DW, (int)RS_SENT_DW, (int)RS_SENT_DW};
 
     for (int b0 = 0; b0 < bands; b0++) {
         const size_t soff = ((size_t)my_pe * bands + b0) * band_elems;
@@ -433,6 +445,13 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
                 __builtin_nontemporal_store(res, &dst[l]);
             } else {
                 dst[l] = res;
+            }
+            if (next_stage) {
+#pragma unroll
+                for (int s = 0; s < TP; s++) {
+                    v4i *nxt = (v4i *)(next_stage + ((size_t)s * bands + b0) * band_elems);
+                    __builtin_nontemporal_store(poison, &nxt[l]);
+                }
             }
             l += blockDim.x;
         }
