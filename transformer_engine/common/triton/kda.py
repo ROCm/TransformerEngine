@@ -1729,19 +1729,23 @@ KDA_VARLEN_PLAN_BLOCK: int = 256
 
 
 class KDALaunchConfig:
-    """Tile parameters, ``num_warps`` and ``num_stages`` for one kernel launch."""
+    """Tile parameters, ``num_warps``, ``num_stages`` and (ROCm) ``waves_per_eu`` for one launch.
 
-    __slots__ = ("kwargs", "num_warps", "num_stages")
+    ``waves_per_eu`` is the AMD occupancy hint; 0 leaves it to the compiler.
+    """
 
-    def __init__(self, kwargs=None, num_warps=4, num_stages=3):
+    __slots__ = ("kwargs", "num_warps", "num_stages", "waves_per_eu")
+
+    def __init__(self, kwargs=None, num_warps=4, num_stages=3, waves_per_eu=0):
         self.kwargs = dict(kwargs or {})
         self.num_warps = num_warps
         self.num_stages = num_stages
+        self.waves_per_eu = waves_per_eu
 
     def __repr__(self):
         return (
             f"KDALaunchConfig({self.kwargs}, num_warps={self.num_warps},"
-            f" num_stages={self.num_stages})"
+            f" num_stages={self.num_stages}, waves_per_eu={self.waves_per_eu})"
         )
 
 
@@ -1791,10 +1795,15 @@ _KDA_CONFIGS = {
     },
     "gfx950": {
         "gla_fwd_o": KDALaunchConfig({"BK": 64, "BV": 128}, num_warps=8, num_stages=3),
+        # The LDS-prefetching pass A needs ~280 VGPRs; waves_per_eu=2 holds it
+        # to 256 (a few spills) for 2 waves/SIMD, worth 1.05-1.13x end to end
+        # on segmented shapes over letting it drop to 1 wave.
         "flash_gluon_k2_wide": KDALaunchConfig(
-            {"BW": 64, "MIN_BLOCKS_PER_CU": 2}, num_warps=4, num_stages=2
+            {"BW": 64, "MIN_BLOCKS_PER_CU": 2}, num_warps=4, num_stages=2, waves_per_eu=2
         ),
-        "flash_gluon_k2_narrow": KDALaunchConfig({"BW": 32}, num_warps=2, num_stages=2),
+        "flash_gluon_k2_narrow": KDALaunchConfig(
+            {"BW": 32}, num_warps=2, num_stages=2, waves_per_eu=2
+        ),
     },
 }
 
@@ -1897,14 +1906,18 @@ def flash_kda_scan_bv(n_seqs: int, H: int, V: int, num_cus: int) -> tuple:
 
 
 def flash_kda_gluon_k2_schedule(W: int, num_segs: int, H: int, arch: str, num_cus: int) -> tuple:
-    """``(BW, num_warps, num_stages)`` for the Gluon fused pass A, which does not autotune."""
+    """``(BW, num_warps, num_stages, waves_per_eu)`` for the Gluon fused pass A.
+
+    It does not autotune; the wide tile is taken when it still gives
+    ``MIN_BLOCKS_PER_CU`` blocks per CU.
+    """
     wide = kda_launch_config("flash_gluon_k2_wide", arch)
     bw = wide.kwargs["BW"]
     blocks = (W // bw) * num_segs * H
-    if W % bw == 0 and blocks >= wide.kwargs["MIN_BLOCKS_PER_CU"] * num_cus:
-        return bw, wide.num_warps, wide.num_stages
-    narrow = kda_launch_config("flash_gluon_k2_narrow", arch)
-    return narrow.kwargs["BW"], narrow.num_warps, narrow.num_stages
+    cfg = wide
+    if W % bw != 0 or blocks < wide.kwargs["MIN_BLOCKS_PER_CU"] * num_cus:
+        cfg = kda_launch_config("flash_gluon_k2_narrow", arch)
+    return cfg.kwargs["BW"], cfg.num_warps, cfg.num_stages, cfg.waves_per_eu
 
 
 def flash_kda_fixed_segments(B: int, T: int, C: int, chunks_per_seg: int) -> tuple:

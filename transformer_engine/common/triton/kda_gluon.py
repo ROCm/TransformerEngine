@@ -308,8 +308,15 @@ def flash_kda_k2_layouts(nw, kw=KW, kw_big=KW_BIG):
         "MMA_B": mma_b,
         "A_OP_B": gl.DotOperandLayout(0, mma_b, kw_big),
         "B_OP_B": gl.DotOperandLayout(1, mma_b, kw_big),
+        # Sources of the global -> LDS copies: 128 (or 32) bits per thread and
+        # no lane replication, as buffer_load_to_shared requires.
         "BLK": gl.BlockedLayout([1, 8], [4, 16], [nw, 1], [1, 0]),
-        "SH_KR": gl.SwizzledSharedLayout(8, 1, 16, [0, 1]),
+        "BLK_CC": gl.BlockedLayout([1, 2], [4, 16], [nw, 1], [1, 0]),
+        # gt and beta: one element per thread, loaded to registers.
+        "BLK_1D": gl.BlockedLayout([1], [64], [nw], [0]),
+        "SH_WS": gl.SwizzledSharedLayout(8, 1, 16, [1, 0]),
+        "SH_PLAIN": gl.SwizzledSharedLayout(1, 1, 1, [1, 0]),
+        "SH_1D": gl.SwizzledSharedLayout(1, 1, 1, [0]),
     }
 
 
@@ -357,16 +364,55 @@ def _recur(
 
 
 @gluon.jit
-def _kr_operand(
-    kr_raw,
+def _issue_chunk(
+    ws_kd,
+    ws_kr,
+    ws_gt,
+    ws_inv_mqk,
+    v_input,
+    beta_raw,
+    s_kd,
+    s_kr,
+    s_inv,
+    s_v,
+    ws_idx,
+    t0,
+    tok_end,
+    ws_off,
+    cc_off,
+    v_off,
+    o_c_v,
+    o_k_g,
+    o_c_g,
+    beta_off,
+    H: gl.constexpr,
     K: gl.constexpr,
+    V: gl.constexpr,
     C: gl.constexpr,
-    SH_KR: gl.constexpr,
-    A_OP: gl.constexpr,
 ):
-    return gl.allocate_shared_memory(gl.bfloat16, [K, C], SH_KR, gl.permute(kr_raw, 1, 0)).load(
-        A_OP
+    """Start fetching one chunk: its tiles by async copy into LDS, and ``gt`` /
+    ``beta`` (returned) into registers, one element per thread.
+
+    ``gt`` and ``beta`` are too small to copy without lane replication, which
+    the async copy cannot lower. They are issued first because ``vmcnt``
+    retires in order: waiting on them must not also wait on the copies.
+    Tail rows of ``beta`` and ``v`` are masked here; ``beta`` masked to 0 is
+    harmless because the recurrence zeroes those rows of U anyway.
+    """
+    tb = t0 * H
+    gt = gl.amd.cdna4.buffer_load(ptr=ws_gt + ws_idx * K, offsets=o_k_g)
+    beta = gl.amd.cdna4.buffer_load(
+        ptr=beta_raw + tb, offsets=beta_off, mask=(t0 + o_c_g) < tok_end, other=0.0
     )
+    ck = ws_idx * (C * K)
+    gl.amd.cdna4.async_copy.buffer_load_to_shared(s_kd, ws_kd + ck, ws_off)
+    gl.amd.cdna4.async_copy.buffer_load_to_shared(s_kr, ws_kr + ck, ws_off)
+    gl.amd.cdna4.async_copy.buffer_load_to_shared(s_inv, ws_inv_mqk + ws_idx * (2 * C * C), cc_off)
+    gl.amd.cdna4.async_copy.buffer_load_to_shared(
+        s_v, v_input + tb * V, v_off, mask=((t0 + o_c_v) < tok_end)[:, None], other=0.0
+    )
+    gl.amd.cdna4.async_copy.commit_group()
+    return gt, beta
 
 
 @gluon.jit
@@ -396,13 +442,21 @@ def flash_kda_k2_ab_fused_gluon(
     A_OP_B: gl.constexpr,
     B_OP_B: gl.constexpr,
     BLK: gl.constexpr,
-    SH_KR: gl.constexpr,
+    BLK_CC: gl.constexpr,
+    BLK_1D: gl.constexpr,
+    SH_WS: gl.constexpr,
+    SH_PLAIN: gl.constexpr,
+    SH_1D: gl.constexpr,
     NUM_XCDS: gl.constexpr,
 ):
     """Both pass-A recurrences (``b_seg`` and ``A_seg``) in one launch, sharing operand loads.
 
     The two chains are independent, so the scheduler interleaves them, which
     covers the serial dependence each has on its own. Requires ``K == V``.
+
+    Chunk j+1's operands are fetched while chunk j computes: its tiles by
+    async global -> LDS copy into the other half of a double buffer, so the
+    prefetch costs no registers (a register prefetch halves occupancy).
     """
     # Keeps a (segment, head)'s V blocks on one XCD, so their re-reads of the
     # chunk workspace share an L2. See the Triton K2 for the full reasoning.
@@ -418,48 +472,72 @@ def flash_kda_k2_ab_fused_gluon(
     tok_base = gl.load(seg_tok_base + i_seg).to(gl.int64)
     tok_end = gl.load(seg_tok_end + i_seg).to(gl.int64)
 
-    o_c_ab = gl.arange(0, C, layout=gl.SliceLayout(1, A_OP_B))
-    o_k_ab = gl.arange(0, K, layout=gl.SliceLayout(0, A_OP_B))
-    o_c_a = gl.arange(0, C, layout=gl.SliceLayout(1, A_OP))
-    o_cc_a = gl.arange(0, C, layout=gl.SliceLayout(0, A_OP))
+    BLK_V: gl.constexpr = gl.BlockedLayout(
+        [1, 8], [64 // (BW // 8), BW // 8], [gl.num_warps(), 1], [1, 0]
+    )
     o_c_s = gl.arange(0, C, layout=gl.SliceLayout(1, BLK))
     o_k_s = gl.arange(0, K, layout=gl.SliceLayout(0, BLK))
+    o_r_cc = gl.arange(0, C, layout=gl.SliceLayout(1, BLK_CC))
+    o_c_cc = gl.arange(0, C, layout=gl.SliceLayout(0, BLK_CC))
+    o_c_v = gl.arange(0, C, layout=gl.SliceLayout(1, BLK_V))
+    o_w_v = i_w * BW + gl.arange(0, BW, layout=gl.SliceLayout(0, BLK_V))
+    o_k_g = gl.arange(0, K, layout=BLK_1D)
+    o_c_g = gl.arange(0, C, layout=BLK_1D)
     o_c_m = gl.arange(0, C, layout=gl.SliceLayout(1, MMA))
     o_k_m = gl.arange(0, K, layout=gl.SliceLayout(1, MMA))
     o_w_m = i_w * BW + gl.arange(0, BW, layout=gl.SliceLayout(0, MMA))
 
-    kd_off = (o_c_ab[:, None] * K + o_k_ab[None, :]).to(gl.int32)
-    inv_off = (o_c_a[:, None] * C + o_cc_a[None, :]).to(gl.int32)
-    kr_off = (o_c_s[:, None] * K + o_k_s[None, :]).to(gl.int32)
-    gt_off = o_k_m.to(gl.int32)
-    beta_off = (i_h + o_c_m * H).to(gl.int32)
-    v_off = (i_h * V + o_c_m[:, None] * (H * V) + o_w_m[None, :]).to(gl.int32)
+    ws_off = (o_c_s[:, None] * K + o_k_s[None, :]).to(gl.int32)
+    cc_off = (o_r_cc[:, None] * C + o_c_cc[None, :]).to(gl.int32)
+    v_off = (i_h * V + o_c_v[:, None] * (H * V) + o_w_v[None, :]).to(gl.int32)
+    beta_off = (i_h + o_c_g * H).to(gl.int32)
+
+    inv_ty: gl.constexpr = ws_inv_mqk.dtype.element_ty
+    s_kd = gl.allocate_shared_memory(gl.bfloat16, [2, C, K], SH_WS)
+    s_kr = gl.allocate_shared_memory(gl.bfloat16, [2, C, K], SH_WS)
+    s_inv = gl.allocate_shared_memory(inv_ty, [2, C, C], SH_PLAIN)
+    s_v = gl.allocate_shared_memory(v_input.dtype.element_ty, [2, C, BW], SH_PLAIN)
+    # gt / beta go register -> LDS once they land, so the per-thread copies
+    # of the MMA slice layout are only materialized at their use.
+    s_gt = gl.allocate_shared_memory(gl.float32, [2, K], SH_1D)
+    s_beta = gl.allocate_shared_memory(gl.float32, [2, C], SH_1D)
 
     h_b = gl.zeros([K, BW], gl.float32, MMA)
     h_a = gl.where(o_k_m[:, None] == o_w_m[None, :], 1.0, 0.0)
 
     ws0 = i_h * TOTAL_TILES + chunk_base
-    inv_ty: gl.constexpr = ws_inv_mqk.dtype.element_ty
+    gt_n = gl.zeros([K], gl.float32, BLK_1D)
+    beta_n = gl.zeros([C], gl.float32, BLK_1D)
+    if n_chunks > 0:
+        gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw,
+                                    s_kd.index(0), s_kr.index(0), s_inv.index(0), s_v.index(0),
+                                    ws0, tok_base, tok_end, ws_off, cc_off, v_off, o_c_v, o_k_g,
+                                    o_c_g, beta_off, H, K, V, C)  # fmt: skip
 
     for j in range(n_chunks):
-        ws_idx = ws0 + j
-        ck = ws_idx * (C * K)
-        t0 = tok_base + j * C
-        tb = t0 * H
-        m_c = (t0 + o_c_m) < tok_end
+        cur = j % 2
+        # Chunk j has landed in half `cur` (every thread's copies, once past
+        # the barrier), and every thread is done reading the other half, which
+        # held chunk j-1, before it is refilled.
+        gl.amd.cdna4.async_copy.wait_group(0)
+        s_gt.index(cur).store(gt_n)
+        s_beta.index(cur).store(beta_n)
+        gl.barrier()
+        if j + 1 < n_chunks:
+            gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw,
+                                        s_kd.index(1 - cur), s_kr.index(1 - cur),
+                                        s_inv.index(1 - cur), s_v.index(1 - cur), ws0 + j + 1,
+                                        tok_base + (j + 1) * C, tok_end, ws_off, cc_off, v_off,
+                                        o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C)  # fmt: skip
 
-        kd_a = gl.amd.cdna4.buffer_load(ptr=ws_kd + ck, offsets=kd_off)
-        inv_a = gl.amd.cdna4.buffer_load(ptr=ws_inv_mqk + ws_idx * (2 * C * C), offsets=inv_off)
-        gt = gl.amd.cdna4.buffer_load(ptr=ws_gt + ws_idx * K, offsets=gt_off)
-        kr_raw = gl.amd.cdna4.buffer_load(ptr=ws_kr + ck, offsets=kr_off)
-        beta = _k2_sigmoid(
-            gl.amd.cdna4.buffer_load(ptr=beta_raw + tb, offsets=beta_off, mask=m_c, other=0.0)
-        )
-        b_v = gl.amd.cdna4.buffer_load(
-            ptr=v_input + tb * V, offsets=v_off, mask=m_c[:, None], other=0.0
-        ).to(gl.float32)
-
-        kr_a = _kr_operand(kr_raw, K, C, SH_KR, A_OP)
+        kd_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kd.index(cur), A_OP_B)
+        # ws_kr is [C, K] in memory; the permuted view is the kr^T A operand.
+        kr_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kr.index(cur).permute((1, 0)), A_OP)
+        inv_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_inv.index(cur), A_OP)
+        b_v = gl.amd.cdna4.async_copy.load_shared_relaxed(s_v.index(cur), MMA).to(gl.float32)
+        gt = s_gt.index(cur).load(gl.SliceLayout(1, MMA))
+        beta = _k2_sigmoid(s_beta.index(cur).load(gl.SliceLayout(1, MMA)))
+        m_c = (tok_base + j * C + o_c_m) < tok_end
         # Written one after the other so the scheduler has two independent MFMA
         # chains to interleave.
         h_b, _u, _h = _recur(h_b, kd_a, inv_a, kr_a, gt, beta, b_v, m_c, C, BW,

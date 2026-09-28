@@ -108,6 +108,7 @@ def _kda_call_lowering(
     num_stages,
     aliases,
     gluon_k2_warps,
+    waves_per_eu,
 ):
     del out_shapes
     consts = dict(constexprs)
@@ -125,6 +126,7 @@ def _kda_call_lowering(
         num_warps=num_warps,
         num_stages=num_stages,
         enable_fp_fusion=True,
+        waves_per_eu=waves_per_eu,
     )
 
 
@@ -143,6 +145,7 @@ def _call(
     num_stages=3,
     aliases=None,
     gluon_k2_warps=0,
+    waves_per_eu=0,
 ):
     """Launch ``kernel`` once.
 
@@ -178,6 +181,7 @@ def _call(
         num_stages=int(num_stages),
         aliases=alias_pairs,
         gluon_k2_warps=int(gluon_k2_warps),
+        waves_per_eu=int(waves_per_eu),
     )
     return dict(zip(out_names, outs))
 
@@ -790,7 +794,7 @@ def _flash_fwd(
         seg_state = (num_segs, H, K, V)
         seg_op = (num_segs, H, K, K)
         if _use_gluon("k2", arch):
-            bw, nw, ns = flash_kda_gluon_k2_schedule(V, num_segs, H, arch, num_cus)
+            bw, nw, ns, wpe = flash_kda_gluon_k2_schedule(V, num_segs, H, arch, num_cus)
             r = _call(
                 _gluon_module().flash_kda_k2_ab_fused_gluon,
                 [
@@ -819,6 +823,7 @@ def _flash_fwd(
                 num_warps=nw,
                 num_stages=ns,
                 gluon_k2_warps=nw,
+                waves_per_eu=wpe,
             )
             b_seg, A_seg = r["h_out_b"], r["h_out_a"]
         else:

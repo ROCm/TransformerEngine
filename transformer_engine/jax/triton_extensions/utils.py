@@ -381,6 +381,7 @@ def compile_triton(
     compute_capability: int,
     enable_fp_fusion: bool = False,
     within_2gb: frozenset = frozenset(),
+    waves_per_eu: int = 0,
 ):
     """Compile a Triton or Gluon kernel to a GPU binary (PTX on CUDA, HSACO on ROCm).
 
@@ -398,6 +399,8 @@ def compile_triton(
         enable_fp_fusion: Enable FP fusion optimizations (default False for accuracy)
         within_2gb: Names of array arguments whose buffers span at most 2**31 - 1
             bytes (ROCm only; see the ``tt.pointer_range`` note below)
+        waves_per_eu: AMD occupancy hint, as the ``waves_per_eu`` launch option of
+            Triton's JIT (ROCm only; 0 leaves it to the compiler)
 
     Returns:
         TritonKernel object for JAX
@@ -422,6 +425,7 @@ def compile_triton(
                 is_hip,
                 is_gluon,
                 tuple(sorted(within_2gb)),
+                waves_per_eu,
             )
         ).encode()
     ).hexdigest()
@@ -442,15 +446,16 @@ def compile_triton(
 
         target = triton.runtime.driver.active.get_current_target()
         backend = make_backend(target)
-        options = backend.parse_options(
-            {
-                "num_warps": num_warps,
-                "num_ctas": num_ctas,
-                "num_stages": num_stages,
-                "warp_size": target.warp_size,
-                "enable_fp_fusion": enable_fp_fusion,
-            }
-        )
+        hip_options = {
+            "num_warps": num_warps,
+            "num_ctas": num_ctas,
+            "num_stages": num_stages,
+            "warp_size": target.warp_size,
+            "enable_fp_fusion": enable_fp_fusion,
+        }
+        if waves_per_eu:
+            hip_options["waves_per_eu"] = waves_per_eu
+        options = backend.parse_options(hip_options)
         binary_key = backend.binary_ext
     else:
         cuda_option_kwargs = {}
@@ -573,6 +578,7 @@ def triton_call_lowering(
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
     enable_fp_fusion: bool = False,
+    waves_per_eu: int = 0,
 ):
     """Helper for MLIR lowering that calls a Triton kernel.
 
@@ -604,6 +610,8 @@ def triton_call_lowering(
         enable_fp_fusion: Allow FMA contraction (default False for accuracy). Pass
                     True to match a kernel launched from PyTorch, where Triton
                     enables it by default.
+        waves_per_eu: AMD occupancy hint for non-autotuned kernels (ROCm only; 0,
+                    the default, leaves it to the compiler).
 
     Returns:
         MLIR lowering result
@@ -810,6 +818,7 @@ def triton_call_lowering(
             compute_capability,
             enable_fp_fusion=enable_fp_fusion,
             within_2gb=within_2gb,
+            waves_per_eu=waves_per_eu,
         )
 
         kernel_params = []

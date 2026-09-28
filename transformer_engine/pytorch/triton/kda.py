@@ -727,7 +727,7 @@ def _flash_fwd(
         A_seg = torch.empty(num_segs, H, K, K, dtype=torch.bfloat16, device=dev)
         if _use_gluon("k2", arch):
             _, k2_gluon = _gluon_launchers()
-            bw, nw, ns = flash_kda_gluon_k2_schedule(V, num_segs, H, arch, num_cus)
+            bw, nw, ns, wpe = flash_kda_gluon_k2_schedule(V, num_segs, H, arch, num_cus)
             k2_gluon[(triton.cdiv(V, bw), num_segs * H)](
                 ws_kd=ws_kd,
                 ws_kr=ws_kr,
@@ -751,6 +751,7 @@ def _flash_fwd(
                 NUM_XCDS=kda_num_xcds(arch),
                 num_warps=nw,
                 num_stages=ns,
+                waves_per_eu=wpe,
             )
         else:
             for buf, width, identity, has_v in (
