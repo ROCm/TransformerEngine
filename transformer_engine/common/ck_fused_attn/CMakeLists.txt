@@ -247,9 +247,16 @@ target_link_directories(ck_fused_attn PUBLIC ${__AITER_MHA_PATH})
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 -l:te_libmha_fwd.so -l:te_libmha_bwd.so)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
-set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
+te_set_rocm_rpath(ck_fused_attn "$ORIGIN")
 
 if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
   install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${AITER_MHA_INSTALL_DIR})
 endif()
 install(TARGETS ck_fused_attn DESTINATION ${AITER_MHA_INSTALL_DIR})
+
+# The MHA libs come out of the QoLA/CK-JIT build, or already built from a
+# prebuilt AITER cache, so we have no link step to give them a RUNPATH. Patch
+# the installed copies instead.
+te_patchelf_rocm_rpath(
+  "${AITER_MHA_INSTALL_DIR}/te_libmha_fwd.so"
+  "${AITER_MHA_INSTALL_DIR}/te_libmha_bwd.so")

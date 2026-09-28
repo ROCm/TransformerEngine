@@ -225,6 +225,25 @@ def _rocm_sdk_path_root() -> Optional[Path]:
     except (ImportError, ModuleNotFoundError, OSError):
         return None
 
+
+def rocm_rpath_enabled() -> bool:
+    """Whether to bake RUNPATHs pointing at the rocm-sdk packages into the libraries.
+
+    Only meaningful when building against the rocm-sdk pip packages: the
+    RUNPATHs point at the _rocm_sdk_* package directories, which a /opt/rocm
+    build does not have.
+
+    NVTE_ROCM_RPATH overrides the detection, for cross-config builds such as
+    producing a /opt/rocm wheel on a machine that also has rocm-sdk. Turning it
+    off leaves the libraries with no way to find the rocm-sdk packages, so the
+    result only runs against a system ROCm install resolved via ldconfig.
+    """
+    override = os.getenv("NVTE_ROCM_RPATH")
+    if override is not None:
+        return bool(int(override))
+    return _rocm_sdk_path_root() is not None
+
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """

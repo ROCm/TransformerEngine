@@ -93,6 +93,7 @@ else()
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
     target_compile_definitions(kittens_gemm PRIVATE ${_kittens_have_defs})
     target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
+    te_set_rocm_rpath(kittens_gemm "$ORIGIN")
 
     install(TARGETS kittens_gemm
         DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/lib)
