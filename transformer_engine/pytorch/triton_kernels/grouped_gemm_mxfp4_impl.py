@@ -19,6 +19,7 @@ from .grouped_gemm_mxfp4 import (
     grouped_gemm_mxfp4_triton_kernel,
     grouped_gemm_mxfp4_variable_k_triton_kernel,
 )
+from .cast_transpose import mxfp8_e4m3_rowwise_downcast
 
 # Logical contraction tile the kernels step by (see grouped_gemm_mxfp4.py).
 BLOCK_SIZE_K = 128
@@ -145,15 +146,13 @@ def _row_col_operand(
     return row_data, row_scale, col_data, col_scale
 
 
-def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def _row_operand_mxfp8_torch(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Row-wise MXFP8 (e4m3): ``x`` [M, K] -> (data [M, K] e4m3, scale [M, K/32] u8).
 
-    Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block,
-    with the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. This is a
-    reference cast matching the a8w4 kernel's tested operand layout; the GATE-2
-    quantizer-parity pass swaps in the recipe quantizer for exact QAT parity.
-    ``K`` (the contraction) is already a 32-multiple; ``M`` needs no padding since
-    the scale is per-row.
+    Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block, with
+    the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. Torch multi-pass reference;
+    :func:`_row_operand_mxfp8` uses the fused single-pass kernel on gfx950. ``K`` (the
+    contraction) is already a 32-multiple; ``M`` needs no padding (scale is per-row).
     """
     fmax = torch.finfo(torch.float8_e4m3fn).max
     M, K = x.shape
@@ -164,6 +163,16 @@ def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     data = q.reshape(M, K).contiguous()
     scale = (exp.squeeze(-1) + 127).to(torch.uint8)
     return data, scale
+
+
+def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Row-wise MXFP8 (e4m3) downcast (ceil rule): fused single-pass Triton on gfx950
+    (:func:`mxfp8_e4m3_rowwise_downcast`), else the bit-identical torch reference
+    :func:`_row_operand_mxfp8_torch`. Used by the a8w4 forward (GATE-2 fused quant).
+    """
+    if _is_gfx950():
+        return mxfp8_e4m3_rowwise_downcast(x)
+    return _row_operand_mxfp8_torch(x)
 
 
 def _quantize_weights_row_col(

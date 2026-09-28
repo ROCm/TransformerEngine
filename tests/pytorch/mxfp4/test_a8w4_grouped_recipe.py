@@ -17,6 +17,8 @@ from transformer_engine.common import recipe
 
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     _row_operand,
+    _row_operand_mxfp8,
+    _row_operand_mxfp8_torch,
     grouped_gemm_mxfp4_dgrad,
     grouped_gemm_mxfp4_fprop_prequantized,
 )
@@ -223,3 +225,18 @@ def test_grouped_linear_a8w4_weight_cache_is_consistent():
 
     assert torch.equal(out_first, out_reuse), "cached weights diverged from the first microbatch"
     assert torch.equal(out_nocache, out_first), "weight caching changed the forward output"
+
+
+def test_row_operand_mxfp8_fused_matches_torch():
+    """The fused MXFP8 e4m3 downcast is bit-identical to the torch reference."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    torch.manual_seed(0)
+    for M, K in [(384, 256), (130, 256), (293, 3584)]:
+        x = torch.randn(M, K, device=device, dtype=dtype)
+        d_ref, s_ref = _row_operand_mxfp8_torch(x)
+        d_fused, s_fused = _row_operand_mxfp8(x)  # fused on gfx950
+        assert torch.equal(s_fused, s_ref), f"E8M0 scales differ at {(M, K)}"
+        assert torch.equal(
+            d_fused.view(torch.uint8), d_ref.view(torch.uint8)
+        ), f"e4m3 data bytes differ at {(M, K)}"
