@@ -1,6 +1,5 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
+# License for AMD contributions = MIT. See LICENSE for more information
 
 """End-to-end test: te.Linear under the a8w4 CustomRecipe."""
 
@@ -44,7 +43,7 @@ def test_a8w4_custom_recipe_linear_forward():
     """te.Linear forward under CustomRecipe(a8w4) == the recipe's qgemm reference."""
     _isolate()
     device, dtype = "cuda", torch.bfloat16
-    B, S, K, N = 2, 128, 256, 256  # K=256 -> loop_k>1 in the eventual fast path
+    B, S, K, N = 2, 128, 256, 256  # K=256 -> loop_k>1 in the grouped Triton path
     torch.manual_seed(0)
 
     module = te.Linear(K, N, bias=False, device=device, params_dtype=dtype)

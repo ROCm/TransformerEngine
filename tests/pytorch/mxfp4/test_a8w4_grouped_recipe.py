@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Forward fast path: grouped a8w4 reference bytes -> persistent Triton kernel.
+"""Grouped MXFP4/a8w4 recipe path: reference bytes -> persistent Triton kernel.
 
 Covers both the standalone pre-quantized entry
 (:func:`grouped_gemm_mxfp4_fprop_prequantized`) and its end-to-end use inside
@@ -90,7 +90,7 @@ def test_grouped_prequantized_a8w4_matches_reference():
 
 
 def test_grouped_linear_a8w4_recipe_forward():
-    """te.GroupedLinear forward under CustomRecipe(a8w4) routes to the fast kernel."""
+    """te.GroupedLinear forward under CustomRecipe(a8w4) routes to the grouped Triton kernel."""
     _isolate()
     device, dtype = "cuda", torch.bfloat16
     num_gemms, K, N = 4, 256, 256
@@ -185,7 +185,7 @@ def test_grouped_linear_a4w4_recipe_backward():
 
 
 def test_grouped_linear_a8w4_backward_raises():
-    """a8w4 is forward-only QAT: the grouped fast-path backward must raise clearly."""
+    """a8w4 is forward-only QAT: the grouped-path backward must raise clearly."""
     _isolate()
     device, dtype = "cuda", torch.bfloat16
     num_gemms, K, N = 2, 256, 256

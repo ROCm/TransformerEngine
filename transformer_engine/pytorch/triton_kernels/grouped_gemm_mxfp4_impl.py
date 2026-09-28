@@ -336,6 +336,56 @@ def grouped_gemm_a8w4_fprop(
     )
 
 
+def _check_prequantized_operands(
+    a_data: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_data: torch.Tensor,
+    b_scale: torch.Tensor,
+    *,
+    a_is_mxfp8: bool,
+) -> None:
+    """Validate pre-quantized operand ranks/shapes/dtypes/devices before launch.
+
+    The raw kernel indexes straight into these buffers, so a malformed operand would
+    read out of bounds rather than fail; reject it up front. Assumes ``b_data`` is
+    3-D ``[G, N, K/2]`` with ``K`` a 128-multiple (checked by the caller).
+    """
+    G, N = b_data.shape[0], b_data.shape[1]
+    K = b_data.shape[2] * 2
+    grid_k = K // MXFP4_BLOCK  # one E8M0 scale per 32-elem block along K
+    total_M = a_data.shape[0]
+    a_cols = K if a_is_mxfp8 else K // 2  # e4m3 unpacked vs e2m1 packed
+
+    if a_data.ndim != 2 or a_data.shape[1] != a_cols:
+        raise ValueError(
+            f"a_data must be [total_M, {a_cols}]"
+            f" ({'e4m3' if a_is_mxfp8 else 'packed e2m1'}), got {tuple(a_data.shape)}"
+        )
+    # Scales may be over-allocated (the reference quantizer pads rows to 256 and
+    # cols to 8); the kernel reads only the valid region via group offsets + strides,
+    # so require they merely *cover* [rows, K/32].
+    if a_scale.ndim != 2 or a_scale.shape[0] < total_M or a_scale.shape[1] < grid_k:
+        raise ValueError(
+            f"a_scale must cover at least [{total_M}, {grid_k}], got {tuple(a_scale.shape)}"
+        )
+    if (
+        b_scale.ndim != 3
+        or b_scale.shape[0] != G
+        or b_scale.shape[1] < N
+        or b_scale.shape[2] < grid_k
+    ):
+        raise ValueError(
+            f"b_scale must cover at least [{G}, {N}, {grid_k}], got {tuple(b_scale.shape)}"
+        )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("E8M0 scales (a_scale, b_scale) must be uint8")
+    if a_data.element_size() != 1 or b_data.element_size() != 1:
+        raise TypeError("packed data operands (a_data, b_data) must be 1-byte")
+    devices = {a_data.device, a_scale.device, b_data.device, b_scale.device}
+    if len(devices) != 1:
+        raise ValueError(f"pre-quantized operands must share one device, got {devices}")
+
+
 def grouped_gemm_mxfp4_fprop_prequantized(
     a_data: torch.Tensor,
     a_scale: torch.Tensor,
@@ -366,11 +416,14 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     Returns:
         ``[total_M, N]`` output in ``out_dtype``.
     """
+    _require_gfx950()
+    if b_data.ndim != 3:
+        raise ValueError(f"b_data (weights) must be 3-D [G, N, K/2], got rank {b_data.ndim}")
     N = b_data.shape[1]
     K = b_data.shape[2] * 2  # weights are packed 2 e2m1 elems/byte along K
-    _require_gfx950()
     _check_contract(K, "K")
     _check_splits(m_splits, a_data.shape[0], b_data.shape[0])
+    _check_prequantized_operands(a_data, a_scale, b_data, b_scale, a_is_mxfp8=a_is_mxfp8)
 
     group_offs = _prefix_offsets(m_splits, a_data.device)
     kernel = grouped_gemm_a8w4_triton_kernel if a_is_mxfp8 else grouped_gemm_mxfp4_triton_kernel

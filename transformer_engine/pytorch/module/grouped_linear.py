@@ -624,10 +624,30 @@ class _GroupedLinear(torch.autograd.Function):
             return False
         if not _is_gfx950():
             return False
-        wq, iq = weight_quantizers[0], input_quantizers[0]
+
+        def _plain_layout(q) -> bool:
+            # The grouped Triton kernels need plain (un-shuffled, un-swizzled,
+            # no-Hadamard) operands. MXFP8E4M3QuantizerRef is always plain; an
+            # MXFP4QuantizerRef must have every layout-transform flag off.
+            if isinstance(q, MXFP8E4M3QuantizerRef):
+                return True
+            return not (
+                q.shuffle_rowwise_data
+                or q.shuffle_columnwise_data
+                or q.with_gemm_swizzled_scales
+                or q.use_hadamard
+            )
+
         # Weight is always plain-layout E2M1; activation is E2M1 (a4w4) or E4M3 (a8w4).
-        return isinstance(wq, MXFP4QuantizerRef) and isinstance(
-            iq, (MXFP4QuantizerRef, MXFP8E4M3QuantizerRef)
+        # Check every expert quantizer -- a shuffled/swizzled/Hadamard variant of the
+        # same class would silently feed the wrong layout to the kernel.
+        if not all(
+            isinstance(q, MXFP4QuantizerRef) and _plain_layout(q) for q in weight_quantizers
+        ):
+            return False
+        return all(
+            isinstance(q, (MXFP4QuantizerRef, MXFP8E4M3QuantizerRef)) and _plain_layout(q)
+            for q in input_quantizers
         )
 
     @staticmethod
@@ -952,9 +972,9 @@ class _GroupedLinear(torch.autograd.Function):
         :meth:`_is_grouped_mxfp4_triton_supported`). The recipe's own reference
         quantizers own the quantization; their packed E2M1/E4M3 data + E8M0 scales
         feed straight into the persistent grouped kernel
-        (:func:`grouped_gemm_mxfp4_fprop_prequantized`), so the fast-path numerics
-        match the reference ``qgemm``. Forward-only: the low-precision backward is
-        not yet wired (:meth:`_backward_grouped_mxfp4_triton`).
+        (:func:`grouped_gemm_mxfp4_fprop_prequantized`), so the grouped-path numerics
+        match the reference ``qgemm``. a4w4 wires the low-precision backward; a8w4
+        is forward-only (see :meth:`_backward_grouped_mxfp4_triton`).
         """
         from ..triton_kernels.grouped_gemm_mxfp4_impl import (
             grouped_gemm_mxfp4_fprop_prequantized,
@@ -1022,16 +1042,16 @@ class _GroupedLinear(torch.autograd.Function):
 
     @staticmethod
     def _backward_grouped_mxfp4_triton(ctx, grad_output):
-        """Backward for the grouped MXFP4 / a8w4 fast path.
+        """Backward for the grouped MXFP4 / a8w4 Triton path.
 
         a4w4 uses the low-precision ``grouped_gemm_mxfp4_dgrad`` / ``_wgrad`` kernels.
         a8w4 (Kimi-K3) is a forward-only QAT recipe: its high-precision (STE) backward
-        is plain bf16, not a fast kernel, and is intentionally not wired -- run a8w4
+        is plain bf16, not a dedicated grouped kernel, and is intentionally not wired -- run a8w4
         under inference (``torch.no_grad``).
         """
         if getattr(ctx, "grouped_mxfp4_is_a8w4", False):
             raise NotImplementedError(
-                "a8w4 (Kimi-K3) is a forward-only QAT recipe on the grouped fast path; its "
+                "a8w4 (Kimi-K3) is a forward-only QAT recipe on the grouped Triton path; its "
                 "high-precision backward is not wired. Run a8w4 under inference (torch.no_grad)."
             )
         from ..triton_kernels.grouped_gemm_mxfp4_impl import (
@@ -1173,7 +1193,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Grouped MXFP4 / a8w4 (Triton, gfx950) under a CustomRecipe. Runs its
         # own reference-quantizer quantization + persistent grouped GEMM and returns
-        # early. Forward-only.
+        # early. a4w4 also runs the backward; a8w4 is forward-only.
         if _GroupedLinear._is_grouped_mxfp4_triton_supported(
             fp8=fp8,
             recipe=blockwise_recipe,
