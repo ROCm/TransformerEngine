@@ -964,6 +964,9 @@ class _GroupedLinear(torch.autograd.Function):
         weight_quantizers,
         activation_dtype,
         is_grad_enabled,
+        is_first_microbatch,
+        weight_workspaces,
+        cache_weight,
     ):
         """Grouped MXFP4 / a8w4 forward (ROCm Triton, gfx950).
 
@@ -998,20 +1001,32 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Weights: per-expert row-wise E2M1, stacked to the kernel's [G, N, *] layout.
         # The a4w4 backward additionally needs the col-wise weight for the dgrad kernel.
+        # Cache the quantized weights across microbatches (is_first_microbatch): the
+        # weight quant is a fixed per-call cost (~G*N*K) that otherwise dominates the
+        # grouped GEMM, so reuse the cache whenever this is not the first microbatch.
         want_wcol = is_grad_enabled and not a_is_mxfp8
-        b_datas, b_scales = [], []
-        wcol_datas, wcol_scales = [], []
-        for i in range(num_gemms):
-            wq = weight_quantizers[i]
-            wq.set_usage(rowwise=True, columnwise=want_wcol)
-            wref = wq.quantize(weights[i].detach())
-            b_datas.append(wref.data)
-            b_scales.append(wref.scale)
-            if want_wcol:
-                wcol_datas.append(wref.data_t)
-                wcol_scales.append(wref.scale_t)
-        b_data = torch.stack(b_datas, dim=0)
-        b_scale = torch.stack(b_scales, dim=0)
+        update_ws = is_first_microbatch is None or is_first_microbatch
+        cached = weight_workspaces[0] if weight_workspaces else None
+        new_workspaces = [None] * num_gemms
+        if not update_ws and cached is not None and (not want_wcol or cached[2] is not None):
+            b_data, b_scale, w_col_data, w_col_scale = cached
+        else:
+            b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []
+            for i in range(num_gemms):
+                wq = weight_quantizers[i]
+                wq.set_usage(rowwise=True, columnwise=want_wcol)
+                wref = wq.quantize(weights[i].detach())
+                b_datas.append(wref.data)
+                b_scales.append(wref.scale)
+                if want_wcol:
+                    wcol_datas.append(wref.data_t)
+                    wcol_scales.append(wref.scale_t)
+            b_data = torch.stack(b_datas, dim=0)
+            b_scale = torch.stack(b_scales, dim=0)
+            w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
+            w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
+            if cache_weight:
+                new_workspaces[0] = (b_data, b_scale, w_col_data, w_col_scale)
 
         out = grouped_gemm_mxfp4_fprop_prequantized(
             aq.data,
@@ -1034,11 +1049,9 @@ class _GroupedLinear(torch.autograd.Function):
                 # wgrad re-quantizes the saved hp activation + grad_out in the kernel.
                 ctx.grouped_mxfp4_requires_dgrad = inp.requires_grad
                 ctx.grouped_mxfp4_weight_requires_grad = weights[0].requires_grad
-                ctx.save_for_backward(
-                    a, torch.stack(wcol_datas, dim=0), torch.stack(wcol_scales, dim=0)
-                )
+                ctx.save_for_backward(a, w_col_data, w_col_scale)
 
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), [None] * num_gemms
+        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
     def _backward_grouped_mxfp4_triton(ctx, grad_output):
@@ -1218,6 +1231,9 @@ class _GroupedLinear(torch.autograd.Function):
                 weight_quantizers=weight_quantizers,
                 activation_dtype=activation_dtype,
                 is_grad_enabled=is_grad_enabled,
+                is_first_microbatch=is_first_microbatch,
+                weight_workspaces=weight_workspaces,
+                cache_weight=cache_weight,
             )
 
         # Configure quantizers

@@ -202,3 +202,24 @@ def test_grouped_linear_a8w4_backward_raises():
     with pytest.raises(NotImplementedError, match="forward-only QAT"):
         out.backward(torch.randn_like(out))
 
+
+def test_grouped_linear_a8w4_weight_cache_is_consistent():
+    """is_first_microbatch weight caching must not change the a8w4 forward output."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    num_gemms, K, N = 4, 256, 256
+    m_splits = [128, 64, 0, 192]
+    total_M = sum(m_splits)
+    torch.manual_seed(0)
+
+    model = te.GroupedLinear(num_gemms, K, N, bias=False, params_dtype=dtype).cuda()
+    inp = torch.randn(total_M, K, device=device, dtype=dtype)
+
+    rec = recipe.CustomRecipe(qfactory=a8w4_quantizer_factory)
+    with torch.no_grad(), te.autocast(enabled=True, recipe=rec):
+        out_nocache = model(inp, m_splits)  # is_first_microbatch=None -> no caching
+        out_first = model(inp, m_splits, is_first_microbatch=True)  # quantize + cache
+        out_reuse = model(inp, m_splits, is_first_microbatch=False)  # reuse the cache
+
+    assert torch.equal(out_first, out_reuse), "cached weights diverged from the first microbatch"
+    assert torch.equal(out_nocache, out_first), "weight caching changed the forward output"
