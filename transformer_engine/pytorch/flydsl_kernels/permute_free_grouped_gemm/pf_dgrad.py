@@ -15,10 +15,10 @@ There are two flavours, matching the TE permute-free contract (``index_a_by_rout
   directly. ``dx`` is **block-padded route-ordered** ``[R_block, K]``.
 * **gather** (FC2 dgrad, ``gather=True``): ``grad`` is **token-ordered** ``[num_recv, N]`` and each
   route slot ``s`` gathers ``grad[SORTED[s]]`` (sentinel ``SORTED[s] == num_recv`` -> 0), writing
-  block-padded route-ordered ``dXrow[R_block, K]``. Mirrors the forward NT gather, one row map
-  redirecting the two LDS A half-tiles, only on the NN tile.
+  block-padded route-ordered ``dXrow[R_block, K]``. Mirrors the forward (TE ``TN``) gather, one row
+  map redirecting the two LDS A half-tiles, only on the dgrad tile.
 
-The weight is bit-identical to the forward ``[E, N, K]`` (forward reads it NT, dgrad NN).
+The weight is bit-identical to the forward ``[E, N, K]`` (TE ``TN`` fprop / ``NN`` dgrad).
 
 Contract:
   * ``grad_y`` [rows, N]     bf16   incoming grad (rows = R_block route-read / num_recv gather)
@@ -211,8 +211,8 @@ def grouped_gemm_dgrad_bf16(
     c_m = int(dx.shape[0])
     assert grad_y.shape[1] == N, f"grad_y N={grad_y.shape[1]} != weight N={N}"
     assert dx.shape[1] == K, f"dx K={dx.shape[1]} != weight K={K}"
-    # The kernel computes the per-expert weight offset (``expert_id * N * K``) in 32-bit, so
-    # ``weight`` must fit 2^31 -- keep the hard guard.
+    # The kernel computes the per-expert weight offset in 32-bit, so ``weight`` must fit 2^31 --
+    # keep the hard guard.
     # ``dx`` and the route-read ``grad_y`` are safe: the kernel addresses them in 64-bit, one tile
     # at a time, so they stay correct above 2 GiB. The FC2-dgrad gather ``grad_y`` is a flat view,
     # so it is bounded by the ``grad_y.numel() < 2^31`` check below.

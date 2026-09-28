@@ -15,7 +15,7 @@ memory model (no pre-permutation, gather-on-demand).
 
 Contract (mirrors MegaMOE ``grouped_gemm_bf16_only`` + permute-free routing metadata):
   * ``A``            [num_recv, K] bf16   received-token activations, UNPERMUTED (gather source)
-  * ``B``            [E, N, K]    bf16    per-expert weights, NT (contiguous inner K)
+  * ``B``            [E, N, K]    bf16    per-expert weights (contiguous inner K)
   * ``C``            [R_block, N]  bf16    block-padded route-ordered output (expert-major, in place)
   * ``sorted_slot_ids`` [R_block]  i32     received-token row per padded slot (sentinel = num_recv)
   * ``expert_ids``   [num_m_blocks] i32   expert id per ``BLOCK_M`` output block (padding tail:
@@ -65,8 +65,9 @@ def compile_grouped_gemm_gather_bf16(
 
     Grid is over-launched to the padded output pool; each block early-exits past the real tile
     range (``num_tile_blocks``) or when ``expert_ids[block_m] < 0`` (PF padding tail). Mirrors
-    MegaMOE's ``compile_grouped_gemm_bf16`` (NT) exactly apart from the gather A fetch, the extra
-    ``SORTED`` argument, and the padding-block guard. Returns the flyc launch callable.
+    MegaMOE's ``compile_grouped_gemm_bf16`` (the fprop / TE ``TN`` GEMM) exactly apart from the
+    gather A fetch, the extra ``SORTED`` argument, and the padding-block guard. Returns the flyc
+    launch callable.
 
     The FC2 route-read (``index_a_by_route_pos``) case reuses this same gathering kernel with an
     identity ``SORTED`` (``SORTED[s] = s``), so no separate no-gather tile is needed.
@@ -171,7 +172,7 @@ def compile_grouped_gemm_gather_bf16(
 
 def grouped_gemm_gather_bf16(
     A,  # [num_recv, K] bf16   received-token activations (UNPERMUTED gather source)
-    weight,  # [E, N, K] bf16   per-expert B (NT)
+    weight,  # [E, N, K] bf16   per-expert weights (shared with dgrad/wgrad)
     output,  # [R_block, N] bf16   block-padded route-ordered C (in place)
     expert_ids,  # [num_m_blocks] i32   expert per BLOCK_M output block
     num_tile_blocks,  # int   real BLOCK_M block count (host scalar; capture-safe)
@@ -186,9 +187,10 @@ def grouped_gemm_gather_bf16(
     agpr_alloc=0,
     gather=True,
 ):
-    """Host entry: grouped bf16 NT GEMM. With ``gather=True`` (FC1) ``C[pos] = A[SORTED[pos]]
-    @ B[expert]^T``; with ``gather=False`` (FC2 route-read) ``A`` is **block-padded route-ordered**
-    ``[R_block, K]`` read at the route slot (``sorted_slot_ids`` unused, may be a dummy).
+    """Host entry: grouped bf16 forward GEMM (TE ``TN`` fprop -- ``input @ weight^T``). With
+    ``gather=True`` (FC1) ``C[pos] = A[SORTED[pos]] @ B[expert]^T``; with ``gather=False`` (FC2
+    route-read) ``A`` is **block-padded route-ordered** ``[R_block, K]`` read at the route slot
+    (``sorted_slot_ids`` unused, may be a dummy).
 
     ``output`` is written in place over its full padded ``[R_block, N]`` extent (padding rows carry
     dead values, ignored by downstream stages keyed on the same routing metadata). ``c_m`` is the

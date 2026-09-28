@@ -14,6 +14,10 @@ TE builds expert-sorted ``sorted_slot_ids`` (token row per route slot) plus per-
 ``block_start``, then runs gather-in-GEMM. FC1 fwd output is block-padded route-ordered
 (valid route slots are ``[0, num_routes)``; tail is inert padding). FC1 dgrad returns
 token-ordered ``dA = [num_recv_tokens, in_features]`` via gather-combine.
+
+Implements the permute-free MoE approach from MoEBlaze ("MoEBlaze: Breaking the Memory Wall for
+Efficient MoE Training on Modern GPUs", MLSys 2026); the gather-GEMM kernels are ported from the
+MegaMOE reference kernel.
 """
 
 from __future__ import annotations

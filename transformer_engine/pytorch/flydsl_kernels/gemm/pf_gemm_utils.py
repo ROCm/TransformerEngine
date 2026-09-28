@@ -5,7 +5,7 @@
 #
 # Adapted from Primus-Turbo (https://github.com/AMD-AGI/Primus-Turbo):
 #   primus_turbo/flydsl/utils/gemm_helper.py
-#     (S2R/MFMA/StoreCBf16, wait_barrier, xcd_remap_pid, compute_global_swizzle_bf16)
+#     (S2R/MFMA/StoreCBf16, xcd_remap_pid, compute_global_swizzle_bf16)
 #   primus_turbo/flydsl/gemm/gemm_bf16_kernel.py
 #     (dense_mma_pipeline_bf16, NN tile logic -> gemm_bf16_nn_gather_tile)
 #
@@ -34,6 +34,7 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
+from .gemm_common_utils import barrier
 
 # Mega 8-wave K-tile. Independent of the 4-wave ``half_prec_gemm`` BLOCK_K.
 BLOCK_K = 64
@@ -342,16 +343,6 @@ def _make_shared_storage(BLOCK_M, BLOCK_N):
     return SharedStorage
 
 
-def wait_barrier(count):
-    _llvm.inline_asm(
-        res=None,
-        operands_=[],
-        asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
-        constraints="",
-        has_side_effects=True,
-    )
-
-
 @ASTRewriter.transform
 def dense_mma_pipeline_bf16(
     lds,
@@ -415,13 +406,13 @@ def dense_mma_pipeline_bf16(
 
     if wave_m == 1:
         rocdl.s_barrier()
-    wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+    barrier(vmcnt=N_LDS_STEPS_A + N_LDS_STEPS_B)
 
     b_g2s.load(b_next0, B0_gl_offset + 1 * b_k_step)
     a_g2s.load(a_next0, A0_gl_offset + 1 * a_k_step)
     b_g2s.load(b_next1, B1_gl_offset + 1 * b_k_step)
 
-    wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+    barrier(vmcnt=N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
 
     for k in range_constexpr(K_ITERS - 2):
         b0_frag = b_s2r.load(b_cur0)
@@ -453,7 +444,7 @@ def dense_mma_pipeline_bf16(
         rocdl.s_barrier()
 
         b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * b_k_step)
-        wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+        barrier(vmcnt=2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
 
         rocdl.s_setprio(1)
         c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
@@ -510,7 +501,7 @@ def dense_mma_pipeline_bf16(
     b_cur1, b_next1 = b_next1, b_cur1
 
     a0_frag = a_s2r.load(a_cur0)
-    wait_barrier(0)
+    barrier(vmcnt=0)
     rocdl.s_setprio(1)
     c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
     rocdl.s_setprio(0)

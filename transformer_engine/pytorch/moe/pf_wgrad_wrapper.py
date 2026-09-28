@@ -66,11 +66,11 @@ def flydsl_moe_wgrad(
     assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
-    # The kernel computes ``dw`` store offsets in 32-bit (``out_off`` in ``pf_wgrad.py``), so a
-    # ``dw`` >= 2 GiB wraps and corrupts memory -- keep the hard guard.
-    # ``x`` and ``grad`` are safe: inside the kernel their base pointer is re-based per expert in
-    # 64-bit, so the remaining 32-bit offset only has to cover one expert's rows, and the gathered
-    # operand is separately bounded to ``[num_recv, feat]``.
+    # The kernel computes ``dw`` store offsets in int32, so a ``dw`` at/above 2 GiB wraps and
+    # corrupts memory -- keep the hard guard.
+    # ``x`` / ``grad`` are safe: the kernel rebases the contiguous operand's SRD base per expert in
+    # i64 (so its i32 offset only spans this expert's slots) and SRD-bounds the gathered operand, so
+    # both address correctly past 2 GiB. Guarding them would false-positive on the static path.
     require_launch_size(
         "permute-free wgrad",
         ("dw", dw),

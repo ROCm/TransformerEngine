@@ -302,19 +302,13 @@ def compile_moe_wgrad_v2(
         num_slots = arith.index_cast(T.index, nblocks) * arith.index(WGRAD_BLOCK_M)
         grad_base_idx = arith.index_cast(T.index, gbase)
 
-        # Re-base this expert's block-padded (contiguous-walk) operand in 64-bit. The per-slot DMA
-        # packs ``row*feat + feat_off`` into a single 32-bit byte offset, which overflows once the
-        # whole buffer exceeds 2 GiB (``R_block*feat*2 > 2^31``; e.g. R_block~528k, N=3072 ->
-        # 3.24 GiB). By folding ``grad_base_idx*feat`` into the buffer's base pointer in 64-bit
-        # (like the per-tile rebase in pf_fwd/pf_dgrad), the 32-bit offset only has to cover this
-        # one expert's rows, which always fits. The gathered operand is already bounded to
-        # ``[num_recv, feat]`` and needs no change.
+        # The contiguous operand's i32 per-slot offset wraps once the buffer exceeds 2 GiB, so fold
+        # the expert's row offset into the SRD base in i64 (as pf_fwd/pf_dgrad do per tile); the i32
+        # offset then only spans this expert's slots. The gathered operand is already SRD-bounded.
         #
-        # CRITICAL (perf): a buffer's base pointer must be the same across the wave (in an SGPR).
-        # ``gbase`` comes from a per-lane ``buffer_load_i32`` (a VGPR), so without ``readfirstlane``
-        # the compiler falls back to a slow per-lane descriptor (~3.7x slower on the 256x256 tile).
-        # Every lane here works on the same expert, so ``gbase`` is uniform and ``readfirstlane``
-        # is safe.
+        # ``readfirstlane`` is required: the base must be wave-uniform (SGPR), but ``gbase`` is a
+        # per-lane VGPR. Every lane handles the same expert, so it is exact -- and skipping it would
+        # waterfall the descriptor (~3.7x slower).
         gbase_u = rocdl.readfirstlane(T.i32, gbase)
         _pool_ptr_ty = PointerType.get(
             elem_ty=fx.BFloat16.ir_type, address_space=AddressSpace.Global, alignment=16
@@ -382,10 +376,11 @@ def compile_moe_wgrad_v2(
                     in_range, arith.cmpi(arith.CmpIPredicate.ult, token, nrecv_idx)
                 )
                 if const_expr(clamp_row):
-                    # grad: contiguous route walk; clamp any overrun to row 0 (expert-relative) for
-                    # fault safety -- its padding contribution is cancelled by the zeroed x column.
-                    # We don't add ``grad_base_idx`` here because the base pointer was already
-                    # re-based by it in 64-bit above, so this offset is expert-relative.
+                    # grad: contiguous route walk; clamp overrun to (expert-relative) row 0 for
+                    # fault safety (its padding contribution is cancelled by the zeroed x column).
+                    # ``grad_base_idx`` is *not* added here: the operand's SRD base was already
+                    # rebased by ``grad_base_idx*feat`` in i64 above, so this offset is
+                    # expert-relative and stays within int32.
                     row_idx = valid.select(slot_base_idx + slot_idx, c0)
                 else:
                     # x: gather by received-token. Real padding already carries the sentinel
