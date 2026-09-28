@@ -380,6 +380,7 @@ def compile_triton(
     num_ctas: int,
     compute_capability: int,
     enable_fp_fusion: bool = False,
+    within_2gb: frozenset = frozenset(),
 ):
     """Compile a Triton or Gluon kernel to a GPU binary (PTX on CUDA, HSACO on ROCm).
 
@@ -395,6 +396,8 @@ def compile_triton(
         compute_capability: CUDA compute capability (CUDA only; ignored on ROCm, whose
             target is auto-detected from the active GPU)
         enable_fp_fusion: Enable FP fusion optimizations (default False for accuracy)
+        within_2gb: Names of array arguments whose buffers span at most 2**31 - 1
+            bytes (ROCm only; see the ``tt.pointer_range`` note below)
 
     Returns:
         TritonKernel object for JAX
@@ -418,6 +421,7 @@ def compile_triton(
                 compute_capability,
                 is_hip,
                 is_gluon,
+                tuple(sorted(within_2gb)),
             )
         ).encode()
     ).hexdigest()
@@ -469,10 +473,21 @@ def compile_triton(
     # at launch), so tell the compiler, as Triton's JIT does for aligned tensors.
     # Without it loads are not vectorized, and reductions then sum in a
     # different order than the same kernel launched from PyTorch.
+    # Triton's JIT on ROCm also marks buffers of at most 2 GB with
+    # tt.pointer_range=32 (enabling buffer loads/stores) when buffer ops are on.
+    # That changes layouts and instruction selection, so it is mirrored here to
+    # get the same binary, and the same results, as a launch from PyTorch.
     attrs = None
     if is_hip:
+        try:
+            from triton import knobs
+
+            use_buffer_ops = bool(knobs.amd.use_buffer_ops)
+        except (ImportError, AttributeError):  # Triton without the knob
+            use_buffer_ops = False
         attrs = {
             (kernel_fn.arg_names.index(name),): [["tt.divisibility", 16]]
+            + ([["tt.pointer_range", 32]] if use_buffer_ops and name in within_2gb else [])
             for name, ty in signature_with_constexpr.items()
             if ty.startswith("*")
         }
@@ -623,6 +638,11 @@ def triton_call_lowering(
     constexpr_names = set(constexprs.keys()) if constexprs else set()
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
+    within_2gb = frozenset(
+        n
+        for n, a in zip(tensor_arg_names, all_avals)
+        if a.size * jnp.dtype(a.dtype).itemsize <= 2**31 - 1
+    )
 
     assert callable(grid) or isinstance(grid, tuple), (
         "Argument 'grid' must be a tuple or a callable but received: "
@@ -718,6 +738,7 @@ def triton_call_lowering(
                 config_num_ctas,
                 compute_capability,
                 enable_fp_fusion=enable_fp_fusion,
+                within_2gb=within_2gb,
             )
 
             # Create kernel call for this config
@@ -788,6 +809,7 @@ def triton_call_lowering(
             num_ctas,
             compute_capability,
             enable_fp_fusion=enable_fp_fusion,
+            within_2gb=within_2gb,
         )
 
         kernel_params = []
