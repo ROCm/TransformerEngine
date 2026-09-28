@@ -59,7 +59,8 @@ jit_fuser = lambda func: func
 jit_fuser_dynamic = lambda func: func
 if torch_version() >= (2, 0, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = lazy_compile
-    jit_fuser_dynamic = lazy_compile_dynamic
+    # On ROCm, static and dynamic variants of the same kernel can pick different Triton launch configs.
+    jit_fuser_dynamic = lazy_compile_dynamic if IS_HIP_EXTENSION else lazy_compile
 
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
