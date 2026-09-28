@@ -6,6 +6,7 @@
 #pragma once
 
 #include "kittens.cuh"
+#include <type_traits>
 
 namespace te_kittens::cdna4::mxfp8 {
 
@@ -101,6 +102,30 @@ void launch_pack_scales_sharded(const uint8_t *scales, uint32_t *ln, int cblk_of
     pack_scales_kernel<COLWISE, STEP, NG, 0, true><<<k_iters * tiles_local, NG * 64, 0, stream>>>(
         scales, ln, 0, scale_K, k_iters, tiles_per_col, nullptr, 0, nullptr, nullptr,
         cblk_off, tiles_local);
+}
+
+// Split-K sum: c[i] = sum over s of w[s * n + i], summed in fp32 in split order, so the result is
+// deterministic. The bf16 store rounds to nearest, like the v_cvt_pk_bf16_f32 the unsplit
+// epilogue stores through, so splitting K changes only the fp32 summation order.
+template <typename OutT>
+__global__ void splitk_reduce_kernel(const float *__restrict__ w, OutT *__restrict__ c, size_t n,
+                                     int splits) {
+    const size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float acc = 0.f;
+    for (int s = 0; s < splits; s++) acc += w[(size_t)s * n + i];
+    if constexpr (std::is_same_v<OutT, float>) {
+        c[i] = acc;
+    } else if constexpr (std::is_same_v<OutT, half>) {
+        c[i] = __float2half(acc);
+    } else {
+        c[i] = __float2bfloat16(acc);
+    }
+}
+
+template <typename OutT>
+void launch_splitk_reduce(const float *w, OutT *c, size_t n, int splits, hipStream_t stream) {
+    splitk_reduce_kernel<OutT><<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(w, c, n, splits);
 }
 
 }  // namespace te_kittens::cdna4::mxfp8

@@ -932,6 +932,19 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
+    // Split-K partials go after the scales; a caller whose workspace cannot hold them gets one
+    // slice, as run_bulk_rs does.
+    int splits = select_split_k_shape_mxfp8(M, N, K);
+    float *partials = nullptr;
+    if (splits > 1) {
+        const size_t partial_bytes = static_cast<size_t>(splits) * M * N * sizeof(float);
+        if (ws.used + partial_bytes <= ws.cap) {
+            partials = static_cast<float *>(ws.take(partial_bytes));
+        } else {
+            splits = 1;
+        }
+    }
+
     // The A slot holds args.B and the B slot args.A, so the scale buffers follow them across that
     // swap. Both operands are K-major here, which is what COLWISE packs.
     launch_pack_scales<true, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
@@ -965,7 +978,9 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
                     nullptr, nullptr, nullptr),
         gl_scale_rt(reinterpret_cast<fp8e8m0 *>(packed_sb), 2 * k_iters * tiles_N,
                     nullptr, nullptr, nullptr),
-        nred, bands, bands, tp_size, args.rank, peers, shard_elems, band_elems, args.stream};
+        gl_f32_rt(partials, nullptr, nullptr, static_cast<size_t>(splits) * M,
+                  static_cast<size_t>(N)),
+        splits, nred, bands, bands, tp_size, args.rank, peers, shard_elems, band_elems, args.stream};
     launch(g);
     return hipGetLastError() == hipSuccess;
 }

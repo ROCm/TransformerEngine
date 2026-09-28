@@ -495,7 +495,12 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL, typename AuxGLType>
+// SPLITK: the grid is tiles x splits, and each workgroup reduces one K slice of its tile into
+// `partials`, [splits * N, M] fp32 in C's orientation, which launch_splitk_reduce then sums into C.
+// Only the plain product splits -- bias, GELU and accumulate need the full sum first. Without
+// SPLITK, `splits` and `partials` are ignored.
+template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false,
+          bool SPLITK = false, typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_fp8_rt A, const gl_fp8_rt B,
     const OutGL C, const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
     [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
@@ -505,13 +510,29 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     [[maybe_unused]] const void *const *b_expert_ptrs,
     [[maybe_unused]] const void *const *c_expert_ptrs,
     [[maybe_unused]] const int *sb_tile_offsets,
-    int N, int K, int total_m_tiles, int tiles_N) {
+    int N, int K, int total_m_tiles, int tiles_N,
+    [[maybe_unused]] int splits, [[maybe_unused]] const gl_f32_rt partials) {
 
     static_assert(!GROUPED || EPILOGUE == GemmEpilogue::DEFAULT,
                   "Grouped GEMM only supports DEFAULT epilogue");
+    static_assert(!SPLITK || (!GROUPED && EPILOGUE == GemmEpilogue::DEFAULT && !ACCUMULATE),
+                  "Split-K only splits the plain product");
 
     int k_iters = K / BLOCK_K;
     int sa_stride = total_m_tiles;
+
+    // Split-K slice: [kt_base, kt_base + k_iters) of the BLOCK_K steps.
+    int tile_wg   = blockIdx.x;
+    int tile_grid = gridDim.x;
+    int kt_base   = 0;
+    [[maybe_unused]] int split_id = 0;
+    if constexpr (SPLITK) {
+        split_id  = (int)blockIdx.x % splits;
+        tile_wg   = (int)blockIdx.x / splits;
+        tile_grid = (int)gridDim.x / splits;
+        k_iters  /= splits;
+        kt_base   = split_id * k_iters;
+    }
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<BLOCK_K, HALF_COL, kittens::st_16x128_s>;
@@ -532,7 +553,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
 
     const int NUM_XCDS = 8;
     const int WGM      = 8;
-    int wgid           = kittens::chiplet_transform_chunked(blockIdx.x, gridDim.x, NUM_XCDS, WGM * WGM);
+    int wgid           = kittens::chiplet_transform_chunked(tile_wg, tile_grid, NUM_XCDS, WGM * WGM);
     int num_wgid_in_group = WGM * tiles_N;
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
@@ -602,23 +623,23 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
+    G::load(Bs[tic][0], B_local, {0, 0, kt_base, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, kt_base, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, kt_base, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, kt_base, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+    G::load(As[toc][0], A_local, {0, 0, kt_base + 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, kt_base + 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, kt_base + 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {kt_base * sa_stride + sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * (kt_base * sb_stride + sb_batch),     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * (kt_base * sb_stride + sb_batch) + 1, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -626,6 +647,13 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     if (warp_m == 1) __builtin_amdgcn_s_barrier();
 
 #include "mxfp8_nt_mainloop.inc"
+
+    if constexpr (SPLITK) {
+        // Slice split_id's partial lands N rows below slice split_id - 1's.
+        gemm_epilogue<GemmEpilogue::DEFAULT, false, true, RT_C, RT_C_T>(cA, cB, cC, cD, partials, AuxGL,
+            nullptr, 0, block_m, block_row, split_id * tiles_N + block_col, warp_m, warp_n);
+        return;
+    }
 
     OutGL C_local(C);
     if constexpr (GROUPED) {
@@ -681,11 +709,12 @@ static void launch_gemm_typed(
                 nullptr, nullptr, nullptr,
                 N, K, tiles_M, tiles_N);
         } else {
+            // Split-K is not enabled here yet (only the bulk RS wgrad uses it): one slice.
             mxfp8_gemm_nt_kernel<false, EPILOGUE, CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
                 gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
                 nullptr, nullptr, 0,
                 nullptr, nullptr, nullptr,
-                N, K, tiles_M, tiles_N);
+                N, K, tiles_M, tiles_N, 1, gl_f32_rt(nullptr, nullptr, nullptr, 1, 1));
         }
     };
     if (out_dtype == OutDtype::BF16) {

@@ -7,6 +7,7 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "overlap_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -460,6 +461,7 @@ using G = kittens::group<NUM_WARPS>;
 using gl_fp8_rt   = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
 using gl_scale_rt = kittens::gl<kittens::fp8e8m0, -1, 1, 16, 64>;
 using gl_bf16_rt  = kittens::gl<kittens::bf16, 1, 1, -1, -1>;
+using gl_f32_rt   = kittens::gl<float, 1, 1, -1, -1>;
 
 // Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
 using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
@@ -471,6 +473,8 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
 
 // dW is [M, N], not the [N, M] mxfp8_gemm.cpp's NT path writes, so the col_l accumulator already
 // carries C's orientation and stores straight through -- that file's NN epilogue, not its NT one.
+// block_row is in BLOCK_ROW units of C's rows, so a split-K slice's partial lands at
+// block_row + split_id * tiles_M in the [splits * M, N] partials buffer.
 template<typename RT_C, typename OutGL>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -493,6 +497,8 @@ struct mxfp8_rs_globals {
     gl_bf16_rt c;                  // dW,        [M=out_local, N=hidden]
     gl_scale_rt sa;                // lane-native scales for the a slot
     gl_scale_rt sb;                // lane-native scales for the b slot, hi/lo tile pair
+    gl_f32_rt w;                   // split-K partials, [splits * M, N]; unused when splits == 1
+    int splits;
     int nred;
     int bands;
     int gband;                     // bands folded per cycle; gband == bands is one pass
@@ -505,11 +511,13 @@ struct mxfp8_rs_globals {
     int M = c.rows();
     int N = c.cols();
     int K = a.rows();
-    dim3 grid()  { return dim3((N / BLOCK_COL) * (M / BLOCK_ROW) + nred); }
+    dim3 grid()  { return dim3((N / BLOCK_COL) * (M / BLOCK_ROW) * splits + nred); }
     dim3 block() { return dim3(NUM_THREADS); }
 };
 
-template <int CBSZ, int BLGP>
+// SPLITK is a template flag rather than a runtime branch so the unsplit kernel keeps its old code:
+// carrying the slice bookkeeping and a second (fp32) epilogue at runtime spilled it.
+template <int CBSZ, int BLGP, bool SPLITK>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     if ((int)blockIdx.x < g.nred) {
@@ -518,14 +526,22 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
         return;
     }
 
-    const int k_iters = K / BLOCK_K;
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N / BLOCK_COL;
 
+    // Split-K, as in wgrad_rs_tk: consecutive workgroups are the slices of one tile, each reducing
+    // [kt_base, kt_base + k_iters) of the BLOCK_K steps into its own partial.
+    const int splits   = SPLITK ? g.splits : 1;
+    int       wgid     = (int)blockIdx.x - g.nred;
+    const int split_id = SPLITK ? wgid % splits : 0;
+    if constexpr (SPLITK) wgid /= splits;
+    const int k_iters = (K / BLOCK_K) / splits;
+    const int kt_base = split_id * k_iters;
+
     const int NUM_XCDS = 8;
     const int WGM      = 8;
-    int wgid = kittens::chiplet_transform_chunked((int)blockIdx.x - g.nred,
-                                                  (int)gridDim.x - g.nred, NUM_XCDS, WGM * WGM);
+    wgid = kittens::chiplet_transform_chunked(wgid, ((int)gridDim.x - g.nred) / splits, NUM_XCDS,
+                                              WGM * WGM);
     int num_wgid_in_group = WGM * tiles_N;
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
@@ -556,23 +572,23 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2        }, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1    }, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
+    G::load(Bs[tic][0], B_local, {0, 0, kt_base, n_tile * 2        }, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, kt_base, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, kt_base, n_tile * 2 + 1    }, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, kt_base, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2}, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+    G::load(As[toc][0], A_local, {0, 0, kt_base + 1, a_row_tile * 2}, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, kt_base + 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, kt_base + 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {kt_base * sa_stride + sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * (kt_base * sb_stride + sb_batch),     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * (kt_base * sb_stride + sb_batch) + 1, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -583,12 +599,33 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
 
 #include "../mxfp8_nt_mainloop.inc"
 
-    gemm_epilogue<RT_C>(cA, cB, cC, cD, g.c, block_row, block_col, warp_m, warp_n);
+    if constexpr (SPLITK) {
+        gemm_epilogue<RT_C>(cA, cB, cC, cD, g.w, split_id * tiles_M + block_row, block_col, warp_m,
+                            warp_n);
+    } else {
+        gemm_epilogue<RT_C>(cA, cB, cC, cD, g.c, block_row, block_col, warp_m, warp_n);
+    }
 }
 
 template <int CBSZ, int BLGP>
 static void dispatch(mxfp8_rs_globals g) {
-    mxfp8_wgrad_rs_tk<CBSZ, BLGP><<<g.grid(), g.block(), 0, g.stream>>>(g, g.M, g.N, g.K);
+    if (g.splits == 1) {
+        mxfp8_wgrad_rs_tk<CBSZ, BLGP, false><<<g.grid(), g.block(), 0, g.stream>>>(g, g.M, g.N, g.K);
+        return;
+    }
+    mxfp8_wgrad_rs_tk<CBSZ, BLGP, true><<<g.grid(), g.block(), 0, g.stream>>>(g, g.M, g.N, g.K);
+    te_kittens::cdna4::mxfp8::launch_splitk_reduce(
+        (const float *)g.w.raw_ptr, (kittens::bf16 *)g.c.raw_ptr, (size_t)g.M * g.N, g.splits, g.stream);
+}
+
+// Split-K for the MXFP8 bulk RS GEMM. Separate from the bf16 select_split_k_shape: the K step is
+// BLOCK_K = 128, and each slice needs at least two steps for the main loop's prologue. Unlike
+// bf16 it never pays here: the MXFP8 GEMM is fast enough that the reduce-scatter bounds the call,
+// and the extra reduce and fp32 traffic only add to it. Forcing 2, 4 or 8 slices was 1-16% slower
+// on every shape that could split (MI355X, 24 shapes), so it stays at one.
+static inline int select_split_k_shape_mxfp8(int M, int N, int K) {
+    (void)M; (void)N; (void)K;
+    return 1;
 }
 
 using bulk_rs_mxfp8_fn_t = void (*)(mxfp8_rs_globals);
