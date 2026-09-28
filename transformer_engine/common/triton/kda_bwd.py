@@ -16,14 +16,18 @@ log2 space, ``Aqk``, ``Akk``, ``w``/``u``/``kg``, ``h``, ``v_new``; see
 
 1. ``dAqk = do @ v_new^T * scale``, ``dv = Aqk^T @ do`` (``_kda_bwd_dav_kernel``).
 2. The reverse-time state gradient ``dh`` per chunk, ``dh0``, and ``dv``
-   through the state (``_kda_bwd_dhu_kernel``).
+   through the state (``_kda_bwd_dhu_kernel``). With too few states to fill
+   the GPU it shares a launch with the recomputed forward recurrence
+   (``_kda_fwd_h_bwd_dhu_kernel``), after the ``dv`` half of stage 1 and
+   before its ``dAqk`` half.
 3. ``dq``/``dk``/``dg``/``dbeta``/``dv`` through the WY representation and the
    inter-chunk terms, plus ``dAkk`` (``_kda_bwd_wy_dqkg_kernel``).
 4. The intra-chunk terms of ``dq``/``dk``/``dg``/``dbeta`` from ``dAqk`` and
    ``dAkk`` (``_kda_bwd_intra_kernel``).
 5. A reverse chunk-local cumsum turns the gradient w.r.t. the cumulative gate
-   into one w.r.t. the per-token gate; the gate activation, l2norm and beta
-   sigmoid are then undone elementwise.
+   into one w.r.t. the per-token gate, and the same kernel undoes the gate
+   activation (``_kda_bwd_gate_cumsum_kernel``); l2norm and beta sigmoid are
+   then undone elementwise.
 
 Kernel bodies follow fla, with the same TE-side conventions as ``kda.py``: no
 heuristics or autotuning, tensor parameters inputs first and outputs last, and
@@ -36,7 +40,7 @@ reading a materialized ``q * exp2(g)``.
 import triton
 import triton.language as tl
 
-from transformer_engine.common.triton.kda import exp, exp2, softplus
+from transformer_engine.common.triton.kda import _kda_fwd_h, exp, exp2, softplus
 
 
 @triton.jit
@@ -55,8 +59,14 @@ def _kda_bwd_dav_kernel(
     BT: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    COMPUTE_DA: tl.constexpr,
+    COMPUTE_DV: tl.constexpr,
 ):
-    """dA = tril(do @ v^T) * scale and dv = tril(A)^T @ do, per chunk (``v`` is ``v_new``)."""
+    """dA = tril(do @ v^T) * scale and dv = tril(A)^T @ do, per chunk (``v`` is ``v_new``).
+
+    ``COMPUTE_DA`` / ``COMPUTE_DV`` select the outputs, so ``dv`` (which needs no
+    ``v_new``) can be produced ahead of ``_kda_fwd_h_bwd_dhu_kernel``.
+    """
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     if IS_VARLEN:
@@ -72,20 +82,23 @@ def _kda_bwd_dav_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
-    dv += (bos * HV + i_hv) * V
-    dA += (bos * HV + i_hv) * BT
+    if COMPUTE_DA:
+        v += (bos * HV + i_hv) * V
+        dA += (bos * HV + i_hv) * BT
+    if COMPUTE_DV:
+        dv += (bos * HV + i_hv) * V
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     o_A = tl.arange(0, BT)
-    m_AT = (o_A[:, None] < BT) & m_t[None, :]
-    # b_A[s, t] = A[t, s]
-    p_A = A + (bos * HV + i_hv) * BT + o_A[:, None] + o_t[None, :] * (HV * BT)
-    b_A = tl.load(p_A, mask=m_AT, other=0.0)
-    m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
+    if COMPUTE_DV:
+        m_AT = (o_A[:, None] < BT) & m_t[None, :]
+        # b_A[s, t] = A[t, s]
+        p_A = A + (bos * HV + i_hv) * BT + o_A[:, None] + o_t[None, :] * (HV * BT)
+        b_A = tl.load(p_A, mask=m_AT, other=0.0)
+        m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
+        b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
@@ -93,23 +106,28 @@ def _kda_bwd_dav_kernel(
         m_v = o_v < V
         m_vT = m_v[:, None] & m_t[None, :]
         m_tv = m_t[:, None] & m_v[None, :]
-        p_v = v + o_v[:, None] + o_t[None, :] * (HV * V)
         p_do = do + o_t[:, None] * (HV * V) + o_v[None, :]
-        p_dv = dv + o_t[:, None] * (HV * V) + o_v[None, :]
-        b_v = tl.load(p_v, mask=m_vT, other=0.0)
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
-        b_dA = tl.dot(b_do, b_v, b_dA)
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
-        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
+        if COMPUTE_DA:
+            p_v = v + o_v[:, None] + o_t[None, :] * (HV * V)
+            b_v = tl.load(p_v, mask=m_vT, other=0.0)
+            b_dA = tl.dot(b_do, b_v, b_dA)
+        if COMPUTE_DV:
+            p_dv = dv + o_t[:, None] * (HV * V) + o_v[None, :]
+            b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
+            tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
 
-    m_dA = m_t[:, None] & (o_A[None, :] < BT)
-    p_dA = dA + o_t[:, None] * (HV * BT) + o_A[None, :]
-    b_dA = tl.where(o_t[:, None] >= o_t, b_dA * scale, 0.0)
-    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
+    if COMPUTE_DA:
+        m_dA = m_t[:, None] & (o_A[None, :] < BT)
+        p_dA = dA + o_t[:, None] * (HV * BT) + o_A[None, :]
+        b_dA = tl.where(o_t[:, None] >= o_t, b_dA * scale, 0.0)
+        tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
 
 
 @triton.jit
-def _kda_bwd_dhu_kernel(
+def _kda_bwd_dhu(
+    i_v,
+    i_nh,
     q,
     g,
     k,
@@ -135,14 +153,8 @@ def _kda_bwd_dhu_kernel(
     IS_VARLEN: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
 ):
-    """Reverse-time recurrence of the per-chunk state gradient.
-
-    ``dh[t]`` is the gradient w.r.t. ``h[t]`` (the state entering chunk ``t``);
-    ``dv2 = dv + kg @ dh[t]`` adds the path through the state to ``v_new``'s
-    gradient. ``q``/``k`` (``kg``) index qk heads/value heads as in the forward;
-    ``g`` is the chunk-local log2 cumsum.
-    """
-    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    """Body of ``_kda_bwd_dhu_kernel`` for program ``(i_v, i_nh)``."""
+    i_nh = i_nh.to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -347,6 +359,168 @@ def _kda_bwd_dhu_kernel(
             else:
                 p_dh0 = dh0 + o_k4[:, None] * V + o_v[None, :]
             tl.store(p_dh0, b_dh4.to(p_dh0.dtype.element_ty), mask=m_h4)
+
+
+@triton.jit
+def _kda_bwd_dhu_kernel(
+    q,
+    g,
+    k,
+    w,
+    dht,
+    do,
+    dv,
+    cu_seqlens,
+    chunk_offsets,
+    dh,
+    dh0,
+    dv2,
+    scale,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
+):
+    """Reverse-time recurrence of the per-chunk state gradient.
+
+    ``dh[t]`` is the gradient w.r.t. ``h[t]`` (the state entering chunk ``t``);
+    ``dv2 = dv + kg @ dh[t]`` adds the path through the state to ``v_new``'s
+    gradient. ``q``/``k`` (``kg``) index qk heads/value heads as in the forward;
+    ``g`` is the chunk-local log2 cumsum.
+    """
+    _kda_bwd_dhu(
+        tl.program_id(0),
+        tl.program_id(1),
+        q,
+        g,
+        k,
+        w,
+        dht,
+        do,
+        dv,
+        cu_seqlens,
+        chunk_offsets,
+        dh,
+        dh0,
+        dv2,
+        scale,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BV,
+        USE_INITIAL_STATE,
+        USE_FINAL_STATE_GRADIENT,
+        IS_VARLEN,
+        TRANSPOSE_STATE,
+    )
+
+
+@triton.jit
+def _kda_fwd_h_bwd_dhu_kernel(
+    q,
+    g,
+    k,
+    v,
+    w,
+    h0,
+    dht,
+    do,
+    dv,
+    cu_seqlens,
+    chunk_offsets,
+    h,
+    v_new,
+    dh,
+    dh0,
+    dv2,
+    scale,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
+):
+    """``_kda_fwd_h_kernel`` (recompute) and ``_kda_bwd_dhu_kernel`` in one launch.
+
+    The two recurrences are independent (``dhu`` needs ``dv = Aqk^T @ do`` but
+    not ``v_new``) and each is a serial chain over chunks that leaves most CUs
+    idle when there are few states, so they share the grid: program ``i_v <
+    cdiv(V, BV)`` runs ``fwd_h`` on V block ``i_v``, the rest run ``dhu``.
+    ``k`` is ``kg``, ``v`` is ``u`` and ``g`` the log2 gate cumsum, as for the two
+    kernels; the final state is not stored.
+    """
+    NV: tl.constexpr = (V + BV - 1) // BV
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    if i_v < NV:
+        _kda_fwd_h(
+            i_v,
+            i_nh,
+            k,
+            v,
+            w,
+            g,
+            h0,
+            cu_seqlens,
+            chunk_offsets,
+            h,
+            v_new,
+            None,
+            T,
+            HV,
+            K,
+            V,
+            BT,
+            BV,
+            USE_INITIAL_STATE,
+            False,
+            IS_VARLEN,
+            TRANSPOSE_STATE,
+        )
+    else:
+        _kda_bwd_dhu(
+            i_v - NV,
+            i_nh,
+            q,
+            g,
+            k,
+            w,
+            dht,
+            do,
+            dv,
+            cu_seqlens,
+            chunk_offsets,
+            dh,
+            dh0,
+            dv2,
+            scale,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BV,
+            USE_INITIAL_STATE,
+            USE_FINAL_STATE_GRADIENT,
+            IS_VARLEN,
+            TRANSPOSE_STATE,
+        )
 
 
 @triton.jit
@@ -799,25 +973,45 @@ def _kda_bwd_intra_kernel(
 
 
 @triton.jit
-def _kda_bwd_reverse_cumsum_kernel(
+def _kda_bwd_gate_cumsum_kernel(
     s,
+    g,
+    A_log,
+    dt_bias,
     cu_seqlens,
     chunk_indices,
     o,
+    dA,
+    dbias,
+    lower_bound,
     T,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GATE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
-    """Chunk-local reverse cumsum of ``[B, T, H, S]``: the adjoint of the forward's gate cumsum."""
+    """Chunk-local reverse cumsum of ``s`` ``[B, T, H, S]`` (the adjoint of the forward's
+    gate cumsum), then with ``USE_GATE`` the backward of the fused gate activation.
+
+    The activation is ``-exp(A_log) * softplus(g + bias)``, or ``lower_bound *
+    sigmoid(exp(A_log) * (g + bias))``. ``o`` is written in its own dtype.
+    ``dA`` ``[NT, B * H, cdiv(S, BS)]`` and ``dbias`` ``[NT, B * H, S]`` receive
+    per-program partial sums of the ``A_log`` and ``dt_bias`` gradients (zeros
+    from programs on padded varlen chunks).
+    """
     i_s, i_t, i_bh = (
         tl.program_id(0),
         tl.program_id(1).to(tl.int64),
         tl.program_id(2).to(tl.int64),
     )
+    i_p = (i_t * tl.num_programs(2) + i_bh) * tl.num_programs(0) + i_s
     i_b, i_h = i_bh // H, i_bh % H
+    o_s = i_s * BS + tl.arange(0, BS)
+    o_db = (i_p - i_s) // tl.num_programs(0) * S + o_s
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -827,75 +1021,42 @@ def _kda_bwd_reverse_cumsum_kernel(
         )
         T = eos - bos
         if i_t * BT >= T:
+            if USE_GATE:
+                tl.store(dA + i_p, 0.0)
+                if HAS_BIAS:
+                    tl.store(dbias + o_db, tl.zeros([BS], dtype=tl.float32), mask=o_s < S)
             return
     else:
         bos, eos = i_b * T, i_b * T + T
 
     o_t = i_t * BT + tl.arange(0, BT)
-    o_s = i_s * BS + tl.arange(0, BS)
     m_s = (o_t[:, None] < T) & (o_s[None, :] < S)
-    p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
-    p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
-    b_s = tl.load(p_s, mask=m_s, other=0.0).to(tl.float32)
+    offs = (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
+    b_s = tl.load(s + offs, mask=m_s, other=0.0).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0, reverse=True)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_s)
 
+    if USE_GATE:
+        b_A = tl.load(A_log + i_h).to(tl.float32)
+        b_g = tl.load(g + offs, mask=m_s, other=0.0).to(tl.float32)
+        if HAS_BIAS:
+            b_bias = tl.load(dt_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(tl.float32)
+            b_g = b_g + b_bias[None, :]
+        if not USE_LOWER_BOUND:
+            b_A = -exp(b_A)
+            b_yg = b_A * softplus(b_g)
+            b_dg = b_A * (b_o * tl.sigmoid(b_g))
+            b_dA = tl.sum(tl.sum(tl.where(m_s, b_o * b_yg, 0.0), 1), 0)
+        else:
+            b_A = exp(b_A)
+            b_sig = tl.sigmoid(b_A * b_g)
+            b_dg = b_o * (lower_bound * b_sig * (1.0 - b_sig)) * b_A
+            b_dA = tl.sum(tl.sum(tl.where(m_s, b_dg * b_g, 0.0), 1), 0)
+        b_o = b_dg
+        tl.store(dA + i_p, b_dA)
+        if HAS_BIAS:
+            tl.store(dbias + o_db, tl.sum(tl.where(m_s, b_dg, 0.0), 0), mask=o_s < S)
 
-@triton.jit
-def _kda_bwd_gate_kernel(
-    g,
-    A_log,
-    dt_bias,
-    dyg,
-    dg,
-    dA,
-    lower_bound,
-    T,
-    H: tl.constexpr,
-    D: tl.constexpr,
-    BT: tl.constexpr,
-    BD: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    USE_LOWER_BOUND: tl.constexpr,
-):
-    """Backward of the fused gate activation; ``dA`` is ``[cdiv(T, BT), H]`` partial sums.
-
-    ``-exp(A_log) * softplus(g + bias)``, or ``lower_bound * sigmoid(exp(A_log) *
-    (g + bias))``. ``T`` counts all tokens; the bias gradient is ``dg`` summed
-    over them.
-    """
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
-
-    b_A = tl.load(A_log + i_h).to(tl.float32)
-
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_d = tl.arange(0, BD)
-    m_t = o_t < T
-    m_g = m_t[:, None] & (o_d[None, :] < D)
-    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
-    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
-    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
-
-    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
-    b_dyg = tl.load(p_dyg, mask=m_g, other=0.0).to(tl.float32)
-
-    if HAS_BIAS:
-        o_b = i_h * D + o_d
-        b_g = b_g + tl.load(dt_bias + o_b, mask=o_d < D, other=0.0).to(tl.float32)[None, :]
-
-    if not USE_LOWER_BOUND:
-        b_A = -exp(b_A)
-        b_yg = b_A * softplus(b_g)
-        b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
-        b_dA = tl.sum(tl.sum(tl.where(m_g, b_dyg * b_yg, 0.0), 1), 0)
-    else:
-        b_A = exp(b_A)
-        b_sig = tl.sigmoid(b_A * b_g)
-        b_dg = b_dyg * (lower_bound * b_sig * (1.0 - b_sig)) * b_A
-        b_dA = tl.sum(tl.sum(tl.where(m_g, b_dg * b_g, 0.0), 1), 0)
-
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
-    tl.store(dA + i_t * H + i_h, b_dA)
+    tl.store(o + offs, b_o.to(o.dtype.element_ty), mask=m_s)
 
 
 @triton.jit

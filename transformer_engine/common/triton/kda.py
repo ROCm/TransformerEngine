@@ -927,7 +927,9 @@ def _kda_recompute_w_u_kernel(
 
 
 @triton.jit
-def _kda_fwd_h_kernel(
+def _kda_fwd_h(
+    i_v,
+    i_nh,
     k,
     v,
     w,
@@ -949,12 +951,7 @@ def _kda_fwd_h_kernel(
     IS_VARLEN: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
 ):
-    """Per-chunk hidden states ``h`` and ``v_new = u - w @ h`` for a per-K (vector) log2 gate.
-
-    ``H`` here is the value-head count. ``h`` is indexed by global chunk,
-    ``chunk_offsets[n]`` being sequence ``n``'s first one.
-    """
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    """Body of ``_kda_fwd_h_kernel`` for program ``(i_v, i_nh)``."""
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(
@@ -1038,18 +1035,16 @@ def _kda_fwd_h_kernel(
         m_tk1 = m_t[:, None] & m_k1[None, :]
         m_tv = m_t[:, None] & m_v[None, :]
 
-        h_t = h + i_t.to(tl.int64) * stride_h
-        p_h1 = h_t + o_k1[:, None] * V + o_v[None, :]
-        tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), mask=m_h1)
+        # The state entering chunk i_t and v_new are stored at the end of the
+        # iteration: stores issued ahead of the chunk's loads hold up the waits
+        # on those loads, and they sit on the serial chain (~1.5x per chunk).
+        b_hs1 = b_h1.to(h.dtype.element_ty)
         if K > 64:
-            p_h2 = h_t + o_k2[:, None] * V + o_v[None, :]
-            tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), mask=m_h2)
+            b_hs2 = b_h2.to(h.dtype.element_ty)
         if K > 128:
-            p_h3 = h_t + o_k3[:, None] * V + o_v[None, :]
-            tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), mask=m_h3)
+            b_hs3 = b_h3.to(h.dtype.element_ty)
         if K > 192:
-            p_h4 = h_t + o_k4[:, None] * V + o_v[None, :]
-            tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_h4)
+            b_hs4 = b_h4.to(h.dtype.element_ty)
 
         p_w = w + o_t[:, None] * stride_k + o_k1[None, :]
         b_w = tl.load(p_w, mask=m_tk1, other=0.0)
@@ -1069,8 +1064,7 @@ def _kda_fwd_h_kernel(
         p_v = v + o_t[:, None] * stride_v + o_v[None, :]
         b_v = tl.load(p_v, mask=m_tv, other=0.0) - b_v
 
-        p_v = v_new + o_t[:, None] * stride_v + o_v[None, :]
-        tl.store(p_v, b_v.to(p_v.dtype.element_ty), mask=m_tv)
+        b_vs = b_v.to(v_new.dtype.element_ty)
 
         last_idx = min((i_t + 1) * BT, T) - 1
         b_gk_last1 = tl.load(
@@ -1118,6 +1112,16 @@ def _kda_fwd_h_kernel(
             b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
             b_h4 = tl.dot(b_k, b_v, acc=b_h4)
 
+        h_t = h + i_t.to(tl.int64) * stride_h
+        tl.store(h_t + o_k1[:, None] * V + o_v[None, :], b_hs1, mask=m_h1)
+        if K > 64:
+            tl.store(h_t + o_k2[:, None] * V + o_v[None, :], b_hs2, mask=m_h2)
+        if K > 128:
+            tl.store(h_t + o_k3[:, None] * V + o_v[None, :], b_hs3, mask=m_h3)
+        if K > 192:
+            tl.store(h_t + o_k4[:, None] * V + o_v[None, :], b_hs4, mask=m_h4)
+        tl.store(v_new + o_t[:, None] * stride_v + o_v[None, :], b_vs, mask=m_tv)
+
     if STORE_FINAL_STATE:
         if TRANSPOSE_STATE:
             p_ht = ht + o_k1[:, None] + o_v[None, :] * K
@@ -1142,6 +1146,60 @@ def _kda_fwd_h_kernel(
             else:
                 p_ht = ht + o_k4[:, None] * V + o_v[None, :]
             tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), mask=m_h4)
+
+
+@triton.jit
+def _kda_fwd_h_kernel(
+    k,
+    v,
+    w,
+    gk,
+    h0,
+    cu_seqlens,
+    chunk_offsets,
+    h,
+    v_new,
+    ht,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
+):
+    """Per-chunk hidden states ``h`` and ``v_new = u - w @ h`` for a per-K (vector) log2 gate.
+
+    ``H`` here is the value-head count. ``h`` is indexed by global chunk,
+    ``chunk_offsets[n]`` being sequence ``n``'s first one.
+    """
+    _kda_fwd_h(
+        tl.program_id(0),
+        tl.program_id(1),
+        k,
+        v,
+        w,
+        gk,
+        h0,
+        cu_seqlens,
+        chunk_offsets,
+        h,
+        v_new,
+        ht,
+        T,
+        H,
+        K,
+        V,
+        BT,
+        BV,
+        USE_INITIAL_STATE,
+        STORE_FINAL_STATE,
+        IS_VARLEN,
+        TRANSPOSE_STATE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1767,6 +1825,8 @@ _KDA_CONFIGS = {
         "inter_solve": KDALaunchConfig({"BK": 32}, num_warps=1, num_stages=3),
         "recompute_w_u": KDALaunchConfig({"BK": 64, "BV": 64}, num_warps=4, num_stages=3),
         "fwd_h": KDALaunchConfig({"BV": 32}, num_warps=2, num_stages=2),
+        # Taken over "fwd_h" / "bwd_dhu" once it fills the CUs (kda_recurrence_config).
+        "fwd_h_wide": KDALaunchConfig({"BV": 64}, num_warps=4, num_stages=2),
         "gla_fwd_o": KDALaunchConfig({"BK": 64, "BV": 64}, num_warps=4, num_stages=1),
         "flash_prepare": KDALaunchConfig({}, num_warps=2, num_stages=1),
         "flash_segment": KDALaunchConfig({"BW": 16}, num_warps=2, num_stages=2),
@@ -1783,10 +1843,10 @@ _KDA_CONFIGS = {
         # general-pipeline shapes; no other arch measured yet.
         "bwd_dav": KDALaunchConfig({"BV": 64}, num_warps=4, num_stages=2),
         "bwd_dhu": KDALaunchConfig({"BV": 32}, num_warps=2, num_stages=2),
+        "bwd_dhu_wide": KDALaunchConfig({"BV": 64}, num_warps=4, num_stages=2),
         "bwd_wy_dqkg": KDALaunchConfig({"BK": 64, "BV": 32}, num_warps=2, num_stages=1),
         "bwd_intra": KDALaunchConfig({"BK": 64}, num_warps=2, num_stages=2),
-        "bwd_reverse_cumsum": KDALaunchConfig({"BS": 32}, num_warps=4, num_stages=2),
-        "bwd_gate": KDALaunchConfig({"BT": 16}, num_warps=2, num_stages=2),
+        "bwd_gate_cumsum": KDALaunchConfig({"BS": 32}, num_warps=4, num_stages=2),
         "bwd_l2norm": KDALaunchConfig({"BT": 32}, num_warps=2, num_stages=2),
         "bwd_beta_sigmoid": KDALaunchConfig({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=2),
     },
@@ -1820,6 +1880,37 @@ def kda_num_cus(device_index: int = 0) -> int:
     """Compute-unit count of a device."""
     props = triton.runtime.driver.active.utils.get_device_properties(device_index)
     return props["multiprocessor_count"]
+
+
+def kda_recurrence_config(name: str, n_states: int, V: int, arch: str, num_cus: int):
+    """Launch config of a chunk recurrence (``"fwd_h"`` or ``"bwd_dhu"``) over ``n_states`` states.
+
+    Both run one program per (V block, state), each looping over every chunk
+    in turn. With few states the narrow config's extra V blocks are most of the
+    parallelism; once ``<name>_wide`` alone fills the CUs its larger tiles win
+    (1.4-1.65x per kernel on gfx950 from ``N * HV = 128`` up).
+    """
+    wide = kda_launch_config(name + "_wide", arch)
+    if triton.cdiv(V, wide.kwargs["BV"]) * n_states >= num_cus:
+        return wide
+    return kda_launch_config(name, arch)
+
+
+def kda_bwd_recurrences_config(n_states: int, V: int, arch: str, num_cus: int):
+    """Config of ``_kda_fwd_h_bwd_dhu_kernel`` if ``kda_bwd`` co-launches ``fwd_h`` and ``dhu``.
+
+    Co-launched when both take their narrow config -- neither fills the CUs on
+    its own, and together they still fit about one wave per SIMD -- and the two
+    narrow configs agree, since the launch has one tile width and warp count.
+    Otherwise None.
+    """
+    cfg_h = kda_recurrence_config("fwd_h", n_states, V, arch, num_cus)
+    cfg_dh = kda_recurrence_config("bwd_dhu", n_states, V, arch, num_cus)
+    narrow = cfg_h is kda_launch_config("fwd_h", arch) and cfg_dh is kda_launch_config(
+        "bwd_dhu", arch
+    )
+    same = (cfg_h.kwargs, cfg_h.num_warps) == (cfg_dh.kwargs, cfg_dh.num_warps)
+    return cfg_dh if narrow and same else None
 
 
 def kda_num_xcds(arch: str) -> int:

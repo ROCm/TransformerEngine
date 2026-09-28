@@ -55,21 +55,23 @@ from transformer_engine.common.triton.kda import (
     flash_kda_gluon_k2_schedule,
     flash_kda_scan_bv,
     flash_kda_supported,
+    kda_bwd_recurrences_config,
     kda_device_arch,
     kda_launch_config,
     kda_num_cus,
     kda_num_xcds,
+    kda_recurrence_config,
     kda_varlen_max_chunks,
 )
 from transformer_engine.common.triton.kda_bwd import (
     _kda_bwd_beta_sigmoid_kernel,
     _kda_bwd_dav_kernel,
     _kda_bwd_dhu_kernel,
-    _kda_bwd_gate_kernel,
+    _kda_bwd_gate_cumsum_kernel,
     _kda_bwd_intra_kernel,
     _kda_bwd_l2norm_kernel,
-    _kda_bwd_reverse_cumsum_kernel,
     _kda_bwd_wy_dqkg_kernel,
+    _kda_fwd_h_bwd_dhu_kernel,
 )
 from ..util import is_hip_extension
 from .utils import triton_call_lowering
@@ -332,6 +334,7 @@ def _general_states(
     use_beta_sigmoid_in_kernel,
     state_v_first,
     arch,
+    run_fwd_h=True,
 ):
     """The general pipeline up to (not including) the output kernel; see the PyTorch driver."""
     B, T, H, K = q.shape
@@ -526,40 +529,43 @@ def _general_states(
             f"`initial_state` must have shape {state_shape} for "
             f"state_v_first={state_v_first}, got {tuple(initial_state.shape)}."
         )
-    cfg = kda_launch_config("fwd_h", arch)
+    cfg = kda_recurrence_config("fwd_h", N * HV, V, arch, kda_num_cus(0))
     BV = cfg.kwargs["BV"]
-    r = _call(
-        _kda_fwd_h_kernel,
-        [
-            ("k", kg),
-            ("v", u),
-            ("w", w),
-            ("gk", g_cumsum),
-            ("h0", initial_state),
-            ("cu_seqlens", cu_seqlens),
-            ("chunk_offsets", chunk_offsets),
-        ],
-        [
-            ("h", (B, NT, HV, K, V), k.dtype),
-            ("v_new", u.shape, u.dtype),
-            ("ht", state_shape if output_final_state else None, jnp.float32),
-        ],
-        (triton.cdiv(V, BV), N * HV),
-        {
-            "T": T,
-            "H": HV,
-            "K": K,
-            "V": V,
-            "BT": BT,
-            "BV": BV,
-            "USE_INITIAL_STATE": initial_state is not None,
-            "STORE_FINAL_STATE": output_final_state,
-            "IS_VARLEN": is_varlen,
-            "TRANSPOSE_STATE": state_v_first,
-        },
-        num_warps=cfg.num_warps,
-        num_stages=cfg.num_stages,
-    )
+    # kda_bwd may run fwd_h itself, alongside dhu (_kda_fwd_h_bwd_dhu_kernel).
+    r = {}
+    if run_fwd_h:
+        r = _call(
+            _kda_fwd_h_kernel,
+            [
+                ("k", kg),
+                ("v", u),
+                ("w", w),
+                ("gk", g_cumsum),
+                ("h0", initial_state),
+                ("cu_seqlens", cu_seqlens),
+                ("chunk_offsets", chunk_offsets),
+            ],
+            [
+                ("h", (B, NT, HV, K, V), k.dtype),
+                ("v_new", u.shape, u.dtype),
+                ("ht", state_shape if output_final_state else None, jnp.float32),
+            ],
+            (triton.cdiv(V, BV), N * HV),
+            {
+                "T": T,
+                "H": HV,
+                "K": K,
+                "V": V,
+                "BT": BT,
+                "BV": BV,
+                "USE_INITIAL_STATE": initial_state is not None,
+                "STORE_FINAL_STATE": output_final_state,
+                "IS_VARLEN": is_varlen,
+                "TRANSPOSE_STATE": state_v_first,
+            },
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
+        )
     return {
         "q": q,
         "k": k,
@@ -569,8 +575,9 @@ def _general_states(
         "Akk": Akk,
         "w": w,
         "kg": kg,
-        "h": r["h"],
-        "v_new": r["v_new"],
+        "u": u,
+        "h": r.get("h"),
+        "v_new": r.get("v_new"),
         "final_state": r.get("ht"),
         "chunk_indices": chunk_indices,
         "chunk_offsets": chunk_offsets,
@@ -1014,6 +1021,8 @@ def kda_bwd(
     BT = chunk_size
     is_varlen = cu_seqlens is not None
     arch = kda_device_arch(0)
+    N = cu_seqlens.shape[0] - 1 if is_varlen else B
+    rec_cfg = kda_bwd_recurrences_config(N * HV, V, arch, kda_num_cus(0))
     st = _general_states(
         q,
         k,
@@ -1034,72 +1043,111 @@ def kda_bwd(
         use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
         state_v_first=state_v_first,
         arch=arch,
+        run_fwd_h=rec_cfg is None,
     )
     qn, kn, bn, gc = st["q"], st["k"], st["beta"], st["g_cumsum"]
-    chunk_indices, N, NT = st["chunk_indices"], st["N"], st["NT"]
+    chunk_indices, NT = st["chunk_indices"], st["NT"]
     tables = [("cu_seqlens", cu_seqlens), ("chunk_indices", chunk_indices)]
     a_shape = (B, T, HV, BT)
     # Kernels leave tokens past cu_seqlens[-1] unwritten; mask every result.
     mask = (lambda x: _mask_tail(x, cu_seqlens)) if is_varlen else (lambda x: x)
 
-    cfg = kda_launch_config("bwd_dav", arch)
-    r = _call(
-        _kda_bwd_dav_kernel,
-        [("v", st["v_new"]), ("A", st["Aqk"]), ("do", do)] + tables,
-        [("dA", a_shape, jnp.float32), ("dv", v.shape, v.dtype)],
-        (NT, B * HV),
-        {
-            "scale": scale,
-            "T": T,
-            "HV": HV,
-            "V": V,
-            "BT": BT,
-            "BV": cfg.kwargs["BV"],
-            "IS_VARLEN": is_varlen,
-        },
-        num_warps=cfg.num_warps,
-        num_stages=cfg.num_stages,
-    )
-    dAqk, dv = r["dA"], r["dv"]
+    cfg_dav = kda_launch_config("bwd_dav", arch)
 
-    cfg = kda_launch_config("bwd_dhu", arch)
-    BV = cfg.kwargs["BV"]
-    r = _call(
-        _kda_bwd_dhu_kernel,
-        [
-            ("q", qn),
-            ("g", gc),
-            ("k", st["kg"]),
-            ("w", st["w"]),
-            ("dht", dht),
-            ("do", do),
-            ("dv", dv),
-            ("cu_seqlens", cu_seqlens),
-            ("chunk_offsets", st["chunk_offsets"]),
-        ],
-        [
-            ("dh", (B, NT, HV, K, V), q.dtype),
-            ("dh0", initial_state.shape if initial_state is not None else None, jnp.float32),
-            ("dv2", v.shape, v.dtype),
-        ],
-        (triton.cdiv(V, BV), N * HV),
-        {
-            "scale": scale,
-            "T": T,
-            "H": H,
-            "HV": HV,
-            "K": K,
-            "V": V,
-            "BT": BT,
-            "BV": BV,
-            "USE_INITIAL_STATE": initial_state is not None,
-            "USE_FINAL_STATE_GRADIENT": dht is not None,
-            "IS_VARLEN": is_varlen,
-            "TRANSPOSE_STATE": state_v_first,
-        },
-        num_warps=cfg.num_warps,
-        num_stages=cfg.num_stages,
-    )
+    def dav(v_new, compute_da, compute_dv):
+        return _call(
+            _kda_bwd_dav_kernel,
+            [("v", v_new), ("A", st["Aqk"]), ("do", do)] + tables,
+            [
+                ("dA", a_shape if compute_da else None, jnp.float32),
+                ("dv", v.shape if compute_dv else None, v.dtype),
+            ],
+            (NT, B * HV),
+            {
+                "scale": scale,
+                "T": T,
+                "HV": HV,
+                "V": V,
+                "BT": BT,
+                "BV": cfg_dav.kwargs["BV"],
+                "IS_VARLEN": is_varlen,
+                "COMPUTE_DA": compute_da,
+                "COMPUTE_DV": compute_dv,
+            },
+            num_warps=cfg_dav.num_warps,
+            num_stages=cfg_dav.num_stages,
+        )
+
+    dhu_consts = {
+        "scale": scale,
+        "T": T,
+        "H": H,
+        "HV": HV,
+        "K": K,
+        "V": V,
+        "BT": BT,
+        "USE_INITIAL_STATE": initial_state is not None,
+        "USE_FINAL_STATE_GRADIENT": dht is not None,
+        "IS_VARLEN": is_varlen,
+        "TRANSPOSE_STATE": state_v_first,
+    }
+    dhu_outputs = [
+        ("dh", (B, NT, HV, K, V), q.dtype),
+        ("dh0", initial_state.shape if initial_state is not None else None, jnp.float32),
+        ("dv2", v.shape, v.dtype),
+    ]
+    tail = [("cu_seqlens", cu_seqlens), ("chunk_offsets", st["chunk_offsets"])]
+    if rec_cfg is None:
+        r = dav(st["v_new"], True, True)
+        dAqk, dv = r["dA"], r["dv"]
+        cfg = kda_recurrence_config("bwd_dhu", N * HV, V, arch, kda_num_cus(0))
+        BV = cfg.kwargs["BV"]
+        r = _call(
+            _kda_bwd_dhu_kernel,
+            [
+                ("q", qn),
+                ("g", gc),
+                ("k", st["kg"]),
+                ("w", st["w"]),
+                ("dht", dht),
+                ("do", do),
+                ("dv", dv),
+            ]
+            + tail,
+            dhu_outputs,
+            (triton.cdiv(V, BV), N * HV),
+            {**dhu_consts, "BV": BV},
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
+        )
+        h, v_new = st["h"], st["v_new"]
+    else:
+        # dhu needs dv but not v_new, so it runs alongside the recomputed fwd_h;
+        # dAqk, which does need v_new, follows.
+        dv = dav(None, False, True)["dv"]
+        BV = rec_cfg.kwargs["BV"]
+        r = _call(
+            _kda_fwd_h_bwd_dhu_kernel,
+            [
+                ("q", qn),
+                ("g", gc),
+                ("k", st["kg"]),
+                ("v", st["u"]),
+                ("w", st["w"]),
+                ("h0", initial_state),
+                ("dht", dht),
+                ("do", do),
+                ("dv", dv),
+            ]
+            + tail,
+            [("h", (B, NT, HV, K, V), k.dtype), ("v_new", v.shape, v.dtype)] + dhu_outputs,
+            (2 * triton.cdiv(V, BV), N * HV),
+            {**dhu_consts, "BV": BV},
+            num_warps=rec_cfg.num_warps,
+            num_stages=rec_cfg.num_stages,
+        )
+        h, v_new = r["h"], r["v_new"]
+        dAqk = dav(v_new, True, False)["dA"]
     dh, dh0, dv = r["dh"], r.get("dh0"), r["dv2"]
 
     cfg = kda_launch_config("bwd_wy_dqkg", arch)
@@ -1110,11 +1158,11 @@ def kda_bwd(
             ("q", qn),
             ("k", kn),
             ("v", v),
-            ("v_new", st["v_new"]),
+            ("v_new", v_new),
             ("g", gc),
             ("beta", bn),
             ("A", st["Akk"]),
-            ("h", st["h"]),
+            ("h", h),
             ("do", do),
             ("dh", dh),
             ("dv", dv),
@@ -1194,45 +1242,39 @@ def kda_bwd(
         dq = dq.reshape(B, T, H, HV // H, K).sum(3)
         dk = dk.reshape(B, T, H, HV // H, K).sum(3)
 
-    cfg = kda_launch_config("bwd_reverse_cumsum", arch)
+    # Gradient w.r.t. the per-token gate, then through its activation, in one
+    # pass that also leaves per-chunk partial sums of dA_log and ddt_bias.
+    cfg = kda_launch_config("bwd_gate_cumsum", arch)
     BS = cfg.kwargs["BS"]
-    dg = _call(
-        _kda_bwd_reverse_cumsum_kernel,
-        [("s", r["dg2"])] + tables,
-        [("o", kv_shape, jnp.float32)],
-        (triton.cdiv(K, BS), NT, B * HV),
-        {"T": T, "H": HV, "S": K, "BT": BT, "BS": BS, "IS_VARLEN": is_varlen},
+    NS = triton.cdiv(K, BS)
+    use_bias = use_gate_in_kernel and dt_bias is not None
+    r = _call(
+        _kda_bwd_gate_cumsum_kernel,
+        [("s", r["dg2"]), ("g", g), ("A_log", A_log), ("dt_bias", dt_bias)] + tables,
+        [
+            ("o", kv_shape, g.dtype),
+            ("dA", (NT, B, HV, NS) if use_gate_in_kernel else None, jnp.float32),
+            ("dbias", (NT * B, HV * K) if use_bias else None, jnp.float32),
+        ],
+        (NS, NT, B * HV),
+        {
+            "lower_bound": 0.0 if lower_bound is None else float(lower_bound),
+            "T": T,
+            "H": HV,
+            "S": K,
+            "BT": BT,
+            "BS": BS,
+            "IS_VARLEN": is_varlen,
+            "USE_GATE": use_gate_in_kernel,
+            "HAS_BIAS": use_bias,
+            "USE_LOWER_BOUND": lower_bound is not None,
+        },
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
-    )["o"]
-    dg = mask(dg)
-    dA_log = ddt_bias = None
-    if use_gate_in_kernel:
-        cfg = kda_launch_config("bwd_gate", arch)
-        BTg = cfg.kwargs["BT"]
-        n_tok = B * T
-        r = _call(
-            _kda_bwd_gate_kernel,
-            [("g", g), ("A_log", A_log), ("dt_bias", dt_bias), ("dyg", dg)],
-            [("dg", kv_shape, jnp.float32), ("dA", (triton.cdiv(n_tok, BTg), HV), jnp.float32)],
-            (triton.cdiv(n_tok, BTg), HV),
-            {
-                "lower_bound": 0.0 if lower_bound is None else float(lower_bound),
-                "T": n_tok,
-                "H": HV,
-                "D": K,
-                "BT": BTg,
-                "BD": triton.next_power_of_2(K),
-                "HAS_BIAS": dt_bias is not None,
-                "USE_LOWER_BOUND": lower_bound is not None,
-            },
-            num_warps=cfg.num_warps,
-            num_stages=cfg.num_stages,
-        )
-        dg = r["dg"]
-        dA_log = r["dA"].sum(0).astype(A_log.dtype)
-        if dt_bias is not None:
-            ddt_bias = dg.reshape(-1, HV * K).sum(0).astype(dt_bias.dtype)
+    )
+    dg = mask(r["o"])
+    dA_log = r["dA"].sum((0, 1, 3)).astype(A_log.dtype) if use_gate_in_kernel else None
+    ddt_bias = r["dbias"].sum(0).astype(dt_bias.dtype) if use_bias else None
 
     if use_qk_l2norm_in_kernel:
         dq = _l2norm_bwd(q, dq, arch)

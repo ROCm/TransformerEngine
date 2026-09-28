@@ -58,21 +58,23 @@ from transformer_engine.common.triton.kda import (
     flash_kda_gluon_k2_schedule,
     flash_kda_scan_bv,
     flash_kda_supported,
+    kda_bwd_recurrences_config,
     kda_device_arch,
     kda_launch_config,
     kda_num_cus,
     kda_num_xcds,
+    kda_recurrence_config,
     kda_varlen_max_chunks,
 )
 from transformer_engine.common.triton.kda_bwd import (
     _kda_bwd_beta_sigmoid_kernel,
     _kda_bwd_dav_kernel,
     _kda_bwd_dhu_kernel,
-    _kda_bwd_gate_kernel,
+    _kda_bwd_gate_cumsum_kernel,
     _kda_bwd_intra_kernel,
     _kda_bwd_l2norm_kernel,
-    _kda_bwd_reverse_cumsum_kernel,
     _kda_bwd_wy_dqkg_kernel,
+    _kda_fwd_h_bwd_dhu_kernel,
 )
 from transformer_engine.pytorch.triton.fast_launch import fast_launch
 
@@ -96,10 +98,10 @@ _flash_seg_scan_k = fast_launch(_flash_kda_seg_scan_kernel)
 _varlen_plan_k = fast_launch(_kda_varlen_plan_kernel)
 _bwd_dav_k = fast_launch(_kda_bwd_dav_kernel)
 _bwd_dhu_k = fast_launch(_kda_bwd_dhu_kernel)
+_fwd_h_bwd_dhu_k = fast_launch(_kda_fwd_h_bwd_dhu_kernel)
 _bwd_wy_dqkg_k = fast_launch(_kda_bwd_wy_dqkg_kernel)
 _bwd_intra_k = fast_launch(_kda_bwd_intra_kernel)
-_bwd_reverse_cumsum_k = fast_launch(_kda_bwd_reverse_cumsum_kernel)
-_bwd_gate_k = fast_launch(_kda_bwd_gate_kernel)
+_bwd_gate_cumsum_k = fast_launch(_kda_bwd_gate_cumsum_kernel)
 _bwd_l2norm_k = fast_launch(_kda_bwd_l2norm_kernel)
 _bwd_beta_sigmoid_k = fast_launch(_kda_bwd_beta_sigmoid_kernel)
 
@@ -254,6 +256,7 @@ def _general_states(
     use_beta_sigmoid_in_kernel,
     state_v_first,
     arch,
+    run_fwd_h=True,
 ):
     """The general pipeline up to (not including) the output kernel.
 
@@ -445,32 +448,34 @@ def _general_states(
     h = k.new_empty(B, NT, HV, K, V)
     v_new = torch.empty_like(u)
     final_state = k.new_empty(*state_shape, dtype=torch.float32) if output_final_state else None
-    cfg = kda_launch_config("fwd_h", arch)
+    cfg = kda_recurrence_config("fwd_h", N * HV, V, arch, kda_num_cus(k.device.index or 0))
     BV = cfg.kwargs["BV"]
-    _fwd_h_k[(triton.cdiv(V, BV), N * HV)](
-        k=kg,
-        v=u,
-        w=w,
-        gk=g_cumsum,
-        h0=initial_state,
-        cu_seqlens=cu_seqlens,
-        chunk_offsets=chunk_offsets,
-        h=h,
-        v_new=v_new,
-        ht=final_state,
-        T=T,
-        H=HV,
-        K=K,
-        V=V,
-        BT=BT,
-        BV=BV,
-        USE_INITIAL_STATE=initial_state is not None,
-        STORE_FINAL_STATE=output_final_state,
-        IS_VARLEN=is_varlen,
-        TRANSPOSE_STATE=state_v_first,
-        num_warps=cfg.num_warps,
-        num_stages=cfg.num_stages,
-    )
+    # kda_bwd may run fwd_h itself, alongside dhu (_kda_fwd_h_bwd_dhu_kernel).
+    if run_fwd_h:
+        _fwd_h_k[(triton.cdiv(V, BV), N * HV)](
+            k=kg,
+            v=u,
+            w=w,
+            gk=g_cumsum,
+            h0=initial_state,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets,
+            h=h,
+            v_new=v_new,
+            ht=final_state,
+            T=T,
+            H=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            BV=BV,
+            USE_INITIAL_STATE=initial_state is not None,
+            STORE_FINAL_STATE=output_final_state,
+            IS_VARLEN=is_varlen,
+            TRANSPOSE_STATE=state_v_first,
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
+        )
     return {
         "q": q,
         "k": k,
@@ -480,6 +485,7 @@ def _general_states(
         "Akk": Akk,
         "w": w,
         "kg": kg,
+        "u": u,
         "h": h,
         "v_new": v_new,
         "final_state": final_state,
@@ -944,6 +950,9 @@ def kda_bwd(
     is_varlen = cu_seqlens is not None
     with torch.cuda.device(q.device):
         arch = kda_device_arch(q.device.index or 0)
+        num_cus = kda_num_cus(q.device.index or 0)
+        N = cu_seqlens.numel() - 1 if is_varlen else B
+        rec_cfg = kda_bwd_recurrences_config(N * HV, V, arch, num_cus)
         st = _general_states(
             q=q,
             k=k,
@@ -964,34 +973,39 @@ def kda_bwd(
             use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
             state_v_first=state_v_first,
             arch=arch,
+            run_fwd_h=rec_cfg is None,
         )
         qn, kn, bn, gc = st["q"], st["k"], st["beta"], st["g_cumsum"]
-        chunk_indices, N, NT = st["chunk_indices"], st["N"], st["NT"]
+        chunk_indices, NT = st["chunk_indices"], st["NT"]
         do = do.contiguous()
         dht = dht.contiguous() if dht is not None else None
 
         # dAqk = do @ v_new^T, dv = Aqk^T @ do.
         dAqk = torch.empty(B, T, HV, BT, device=q.device, dtype=torch.float32)
         dv = torch.empty_like(v)
-        cfg = kda_launch_config("bwd_dav", arch)
-        _bwd_dav_k[(NT, B * HV)](
-            v=st["v_new"],
-            A=st["Aqk"],
-            do=do,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            dA=dAqk,
-            dv=dv,
-            scale=scale,
-            T=T,
-            HV=HV,
-            V=V,
-            BT=BT,
-            BV=cfg.kwargs["BV"],
-            IS_VARLEN=is_varlen,
-            num_warps=cfg.num_warps,
-            num_stages=cfg.num_stages,
-        )
+        cfg_dav = kda_launch_config("bwd_dav", arch)
+
+        def dav(compute_da, compute_dv):
+            _bwd_dav_k[(NT, B * HV)](
+                v=st["v_new"],
+                A=st["Aqk"],
+                do=do,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                dA=dAqk,
+                dv=dv,
+                scale=scale,
+                T=T,
+                HV=HV,
+                V=V,
+                BT=BT,
+                BV=cfg_dav.kwargs["BV"],
+                IS_VARLEN=is_varlen,
+                COMPUTE_DA=compute_da,
+                COMPUTE_DV=compute_dv,
+                num_warps=cfg_dav.num_warps,
+                num_stages=cfg_dav.num_stages,
+            )
 
         # Reverse-time state gradient.
         dh = q.new_empty(B, NT, HV, K, V)
@@ -1001,36 +1015,54 @@ def kda_bwd(
             else None
         )
         dv2 = torch.empty_like(dv)
-        cfg = kda_launch_config("bwd_dhu", arch)
-        BV = cfg.kwargs["BV"]
-        _bwd_dhu_k[(triton.cdiv(V, BV), N * HV)](
-            q=qn,
-            g=gc,
-            k=st["kg"],
-            w=st["w"],
-            dht=dht,
-            do=do,
-            dv=dv,
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=st["chunk_offsets"],
-            dh=dh,
-            dh0=dh0,
-            dv2=dv2,
-            scale=scale,
-            T=T,
-            H=H,
-            HV=HV,
-            K=K,
-            V=V,
-            BT=BT,
-            BV=BV,
-            USE_INITIAL_STATE=initial_state is not None,
-            USE_FINAL_STATE_GRADIENT=dht is not None,
-            IS_VARLEN=is_varlen,
-            TRANSPOSE_STATE=state_v_first,
-            num_warps=cfg.num_warps,
-            num_stages=cfg.num_stages,
-        )
+        dhu_args = {
+            "q": qn,
+            "g": gc,
+            "k": st["kg"],
+            "w": st["w"],
+            "dht": dht,
+            "do": do,
+            "dv": dv,
+            "cu_seqlens": cu_seqlens,
+            "chunk_offsets": st["chunk_offsets"],
+            "dh": dh,
+            "dh0": dh0,
+            "dv2": dv2,
+            "scale": scale,
+            "T": T,
+            "H": H,
+            "HV": HV,
+            "K": K,
+            "V": V,
+            "BT": BT,
+            "USE_INITIAL_STATE": initial_state is not None,
+            "USE_FINAL_STATE_GRADIENT": dht is not None,
+            "IS_VARLEN": is_varlen,
+            "TRANSPOSE_STATE": state_v_first,
+        }
+        if rec_cfg is None:
+            dav(True, True)
+            cfg = kda_recurrence_config("bwd_dhu", N * HV, V, arch, num_cus)
+            BV = cfg.kwargs["BV"]
+            _bwd_dhu_k[(triton.cdiv(V, BV), N * HV)](
+                **dhu_args, BV=BV, num_warps=cfg.num_warps, num_stages=cfg.num_stages
+            )
+        else:
+            # dhu needs dv but not v_new, so it runs alongside the recomputed
+            # fwd_h; dAqk, which does need v_new, follows.
+            dav(False, True)
+            BV = rec_cfg.kwargs["BV"]
+            _fwd_h_bwd_dhu_k[(2 * triton.cdiv(V, BV), N * HV)](
+                **dhu_args,
+                v=st["u"],
+                h0=initial_state,
+                h=st["h"],
+                v_new=st["v_new"],
+                BV=BV,
+                num_warps=rec_cfg.num_warps,
+                num_stages=rec_cfg.num_stages,
+            )
+            dav(True, False)
 
         # Inter-chunk and WY-representation gradients.
         # Varlen tokens past cu_seqlens[-1] are never written: zero those outputs.
@@ -1121,53 +1153,41 @@ def kda_bwd(
             dq = dq.view(B, T, H, HV // H, K).sum(3)
             dk = dk.view(B, T, H, HV // H, K).sum(3)
 
-        # Gradient w.r.t. the per-token gate, then through its activation.
-        cfg = kda_launch_config("bwd_reverse_cumsum", arch)
+        # Gradient w.r.t. the per-token gate, then through its activation, in one
+        # pass that also leaves per-chunk partial sums of dA_log and ddt_bias.
+        cfg = kda_launch_config("bwd_gate_cumsum", arch)
         BS = cfg.kwargs["BS"]
-        dg = alloc(dg2.shape, device=q.device, dtype=torch.float32)
-        _bwd_reverse_cumsum_k[(triton.cdiv(K, BS), NT, B * HV)](
+        NS = triton.cdiv(K, BS)
+        use_bias = use_gate_in_kernel and dt_bias is not None
+        f32 = {"device": q.device, "dtype": torch.float32}
+        dA_part = torch.empty(NT, B, HV, NS, **f32) if use_gate_in_kernel else None
+        db_part = torch.empty(NT * B, HV * K, **f32) if use_bias else None
+        dg = alloc(dg2.shape, device=q.device, dtype=g.dtype)
+        _bwd_gate_cumsum_k[(NS, NT, B * HV)](
             s=dg2,
+            g=g,
+            A_log=A_log,
+            dt_bias=dt_bias,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             o=dg,
+            dA=dA_part,
+            dbias=db_part,
+            lower_bound=0.0 if lower_bound is None else float(lower_bound),
             T=T,
             H=HV,
             S=K,
             BT=BT,
             BS=BS,
             IS_VARLEN=is_varlen,
+            USE_GATE=use_gate_in_kernel,
+            HAS_BIAS=use_bias,
+            USE_LOWER_BOUND=lower_bound is not None,
             num_warps=cfg.num_warps,
             num_stages=cfg.num_stages,
         )
-        dA_log = ddt_bias = None
-        if use_gate_in_kernel:
-            cfg = kda_launch_config("bwd_gate", arch)
-            BTg = cfg.kwargs["BT"]
-            n_tok = B * T
-            dg_act = dg
-            dg = torch.empty_like(dg_act)
-            dA_part = torch.empty(triton.cdiv(n_tok, BTg), HV, device=q.device, dtype=torch.float32)
-            _bwd_gate_k[(triton.cdiv(n_tok, BTg), HV)](
-                g=g,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                dyg=dg_act,
-                dg=dg,
-                dA=dA_part,
-                lower_bound=0.0 if lower_bound is None else float(lower_bound),
-                T=n_tok,
-                H=HV,
-                D=K,
-                BT=BTg,
-                BD=triton.next_power_of_2(K),
-                HAS_BIAS=dt_bias is not None,
-                USE_LOWER_BOUND=lower_bound is not None,
-                num_warps=cfg.num_warps,
-                num_stages=cfg.num_stages,
-            )
-            dA_log = dA_part.sum(0).to(A_log.dtype)
-            if dt_bias is not None:
-                ddt_bias = dg.view(-1, HV * K).sum(0).to(dt_bias.dtype)
+        dA_log = dA_part.sum((0, 1, 3)).to(A_log.dtype) if use_gate_in_kernel else None
+        ddt_bias = db_part.sum(0).to(dt_bias.dtype) if use_bias else None
 
         if use_qk_l2norm_in_kernel:
             dq = _l2norm_bwd(q, dq, arch)
