@@ -6,7 +6,7 @@
 Extensible ``CustomRecipe`` quantizer factories built on the existing
 ``MXFP4QuantizerRef``.
 
-  * ``mxfp4_grouped_quantizer_factory`` -- w4a4: E2M1 weights and activations.
+  * ``mxfp4_grouped_quantizer_factory`` -- a4w4: E2M1 weights and activations.
   * ``a8w4_quantizer_factory``          -- Kimi-K3 a8w4: MXFP8 E4M3 activation x
                                            MXFP4 E2M1 weight.
 """
@@ -165,7 +165,7 @@ def _e2m1_ref(*, rowwise: bool, columnwise: bool) -> MXFP4QuantizerRef:
 def _make_mxfp4_family_factory(*, activation: str):
     """Build a role-based MXFP4-family ``qfactory``.
 
-    ``activation`` selects the non-weight format: ``"e2m1"`` -> w4a4 (E2M1
+    ``activation`` selects the non-weight format: ``"e2m1"`` -> a4w4 (E2M1
     everywhere); ``"e4m3"`` -> a8w4 (E4M3 activation and grad, E2M1 weight).
     Weights are always E2M1 and need both layouts (fprop row + dgrad col).
     """
@@ -184,7 +184,7 @@ def _make_mxfp4_family_factory(*, activation: str):
     return factory
 
 
-# w4a4: pure E2M1
+# a4w4: pure E2M1
 mxfp4_grouped_quantizer_factory = _make_mxfp4_family_factory(activation="e2m1")
 
 # Kimi-K3 a8w4: E4M3 activation x E2M1 weight

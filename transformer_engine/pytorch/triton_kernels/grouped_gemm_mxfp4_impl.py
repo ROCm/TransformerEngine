@@ -336,6 +336,58 @@ def grouped_gemm_a8w4_fprop(
     )
 
 
+def grouped_gemm_mxfp4_fprop_prequantized(
+    a_data: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_data: torch.Tensor,
+    b_scale: torch.Tensor,
+    m_splits: Sequence[int],
+    *,
+    a_is_mxfp8: bool,
+    out_dtype: torch.dtype = torch.bfloat16,
+    num_cu: Optional[int] = None,
+) -> torch.Tensor:
+    """Grouped forward from already-quantized operands: ``C[g] = A[g] @ W[g]^T``.
+
+    Unlike :func:`grouped_gemm_mxfp4_fprop` / :func:`grouped_gemm_a8w4_fprop`, this
+    takes the packed data + E8M0 scales directly (no internal cast), so a recipe's
+    own reference quantizer owns the quantization and this only drives the GEMM.
+
+    Args:
+        a_data: activation data grouped along M by ``m_splits`` -- ``[total_M, K]``
+            e4m3 when ``a_is_mxfp8`` else ``[total_M, K/2]`` packed e2m1.
+        a_scale: ``[total_M, K/32]`` uint8 E8M0 activation scales.
+        b_data: ``[G, N, K/2]`` packed e2m1 weights.
+        b_scale: ``[G, N, K/32]`` uint8 E8M0 weight scales.
+        m_splits: per-group token counts (len G).
+        a_is_mxfp8: ``True`` routes the MXFP8(e4m3) x MXFP4(e2m1) a8w4 kernel;
+            ``False`` the MXFP4 x MXFP4 kernel.
+
+    Returns:
+        ``[total_M, N]`` output in ``out_dtype``.
+    """
+    N = b_data.shape[1]
+    K = b_data.shape[2] * 2  # weights are packed 2 e2m1 elems/byte along K
+    _require_gfx950()
+    _check_contract(K, "K")
+    _check_splits(m_splits, a_data.shape[0], b_data.shape[0])
+
+    group_offs = _prefix_offsets(m_splits, a_data.device)
+    kernel = grouped_gemm_a8w4_triton_kernel if a_is_mxfp8 else grouped_gemm_mxfp4_triton_kernel
+    return kernel(
+        a_data,
+        a_scale,
+        b_data,
+        b_scale,
+        group_offs,
+        N,
+        K,
+        group_offs_out=group_offs,
+        out_dtype=out_dtype,
+        num_cu=num_cu,
+    )
+
+
 def grouped_gemm_mxfp4_dgrad(
     grad_out: torch.Tensor,
     weights: Optional[List[torch.Tensor]],
