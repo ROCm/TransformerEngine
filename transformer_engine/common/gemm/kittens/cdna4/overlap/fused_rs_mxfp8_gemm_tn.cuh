@@ -235,6 +235,18 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     if (wb_tick != 0 && threadIdx.x == 0) {
         __builtin_amdgcn_fence(__ATOMIC_RELEASE, "");
     }
+
+    // tile_counter is [cursor, exits] and lives across calls, so the last workgroup out zeroes
+    // both for the next call instead of the host doing it per call. Every workgroup, comm ones
+    // included, drains the queue through the cursor and has consumed its last fetch_add before
+    // it gets here, so once the exit count reaches the grid no one touches the cursor again.
+    if (threadIdx.x == 0) {
+        if (__hip_atomic_fetch_add(&tile_counter[1], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
+            == (int)gridDim.x - 1) {
+            __hip_atomic_store(&tile_counter[0], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            __hip_atomic_store(&tile_counter[1], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        }
+    }
 }
 
 static std::vector<TileDesc> build_rs_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {

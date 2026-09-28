@@ -970,6 +970,15 @@ std::map<PlanKey, RsPlan> g_rs_plans;
 
 std::map<const void *, uint64_t> g_rs_epoch;
 
+// Per-userbuffer state the MXFP8 fused RS keeps across calls: its self-resetting [cursor, exits]
+// tile counter (not carved from the caller's workspace, which other GEMMs overwrite between
+// calls) and the stage size the last kernel poisoned ahead for.
+struct RsRegion {
+    int   *counters    = nullptr;
+    size_t stage_bytes = 0;
+};
+std::map<const void *, RsRegion> g_rs_regions;
+
 int rs_comm_wg_tn(int tokens, int hidden, int k_local) {
     const int tiles = (tokens / hk_rs_tn::BLOCK_ROW) * (hidden / hk_rs_tn::BLOCK_COL);
     const int waves = tiles / hk_rs_tn::GRID_CAP;
@@ -1092,10 +1101,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     const PlanKey key{3, M, N_TOTAL, K, tp_size, args.rank, 1};
     auto it = g_rs_plans.find(key);
-    // First call for this plan: nothing has poisoned the stage yet, so the host arms it below.
-    // Every later call finds its half already poisoned by the previous call's kernel.
-    const bool bootstrap = (it == g_rs_plans.end());
-    if (bootstrap) {
+    if (it == g_rs_plans.end()) {
         RsPlan plan;
         auto queue = build_rs_work_queue(M, N_TOTAL, K, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
@@ -1110,8 +1116,6 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
     size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
 
-    int *tile_counter  = static_cast<int *>(ws.take(sizeof(int)));
-    const size_t counter_bytes = ws.used;
     uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
     uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
@@ -1120,6 +1124,22 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters, args.stream);
 
     const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
+
+    // First call on this userbuffer, or a different stage size than the last kernel poisoned
+    // ahead for: the host zeroes the counters and arms the working half below. Every other call
+    // finds both already reset and poisoned by the previous call's kernel.
+    RsRegion &region = g_rs_regions[args.ub];
+    if (!region.counters) {
+        void *c = nullptr;
+        if (hipMalloc(&c, 2 * sizeof(int)) != hipSuccess) return false;
+        region.counters = static_cast<int *>(c);
+        if (hipMemsetAsync(region.counters, 0, 2 * sizeof(int), args.stream) != hipSuccess) {
+            return false;
+        }
+        region.stage_bytes = 0;
+    }
+    const bool bootstrap = (region.stage_bytes != lay.stage_bytes);
+    region.stage_bytes   = lay.stage_bytes;
 
     const uint64_t epoch = g_rs_epoch[args.ub]++;
     const size_t stage_off = (epoch & 1ull) ? lay.recv_off : 0;
@@ -1137,10 +1157,9 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     bf16 *local_stage = peers.stage[args.rank];
 
-    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
-
     // Arms the sentinel, which is what orders a peer's stage read against its epilogue store. Only
-    // the first call arms it here; the kernel's comm workgroups poison the other half for the next.
+    // a bootstrap call arms it here; the kernel's comm workgroups poison the other half for the
+    // next call.
     if (!sentinel_pattern_agrees()) return false;
     if (bootstrap) {
         const size_t stage_dw = lay.stage_bytes / sizeof(unsigned int);
@@ -1171,7 +1190,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     launch(M, N_TOTAL, K, static_cast<fp8e4m3 *>(const_cast<void *>(args.A)),
            static_cast<fp8e4m3 *>(const_cast<void *>(args.B)), local_stage,
            static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
-           plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
+           plan.num_tiles, region.counters, peers, args.rank, tp_size, cfg,
            args.stream);
     return hipGetLastError() == hipSuccess;
 }
@@ -1266,6 +1285,10 @@ void kittens_persistent_plans_reset_cdna4() {
     g_plans.clear();
     g_rs_plans.clear();
     g_rs_epoch.clear();
+    for (auto &kv : g_rs_regions) {
+        if (kv.second.counters) static_cast<void>(hipFree(kv.second.counters));
+    }
+    g_rs_regions.clear();
     g_peers.clear();
 }
 
