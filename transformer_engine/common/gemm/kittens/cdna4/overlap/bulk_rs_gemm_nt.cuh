@@ -44,9 +44,12 @@ struct PeerPtrs {
 };
 
 
+// deep: load two sources before adding them instead of one, so each thread keeps two remote loads
+// in flight. It pays with fewer comm workgroups on comm-bound shapes; one-at-a-time with more
+// workgroups disturbs a GEMM-bound shape's GEMM least.
 __device__ __forceinline__
 void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
-                  const PeerPtrs &peers, size_t shard_elems, size_t band_elems)
+                  const PeerPtrs &peers, size_t shard_elems, size_t band_elems, bool deep = false)
 {
     typedef int v4i __attribute__((ext_vector_type(4)));
     const size_t lines = band_elems / 8;                  // one int4 = 8 bf16
@@ -64,17 +67,36 @@ void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
         v4i *const dst = (v4i *)(out + boff);
         for (size_t l = l0 + threadIdx.x; l < l1; l += blockDim.x) {
             float acc[8];
+            if (deep) {
 #pragma unroll 1
-            for (int s = 0; s < tp_size; s++) {
-                const bf16 *base = peers.base[s] + soff + boff;
-                const v4i v = ((const v4i *)base)[l];
-                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
-                if (s == 0) {
+                for (int s = 0; s < tp_size; s += 2) {   // tp_size is 4 or 8: always even
+                    const v4i v0 = ((const v4i *)(peers.base[s] + soff + boff))[l];
+                    const v4i v1 = ((const v4i *)(peers.base[s + 1] + soff + boff))[l];
+                    const __hip_bfloat16 *x0 = reinterpret_cast<const __hip_bfloat16 *>(&v0);
+                    const __hip_bfloat16 *x1 = reinterpret_cast<const __hip_bfloat16 *>(&v1);
+                    if (s == 0) {
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
-                } else {
+                        for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x0[j]);
+                    } else {
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
+                        for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x0[j]);
+                    }
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x1[j]);
+                }
+            } else {
+#pragma unroll 1
+                for (int s = 0; s < tp_size; s++) {
+                    const bf16 *base = peers.base[s] + soff + boff;
+                    const v4i v = ((const v4i *)base)[l];
+                    const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
+                    if (s == 0) {
+#pragma unroll
+                        for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
+                    } else {
+#pragma unroll
+                        for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
+                    }
                 }
             }
             v4i res;
@@ -504,6 +526,7 @@ struct mxfp8_rs_globals {
     int gband;                     // bands folded per cycle; gband == bands is one pass
     int tp_size;
     int my_pe;
+    bool fold_deep;                // rs_pull_fold's two-loads-in-flight mode
     hk_rs_nt::PeerPtrs peers;
     size_t shard_elems;            // (tokens/tp) * hidden
     size_t band_elems;             // RS_BAND_ROWS * hidden
@@ -522,7 +545,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     if ((int)blockIdx.x < g.nred) {
         hk_rs_nt::rs_pull_fold((int)blockIdx.x, g.nred, g.bands, g.gband, g.tp_size, g.my_pe,
-                               g.peers, g.shard_elems, g.band_elems);
+                               g.peers, g.shard_elems, g.band_elems, g.fold_deep);
         return;
     }
 

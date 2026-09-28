@@ -812,14 +812,25 @@ int rs_comm_wg_bulk(int out_local, int tp_size) {
     return hk_rs_nt::RS_COMM_WG_DEFAULT;
 }
 
-// The MXFP8 GEMM finishes ~1.5-2x sooner than bf16 at the same shape while the bulk payload stays
-// bf16, so the reduce needs more workgroups to finish inside it: rs_comm_wg_bulk's 4 at
-// out_local >= 3584 left 70B-Down 23-29% slower and 405B-Down 6-8% slower than 8, and its 2 at
-// out_local >= 8192 lost 41% to 4. Swept 2-16 on MI355X, 24 shapes plus out_local 8192/16384.
-int rs_comm_wg_bulk_mxfp8(int out_local, int tp_size) {
-    if (tp_size != 8) return hk_rs_nt::RS_COMM_WG_DEFAULT;
-    if (out_local >= 8192) return 4;
-    return 8;
+// Comm side of the MXFP8 bulk RS: comm workgroups per peer, and whether rs_pull_fold keeps two
+// loads in flight per thread. The GEMM's work grows with out_local and the reduce-scatter's does
+// not, so out_local alone says which one bounds the call (GEMM ~ reduce alone near 5k).
+//   - Comm-bound: the two-deep fold on 4 workgroups per peer beats one-at-a-time on 8 by 2-8%;
+//     one-at-a-time on 4 cannot keep up (23-29% slower on 70B-Down), and deeper or wider both
+//     congest the fabric.
+//   - GEMM-bound: one-at-a-time on 8 disturbs the GEMM least (405B-Down: the two-deep fold on 4
+//     is 0.5-6% slower); from out_local 8192 the reduce needs only 4, and 2 loses 41%.
+// Swept on MI355X, 24 shapes plus out_local 8192/16384; no shape falls between 3584 and 6656.
+struct BulkRsCommCfg {
+    int  comm_wg;
+    bool fold_deep;
+};
+
+BulkRsCommCfg rs_comm_cfg_bulk_mxfp8(int out_local, int tp_size) {
+    if (tp_size != 8) return {hk_rs_nt::RS_COMM_WG_DEFAULT, false};
+    if (out_local >= 8192) return {4, false};
+    if (out_local >= 5120) return {8, false};
+    return {4, true};
 }
 
 static_assert(hk_rs_nt::BLOCK_SIZE == 256 && hk_rs_nt::K_STEP == 64 && hk_rs_nt::NUM_XCDS == 8,
@@ -903,7 +914,8 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     const int K       = args.k;               // tokens
     const int tp_size = args.nranks;
 
-    const int wgs  = (tp_size - 1) * rs_comm_wg_bulk_mxfp8(M, tp_size);
+    const BulkRsCommCfg comm = rs_comm_cfg_bulk_mxfp8(M, tp_size);
+    const int wgs  = (tp_size - 1) * comm.comm_wg;
     const int nred = (wgs + hk_rs_nt::NUM_XCDS - 1) / hk_rs_nt::NUM_XCDS * hk_rs_nt::NUM_XCDS;
 
     if (!bulk_rs_shape_ok_mxfp8(M, N, K, nred)) return false;
@@ -980,7 +992,7 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
                     nullptr, nullptr, nullptr),
         gl_f32_rt(partials, nullptr, nullptr, static_cast<size_t>(splits) * M,
                   static_cast<size_t>(N)),
-        splits, nred, bands, bands, tp_size, args.rank, peers, shard_elems, band_elems, args.stream};
+        splits, nred, bands, bands, tp_size, args.rank, comm.fold_deep, peers, shard_elems, band_elems, args.stream};
     launch(g);
     return hipGetLastError() == hipSuccess;
 }
