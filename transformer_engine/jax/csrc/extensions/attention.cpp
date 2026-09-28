@@ -51,9 +51,9 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        const size_t bias_batch, const size_t attn_heads,
                                        const size_t bias_heads, const size_t q_max_seqlen,
                                        const size_t kv_max_seqlen, DType dtype,
-                                       NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
-                                       void *softmax_buf, void *rng_state_buf = nullptr,
-                                       void *bias_buf = nullptr,
+                                       NVTE_Bias_Type bias_type, NVTE_Softmax_Type softmax_type,
+                                       NVTE_Fused_Attn_Backend backend, void *softmax_buf,
+                                       void *rng_state_buf = nullptr, void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
   tensor_pack->size = 1;
@@ -104,9 +104,8 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       bias_aux_data.dtype = static_cast<NVTEDType>(dtype);
       nvte_set_tensor_param(&bias_aux, kNVTERowwiseData, &bias_aux_data);
     }
-#ifndef USE_ROCM
-    // include softmax_offset if provided
-    if (softmax_offset_buf != nullptr) {
+    // include softmax_offset if the softmax variant carries one
+    if (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
       NVTETensor &softmax_offset_aux = tensor_pack->tensors[size];
       size++;
       NVTEBasicTensor softmax_offset_aux_data;
@@ -119,7 +118,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       softmax_offset_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
       nvte_set_tensor_param(&softmax_offset_aux, kNVTERowwiseData, &softmax_offset_aux_data);
     }
-#endif
 
     // Set final size
     tensor_pack->size = size;
@@ -138,21 +136,27 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
                                         const size_t bias_batch, const size_t attn_heads,
                                         const size_t bias_heads, const size_t q_max_seqlen,
                                         const size_t kv_max_seqlen, DType dtype,
-                                        NVTE_Fused_Attn_Backend backend, void *softmax_buf,
+                                        [[maybe_unused]] NVTE_Bias_Type bias_type,
+                                        NVTE_Softmax_Type softmax_type,
+                                        [[maybe_unused]] NVTE_Fused_Attn_Backend backend,
+                                        void *softmax_buf,
                                         void *rng_state_buf, void *bias_buf,
                                         void *softmax_offset_buf = nullptr) {
+#ifndef USE_ROCM
   // Backward calls put everything into the tensor pack for every backend
   // so we set dummy bias_type and backend choices here to follow the correct code path
   auto dummy_bias_type = NVTE_Bias_Type::NVTE_POST_SCALE_BIAS;
-#ifndef USE_ROCM
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
-#else
-  auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-#endif
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
-                                    dummy_backend, softmax_buf, rng_state_buf, bias_buf,
+                                    softmax_type, dummy_backend, softmax_buf, rng_state_buf,
+                                    bias_buf, softmax_offset_buf);
+#else
+  PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
+                                    q_max_seqlen, kv_max_seqlen, dtype, bias_type, softmax_type,
+                                    backend, softmax_buf, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
+#endif
 }
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
@@ -304,7 +308,8 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_create(&aux_output_tensors);
   PrepareFusedAttnForwardAuxTensors(&aux_output_tensors, input_batch, bias_batch, attn_heads,
                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type,
-                                    backend, softmax_aux, softmax_offset);
+                                    softmax_type, backend, softmax_aux, rng_state, bias,
+                                    softmax_offset);
 
   /* Call the underlying NVTE API */
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -589,8 +594,9 @@ static void FusedAttnBackwardImpl(
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
       false, false, deterministic);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
-                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
-                                     softmax_aux, rng_state, bias, softmax_offset);
+                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type,
+                                     softmax_type, backend, softmax_aux, rng_state, bias,
+                                     softmax_offset);
 
   /* Call the underlying NVTE API */
   // Prepare Q, K, V pointers and shapes based on layout

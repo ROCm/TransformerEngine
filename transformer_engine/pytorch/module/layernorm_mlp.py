@@ -26,10 +26,12 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     fused_ag_gemm_eligible,
+    fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    _ub_is_fused,
     ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
@@ -411,6 +413,14 @@ class _LayerNormMLP(torch.autograd.Function):
             )
         ):
             ub_overlap_ag = False
+        if ub_overlap_rs and not fused_rs_gemm_eligible(
+            "fc2_fprop", fc2_weight, fc2_bias, activation_dtype, tp_size, fp8,
+        ):
+            ub_overlap_rs = False
+        if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
+            "fc1_dgrad", fc1_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+        ):
+            ub_overlap_rs_dgrad = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
             "fc1_dgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
         ):
@@ -2139,7 +2149,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if ub_overlap_disabled("fc1_dgrad"):
                 self.ub_overlap_rs_dgrad = False
                 self.ub_bulk_dgrad = False
-            if ub_overlap_disabled("fc1_wgrad"):
+            if ub_overlap_disabled("fc1_wgrad") or (
+                IS_HIP_EXTENSION and not _ub_is_fused("fc1_wgrad")
+            ):
                 self.ub_bulk_wgrad = False
 
         if any(
