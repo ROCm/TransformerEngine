@@ -1039,21 +1039,24 @@ class _GroupedLinear(torch.autograd.Function):
         update_ws = is_first_microbatch is None or is_first_microbatch
         cached = weight_workspaces[0] if weight_workspaces else None
         new_workspaces = [None] * num_gemms
-        reuse = not update_ws and cached is not None and (not want_wcol or cached[2] is not None)
+        # Reuse the cached quantized weights only when they came from a compatible call.
+        # _fp8_workspaces is shared and only cleared when the recipe class changes, so a
+        # workspace from another CustomRecipe (or a prior fallback) may sit here. The cache
+        # tuple tags the operand format (a_is_mxfp8) -- a8w4 stores the weight scale
+        # transposed [G, K/32, N], a4w4 plain [G, N, K/32] -- so the two are never mixed.
+        # Validate the structure before indexing, and re-quantize on any mismatch.
+        expected_b = (num_gemms, weights[0].size(0), in_features // 2)
+        reuse = (
+            not update_ws
+            and isinstance(cached, tuple)
+            and len(cached) == 5
+            and cached[0] == a_is_mxfp8
+            and isinstance(cached[1], torch.Tensor)
+            and tuple(cached[1].shape) == expected_b
+            and (not want_wcol or cached[3] is not None)
+        )
         if reuse:
-            # Validate the cached workspace before trusting it
-            expected = (num_gemms, weights[0].size(0), in_features // 2)
-            if not (
-                isinstance(cached, tuple)
-                and len(cached) == 4
-                and isinstance(cached[0], torch.Tensor)
-                and tuple(cached[0].shape) == expected
-            ):
-                raise RuntimeError(
-                    "Cached grouped MXFP4 weight workspace is incompatible with the current "
-                    f"weights; expected a 4-tuple whose b_data has shape {expected}."
-                )
-            b_data, b_scale, w_col_data, w_col_scale = cached
+            _, b_data, b_scale, w_col_data, w_col_scale = cached
         else:
             b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []
             for i in range(num_gemms):
@@ -1073,7 +1076,7 @@ class _GroupedLinear(torch.autograd.Function):
             w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
             w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
             if cache_weight:
-                new_workspaces[0] = (b_data, b_scale, w_col_data, w_col_scale)
+                new_workspaces[0] = (a_is_mxfp8, b_data, b_scale, w_col_data, w_col_scale)
 
         result_out = _GroupedLinear._validate_or_alloc_output(
             out, a_data.shape[0], b_data.shape[1], activation_dtype, a_data.device

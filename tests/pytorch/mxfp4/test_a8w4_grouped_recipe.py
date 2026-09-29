@@ -16,6 +16,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
+    _col_operand_grouped_padded,
     _row_operand,
     _row_operand_mxfp8,
     _row_operand_mxfp8_torch,
@@ -180,7 +181,7 @@ def test_a4w4_activation_native_matches_reference():
 
 
 def test_grouped_linear_a4w4_recipe_backward():
-    """te.GroupedLinear a4w4 fwd+bwd routes to the low-precision dgrad/wgrad kernels."""
+    """te.GroupedLinear a4w4 fwd+bwd: routing + exact output/dgrad/wgrad vs the reference."""
     _isolate()
     device, dtype = "cuda", torch.bfloat16
     num_gemms, K, N = 4, 256, 256
@@ -190,19 +191,65 @@ def test_grouped_linear_a4w4_recipe_backward():
 
     model = te.GroupedLinear(num_gemms, K, N, bias=False, params_dtype=dtype).cuda()
     inp = torch.randn(total_M, K, device=device, dtype=dtype, requires_grad=True)
+    grad_out = torch.randn(total_M, N, device=device, dtype=dtype)
 
     rec = recipe.CustomRecipe(qfactory=mxfp4_grouped_quantizer_factory)
     with te.autocast(enabled=True, recipe=rec):
         out = model(inp, m_splits)
-    out.backward(torch.randn_like(out))
+    out.backward(grad_out)
+
+    # Reference: dequant the SAME native-e2m1 activation/grad and reference-e2m1 weights
+    # the kernels consume, per expert, in fp32. Forward Y = Aq @ Wq^T (row weight); dgrad
+    # dX = dYq @ Wq (reference col weight, matching the dgrad kernel).
+    def _deq_rows(x):
+        d, s = _row_operand(x)
+        return mxfp4_to_f32(d) * e8m0_to_f32(s).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
+
+    a_hp = _deq_rows(inp.detach())
+    go_hp = _deq_rows(grad_out)
+    weight_refs = [
+        _e2m1_ref(rowwise=True, columnwise=True).quantize(getattr(model, f"weight{g}").detach())
+        for g in range(num_gemms)
+    ]
+    y_ref = torch.zeros(total_M, N, device=device, dtype=torch.float32)
+    dx_ref = torch.zeros(total_M, K, device=device, dtype=torch.float32)
+    start = 0
+    for g, m in enumerate(m_splits):
+        if m > 0:
+            seg = slice(start, start + m)
+            w_hp = _deq_ref_operand(
+                weight_refs[g].data, weight_refs[g].scale, weight_refs[g], default_e4m3=False
+            )  # [N, K]
+            w_t_hp = _deq_ref_operand(
+                weight_refs[g].data_t, weight_refs[g].scale_t, weight_refs[g], default_e4m3=False
+            )  # [K, N] == W^T
+            y_ref[seg] = a_hp[seg] @ w_hp.t()
+            dx_ref[seg] = go_hp[seg] @ w_t_hp.t()
+        start += m
+
+    # wgrad dW[g] = dYq^T @ Aq contracts over M with the columnwise, per-group-padded
+    # operands the kernel consumes -- build them with the exact prep fn so the quantization
+    # matches; the zero padding rows contribute nothing to the reduction.
+    go_ld, go_ls, go_off = _col_operand_grouped_padded(grad_out, m_splits)
+    a_ld, a_ls, _ = _col_operand_grouped_padded(inp.detach(), m_splits)
+    go_col = mxfp4_to_f32(go_ld) * e8m0_to_f32(go_ls).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
+    a_col = mxfp4_to_f32(a_ld) * e8m0_to_f32(a_ls).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
+    off = go_off.tolist()
+    dw_ref = [
+        go_col[:, off[g] : off[g + 1]] @ a_col[:, off[g] : off[g + 1]].t() for g in range(num_gemms)
+    ]
+
+    def _rel(x, ref):
+        return (x.float() - ref).norm() / ref.norm().clamp_min(1e-12)
 
     assert out.shape == (total_M, N)
+    assert _rel(out, y_ref) < _REL_TOL, f"a4w4 forward disagrees with reference: {_rel(out, y_ref):.4f}"
     assert inp.grad is not None and inp.grad.shape == inp.shape
-    assert torch.isfinite(inp.grad).all()
+    assert _rel(inp.grad, dx_ref) < _REL_TOL, f"a4w4 dgrad disagrees: {_rel(inp.grad, dx_ref):.4f}"
     for g in range(num_gemms):
         w = getattr(model, f"weight{g}")
         assert w.grad is not None and w.grad.shape == w.shape
-        assert torch.isfinite(w.grad).all()
+        assert _rel(w.grad, dw_ref[g]) < _REL_TOL, f"a4w4 wgrad[{g}] disagrees: {_rel(w.grad, dw_ref[g]):.4f}"
 
 
 def test_grouped_linear_a8w4_backward_raises():
