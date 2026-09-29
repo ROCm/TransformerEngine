@@ -828,11 +828,13 @@ def _kda_recompute_w_u_kernel(
     beta,
     A,
     gk,
+    q,
     cu_seqlens,
     chunk_indices,
     w,
     u,
     kg,
+    qg,
     T,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -842,8 +844,13 @@ def _kda_recompute_w_u_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    STORE_QG: tl.constexpr,
 ):
-    """w = A @ (k*beta*exp2(gk)), u = A @ (v*beta), kg = k*exp2(gk_last - gk)."""
+    """w = A @ (k*beta*exp2(gk)), u = A @ (v*beta), kg = k*exp2(gk_last - gk).
+
+    With ``STORE_QG`` also ``qg = q*exp2(gk)`` per value head, which the
+    backward's state recurrence reads instead of gating ``q`` on its serial path.
+    """
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
@@ -871,6 +878,9 @@ def _kda_recompute_w_u_kernel(
     beta += bos * HV + i_hv
     A += (bos * HV + i_hv) * BT
     kg += (bos * HV + i_hv) * K
+    if STORE_QG:
+        q += (bos * H + i_h) * K
+        qg += (bos * HV + i_hv) * K
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -916,6 +926,11 @@ def _kda_recompute_w_u_kernel(
         )
         p_kg = kg + o_t[:, None] * (HV * K) + o_k[None, :]
         tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_tk)
+        if STORE_QG:
+            p_q = q + o_t[:, None] * (H * K) + o_k[None, :]
+            p_qg = qg + o_t[:, None] * (HV * K) + o_k[None, :]
+            b_q = tl.load(p_q, mask=m_tk, other=0.0)
+            tl.store(p_qg, (b_q * exp2(b_gk)).to(p_qg.dtype.element_ty), mask=m_tk)
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_tk)

@@ -33,14 +33,15 @@ Kernel bodies follow fla, with the same TE-side conventions as ``kda.py``: no
 heuristics or autotuning, tensor parameters inputs first and outputs last, and
 an early exit on padded varlen chunks. The state gradient keeps ``dh`` in the
 ``[K, V]`` layout of the forward's ``h``; ``TRANSPOSE_STATE`` only describes
-``dht`` / ``dh0``. ``_kda_bwd_dhu_kernel`` gates ``q`` itself instead of
-reading a materialized ``q * exp2(g)``.
+``dht`` / ``dh0``. ``_kda_bwd_dhu_kernel`` reads ``qg = q * exp2(g)`` from
+the recompute (``_kda_recompute_w_u_kernel``) rather than gating ``q`` on its
+serial chunk chain.
 """
 
 import triton
 import triton.language as tl
 
-from transformer_engine.common.triton.kda import _kda_fwd_h, exp, exp2, softplus
+from transformer_engine.common.triton.kda import _kda_fwd_h, exp, exp2, remap_xcd, softplus
 
 
 @triton.jit
@@ -128,7 +129,7 @@ def _kda_bwd_dav_kernel(
 def _kda_bwd_dhu(
     i_v,
     i_nh,
-    q,
+    qg,
     g,
     k,
     w,
@@ -142,7 +143,6 @@ def _kda_bwd_dhu(
     dv2,
     scale,
     T,
-    H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -156,7 +156,6 @@ def _kda_bwd_dhu(
     """Body of ``_kda_bwd_dhu_kernel`` for program ``(i_v, i_nh)``."""
     i_nh = i_nh.to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int64),
@@ -178,7 +177,7 @@ def _kda_bwd_dhu(
     if K > 192:
         b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
-    q += (bos * H + i_h) * K
+    qg += (bos * HV + i_hv) * K
     g += (bos * HV + i_hv) * K
     k += (bos * HV + i_hv) * K
     w += (bos * HV + i_hv) * K
@@ -302,35 +301,27 @@ def _kda_bwd_dhu(
         p_dv2 = dv2 + o_t[:, None] * (HV * V) + o_v[None, :]
         tl.store(p_dv2, b_dv.to(p_dv2.dtype.element_ty), mask=m_tv)
 
-        # dh = dh * exp2(g_last) + (q * exp2(g))^T @ do * scale - w^T @ dv2
+        # dh = dh * exp2(g_last) + qg^T @ do * scale - w^T @ dv2
         m_kt = m_k1[:, None] & m_t[None, :]
-        b_q = tl.load(q + o_k1[:, None] + o_t[None, :] * (H * K), mask=m_kt, other=0.0)
-        b_g = tl.load(g + o_k1[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
-        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+        b_qg = tl.load(qg + o_k1[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
         b_w = tl.load(w + o_k1[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
         b_dh1 *= exp2(b_gl1)[:, None]
         b_dh1 += tl.dot(b_qg, b_do.to(b_qg.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 64:
             m_kt = m_k2[:, None] & m_t[None, :]
-            b_q = tl.load(q + o_k2[:, None] + o_t[None, :] * (H * K), mask=m_kt, other=0.0)
-            b_g = tl.load(g + o_k2[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            b_qg = tl.load(qg + o_k2[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_w = tl.load(w + o_k2[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_dh2 *= exp2(b_gl2)[:, None]
             b_dh2 += tl.dot(b_qg, b_do.to(b_qg.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 128:
             m_kt = m_k3[:, None] & m_t[None, :]
-            b_q = tl.load(q + o_k3[:, None] + o_t[None, :] * (H * K), mask=m_kt, other=0.0)
-            b_g = tl.load(g + o_k3[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            b_qg = tl.load(qg + o_k3[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_w = tl.load(w + o_k3[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_dh3 *= exp2(b_gl3)[:, None]
             b_dh3 += tl.dot(b_qg, b_do.to(b_qg.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 192:
             m_kt = m_k4[:, None] & m_t[None, :]
-            b_q = tl.load(q + o_k4[:, None] + o_t[None, :] * (H * K), mask=m_kt, other=0.0)
-            b_g = tl.load(g + o_k4[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            b_qg = tl.load(qg + o_k4[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_w = tl.load(w + o_k4[:, None] + o_t[None, :] * (HV * K), mask=m_kt, other=0.0)
             b_dh4 *= exp2(b_gl4)[:, None]
             b_dh4 += tl.dot(b_qg, b_do.to(b_qg.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
@@ -363,7 +354,7 @@ def _kda_bwd_dhu(
 
 @triton.jit
 def _kda_bwd_dhu_kernel(
-    q,
+    qg,
     g,
     k,
     w,
@@ -377,7 +368,6 @@ def _kda_bwd_dhu_kernel(
     dv2,
     scale,
     T,
-    H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -387,18 +377,22 @@ def _kda_bwd_dhu_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
 ):
     """Reverse-time recurrence of the per-chunk state gradient.
 
     ``dh[t]`` is the gradient w.r.t. ``h[t]`` (the state entering chunk ``t``);
     ``dv2 = dv + kg @ dh[t]`` adds the path through the state to ``v_new``'s
-    gradient. ``q``/``k`` (``kg``) index qk heads/value heads as in the forward;
+    gradient. ``qg`` (``q * exp2(g)``) and ``k`` (``kg``) are per value head and
     ``g`` is the chunk-local log2 cumsum.
     """
+    # The V blocks of one state share their qg/kg/w/g loads: keep them on one XCD.
+    NV = tl.num_programs(0)
+    pid = remap_xcd(tl.program_id(1) * NV + tl.program_id(0), NV * tl.num_programs(1), NUM_XCDS)
     _kda_bwd_dhu(
-        tl.program_id(0),
-        tl.program_id(1),
-        q,
+        pid % NV,
+        pid // NV,
+        qg,
         g,
         k,
         w,
@@ -412,7 +406,6 @@ def _kda_bwd_dhu_kernel(
         dv2,
         scale,
         T,
-        H,
         HV,
         K,
         V,
@@ -427,7 +420,7 @@ def _kda_bwd_dhu_kernel(
 
 @triton.jit
 def _kda_fwd_h_bwd_dhu_kernel(
-    q,
+    qg,
     g,
     k,
     v,
@@ -445,7 +438,6 @@ def _kda_fwd_h_bwd_dhu_kernel(
     dv2,
     scale,
     T,
-    H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -455,6 +447,7 @@ def _kda_fwd_h_bwd_dhu_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
 ):
     """``_kda_fwd_h_kernel`` (recompute) and ``_kda_bwd_dhu_kernel`` in one launch.
 
@@ -462,11 +455,14 @@ def _kda_fwd_h_bwd_dhu_kernel(
     not ``v_new``) and each is a serial chain over chunks that leaves most CUs
     idle when there are few states, so they share the grid: program ``i_v <
     cdiv(V, BV)`` runs ``fwd_h`` on V block ``i_v``, the rest run ``dhu``.
-    ``k`` is ``kg``, ``v`` is ``u`` and ``g`` the log2 gate cumsum, as for the two
-    kernels; the final state is not stored.
+    ``qg``, ``k`` (``kg``), ``v`` (``u``) and ``g`` (the log2 gate cumsum) are as
+    for the two kernels; the final state is not stored.
     """
     NV: tl.constexpr = (V + BV - 1) // BV
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    # A state's fwd_h (and dhu) V blocks share their loads: keep them on one XCD.
+    n_v = tl.num_programs(0)
+    pid = remap_xcd(tl.program_id(1) * n_v + tl.program_id(0), n_v * tl.num_programs(1), NUM_XCDS)
+    i_v, i_nh = pid % n_v, pid // n_v
     if i_v < NV:
         _kda_fwd_h(
             i_v,
@@ -496,7 +492,7 @@ def _kda_fwd_h_bwd_dhu_kernel(
         _kda_bwd_dhu(
             i_v - NV,
             i_nh,
-            q,
+            qg,
             g,
             k,
             w,
@@ -510,7 +506,6 @@ def _kda_fwd_h_bwd_dhu_kernel(
             dv2,
             scale,
             T,
-            H,
             HV,
             K,
             V,
@@ -733,17 +728,23 @@ def _kda_bwd_intra_kernel(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
 ):
     """Intra-chunk dq/dk/dg/dbeta from dAqk and dAkk, one ``BC`` sub-chunk and ``BK`` slice each.
 
     ``dq2 = dq + ...`` etc. accumulate onto the inter-chunk terms; ``db`` is
     ``[NK, B*T, HV]`` partials, one per ``BK`` slice.
     """
-    i_kc, i_t, i_bh = (
-        tl.program_id(0),
-        tl.program_id(1).to(tl.int64),
-        tl.program_id(2).to(tl.int64),
+    # The NK * NC programs of a chunk re-read each other's k/g/q tiles; launched
+    # round-robin they would sit on different XCDs (L2s), so keep them on one.
+    n_kc, n_t = tl.num_programs(0), tl.num_programs(1)
+    pid = remap_xcd(
+        (tl.program_id(2) * n_t + tl.program_id(1)) * n_kc + tl.program_id(0),
+        n_kc * n_t * tl.num_programs(2),
+        NUM_XCDS,
     )
+    i_kc = pid % n_kc
+    i_t, i_bh = (pid // n_kc % n_t).to(tl.int64), (pid // (n_kc * n_t)).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     i_k, i_i = i_kc // NC, i_kc % NC

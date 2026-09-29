@@ -335,6 +335,7 @@ def _general_states(
     state_v_first,
     arch,
     run_fwd_h=True,
+    store_qg=False,
 ):
     """The general pipeline up to (not including) the output kernel; see the PyTorch driver."""
     B, T, H, K = q.shape
@@ -498,6 +499,7 @@ def _general_states(
             ("beta", beta),
             ("A", Akk),
             ("gk", g_cumsum),
+            ("q", q if store_qg else None),
             ("cu_seqlens", cu_seqlens),
             ("chunk_indices", chunk_indices),
         ],
@@ -505,6 +507,7 @@ def _general_states(
             ("w", (B, T, HV, K), k.dtype),
             ("u", v.shape, v.dtype),
             ("kg", (B, T, HV, K), k.dtype),
+            ("qg", (B, T, HV, K) if store_qg else None, k.dtype),
         ],
         (NT, B * HV),
         {
@@ -517,11 +520,12 @@ def _general_states(
             "BK": cfg.kwargs["BK"],
             "BV": cfg.kwargs["BV"],
             "IS_VARLEN": is_varlen,
+            "STORE_QG": store_qg,
         },
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
     )
-    w, u, kg = r["w"], r["u"], r["kg"]
+    w, u, kg, qg = r["w"], r["u"], r["kg"], r.get("qg")
 
     state_shape = (N, HV, V, K) if state_v_first else (N, HV, K, V)
     if initial_state is not None and tuple(initial_state.shape) != state_shape:
@@ -575,6 +579,7 @@ def _general_states(
         "Akk": Akk,
         "w": w,
         "kg": kg,
+        "qg": qg,
         "u": u,
         "h": r.get("h"),
         "v_new": r.get("v_new"),
@@ -1044,6 +1049,7 @@ def kda_bwd(
         state_v_first=state_v_first,
         arch=arch,
         run_fwd_h=rec_cfg is None,
+        store_qg=True,
     )
     qn, kn, bn, gc = st["q"], st["k"], st["beta"], st["g_cumsum"]
     chunk_indices, NT = st["chunk_indices"], st["NT"]
@@ -1081,7 +1087,6 @@ def kda_bwd(
     dhu_consts = {
         "scale": scale,
         "T": T,
-        "H": H,
         "HV": HV,
         "K": K,
         "V": V,
@@ -1090,6 +1095,7 @@ def kda_bwd(
         "USE_FINAL_STATE_GRADIENT": dht is not None,
         "IS_VARLEN": is_varlen,
         "TRANSPOSE_STATE": state_v_first,
+        "NUM_XCDS": kda_num_xcds(arch),
     }
     dhu_outputs = [
         ("dh", (B, NT, HV, K, V), q.dtype),
@@ -1105,7 +1111,7 @@ def kda_bwd(
         r = _call(
             _kda_bwd_dhu_kernel,
             [
-                ("q", qn),
+                ("qg", st["qg"]),
                 ("g", gc),
                 ("k", st["kg"]),
                 ("w", st["w"]),
@@ -1129,7 +1135,7 @@ def kda_bwd(
         r = _call(
             _kda_fwd_h_bwd_dhu_kernel,
             [
-                ("q", qn),
+                ("qg", st["qg"]),
                 ("g", gc),
                 ("k", st["kg"]),
                 ("v", st["u"]),
@@ -1232,6 +1238,7 @@ def kda_bwd(
             "NC": NC,
             "IS_VARLEN": is_varlen,
             "SAFE_GATE": safe_gate,
+            "NUM_XCDS": kda_num_xcds(arch),
         },
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,

@@ -257,12 +257,14 @@ def _general_states(
     state_v_first,
     arch,
     run_fwd_h=True,
+    store_qg=False,
 ):
     """The general pipeline up to (not including) the output kernel.
 
     Returns a dict of the intermediates the output kernel and the backward
     consume: the activated ``q``/``k``/``beta``, ``g_cumsum``, ``Aqk``,
-    ``Akk``, ``w``, ``kg``, ``h``, ``v_new``, ``final_state`` and the chunk tables.
+    ``Akk``, ``w``, ``kg``, ``h``, ``v_new``, ``final_state`` and the chunk tables,
+    plus ``qg = q * exp2(g_cumsum)`` per value head with ``store_qg``.
     """
     B, T, H, K = q.shape
     HV, V = v.shape[2], v.shape[-1]
@@ -413,6 +415,7 @@ def _general_states(
     w = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
     u = torch.empty_like(v)
     kg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
+    qg = torch.empty_like(kg) if store_qg else None
     cfg = kda_launch_config("recompute_w_u", arch)
     _recompute_w_u_k[(NT, B * HV)](
         k=k,
@@ -420,11 +423,13 @@ def _general_states(
         beta=beta,
         A=Akk,
         gk=g_cumsum,
+        q=q if store_qg else None,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         w=w,
         u=u,
         kg=kg,
+        qg=qg,
         T=T,
         H=H,
         HV=HV,
@@ -434,6 +439,7 @@ def _general_states(
         BK=cfg.kwargs["BK"],
         BV=cfg.kwargs["BV"],
         IS_VARLEN=is_varlen,
+        STORE_QG=store_qg,
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
     )
@@ -485,6 +491,7 @@ def _general_states(
         "Akk": Akk,
         "w": w,
         "kg": kg,
+        "qg": qg,
         "u": u,
         "h": h,
         "v_new": v_new,
@@ -974,6 +981,7 @@ def kda_bwd(
             state_v_first=state_v_first,
             arch=arch,
             run_fwd_h=rec_cfg is None,
+            store_qg=True,
         )
         qn, kn, bn, gc = st["q"], st["k"], st["beta"], st["g_cumsum"]
         chunk_indices, NT = st["chunk_indices"], st["NT"]
@@ -1016,7 +1024,7 @@ def kda_bwd(
         )
         dv2 = torch.empty_like(dv)
         dhu_args = {
-            "q": qn,
+            "qg": st["qg"],
             "g": gc,
             "k": st["kg"],
             "w": st["w"],
@@ -1030,7 +1038,6 @@ def kda_bwd(
             "dv2": dv2,
             "scale": scale,
             "T": T,
-            "H": H,
             "HV": HV,
             "K": K,
             "V": V,
@@ -1039,6 +1046,7 @@ def kda_bwd(
             "USE_FINAL_STATE_GRADIENT": dht is not None,
             "IS_VARLEN": is_varlen,
             "TRANSPOSE_STATE": state_v_first,
+            "NUM_XCDS": kda_num_xcds(arch),
         }
         if rec_cfg is None:
             dav(True, True)
@@ -1145,6 +1153,7 @@ def kda_bwd(
             NC=NC,
             IS_VARLEN=is_varlen,
             SAFE_GATE=safe_gate,
+            NUM_XCDS=kda_num_xcds(arch),
             num_warps=cfg.num_warps,
             num_stages=cfg.num_stages,
         )
