@@ -1035,7 +1035,10 @@ class _GroupedLinear(torch.autograd.Function):
         # Cache the quantized weights across microbatches (is_first_microbatch): the
         # weight quant is a fixed per-call cost (~G*N*K) that otherwise dominates the
         # grouped GEMM, so reuse the cache whenever this is not the first microbatch.
-        want_wcol = is_grad_enabled and not a_is_mxfp8
+        # a4w4 dgrad consumes the col-wise weight, so only request/quantize it when an
+        # input gradient is actually needed (matches the standard grouped path); a8w4 is
+        # forward-only and never needs it.
+        want_wcol = is_grad_enabled and not a_is_mxfp8 and inp.requires_grad
         update_ws = is_first_microbatch is None or is_first_microbatch
         cached = weight_workspaces[0] if weight_workspaces else None
         new_workspaces = [None] * num_gemms
