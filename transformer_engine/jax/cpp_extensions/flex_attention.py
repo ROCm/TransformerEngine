@@ -1,13 +1,14 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
+
 import hashlib
 import importlib
 import inspect
 import os
-from pathlib import Path
-import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -18,6 +19,7 @@ from jax import ffi
 
 import transformer_engine_jax
 
+from ..util import is_hip_extension
 
 __all__ = [
     "FusedAttnScoreModHelper",
@@ -26,10 +28,6 @@ __all__ = [
     "fused_attn_score_mod_fwd",
     "fused_attn_score_mod_bwd",
 ]
-
-_CUDNN_FRONTEND_PYTHON_PATH = (
-    Path(__file__).resolve().parents[3] / "3rdparty" / "cudnn-frontend" / "python"
-)
 
 
 def _is_non_deterministic_allowed():
@@ -600,13 +598,15 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 
 
 def _import_cudnn_for_score_mod():
-    cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
-    cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
-    if (
-        any(cudnn_frontend_package.glob("_compiled_module*"))
-        and cudnn_frontend_path not in sys.path
-    ):
-        sys.path.insert(0, cudnn_frontend_path)
+    # score_mod fused attention is a cuDNN-frontend (CUDA-only) feature; ROCm has
+    # no cuDNN frontend (GetCudnnFrontendVersion() is a stub). This helper is the
+    # availability probe: callers (incl. the score_mod tests' skipif guard) treat
+    # ImportError as "feature unavailable -> skip", so signal unavailability that
+    # way on ROCm too. The user-facing rejection for an explicit score_mod request
+    # is a NotImplementedError raised earlier in fused_attn() (attention.py),
+    # before any graph construction.
+    if is_hip_extension():
+        raise ImportError("score_mod fused attention is not supported on ROCm (no cuDNN frontend).")
     try:
         cudnn = importlib.import_module("cudnn")
     except ImportError as exc:

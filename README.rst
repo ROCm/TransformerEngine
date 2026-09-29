@@ -224,6 +224,23 @@ These backends are not enabled by default. The following environment variables c
 When none are set, TE uses multi-stream dispatch (one hipBLASLt GEMM per expert).
 
 
+FlyDSL GEMM Backend on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ROCm TE provides an optional FlyDSL GEMM backend for dense (non-grouped) GEMMs, covering BF16, FP16, FP32, tensor-wise FP8, and MXFP8.
+
+Support matrix:
+
+* **Architecture** -- gfx950 (CDNA4) is the targeted architecture for now. On any other architecture the backend is not selected and TE uses its default GEMM path. gfx942 support is planned for a future release.
+* **FlyDSL package** -- requires ``flydsl >= 0.3.0``. FlyDSL is not a declared dependency of TE (similar to flash-attention); install it yourself with ``pip install flydsl``.
+
+The backend is off by default and enabled via an environment variable:
+
+* ``NVTE_GEMM_BACKEND=FLYDSL`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed. (Leave ``NVTE_GEMM_BACKEND`` unset for the default C++/hipBLASLt backend, or set it to ``TRITON`` for the Triton GEMM backend.)
+* ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` -- emit a warning whenever a GEMM that FlyDSL cannot serve (unsupported shape/config) falls back to the default backend. Off by default.
+
+If ``NVTE_GEMM_BACKEND=FLYDSL`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
@@ -275,6 +292,42 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 * 3 - standard asm, default;
 * 4 - rta_asm.
 
+Small-Sequence Attention (gfx942/gfx950)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For workloads with very short sequences (up to 17 tokens), ROCm TE provides dedicated HIP MFMA
+attention kernels that are more efficient than the general fused-attention path for these shapes.
+
+This path is opt-in at runtime on the CK fused-attention backend (it replaces the usual CK/AITER
+kernel for eligible problems; otherwise, TE transparently falls back to the regular CK/AITER fused-attention path):
+
+* NVTE_FUSED_ATTN_CK_SMALLSEQ - by default 0 (disabled); set to 1 to route eligible problems through the small-seq kernels.
+
+It requires the CK backend to be enabled (NVTE_FUSED_ATTN_CK=1, the default). When enabled, a problem is
+routed to the small-seq kernels only when all of the following hold; otherwise TE transparently falls back
+to the regular CK/AITER fused-attention path:
+
+* GPU architecture is gfx942 or gfx950;
+* data type is BF16.
+* head dimension is 128 or 256, with matching Q/K and V head dimensions;
+* number of attention heads is 16 or 32, with no GQA/MQA (num_heads == num_gqa_groups);
+* no attention bias and no dropout;
+* mask type is padding mask or no mask;
+
+Both ``THD`` (variable-length, e.g. cross-attention) and ``BSHD`` (dense self-attention with s_q == s_kv)
+layouts are supported, with different sequence-length ranges:
+
+* ``THD`` — eligibility uses the **runtime** maximum sequence length per batch (from ``cu_seqlens``).
+  ``1 <= s_q <= 17`` and ``2 <= s_kv <= 17`` (``s_q = 1`` is supported for cross-attention).
+* ``BSHD`` — eligibility uses the **static** sequence length. Requires ``s_q == s_kv`` with
+  ``2 <= s_q <= 17``.
+
+When using the JAX integration, the small-seq path requires XLA GPU graph capture (command buffers) to be
+disabled, and XLA_FLAGS must be set before the process starts, for example:
+
+.. code-block:: bash
+
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' NVTE_FUSED_ATTN_CK_SMALLSEQ=1 python your_script.py
+
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm.
@@ -296,6 +349,13 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 0 - disable MXFP8 support (default);
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
+
+MXFP4 GEMM support on ROCm (gfx95x only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+MXFP4 GEMM is supported on gfx95x GPUs for a limited number of configurations. A native hipBLASLt MXFP4 (F4F4) path is available when built against hipBLASLt >= 1.3, alongside the default AITER ``a4w4`` backend.
+To select the GEMM backend, use NVTE_ROCM_USE_HIPBLASLT_MXFP4 environment variable which can take the following values:
+* 0 - use the AITER a4w4 backend (default);
+* 1 - use the hipBLASLt MXFP4 GEMM backend.
 
 Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -347,6 +407,11 @@ Transformer Engine
 Latest News
 ===========
 
+* [06/2026] `Boosting MoE Training Throughput with Advanced Fusion Kernels <https://developer.nvidia.com/blog/boosting-moe-training-throughput-with-advanced-fusion-kernels/>`_
+* [06/2026] `Nemotron 3 Ultra: Open, Efficient Mixture-of-Experts Hybrid Mamba-Transformer Model for Agentic Reasoning <https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Ultra-Technical-Report.pdf>`_
+* [06/2026] `Train Models Faster with JAX and MaxText Using NVFP4 on NVIDIA Blackwell <https://developer.nvidia.com/blog/train-models-faster-with-jax-and-maxtext-using-nvfp4-on-nvidia-blackwell/>`_
+* [04/2026] `Run High-Throughput Reinforcement Learning Training with End-to-End FP8 Precision <https://developer.nvidia.com/blog/run-high-throughput-reinforcement-learning-training-with-end-to-end-fp8-precision/>`_
+* [02/2026] `Using NVFP4 Low-Precision Model Training for Higher Throughput Without Losing Accuracy <https://developer.nvidia.com/blog/using-nvfp4-low-precision-model-training-for-higher-throughput-without-losing-accuracy/>`_
 * [12/2025] `NVIDIA Nemotron 3: Efficient and Open Intelligence <https://arxiv.org/abs/2512.20856>`_ - trained with NVFP4 on Transformer Engine
 * [11/2025] `NVIDIA Blackwell Architecture Sweeps MLPerf Training v5.1 Benchmarks <https://developer.nvidia.com/blog/nvidia-blackwell-architecture-sweeps-mlperf-training-v5-1-benchmarks/>`_
 * [11/2025] `Scale Biology Transformer Models with PyTorch and NVIDIA BioNeMo Recipes <https://developer.nvidia.com/blog/scale-biology-transformer-models-with-pytorch-and-nvidia-bionemo-recipes/>`_
