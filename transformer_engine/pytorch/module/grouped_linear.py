@@ -584,6 +584,7 @@ class _GroupedLinear(torch.autograd.Function):
         recipe,
         input_quantizers,
         weight_quantizers,
+        grad_output_quantizers,
         use_bias,
         backward_override,
         cpu_offloading,
@@ -666,7 +667,14 @@ class _GroupedLinear(torch.autograd.Function):
             return True  # a8w4: forward-only, only the K=in_features contraction matters
         if not all(isinstance(q, MXFP4QuantizerRef) for q in input_quantizers):
             return False  # mixed activation formats -> fall back to the standard path
-        # a4w4 runs the low-precision dgrad, which contracts over N=out_features in 128s.
+        # a4w4 runs the low-precision backward, which quantizes grad_output as plain E2M1;
+        # the recipe's grad_output quantizer must match (plain MXFP4) or the fast path would
+        # silently use a different grad quantization than the recipe specifies.
+        if not all(
+            isinstance(q, MXFP4QuantizerRef) and _plain_layout(q) for q in grad_output_quantizers
+        ):
+            return False
+        # dgrad contracts over N=out_features in 128s.
         return out_features % 128 == 0
 
     @staticmethod
@@ -1270,6 +1278,7 @@ class _GroupedLinear(torch.autograd.Function):
             recipe=blockwise_recipe,
             input_quantizers=input_quantizers,
             weight_quantizers=weight_quantizers,
+            grad_output_quantizers=grad_output_quantizers,
             use_bias=use_bias,
             backward_override=backward_override,
             cpu_offloading=cpu_offloading,
@@ -2772,8 +2781,21 @@ class GroupedLinear(TransformerEngineBaseModule):
                 autograd_ctx = [None]
 
             cache_weight = is_first_microbatch is not None
+            # The MXFP4 grouped fast path caches a raw tuple; isolate it in its own workspace
+            # namespace so it never lands in the shared weight{i} slot that the standard /
+            # blockwise paths consume as a quantized weight (_fp8_workspaces is shared and only
+            # clears on a recipe *class* change, not between two CustomRecipe factories).
+            ws_prefix = "weight"
+            if cache_weight and self.fp8:
+                try:
+                    from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+
+                    if isinstance(weight_quantizers[0], MXFP4QuantizerRef):
+                        ws_prefix = "mxfp4_grouped_weight"
+                except ImportError:
+                    pass
             weight_workspaces = (
-                [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
+                [self._fp8_workspaces.get(f"{ws_prefix}{i}") for i in range(num_gemms)]
                 if cache_weight
                 else [None] * num_gemms
             )
@@ -2820,7 +2842,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     if ws is not None:
                         if isinstance(ws, torch.Tensor):
                             ws = ws.detach()
-                        self._fp8_workspaces[f"weight{i}"] = ws
+                        self._fp8_workspaces[f"{ws_prefix}{i}"] = ws
 
         finally:
             self.end_forward()
