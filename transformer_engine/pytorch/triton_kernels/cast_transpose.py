@@ -873,10 +873,7 @@ def mxfp8_e4m3_rowwise_downcast(x, transpose_scale=False):
     """Fused single-pass MXFP8 e4m3 row-wise downcast (Kimi-K3 a8w4 activation).
 
     ``x`` [M, K] (K a multiple of 32) -> (data [M, K] e4m3, scale uint8 E8M0), using the
-    ceil scale rule ``ceil(log2(amax_block / 448))``. Reuses :func:`_cast_transpose_triton_mxfp8`
-    row-wise only, so it matches the torch reference ``_row_operand_mxfp8_torch`` bit-for-bit for
-    non-zero blocks (an all-zero 32-block may get a different E8M0 scale byte, but its data is zero
-    so it dequantizes to zero either way) but is single-pass.
+    ceil scale rule ``ceil(log2(amax_block / 448))``.
     """
     assert x.shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0, "K must be a multiple of 32"
     x = x.contiguous()

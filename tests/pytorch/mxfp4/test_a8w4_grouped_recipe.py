@@ -23,8 +23,10 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     grouped_gemm_mxfp4_dgrad,
     grouped_gemm_mxfp4_fprop_prequantized,
 )
+from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
 from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import (
     MXFP4_BLOCK_SIZE,
+    MXFP4QuantizerRef,
     e8m0_to_f32,
     mxfp4_to_f32,
 )
@@ -383,3 +385,85 @@ def test_grouped_linear_a8w4_out_buffer():
 
     assert torch.equal(buf, ref), "out buffer does not hold the forward result"
     assert torch.equal(got, ref), "returned output differs when an out buffer is given"
+
+
+def test_a4w4_gate_rejects_nonplain_grad_output_quantizer():
+    """a4w4 fast path must fall back unless the recipe's grad_output quantizer is plain MXFP4.
+
+    The low-precision backward quantizes grad_output as native E2M1, so a recipe that keeps a
+    plain-MXFP4 forward but a different grad format (E4M3) or a swizzled/Hadamard MXFP4 grad
+    quantizer would silently disagree with what the recipe specifies -- gate must reject it.
+    """
+    _isolate()
+    G, K, N = 4, 256, 256
+    rec = recipe.CustomRecipe(qfactory=mxfp4_grouped_quantizer_factory)
+    base = dict(
+        fp8=True,
+        recipe=rec,
+        input_quantizers=[_e2m1_ref(rowwise=True, columnwise=False) for _ in range(G)],
+        weight_quantizers=[_e2m1_ref(rowwise=True, columnwise=True) for _ in range(G)],
+        use_bias=False,
+        backward_override=False,
+        cpu_offloading=False,
+        save_original_input=False,
+        debug=False,
+        unpad_output=False,
+        actual_m_splits=None,
+        dgrad_out=None,
+        fuse_wgrad_accumulation=False,
+        wgrad_store=None,
+        in_features=K,
+        out_features=N,
+    )
+
+    def _supported(grad_quantizers):
+        return _GroupedLinear._is_grouped_mxfp4_triton_supported(
+            grad_output_quantizers=grad_quantizers, **base
+        )
+
+    # Plain E2M1 grad_output -> a4w4 fast path is supported.
+    assert _supported([_e2m1_ref(rowwise=True, columnwise=False) for _ in range(G)])
+    # E4M3 grad_output (not MXFP4) -> fall back to the standard path.
+    assert not _supported(
+        [MXFP8E4M3QuantizerRef(rowwise=True, columnwise=True) for _ in range(G)]
+    )
+    # Swizzled MXFP4 grad_output (MXFP4 but not plain) -> fall back.
+    swz = [
+        MXFP4QuantizerRef(
+            rowwise=True,
+            columnwise=False,
+            shuffle_rowwise_data=False,
+            shuffle_columnwise_data=False,
+            with_gemm_swizzled_scales=True,
+            use_hadamard=False,
+        )
+        for _ in range(G)
+    ]
+    assert not _supported(swz)
+
+
+def test_a8w4_weight_cache_uses_isolated_namespace():
+    """The fast-path weight cache is a raw tuple; it must live in an MXFP4-only workspace key,
+    never the shared 'weight{i}' slot the standard/blockwise weight-prep paths read (a stale
+    tuple there would break a later call under a different CustomRecipe, since _fp8_workspaces
+    only clears on a recipe *class* change)."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    num_gemms, K, N = 4, 256, 256
+    m_splits = [128, 64, 0, 192]
+    total_M = sum(m_splits)
+    torch.manual_seed(0)
+
+    model = te.GroupedLinear(num_gemms, K, N, bias=False, params_dtype=dtype).cuda()
+    inp = torch.randn(total_M, K, device=device, dtype=dtype)
+
+    rec = recipe.CustomRecipe(qfactory=a8w4_quantizer_factory)
+    with torch.no_grad(), te.autocast(enabled=True, recipe=rec):
+        model(inp, m_splits, is_first_microbatch=True)  # quantize + cache the weights
+
+    ws = model._fp8_workspaces
+    # the raw fast-path tuple lives under the isolated MXFP4 namespace...
+    assert isinstance(ws.get("mxfp4_grouped_weight0"), tuple), list(ws.keys())
+    # ...and never in the shared 'weight{i}' slots the other weight-prep paths read.
+    for i in range(num_gemms):
+        assert not isinstance(ws.get(f"weight{i}"), tuple)
