@@ -10,7 +10,6 @@ from importlib import metadata
 import os
 import shutil
 import subprocess
-import sysconfig
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -35,7 +34,6 @@ from build_tools.utils import (
     remove_dups,
     min_python_version_str,
     nccl_ep_enabled,
-    rocm_rpath_enabled,
 )
 
 frameworks = get_frameworks()
@@ -48,7 +46,6 @@ from setuptools.command.build_py import build_py as _build_py
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 _ROCM_INIT_TEMPLATE = current_file_path / "build_tools" / "templates" / "_rocm_init.py"
-
 
 class BuildPy(_build_py):
     """Generate _rocm_init.py for ROCm builds only."""
@@ -122,12 +119,6 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_NORM=ON")
         cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON")
 
-        # Against the rocm-sdk pip packages, bake RUNPATHs into the native
-        # libraries so the dynamic loader resolves the ROCm runtime on its own,
-        # with nothing preloaded from Python.
-        if rocm_rpath_enabled():
-            cmake_flags.append("-DTE_ROCM_RPATH=ON")
-            cmake_flags.append(f"-DTE_ROCM_PURELIB={sysconfig.get_paths()['purelib']}")
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
