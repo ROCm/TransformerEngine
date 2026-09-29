@@ -1066,6 +1066,11 @@ class _GroupedLinear(torch.autograd.Function):
             if cache_weight:
                 new_workspaces[0] = (b_data, b_scale, w_col_data, w_col_scale)
 
+        # Validate the caller's out buffer (2D/contiguous/dtype/device, and reject a
+        # requires-grad buffer -- the kernel writes in place) or allocate one.
+        result_out = _GroupedLinear._validate_or_alloc_output(
+            out, a_data.shape[0], b_data.shape[1], activation_dtype, a_data.device
+        )
         result = grouped_gemm_mxfp4_fprop_prequantized(
             a_data,
             a_scale,
@@ -1075,7 +1080,7 @@ class _GroupedLinear(torch.autograd.Function):
             a_is_mxfp8=a_is_mxfp8,
             out_dtype=activation_dtype,
             scale_transposed=a_is_mxfp8,
-            out=None if out is None else out.reshape(-1, out.shape[-1]),
+            out=result_out,
         )
 
         if is_grad_enabled:
