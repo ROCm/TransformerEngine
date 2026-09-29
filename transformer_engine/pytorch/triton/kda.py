@@ -56,6 +56,7 @@ from transformer_engine.common.triton.kda import (
     flash_kda_choose_chunks_per_seg,
     flash_kda_fixed_segments,
     flash_kda_gluon_k2_schedule,
+    flash_kda_gluon_k2c_schedule,
     flash_kda_scan_bv,
     flash_kda_supported,
     kda_bwd_recurrences_config,
@@ -135,7 +136,11 @@ def _gluon_module():
 @functools.lru_cache(maxsize=None)
 def _gluon_launchers():
     kg = _gluon_module()
-    return fast_launch(kg.flash_kda_k1_prepare_gluon), fast_launch(kg.flash_kda_k2_ab_fused_gluon)
+    return (
+        fast_launch(kg.flash_kda_k1_prepare_gluon),
+        fast_launch(kg.flash_kda_k2_ab_fused_gluon),
+        fast_launch(kg.flash_kda_k2_c_gluon),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +517,8 @@ def _general_fwd(q, v, scale, cu_seqlens, chunk_size, arch, **kwargs):
     BT = chunk_size
     NT = st["NT"]
     is_varlen = cu_seqlens is not None
-    o = torch.zeros_like(v)
+    # Every token is written except, when varlen, any past cu_seqlens[-1].
+    o = torch.zeros_like(v) if is_varlen else torch.empty_like(v)
     cfg = kda_launch_config("gla_fwd_o", arch)
     BV = cfg.kwargs["BV"]
     _gla_fwd_o_k[(triton.cdiv(V, BV), NT, B * HV)](
@@ -623,7 +629,7 @@ def _flash_fwd(
 
     k1_grid = (total_tiles if is_varlen else NT, B * H)
     if _use_gluon("k1", arch):
-        k1_gluon, _ = _gluon_launchers()
+        k1_gluon = _gluon_launchers()[0]
         k1_gluon[k1_grid](
             q=q,
             k=k,
@@ -739,7 +745,7 @@ def _flash_fwd(
         b_seg = torch.empty(num_segs, H, K, V, dtype=torch.float32, device=dev)
         A_seg = torch.empty(num_segs, H, K, K, dtype=torch.bfloat16, device=dev)
         if _use_gluon("k2", arch):
-            _, k2_gluon = _gluon_launchers()
+            k2_gluon = _gluon_launchers()[1]
             bw, nw, ns, wpe = flash_kda_gluon_k2_schedule(V, num_segs, H, arch, num_cus)
             k2_gluon[(triton.cdiv(V, bw), num_segs * H)](
                 ws_kd=ws_kd,
@@ -807,20 +813,55 @@ def _flash_fwd(
         h_in = h0
 
     # Pass C: re-run each segment from its true incoming state, writing outputs.
-    _launch_k2(
-        v_input=v,
-        out=o,
-        h_in=h_in,
-        h_out=None,
-        final_state=final_state,
-        W=V,
-        INIT_IDENTITY=False,
-        HAS_H_IN=h_in is not None,
-        HAS_V=True,
-        COMPUTE_OUTPUT=True,
-        STORE_H_OUT=False,
-        STORE_FINAL=output_final_state,
-    )
+    if _use_gluon("k2", arch):
+        bw, nw, ns = flash_kda_gluon_k2c_schedule(segmented, arch)
+        _gluon_launchers()[2][(triton.cdiv(V, bw), num_segs * H)](
+            ws_kd=ws_kd,
+            ws_qd=ws_qd,
+            ws_kr=ws_kr,
+            ws_gt=ws_gt,
+            ws_inv_mqk=ws_inv_mqk,
+            v_input=v,
+            beta_raw=beta,
+            h_in=h_in,
+            seg_chunk_base=seg_chunk_base,
+            seg_nchunks=seg_nchunks,
+            seg_tok_base=seg_tok_base,
+            seg_tok_end=seg_tok_end,
+            seg_seq=seg_seq,
+            seg_is_last=seg_is_last,
+            out=o,
+            final_state=final_state,
+            TOTAL_TILES=total_tiles,
+            H=H,
+            K=K,
+            V=V,
+            C=C,
+            BW=bw,
+            **_gluon_module().flash_kda_k2_layouts(nw),
+            HAS_H_IN=h_in is not None,
+            STORE_FINAL=output_final_state,
+            STATE_V_FIRST=state_v_first,
+            CM_OUT=CM_OUT_STORE,
+            NUM_XCDS=kda_num_xcds(arch),
+            num_warps=nw,
+            num_stages=ns,
+        )
+    else:
+        _launch_k2(
+            v_input=v,
+            out=o,
+            h_in=h_in,
+            h_out=None,
+            final_state=final_state,
+            W=V,
+            INIT_IDENTITY=False,
+            HAS_H_IN=h_in is not None,
+            HAS_V=True,
+            COMPUTE_OUTPUT=True,
+            STORE_H_OUT=False,
+            STORE_FINAL=output_final_state,
+        )
     return o, final_state
 
 

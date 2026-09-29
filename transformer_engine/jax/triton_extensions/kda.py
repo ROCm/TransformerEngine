@@ -53,6 +53,7 @@ from transformer_engine.common.triton.kda import (
     flash_kda_choose_chunks_per_seg,
     flash_kda_fixed_segments,
     flash_kda_gluon_k2_schedule,
+    flash_kda_gluon_k2c_schedule,
     flash_kda_scan_bv,
     flash_kda_supported,
     kda_bwd_recurrences_config,
@@ -875,21 +876,46 @@ def _flash_fwd(
     else:
         h_in = h0
 
-    r = _k2(
-        W=V,
-        h_in=h_in,
-        outputs=[
-            ("out", v.shape, v.dtype),
-            ("h_out", None),
-            ("final_state", state_shape if output_final_state else None, state_dtype),
-        ],
-        INIT_IDENTITY=False,
-        HAS_H_IN=h_in is not None,
-        HAS_V=True,
-        COMPUTE_OUTPUT=True,
-        STORE_H_OUT=False,
-        STORE_FINAL=output_final_state,
-    )
+    out_outputs = [
+        ("out", v.shape, v.dtype),
+        ("final_state", state_shape if output_final_state else None, state_dtype),
+    ]
+    if _use_gluon("k2", arch):
+        bw, nw, ns = flash_kda_gluon_k2c_schedule(segmented, arch)
+        r = _call(
+            _gluon_module().flash_kda_k2_c_gluon,
+            ws_inputs + [("v_input", v), ("beta_raw", beta), ("h_in", h_in)] + seg_inputs,
+            out_outputs,
+            (triton.cdiv(V, bw), num_segs * H),
+            {
+                "TOTAL_TILES": total_tiles,
+                "H": H,
+                "K": K,
+                "V": V,
+                "C": C,
+                "BW": bw,
+                "HAS_H_IN": h_in is not None,
+                "STORE_FINAL": output_final_state,
+                "STATE_V_FIRST": state_v_first,
+                "CM_OUT": CM_OUT_STORE,
+                "NUM_XCDS": kda_num_xcds(arch),
+            },
+            num_warps=nw,
+            num_stages=ns,
+            gluon_k2_warps=nw,
+        )
+    else:
+        r = _k2(
+            W=V,
+            h_in=h_in,
+            outputs=[out_outputs[0], ("h_out", None), out_outputs[1]],
+            INIT_IDENTITY=False,
+            HAS_H_IN=h_in is not None,
+            HAS_V=True,
+            COMPUTE_OUTPUT=True,
+            STORE_H_OUT=False,
+            STORE_FINAL=output_final_state,
+        )
     return r["out"], r.get("final_state")
 
 

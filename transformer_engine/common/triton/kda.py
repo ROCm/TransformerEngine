@@ -1854,6 +1854,11 @@ _KDA_CONFIGS = {
             {"BW": 32, "MIN_BLOCKS_PER_CU": 0}, num_warps=2, num_stages=2
         ),
         "flash_gluon_k2_narrow": KDALaunchConfig({"BW": 32}, num_warps=2, num_stages=2),
+        # Gluon pass C, unsegmented / segmented (flash_kda_gluon_k2c_schedule).
+        # Wider tiles amortize a block's workspace reads over more of V; BW=128
+        # only pays once segmenting has supplied the blocks.
+        "flash_gluon_k2c": KDALaunchConfig({"BW": 64}, num_warps=4, num_stages=1),
+        "flash_gluon_k2c_segmented": KDALaunchConfig({"BW": 128}, num_warps=4, num_stages=1),
         # Backward (kda_bwd.py). Swept on gfx950 (MI355X) over FlashKDA and
         # general-pipeline shapes; no other arch measured yet.
         "bwd_dav": KDALaunchConfig({"BV": 64}, num_warps=4, num_stages=2),
@@ -1942,10 +1947,12 @@ def kda_launch_config(name: str, arch: str) -> KDALaunchConfig:
 # FlashKDA scheduling (framework-agnostic)
 # ---------------------------------------------------------------------------
 
-# Blocks pass A should end up with, in units of the CU count.
+# Blocks pass A should end up with, in units of the CU count, and the most
+# segments per sequence taken for that reason alone.
 _SEG_TARGET_BLOCKS = 3
 _SEG_MAX_SEGMENTS = 16
-_SEG_MAX_CHUNKS = 32
+# Longest segment, however many segments that takes.
+_SEG_MAX_CHUNKS = 64
 _SEG_MIN_CHUNKS = 64
 
 _SCAN_BV_NARROW = 16
@@ -1990,16 +1997,19 @@ def flash_kda_choose_chunks_per_seg(
     K2 gets ``n_segments * H * (V / BW)`` blocks, so with one segment per
     sequence a low head count leaves most of the device idle. Segmenting buys
     blocks by turning one pass into three, so it is only taken when there is
-    idle capacity and enough depth to amortize the extra passes.
+    idle capacity and enough depth to amortize the extra passes. Once taken,
+    segments are also kept to ``_SEG_MAX_CHUNKS``: on gfx950, 64-chunk
+    segments beat longer ones by up to 1.9x on long few-head sequences
+    (1 x 131072 x 4), where the occupancy target alone gives 256-chunk ones.
     """
     blocks = n_seqs * H * max(1, V // 32)
     if blocks > num_cus:
         return n_chunks_max
     if n_chunks_max < _SEG_MIN_CHUNKS:
         return n_chunks_max
-    segs = min(
-        _SEG_MAX_SEGMENTS,
-        max(_SEG_TARGET_BLOCKS * num_cus / blocks, n_chunks_max / _SEG_MAX_CHUNKS),
+    segs = max(
+        min(_SEG_MAX_SEGMENTS, _SEG_TARGET_BLOCKS * num_cus / blocks),
+        n_chunks_max / _SEG_MAX_CHUNKS,
     )
     return max(1, min(n_chunks_max, 1 << round(math.log2(n_chunks_max / segs))))
 
@@ -2024,6 +2034,12 @@ def flash_kda_gluon_k2_schedule(W: int, num_segs: int, H: int, arch: str, num_cu
     if W % bw != 0 or blocks < wide.kwargs["MIN_BLOCKS_PER_CU"] * num_cus:
         cfg = kda_launch_config("flash_gluon_k2_narrow", arch)
     return cfg.kwargs["BW"], cfg.num_warps, cfg.num_stages, cfg.waves_per_eu
+
+
+def flash_kda_gluon_k2c_schedule(segmented: bool, arch: str) -> tuple:
+    """``(BW, num_warps, num_stages)`` for the Gluon pass C."""
+    cfg = kda_launch_config("flash_gluon_k2c_segmented" if segmented else "flash_gluon_k2c", arch)
+    return cfg.kwargs["BW"], cfg.num_warps, cfg.num_stages
 
 
 def flash_kda_fixed_segments(B: int, T: int, C: int, chunks_per_seg: int) -> tuple:

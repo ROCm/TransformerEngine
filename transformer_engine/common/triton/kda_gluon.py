@@ -5,7 +5,7 @@
 # aiter/ops/triton/_gluon_kernels/gfx950/chunk_delta_attn), MIT licensed, plus
 # the XCD remap of pass A from AITER branch zain/kda/xcd-remap (a3c3c2fdd).
 
-"""Gluon (gfx950) replacements for FlashKDA's prepare kernel and fused pass A.
+"""Gluon (gfx950) replacements for FlashKDA's prepare kernel, fused pass A and pass C.
 
 Framework-agnostic; see ``kda.py`` for the Triton kernels these stand in for.
 Tensor parameters are ordered inputs first, outputs last, as in ``kda.py``.
@@ -371,10 +371,13 @@ def _issue_chunk(
     ws_inv_mqk,
     v_input,
     beta_raw,
+    ws_qd,
     s_kd,
     s_kr,
     s_inv,
     s_v,
+    s_qd,
+    s_mqk,
     ws_idx,
     t0,
     tok_end,
@@ -389,6 +392,7 @@ def _issue_chunk(
     K: gl.constexpr,
     V: gl.constexpr,
     C: gl.constexpr,
+    WITH_OUTPUT: gl.constexpr,
 ):
     """Start fetching one chunk: its tiles by async copy into LDS, and ``gt`` /
     ``beta`` (returned) into registers, one element per thread.
@@ -398,6 +402,8 @@ def _issue_chunk(
     retires in order: waiting on them must not also wait on the copies.
     Tail rows of ``beta`` and ``v`` are masked here; ``beta`` masked to 0 is
     harmless because the recurrence zeroes those rows of U anyway.
+    ``WITH_OUTPUT`` (pass C) also fetches the output projection's ``qd`` and
+    ``Mqk`` tiles into ``s_qd`` / ``s_mqk``.
     """
     tb = t0 * H
     gt = gl.amd.cdna4.buffer_load(ptr=ws_gt + ws_idx * K, offsets=o_k_g)
@@ -411,6 +417,11 @@ def _issue_chunk(
     gl.amd.cdna4.async_copy.buffer_load_to_shared(
         s_v, v_input + tb * V, v_off, mask=((t0 + o_c_v) < tok_end)[:, None], other=0.0
     )
+    if WITH_OUTPUT:
+        gl.amd.cdna4.async_copy.buffer_load_to_shared(s_qd, ws_qd + ck, ws_off)
+        gl.amd.cdna4.async_copy.buffer_load_to_shared(
+            s_mqk, ws_inv_mqk + ws_idx * (2 * C * C) + C * C, cc_off
+        )
     gl.amd.cdna4.async_copy.commit_group()
     return gt, beta
 
@@ -509,10 +520,10 @@ def flash_kda_k2_ab_fused_gluon(
     gt_n = gl.zeros([K], gl.float32, BLK_1D)
     beta_n = gl.zeros([C], gl.float32, BLK_1D)
     if n_chunks > 0:
-        gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw,
+        gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, None,
                                     s_kd.index(0), s_kr.index(0), s_inv.index(0), s_v.index(0),
-                                    ws0, tok_base, tok_end, ws_off, cc_off, v_off, o_c_v, o_k_g,
-                                    o_c_g, beta_off, H, K, V, C)  # fmt: skip
+                                    None, None, ws0, tok_base, tok_end, ws_off, cc_off, v_off,
+                                    o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C, False)  # fmt: skip
 
     for j in range(n_chunks):
         cur = j % 2
@@ -524,11 +535,12 @@ def flash_kda_k2_ab_fused_gluon(
         s_beta.index(cur).store(beta_n)
         gl.barrier()
         if j + 1 < n_chunks:
-            gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw,
+            gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, None,
                                         s_kd.index(1 - cur), s_kr.index(1 - cur),
-                                        s_inv.index(1 - cur), s_v.index(1 - cur), ws0 + j + 1,
-                                        tok_base + (j + 1) * C, tok_end, ws_off, cc_off, v_off,
-                                        o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C)  # fmt: skip
+                                        s_inv.index(1 - cur), s_v.index(1 - cur), None, None,
+                                        ws0 + j + 1, tok_base + (j + 1) * C, tok_end, ws_off,
+                                        cc_off, v_off, o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C,
+                                        False)  # fmt: skip
 
         kd_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kd.index(cur), A_OP_B)
         # ws_kr is [C, K] in memory; the permuted view is the kr^T A operand.
@@ -549,3 +561,177 @@ def flash_kda_k2_ab_fused_gluon(
     s_off = (o_k_m[:, None] * V + o_w_m[None, :]).to(gl.int32)
     gl.amd.cdna4.buffer_store(h_b.to(h_out_b.dtype.element_ty), h_out_b + s_base, s_off)
     gl.amd.cdna4.buffer_store(h_a.to(h_out_a.dtype.element_ty), h_out_a + s_base, s_off)
+
+
+@gluon.jit
+def flash_kda_k2_c_gluon(
+    ws_kd,
+    ws_qd,
+    ws_kr,
+    ws_gt,
+    ws_inv_mqk,
+    v_input,
+    beta_raw,
+    h_in,
+    seg_chunk_base,
+    seg_nchunks,
+    seg_tok_base,
+    seg_tok_end,
+    seg_seq,
+    seg_is_last,
+    out,
+    final_state,
+    TOTAL_TILES,
+    H: gl.constexpr,
+    K: gl.constexpr,
+    V: gl.constexpr,
+    C: gl.constexpr,
+    BW: gl.constexpr,
+    MMA: gl.constexpr,
+    A_OP: gl.constexpr,
+    B_OP: gl.constexpr,
+    MMA_B: gl.constexpr,
+    A_OP_B: gl.constexpr,
+    B_OP_B: gl.constexpr,
+    BLK: gl.constexpr,
+    BLK_CC: gl.constexpr,
+    BLK_1D: gl.constexpr,
+    SH_WS: gl.constexpr,
+    SH_PLAIN: gl.constexpr,
+    SH_1D: gl.constexpr,
+    HAS_H_IN: gl.constexpr,
+    STORE_FINAL: gl.constexpr,
+    STATE_V_FIRST: gl.constexpr,
+    CM_OUT: gl.constexpr,
+    NUM_XCDS: gl.constexpr,
+):
+    """Pass C (the output pass) on gfx950: the recurrence of one segment from its incoming state.
+
+    Same contract as ``_flash_kda_segment_kernel`` with ``COMPUTE_OUTPUT``,
+    ``HAS_V`` and without ``STORE_H_OUT``. Chunk j+1's tiles are prefetched
+    into LDS while chunk j computes, as in the fused pass A. The output is
+    stored straight from the MFMA layout: converting it for a wider store
+    costs an LDS round trip and enough scratch to cost occupancy at BW=128.
+    """
+    n_w = gl.num_programs(0)
+    pid = remap_xcd(gl.program_id(1) * n_w + gl.program_id(0), n_w * gl.num_programs(1), NUM_XCDS)
+    i_w = (pid % n_w).to(gl.int64)
+    i_sh = (pid // n_w).to(gl.int64)
+    i_seg = i_sh // H
+    i_h = i_sh % H
+
+    chunk_base = gl.load(seg_chunk_base + i_seg).to(gl.int64)
+    n_chunks = gl.load(seg_nchunks + i_seg)
+    tok_base = gl.load(seg_tok_base + i_seg).to(gl.int64)
+    tok_end = gl.load(seg_tok_end + i_seg).to(gl.int64)
+
+    BLK_V: gl.constexpr = gl.BlockedLayout(
+        [1, 8], [64 // (BW // 8), BW // 8], [gl.num_warps(), 1], [1, 0]
+    )
+    o_c_s = gl.arange(0, C, layout=gl.SliceLayout(1, BLK))
+    o_k_s = gl.arange(0, K, layout=gl.SliceLayout(0, BLK))
+    o_r_cc = gl.arange(0, C, layout=gl.SliceLayout(1, BLK_CC))
+    o_c_cc = gl.arange(0, C, layout=gl.SliceLayout(0, BLK_CC))
+    o_c_v = gl.arange(0, C, layout=gl.SliceLayout(1, BLK_V))
+    o_w_v = i_w * BW + gl.arange(0, BW, layout=gl.SliceLayout(0, BLK_V))
+    o_k_g = gl.arange(0, K, layout=BLK_1D)
+    o_c_g = gl.arange(0, C, layout=BLK_1D)
+    o_c_m = gl.arange(0, C, layout=gl.SliceLayout(1, MMA))
+    o_k_m = gl.arange(0, K, layout=gl.SliceLayout(1, MMA))
+    o_w_m = i_w * BW + gl.arange(0, BW, layout=gl.SliceLayout(0, MMA))
+
+    ws_off = (o_c_s[:, None] * K + o_k_s[None, :]).to(gl.int32)
+    cc_off = (o_r_cc[:, None] * C + o_c_cc[None, :]).to(gl.int32)
+    v_off = (i_h * V + o_c_v[:, None] * (H * V) + o_w_v[None, :]).to(gl.int32)
+    o_off = (i_h * V + o_c_m[:, None] * (H * V) + o_w_m[None, :]).to(gl.int32)
+    beta_off = (i_h + o_c_g * H).to(gl.int32)
+    s_off = (o_k_m[:, None] * V + o_w_m[None, :]).to(gl.int32)
+
+    inv_ty: gl.constexpr = ws_inv_mqk.dtype.element_ty
+    out_ty: gl.constexpr = out.dtype.element_ty
+    s_kd = gl.allocate_shared_memory(gl.bfloat16, [2, C, K], SH_WS)
+    s_qd = gl.allocate_shared_memory(gl.bfloat16, [2, C, K], SH_WS)
+    s_kr = gl.allocate_shared_memory(gl.bfloat16, [2, C, K], SH_WS)
+    s_inv = gl.allocate_shared_memory(inv_ty, [2, C, C], SH_PLAIN)
+    s_mqk = gl.allocate_shared_memory(inv_ty, [2, C, C], SH_PLAIN)
+    s_v = gl.allocate_shared_memory(v_input.dtype.element_ty, [2, C, BW], SH_PLAIN)
+    s_gt = gl.allocate_shared_memory(gl.float32, [2, K], SH_1D)
+    s_beta = gl.allocate_shared_memory(gl.float32, [2, C], SH_1D)
+
+    if HAS_H_IN:
+        h = gl.amd.cdna4.buffer_load(ptr=h_in + (i_seg * H + i_h) * (K * V), offsets=s_off)
+        h = h.to(gl.float32)
+    else:
+        h = gl.zeros([K, BW], gl.float32, MMA)
+
+    ws0 = i_h * TOTAL_TILES + chunk_base
+    gt_n = gl.zeros([K], gl.float32, BLK_1D)
+    beta_n = gl.zeros([C], gl.float32, BLK_1D)
+    if n_chunks > 0:
+        gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, ws_qd,
+                                    s_kd.index(0), s_kr.index(0), s_inv.index(0), s_v.index(0),
+                                    s_qd.index(0), s_mqk.index(0), ws0, tok_base, tok_end, ws_off,
+                                    cc_off, v_off, o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C,
+                                    True)  # fmt: skip
+
+    for j in range(n_chunks):
+        cur = j % 2
+        # As in pass A: chunk j is in half `cur`, and half 1 - cur is free.
+        gl.amd.cdna4.async_copy.wait_group(0)
+        s_gt.index(cur).store(gt_n)
+        s_beta.index(cur).store(beta_n)
+        gl.barrier()
+        if j + 1 < n_chunks:
+            gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, ws_qd,
+                                        s_kd.index(1 - cur), s_kr.index(1 - cur),
+                                        s_inv.index(1 - cur), s_v.index(1 - cur),
+                                        s_qd.index(1 - cur), s_mqk.index(1 - cur), ws0 + j + 1,
+                                        tok_base + (j + 1) * C, tok_end, ws_off, cc_off, v_off,
+                                        o_c_v, o_k_g, o_c_g, beta_off, H, K, V, C,
+                                        True)  # fmt: skip
+
+        t0 = tok_base + j * C
+        kd_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kd.index(cur), A_OP_B)
+        inv_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_inv.index(cur), A_OP)
+        b_v = gl.amd.cdna4.async_copy.load_shared_relaxed(s_v.index(cur), MMA).to(gl.float32)
+        gt = s_gt.index(cur).load(gl.SliceLayout(1, MMA))
+        beta = _k2_sigmoid(s_beta.index(cur).load(gl.SliceLayout(1, MMA)))
+        m_c = (t0 + o_c_m) < tok_end
+
+        # _recur's steps, split around the output projection: updating the
+        # state after it keeps the next state and kr out of registers meanwhile
+        # (1.1-1.2x on this kernel).
+        h_op = gl.convert_layout(h.to(gl.bfloat16), B_OP_B)
+        tmp = gl.convert_layout(
+            gl.amd.cdna4.mfma(kd_a, h_op, gl.zeros([C, BW], gl.float32, MMA_B)), MMA
+        )
+        u = gl.where(m_c[:, None], (b_v - tmp) * beta[:, None], 0.0)
+        big_u = gl.amd.cdna4.mfma(
+            inv_a, gl.convert_layout(u.to(inv_ty), B_OP), gl.zeros([C, BW], gl.float32, MMA)
+        )
+
+        # o = qd @ h + Mqk @ U, h being the state entering the chunk.
+        qd_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_qd.index(cur), A_OP_B)
+        mqk_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_mqk.index(cur), A_OP)
+        o = gl.convert_layout(
+            gl.amd.cdna4.mfma(qd_a, h_op, gl.zeros([C, BW], gl.float32, MMA_B)), MMA
+        )
+        o = gl.amd.cdna4.mfma(mqk_a, gl.convert_layout(big_u.to(inv_ty), B_OP), o)
+        gl.amd.cdna4.buffer_store(o.to(out_ty), out + t0 * (H * V), o_off,
+                                  mask=m_c[:, None], cache=CM_OUT)  # fmt: skip
+
+        kr_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kr.index(cur).permute((1, 0)), A_OP)
+        h = gl.amd.cdna4.mfma(kr_a, gl.convert_layout(big_u.to(gl.bfloat16), B_OP), h * gt[:, None])
+
+    # Not merged into one condition: when STORE_FINAL is false final_state is
+    # null and seg_is_last must not be read.
+    if STORE_FINAL:  # noqa: SIM102
+        if gl.load(seg_is_last + i_seg) == 1:
+            i_n = gl.load(seg_seq + i_seg).to(gl.int64)
+            if STATE_V_FIRST:
+                f_off = (o_w_m[None, :] * K + o_k_m[:, None]).to(gl.int32)
+            else:
+                f_off = s_off
+            gl.amd.cdna4.buffer_store(
+                h.to(final_state.dtype.element_ty), final_state + (i_n * H + i_h) * (K * V), f_off
+            )
