@@ -980,6 +980,7 @@ class _GroupedLinear(torch.autograd.Function):
         is forward-only (see :meth:`_backward_grouped_mxfp4_triton`).
         """
         from ..triton_kernels.grouped_gemm_mxfp4_impl import (
+            _row_operand,
             _row_operand_mxfp8,
             grouped_gemm_mxfp4_fprop_prequantized,
         )
@@ -992,19 +993,17 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
         # Activation: quantize the whole grouped [total_M, K] once (row-wise scales
-        # do not cross groups). Detach: the reference quantizer casts via NumPy and
-        # the low-precision forward is not differentiated through (custom backward).
+        # do not cross groups). Detach: the low-precision forward is not differentiated
+        # through (a custom backward handles grads).
         a = inp.reshape(-1, in_features).to(activation_dtype).contiguous().detach()
         input_quantizer = input_quantizers[0]
-        input_quantizer.set_usage(rowwise=True, columnwise=False)
         a_is_mxfp8 = isinstance(input_quantizer, MXFP8E4M3QuantizerRef)
         if a_is_mxfp8:
             # a8w4 activation: fused single-pass MXFP8 e4m3 downcast on gfx950; emit the
             # scale transposed ([K/32, M]) for the kernel's swizzle path.
             a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)
         else:
-            aq = input_quantizer.quantize(a)
-            a_data, a_scale = aq.data, aq.scale
+            a_data, a_scale = _row_operand(a)
 
         # Weights: per-expert row-wise E2M1, stacked to the kernel's [G, N, *] layout.
         # The a4w4 backward additionally needs the col-wise weight for the dgrad kernel.

@@ -159,6 +159,26 @@ def test_grouped_prequantized_a4w4_dgrad_matches_reference():
     assert rel < _REL_TOL, f"a4w4 dgrad on reference col weight disagrees: rel={rel:.4f}"
 
 
+def test_a4w4_activation_native_matches_reference():
+    """
+    The a4w4 module activation uses the native GPU MXFP4 quantizer; its dequantized values must match the reference CPU quantizer.
+    """
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    M, K = 384, 256
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device=device, dtype=dtype)
+
+    d_nat, s_nat = _row_operand(x)  # native GPU path
+    hp_nat = mxfp4_to_f32(d_nat) * e8m0_to_f32(s_nat).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
+
+    ref = _e2m1_ref(rowwise=True, columnwise=False).quantize(x)  # pure-NumPy reference
+    hp_ref = _deq_ref_operand(ref.data, ref.scale, ref, default_e4m3=False)
+
+    rel = (hp_nat - hp_ref).norm() / hp_ref.norm().clamp_min(1e-12)
+    assert rel < _REL_TOL, f"native a4w4 activation disagrees with reference: rel={rel:.4f}"
+
+
 def test_grouped_linear_a4w4_recipe_backward():
     """te.GroupedLinear a4w4 fwd+bwd routes to the low-precision dgrad/wgrad kernels."""
     _isolate()
