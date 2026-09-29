@@ -608,9 +608,10 @@ class _GroupedLinear(torch.autograd.Function):
         """
         if not (IS_HIP_EXTENSION and fp8 and recipe is not None and recipe.custom()):
             return False
-        # Contractions the kernels step in 128s: fprop/wgrad over K=in_features,
-        # dgrad over N=out_features. Require both so the a4w4 backward is safe.
-        if in_features % 128 != 0 or out_features % 128 != 0:
+        # The persistent forward kernel steps the K=in_features contraction in 128s (both
+        # a8w4 and a4w4). out_features (the dgrad N contraction) is required only for a4w4
+        # below, since a8w4 is forward-only and the forward masks arbitrary N.
+        if in_features % 128 != 0:
             return False
         if (
             use_bias
@@ -654,10 +655,17 @@ class _GroupedLinear(torch.autograd.Function):
             isinstance(q, MXFP4QuantizerRef) and _plain_layout(q) for q in weight_quantizers
         ):
             return False
-        return all(
-            isinstance(q, (MXFP4QuantizerRef, MXFP8E4M3QuantizerRef)) and _plain_layout(q)
-            for q in input_quantizers
-        )
+        if not all(_plain_layout(q) for q in input_quantizers):
+            return False
+        # The forward quantizes the whole grouped activation in one format chosen from
+        # input_quantizers[0], so every expert's input quantizer must be the same format;
+        # a mixed list would silently drop the later formats.
+        if all(isinstance(q, MXFP8E4M3QuantizerRef) for q in input_quantizers):
+            return True  # a8w4: forward-only, only the K=in_features contraction matters
+        if not all(isinstance(q, MXFP4QuantizerRef) for q in input_quantizers):
+            return False  # mixed activation formats -> fall back to the standard path
+        # a4w4 runs the low-precision dgrad, which contracts over N=out_features in 128s.
+        return out_features % 128 == 0
 
     @staticmethod
     def _forward_blockwise_fp8_triton(
@@ -1031,8 +1039,7 @@ class _GroupedLinear(torch.autograd.Function):
         new_workspaces = [None] * num_gemms
         reuse = not update_ws and cached is not None and (not want_wcol or cached[2] is not None)
         if reuse:
-            # Validate the cached workspace before trusting it (mirrors the blockwise path):
-            # our 4-tuple whose stacked b_data matches the current weights.
+            # Validate the cached workspace before trusting it
             expected = (num_gemms, weights[0].size(0), in_features // 2)
             if not (
                 isinstance(cached, tuple)
@@ -1066,8 +1073,6 @@ class _GroupedLinear(torch.autograd.Function):
             if cache_weight:
                 new_workspaces[0] = (b_data, b_scale, w_col_data, w_col_scale)
 
-        # Validate the caller's out buffer (2D/contiguous/dtype/device, and reject a
-        # requires-grad buffer -- the kernel writes in place) or allocate one.
         result_out = _GroupedLinear._validate_or_alloc_output(
             out, a_data.shape[0], b_data.shape[1], activation_dtype, a_data.device
         )
