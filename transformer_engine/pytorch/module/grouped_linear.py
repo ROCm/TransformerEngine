@@ -591,7 +591,6 @@ class _GroupedLinear(torch.autograd.Function):
         debug,
         unpad_output,
         actual_m_splits,
-        out,
         dgrad_out,
         fuse_wgrad_accumulation,
         wgrad_store,
@@ -603,9 +602,9 @@ class _GroupedLinear(torch.autograd.Function):
 
         a8w4 is forward-only (backward raises); a4w4 also wires the low-precision
         dgrad/wgrad (see :meth:`_forward_grouped_mxfp4_triton`). Gated off for options this
-        self-contained path does not honor -- caller ``out``/``dgrad_out`` buffers,
+        self-contained path does not honor -- a caller ``dgrad_out`` buffer,
         ``fuse_wgrad_accumulation``, and delayed wgrad (``wgrad_store``) -- so those fall
-        back to the standard path.
+        back to the standard path. (A forward ``out`` buffer is honored.)
         """
         if not (IS_HIP_EXTENSION and fp8 and recipe is not None and recipe.custom()):
             return False
@@ -621,7 +620,6 @@ class _GroupedLinear(torch.autograd.Function):
             or debug
             or unpad_output
             or actual_m_splits is not None
-            or out is not None
             or dgrad_out is not None
             or fuse_wgrad_accumulation
             or (wgrad_store is not None and wgrad_store.delay_wgrad_compute())
@@ -978,6 +976,7 @@ class _GroupedLinear(torch.autograd.Function):
         is_first_microbatch,
         weight_workspaces,
         cache_weight,
+        out=None,
     ):
         """Grouped MXFP4 / a8w4 forward (ROCm Triton, gfx950).
 
@@ -1062,7 +1061,7 @@ class _GroupedLinear(torch.autograd.Function):
             if cache_weight:
                 new_workspaces[0] = (b_data, b_scale, w_col_data, w_col_scale)
 
-        out = grouped_gemm_mxfp4_fprop_prequantized(
+        result = grouped_gemm_mxfp4_fprop_prequantized(
             a_data,
             a_scale,
             b_data,
@@ -1071,6 +1070,7 @@ class _GroupedLinear(torch.autograd.Function):
             a_is_mxfp8=a_is_mxfp8,
             out_dtype=activation_dtype,
             scale_transposed=a_is_mxfp8,
+            out=None if out is None else out.reshape(-1, out.shape[-1]),
         )
 
         if is_grad_enabled:
@@ -1086,7 +1086,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grouped_mxfp4_weight_requires_grad = weights[0].requires_grad
                 ctx.save_for_backward(a, w_col_data, w_col_scale)
 
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
+        return result.view(-1, *inp.shape[1:-1], result.shape[-1]), new_workspaces
 
     @staticmethod
     def _backward_grouped_mxfp4_triton(ctx, grad_output):
@@ -1254,7 +1254,6 @@ class _GroupedLinear(torch.autograd.Function):
             debug=debug,
             unpad_output=unpad_output,
             actual_m_splits=actual_m_splits,
-            out=out,
             dgrad_out=dgrad_out,
             fuse_wgrad_accumulation=fuse_wgrad_accumulation,
             wgrad_store=wgrad_store,
@@ -1273,6 +1272,7 @@ class _GroupedLinear(torch.autograd.Function):
                 is_first_microbatch=is_first_microbatch,
                 weight_workspaces=weight_workspaces,
                 cache_weight=cache_weight,
+                out=out,
             )
 
         # Configure quantizers

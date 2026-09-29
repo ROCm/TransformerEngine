@@ -328,6 +328,7 @@ def grouped_gemm_mxfp4_triton_kernel(
     out_dtype=torch.bfloat16,
     num_cu=None,
     scale_transposed=False,
+    out=None,
 ):
     """A(total_M, K/2) @ B(G, N, K/2)^T -> C. FP4-packed data, e8m0 uint8 scales.
 
@@ -338,7 +339,7 @@ def grouped_gemm_mxfp4_triton_kernel(
     if group_offs_out is None:
         group_offs_out = group_offs
     G = b.shape[0]
-    c = torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
+    c = out if out is not None else torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
     a_s = a_scale.view(torch.uint8)
     b_s = b_scale.view(torch.uint8)
     a_u8 = a.view(torch.uint8)
@@ -410,6 +411,7 @@ def grouped_gemm_a8w4_triton_kernel(
     out_dtype=torch.bfloat16,
     num_cu=None,
     scale_transposed=False,
+    out=None,
 ):
     """a8w4 forward: C = A(e4m3) @ B(e2m1)^T, grouped along M (routed experts).
 
@@ -423,7 +425,7 @@ def grouped_gemm_a8w4_triton_kernel(
     if group_offs_out is None:
         group_offs_out = group_offs
     G = b.shape[0]
-    c = torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
+    c = out if out is not None else torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
     a_s = a_scale.view(torch.uint8)
     b_s = b_scale.view(torch.uint8)
     a_e4m3 = a.view(torch.float8_e4m3fn)  # e4m3 operand, unpacked (K bytes/row)

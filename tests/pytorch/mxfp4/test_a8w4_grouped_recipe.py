@@ -288,3 +288,51 @@ def test_grouped_prequantized_empty_batch():
         a_data, a_scale, b_data, b_scale, m_splits, a_is_mxfp8=True, out_dtype=dtype
     )
     assert out.shape == (0, N)
+
+
+def test_grouped_prequantized_out_buffer():
+    """grouped_gemm_mxfp4_fprop_prequantized writes into a caller-provided out buffer."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    K, N = 256, 256
+    m_splits = [128, 64, 0, 192]
+    total_M = sum(m_splits)
+    torch.manual_seed(0)
+    a = torch.randn(total_M, K, device=device, dtype=dtype)
+    weights = [torch.randn(N, K, device=device, dtype=dtype) for _ in m_splits]
+
+    aq = MXFP8E4M3QuantizerRef(rowwise=True, columnwise=False).quantize(a)
+    weight_refs = [_e2m1_ref(rowwise=True, columnwise=False).quantize(w) for w in weights]
+    b_data = torch.stack([w.data for w in weight_refs], dim=0)
+    b_scale = torch.stack([w.scale for w in weight_refs], dim=0)
+
+    ref = grouped_gemm_mxfp4_fprop_prequantized(
+        aq.data, aq.scale, b_data, b_scale, m_splits, a_is_mxfp8=True, out_dtype=dtype
+    )
+    buf = torch.empty(total_M, N, device=device, dtype=dtype)
+    got = grouped_gemm_mxfp4_fprop_prequantized(
+        aq.data, aq.scale, b_data, b_scale, m_splits, a_is_mxfp8=True, out_dtype=dtype, out=buf
+    )
+    assert got.data_ptr() == buf.data_ptr(), "the caller's out buffer was not used"
+    assert torch.equal(buf, ref), "out-buffer result differs from the allocating path"
+
+
+def test_grouped_linear_a8w4_out_buffer():
+    """te.GroupedLinear a8w4 honors a caller-provided out buffer in the fast path."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    num_gemms, K, N = 4, 256, 256
+    m_splits = [128, 64, 0, 192]
+    total_M = sum(m_splits)
+    torch.manual_seed(0)
+    model = te.GroupedLinear(num_gemms, K, N, bias=False, params_dtype=dtype).cuda()
+    inp = torch.randn(total_M, K, device=device, dtype=dtype)
+
+    rec = recipe.CustomRecipe(qfactory=a8w4_quantizer_factory)
+    with torch.no_grad(), te.autocast(enabled=True, recipe=rec):
+        ref = model(inp, m_splits)
+        buf = torch.empty(total_M, N, device=device, dtype=dtype)
+        got = model(inp, m_splits, out=buf)
+
+    assert torch.equal(buf, ref), "out buffer does not hold the forward result"
+    assert torch.equal(got, ref), "returned output differs when an out buffer is given"

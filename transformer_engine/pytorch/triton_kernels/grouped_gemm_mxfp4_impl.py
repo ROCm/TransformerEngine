@@ -441,6 +441,7 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
     scale_transposed: bool = False,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Grouped forward from already-quantized operands: ``C[g] = A[g] @ W[g]^T``.
 
@@ -459,6 +460,8 @@ def grouped_gemm_mxfp4_fprop_prequantized(
             ``False`` the MXFP4 x MXFP4 kernel.
         scale_transposed: when ``True`` the E8M0 scales are laid out ``[K/32, total_M]``
             / ``[G, K/32, N]`` so the kernel loads them without the per-iter ``tl.trans``.
+        out: optional ``[total_M, N]`` ``out_dtype`` buffer the kernel writes into instead
+            of allocating (caller-provided output; must match device).
 
     Returns:
         ``[total_M, N]`` output in ``out_dtype``.
@@ -473,8 +476,18 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     _check_prequantized_operands(
         a_data, a_scale, b_data, b_scale, a_is_mxfp8=a_is_mxfp8, scale_transposed=scale_transposed
     )
-    if a_data.shape[0] == 0:  # empty MoE routing batch: no tokens for this GPU's experts
-        return torch.empty((0, N), dtype=out_dtype, device=a_data.device)
+    total_M = a_data.shape[0]
+    if out is not None and (
+        tuple(out.shape) != (total_M, N)
+        or out.dtype != out_dtype
+        or out.device != a_data.device
+    ):
+        raise ValueError(
+            f"out must be [{total_M}, {N}] {out_dtype} on {a_data.device}, got"
+            f" {tuple(out.shape)} {out.dtype} on {out.device}"
+        )
+    if total_M == 0:  # empty MoE routing batch: no tokens for this GPU's experts
+        return out if out is not None else torch.empty((0, N), dtype=out_dtype, device=a_data.device)
 
     group_offs = _prefix_offsets(m_splits, a_data.device)
     kernel = grouped_gemm_a8w4_triton_kernel if a_is_mxfp8 else grouped_gemm_mxfp4_triton_kernel
@@ -490,6 +503,7 @@ def grouped_gemm_mxfp4_fprop_prequantized(
         out_dtype=out_dtype,
         num_cu=num_cu,
         scale_transposed=scale_transposed,
+        out=out,
     )
 
 
