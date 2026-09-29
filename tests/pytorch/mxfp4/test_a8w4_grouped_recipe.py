@@ -38,7 +38,6 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4_grouped import
 _recipe_ok, _reason = te.is_mxfp4_available(return_reason=True)
 pytestmark = pytest.mark.skipif(not _recipe_ok, reason=_reason)
 
-# fp32 matmul vs MFMA on identical quantized bytes: only accumulation differs.
 _REL_TOL = 5e-2
 
 
@@ -65,7 +64,7 @@ def _reference_grouped_a8w4(aq, weight_refs, m_splits, N):
 
 
 def test_grouped_prequantized_a8w4_matches_reference():
-    """The kernel on reference bytes agrees with the reference qgemm (Option B)."""
+    """The kernel on reference bytes agrees with the reference qgemm."""
     _isolate()
     device, dtype = "cuda", torch.bfloat16
     K, N = 256, 256  # K % 128 == 0 -> loop_k > 1
