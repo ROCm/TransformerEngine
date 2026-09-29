@@ -998,6 +998,11 @@ class _GroupedLinear(torch.autograd.Function):
 
         num_gemms = len(weights)
         in_features = weights[0].size(-1)
+        if inp.size(-1) != in_features:
+            raise ValueError(
+                f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
+                f"weight tensor (shape={tuple(weights[0].size())})"
+            )
         m_splits_list = (
             m_splits.tolist() if isinstance(m_splits, torch.Tensor) else [int(m) for m in m_splits]
         )
