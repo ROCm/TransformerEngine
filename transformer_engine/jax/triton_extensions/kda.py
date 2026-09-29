@@ -1200,9 +1200,16 @@ def kda_bwd(
     )
     dv, db = r["dv2"], r["db"]
 
+    # With the in-kernel l2norm and no GVA (no head-group sum pending), one program
+    # per whole K row (K <= 128) finishes dq/dk through the l2norm and dbeta; see
+    # the PyTorch driver.
     cfg = kda_launch_config("bwd_intra", arch)
     BC = min(KDA_SUB_CHUNK, BT)
-    BK = min(cfg.kwargs["BK"], triton.next_power_of_2(K))
+    fuse = K <= 128 and use_qk_l2norm_in_kernel and HV == H
+    sigmoid = fuse and use_beta_sigmoid_in_kernel
+    BK = triton.next_power_of_2(K)
+    if not fuse:
+        BK = min(cfg.kwargs["BK"], BK)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
     r = _call(
@@ -1217,16 +1224,21 @@ def kda_bwd(
             ("dq", r["dq"]),
             ("dk", r["dk"]),
             ("dg", r["dg"]),
+            ("q_raw", q if fuse else None),
+            ("k_raw", k if fuse else None),
+            ("beta_raw", beta if sigmoid else None),
+            ("db", db if fuse else None),
         ]
         + tables,
         [
-            ("dq2", kv_shape, jnp.float32),
-            ("dk2", kv_shape, jnp.float32),
+            ("dq2", kv_shape, q.dtype if fuse else jnp.float32),
+            ("dk2", kv_shape, k.dtype if fuse else jnp.float32),
             ("dg2", kv_shape, jnp.float32),
-            ("db", (NK, B, T, HV), jnp.float32),
+            ("db2", *(((B, T, HV), beta.dtype) if fuse else ((NK, B, T, HV), jnp.float32))),
         ],
         (NK * NC, NT, B * HV),
         {
+            "eps": 1e-6,
             "B": B,
             "T": T,
             "H": H,
@@ -1239,12 +1251,15 @@ def kda_bwd(
             "IS_VARLEN": is_varlen,
             "SAFE_GATE": safe_gate,
             "NUM_XCDS": kda_num_xcds(arch),
+            "L2NORM_QK": fuse,
+            "FINISH_DB": fuse,
+            "BETA_SIGMOID": sigmoid,
         },
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
     )
     dq, dk = mask(r["dq2"]), mask(r["dk2"])
-    db = mask(r["db"].sum(0) + db)
+    db = mask(r["db2"] if fuse else r["db2"].sum(0) + db)
     if HV > H:
         dq = dq.reshape(B, T, H, HV // H, K).sum(3)
         dk = dk.reshape(B, T, H, HV // H, K).sum(3)
@@ -1283,10 +1298,10 @@ def kda_bwd(
     dA_log = r["dA"].sum((0, 1, 3)).astype(A_log.dtype) if use_gate_in_kernel else None
     ddt_bias = r["dbias"].sum(0).astype(dt_bias.dtype) if use_bias else None
 
-    if use_qk_l2norm_in_kernel:
+    if use_qk_l2norm_in_kernel and not fuse:
         dq = _l2norm_bwd(q, dq, arch)
         dk = _l2norm_bwd(k, dk, arch)
-    if use_beta_sigmoid_in_kernel:
+    if use_beta_sigmoid_in_kernel and not sigmoid:
         db = _beta_sigmoid_bwd(beta, db, arch)
     return (
         dq.astype(q.dtype),

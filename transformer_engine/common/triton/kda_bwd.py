@@ -23,11 +23,13 @@ log2 space, ``Aqk``, ``Akk``, ``w``/``u``/``kg``, ``h``, ``v_new``; see
 3. ``dq``/``dk``/``dg``/``dbeta``/``dv`` through the WY representation and the
    inter-chunk terms, plus ``dAkk`` (``_kda_bwd_wy_dqkg_kernel``).
 4. The intra-chunk terms of ``dq``/``dk``/``dg``/``dbeta`` from ``dAqk`` and
-   ``dAkk`` (``_kda_bwd_intra_kernel``).
+   ``dAkk`` (``_kda_bwd_intra_kernel``). With the in-kernel l2norm, no GVA
+   and ``K <= 128`` it also takes ``dq``/``dk`` back through the l2norm and
+   finishes ``dbeta`` (beta sigmoid included).
 5. A reverse chunk-local cumsum turns the gradient w.r.t. the cumulative gate
    into one w.r.t. the per-token gate, and the same kernel undoes the gate
-   activation (``_kda_bwd_gate_cumsum_kernel``); l2norm and beta sigmoid are
-   then undone elementwise.
+   activation (``_kda_bwd_gate_cumsum_kernel``). l2norm and beta sigmoid are
+   undone elementwise when stage 4 did not.
 
 Kernel bodies follow fla, with the same TE-side conventions as ``kda.py``: no
 heuristics or autotuning, tensor parameters inputs first and outputs last, and
@@ -42,6 +44,14 @@ import triton
 import triton.language as tl
 
 from transformer_engine.common.triton.kda import _kda_fwd_h, exp, exp2, remap_xcd, softplus
+
+
+@triton.jit
+def _l2norm_bwd_rows(x, dy, eps):
+    """``dx`` for ``y = x / sqrt(sum(x^2) + eps)`` per row of fp32 ``[rows, D]`` tiles."""
+    rstd = tl.rsqrt(tl.sum(x * x, axis=1) + eps)[:, None]
+    y = x * rstd
+    return dy * rstd - tl.sum(dy * y, axis=1)[:, None] * y * rstd
 
 
 @triton.jit
@@ -711,12 +721,17 @@ def _kda_bwd_intra_kernel(
     dq,
     dk,
     dg,
+    q_raw,
+    k_raw,
+    beta_raw,
+    db,
     cu_seqlens,
     chunk_indices,
     dq2,
     dk2,
     dg2,
-    db,
+    db2,
+    eps,
     B,
     T,
     H: tl.constexpr,
@@ -729,12 +744,23 @@ def _kda_bwd_intra_kernel(
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    L2NORM_QK: tl.constexpr,
+    FINISH_DB: tl.constexpr,
+    BETA_SIGMOID: tl.constexpr,
 ):
     """Intra-chunk dq/dk/dg/dbeta from dAqk and dAkk, one ``BC`` sub-chunk and ``BK`` slice each.
 
-    ``dq2 = dq + ...`` etc. accumulate onto the inter-chunk terms; ``db`` is
-    ``[NK, B*T, HV]`` partials, one per ``BK`` slice.
+    ``dq2 = dq + ...`` etc. accumulate onto the inter-chunk terms; ``db2`` is
+    ``[NK, B*T, HV]`` partials, one per ``BK`` slice. With a single slice
+    (``BK >= K``) the epilogue can also finish the gradients:
+
+    * ``L2NORM_QK`` (``H == HV``): ``dq2``/``dk2`` are taken back through the
+      in-kernel l2norm of ``q_raw``/``k_raw``, as ``_kda_bwd_l2norm_kernel``.
+    * ``FINISH_DB``: ``db2`` is the whole ``dbeta``: it adds the inter-chunk
+      ``db`` and, with ``BETA_SIGMOID``, goes back through ``sigmoid(beta_raw)``.
     """
+    if L2NORM_QK or FINISH_DB:
+        tl.static_assert(BK >= K)
     # The NK * NC programs of a chunk re-read each other's k/g/q tiles; launched
     # round-robin they would sit on different XCDs (L2s), so keep them on one.
     n_kc, n_t = tl.num_programs(0), tl.num_programs(1)
@@ -781,7 +807,14 @@ def _kda_bwd_intra_kernel(
     dk2 += (bos * HV + i_hv) * K
     dg += (bos * HV + i_hv) * K
     dg2 += (bos * HV + i_hv) * K
-    db += (i_k * n_all + bos) * HV + i_hv
+    db2 += (i_k * n_all + bos) * HV + i_hv
+    if L2NORM_QK:
+        q_raw += (bos * H + i_h) * K
+        k_raw += (bos * H + i_h) * K
+    if FINISH_DB:
+        db += bos * HV + i_hv
+        if BETA_SIGMOID:
+            beta_raw += bos * HV + i_hv
 
     o_i = tl.arange(0, BC)
     o_c = i_ti + o_i
@@ -873,12 +906,21 @@ def _kda_bwd_intra_kernel(
 
     p_dq = dq + o_c[:, None] * (HV * K) + o_k[None, :]
     p_dq2 = dq2 + o_c[:, None] * (HV * K) + o_k[None, :]
-    p_db = db + o_c * HV
+    p_db2 = db2 + o_c * HV
 
     b_dg2 = b_q * b_dq2
     b_dq2 = b_dq2 + tl.load(p_dq, mask=m_ck, other=0.0)
+    if L2NORM_QK:
+        p_qr = q_raw + o_c[:, None] * (H * K) + o_k[None, :]
+        b_qr = tl.load(p_qr, mask=m_ck, other=0.0).to(tl.float32)
+        b_dq2 = _l2norm_bwd_rows(b_qr, b_dq2, eps)
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), mask=m_ck)
-    tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_c)
+    if FINISH_DB:
+        b_db += tl.load(db + o_c * HV, mask=m_c, other=0.0)
+        if BETA_SIGMOID:
+            b_s = tl.sigmoid(tl.load(beta_raw + o_c * HV, mask=m_c, other=0).to(tl.float32))
+            b_db = b_db * b_s * (1.0 - b_s)
+    tl.store(p_db2, b_db.to(p_db2.dtype.element_ty), mask=m_c)
 
     tl.debug_barrier()
     # Columns of this sub-chunk against later sub-chunks.
@@ -968,6 +1010,10 @@ def _kda_bwd_intra_kernel(
     b_dg2 += (b_dk2 - b_dkt) * b_k + tl.load(p_dg, mask=m_ck, other=0.0)
     b_dk2 += tl.load(p_dk, mask=m_ck, other=0.0)
     b_dk2 += b_dkt
+    if L2NORM_QK:
+        p_kr = k_raw + o_c[:, None] * (H * K) + o_k[None, :]
+        b_kr = tl.load(p_kr, mask=m_ck, other=0.0).to(tl.float32)
+        b_dk2 = _l2norm_bwd_rows(b_kr, b_dk2, eps)
 
     tl.store(p_dk2, b_dk2.to(p_dk2.dtype.element_ty), mask=m_ck)
     tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_ck)
@@ -1078,9 +1124,7 @@ def _kda_bwd_l2norm_kernel(
     mask = (row_idx < T) & (col_idx < D)
     x = tl.load(X + col_idx + D * row_idx, mask=mask, other=0.0).to(tl.float32)
     dy = tl.load(DY + col_idx + D * row_idx, mask=mask, other=0.0).to(tl.float32)
-    rstd = tl.rsqrt(tl.sum(x * x, axis=1) + eps)[:, None]
-    y = x * rstd
-    dx = dy * rstd - tl.sum(dy * y, axis=1)[:, None] * y * rstd
+    dx = _l2norm_bwd_rows(x, dy, eps)
     tl.store(DX + col_idx + D * row_idx, dx.to(DX.dtype.element_ty), mask=mask)
 
 

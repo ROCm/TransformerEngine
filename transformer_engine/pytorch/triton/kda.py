@@ -1117,15 +1117,26 @@ def kda_bwd(
         )
 
         # Intra-chunk gradients.
+        # With the in-kernel l2norm and no GVA (no head-group sum pending), one
+        # program per whole K row (K <= 128) finishes dq/dk through the l2norm
+        # and dbeta. Without the l2norm to fold in, the wider tile costs more
+        # than the small dbeta kernels it would save.
         cfg = kda_launch_config("bwd_intra", arch)
         BC = min(KDA_SUB_CHUNK, BT)
-        BK = min(cfg.kwargs["BK"], triton.next_power_of_2(K))
+        fuse = K <= 128 and use_qk_l2norm_in_kernel and HV == H
+        sigmoid = fuse and use_beta_sigmoid_in_kernel
+        BK = triton.next_power_of_2(K)
+        if not fuse:
+            BK = min(cfg.kwargs["BK"], BK)
         NC = triton.cdiv(BT, BC)
         NK = triton.cdiv(K, BK)
-        dq2 = alloc(dq.shape, device=q.device, dtype=torch.float32)
-        dk2 = alloc(dk.shape, device=q.device, dtype=torch.float32)
+        dq2 = alloc(dq.shape, device=q.device, dtype=q.dtype if fuse else torch.float32)
+        dk2 = alloc(dk.shape, device=q.device, dtype=k.dtype if fuse else torch.float32)
         dg2 = torch.empty_like(dg)
-        db2 = alloc(NK, B, T, HV, device=q.device, dtype=torch.float32)
+        if fuse:
+            db2 = alloc(B, T, HV, device=q.device, dtype=beta.dtype)
+        else:
+            db2 = alloc(NK, B, T, HV, device=q.device, dtype=torch.float32)
         _bwd_intra_k[(NK * NC, NT, B * HV)](
             q=qn,
             k=kn,
@@ -1136,12 +1147,17 @@ def kda_bwd(
             dq=dq,
             dk=dk,
             dg=dg,
+            q_raw=q if fuse else None,
+            k_raw=k if fuse else None,
+            beta_raw=beta if sigmoid else None,
+            db=db if fuse else None,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             dq2=dq2,
             dk2=dk2,
             dg2=dg2,
-            db=db2,
+            db2=db2,
+            eps=1e-6,
             B=B,
             T=T,
             H=H,
@@ -1154,10 +1170,13 @@ def kda_bwd(
             IS_VARLEN=is_varlen,
             SAFE_GATE=safe_gate,
             NUM_XCDS=kda_num_xcds(arch),
+            L2NORM_QK=fuse,
+            FINISH_DB=fuse,
+            BETA_SIGMOID=sigmoid,
             num_warps=cfg.num_warps,
             num_stages=cfg.num_stages,
         )
-        dq, dk, db = dq2, dk2, db2.sum(0).add_(db)
+        dq, dk, db = dq2, dk2, db2 if fuse else db2.sum(0).add_(db)
         if HV > H:
             dq = dq.view(B, T, H, HV // H, K).sum(3)
             dk = dk.view(B, T, H, HV // H, K).sum(3)
@@ -1198,10 +1217,10 @@ def kda_bwd(
         dA_log = dA_part.sum((0, 1, 3)).to(A_log.dtype) if use_gate_in_kernel else None
         ddt_bias = db_part.sum(0).to(dt_bias.dtype) if use_bias else None
 
-        if use_qk_l2norm_in_kernel:
+        if use_qk_l2norm_in_kernel and not fuse:
             dq = _l2norm_bwd(q, dq, arch)
             dk = _l2norm_bwd(k, dk, arch)
-        if use_beta_sigmoid_in_kernel:
+        if use_beta_sigmoid_in_kernel and not sigmoid:
             db = _beta_sigmoid_bwd(beta, db, arch)
     return (
         dq.to(q.dtype),
