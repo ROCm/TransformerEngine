@@ -266,3 +266,25 @@ def test_row_operand_mxfp8_fused_matches_torch():
         assert torch.equal(
             s_fused_t, s_ref.t().contiguous()
         ), f"transposed scale != plain scale.T at {(M, K)}"
+
+
+def test_grouped_prequantized_empty_batch():
+    """Empty MoE routing batch (total_M=0): the grouped path returns [0, N] with no
+    zero-sized grid launch (the fused downcast and the GEMM both short-circuit)."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    G, K, N = 4, 256, 256
+    m_splits = [0] * G
+    weights = [torch.randn(N, K, device=device, dtype=dtype) for _ in range(G)]
+    b_ops = [_row_operand(w) for w in weights]
+    b_data = torch.stack([d for d, _ in b_ops])
+    b_scale = torch.stack([s for _, s in b_ops])
+
+    a = torch.empty(0, K, device=device, dtype=dtype)
+    a_data, a_scale = _row_operand_mxfp8(a)  # fused downcast must skip the zero-sized grid
+    assert a_data.shape == (0, K) and a_scale.numel() == 0
+
+    out = grouped_gemm_mxfp4_fprop_prequantized(
+        a_data, a_scale, b_data, b_scale, m_splits, a_is_mxfp8=True, out_dtype=dtype
+    )
+    assert out.shape == (0, N)

@@ -463,6 +463,8 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     N = b_data.shape[1]
     K = b_data.shape[2] * 2  # weights are packed 2 e2m1 elems/byte along K
     _check_contract(K, "K")
+    if a_data.shape[0] == 0:  # empty MoE routing batch: no tokens for this GPU's experts
+        return torch.empty((0, N), dtype=out_dtype, device=a_data.device)
     _check_splits(m_splits, a_data.shape[0], b_data.shape[0])
     _check_prequantized_operands(
         a_data, a_scale, b_data, b_scale, a_is_mxfp8=a_is_mxfp8, scale_transposed=scale_transposed

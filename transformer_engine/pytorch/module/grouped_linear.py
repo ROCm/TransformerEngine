@@ -1014,7 +1014,21 @@ class _GroupedLinear(torch.autograd.Function):
         update_ws = is_first_microbatch is None or is_first_microbatch
         cached = weight_workspaces[0] if weight_workspaces else None
         new_workspaces = [None] * num_gemms
-        if not update_ws and cached is not None and (not want_wcol or cached[2] is not None):
+        reuse = not update_ws and cached is not None and (not want_wcol or cached[2] is not None)
+        if reuse:
+            # Validate the cached workspace before trusting it (mirrors the blockwise path):
+            # our 4-tuple whose stacked b_data matches the current weights.
+            expected = (num_gemms, weights[0].size(0), in_features // 2)
+            if not (
+                isinstance(cached, tuple)
+                and len(cached) == 4
+                and isinstance(cached[0], torch.Tensor)
+                and tuple(cached[0].shape) == expected
+            ):
+                raise RuntimeError(
+                    "Cached grouped MXFP4 weight workspace is incompatible with the current "
+                    f"weights; expected a 4-tuple whose b_data has shape {expected}."
+                )
             b_data, b_scale, w_col_data, w_col_scale = cached
         else:
             b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []

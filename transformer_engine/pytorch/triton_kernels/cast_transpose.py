@@ -874,8 +874,9 @@ def mxfp8_e4m3_rowwise_downcast(x, transpose_scale=False):
 
     ``x`` [M, K] (K a multiple of 32) -> (data [M, K] e4m3, scale uint8 E8M0), using the
     ceil scale rule ``ceil(log2(amax_block / 448))``. Reuses :func:`_cast_transpose_triton_mxfp8`
-    row-wise only, so it is bit-identical to the torch reference ``_row_operand_mxfp8_torch``
-    but single-pass.
+    row-wise only, so it matches the torch reference ``_row_operand_mxfp8_torch`` bit-for-bit for
+    non-zero blocks (an all-zero 32-block may get a different E8M0 scale byte, but its data is zero
+    so it dequantizes to zero either way) but is single-pass.
     """
     assert x.shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0, "K must be a multiple of 32"
     x = x.contiguous()
@@ -889,6 +890,8 @@ def mxfp8_e4m3_rowwise_downcast(x, transpose_scale=False):
     else:
         scale = torch.empty((M, grid_k), dtype=torch.uint8, device=x.device)
         scale_stride_m, scale_stride_k = scale.stride(0), scale.stride(1)
+    if M == 0:  # empty MoE routing batch: nothing to quantize, skip the zero-sized grid
+        return data, scale
     rowwise_y = triton.reinterpret(data, te_dtype_to_triton_dtype(fp8_dtype))
     BLOCK_X = BLOCK_Y = 64
     GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
