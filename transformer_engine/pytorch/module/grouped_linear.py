@@ -641,6 +641,8 @@ class _GroupedLinear(torch.autograd.Function):
             # MXFP4QuantizerRef must have every layout-transform flag off.
             if isinstance(q, MXFP8E4M3QuantizerRef):
                 return True
+            if not isinstance(q, MXFP4QuantizerRef):
+                return False
             return not (
                 q.shuffle_rowwise_data
                 or q.shuffle_columnwise_data
