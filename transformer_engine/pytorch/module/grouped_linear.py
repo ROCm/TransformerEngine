@@ -578,6 +578,106 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _is_flydsl_mxfp8_grouped_gemm_supported(
+        *,
+        fp8,
+        recipe,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ) -> bool:
+        """FlyDSL persistent work-stealing MXFP8 grouped GEMM: HIP, gfx950, env, MXFP8 recipe.
+
+        Opt-in via ``NVTE_USE_GROUPED_GEMM_FLYDSL=1``. The kernel is a TN-only packed
+        launch (see :func:`_run_mxfp8_grouped`); N (out_features) and K (in_features)
+        must be 128-aligned for the tile/scale geometry, and the same feature-set
+        exclusions as the blockwise-triton path apply.
+        """
+        return (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+            and get_device_compute_capability() == (9, 5)
+            and fp8
+            and recipe is not None
+            and recipe.mxfp8()
+            and in_features % 128 == 0
+            and out_features % 128 == 0
+            and not (
+                use_bias
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
+
+    @staticmethod
+    def _grouped_gemm_flydsl_mxfp8(
+        *,
+        inputmats,
+        weights_fp8,
+        out,
+        m_splits,
+        m_splits_tensor,
+    ):
+        """Dispatch the FlyDSL MXFP8 grouped GEMM over already-quantized operands.
+
+        Called inline at the forward GEMM dispatch (like ``general_grouped_gemm_triton``),
+        riding off the quantization TE already performed -- ``inputmats`` are the
+        per-group MXFP8 activations from ``tex.split_quantize`` and ``weights_fp8`` the
+        per-expert MXFP8 weights. This first iteration does not quantize: it packs the
+        rowwise MXFP8 payloads into the ``[M_total, K]`` / ``[G*N, K]`` layout, derives
+        ``group_offs`` from ``m_splits``, and issues one packed TN launch via
+        :func:`_run_mxfp8_grouped`, writing into ``out``.
+        """
+        from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+
+        num_gemms = len(inputmats)
+        # TN packed operands: activations concatenated along the token (M) axis,
+        # weights along the expert*N axis. Each MXFP8 operand carries its rowwise
+        # fp8 payload and E8M0 scale; concatenate both.
+        a_data = torch.cat([im._rowwise_data for im in inputmats], dim=0)
+        a_scale = torch.cat([im._rowwise_scale_inv for im in inputmats], dim=0)
+        b_data = torch.cat([w._rowwise_data for w in weights_fp8], dim=0)
+        b_scale = torch.cat([w._rowwise_scale_inv for w in weights_fp8], dim=0)
+
+        # Preserve the native MXFP8 dtype so the wrapper reinterprets the uint8
+        # payload to the correct fp8 view at the kernel boundary.
+        a_data._fp8_dtype = inputmats[0]._fp8_dtype
+        b_data._fp8_dtype = weights_fp8[0]._fp8_dtype
+
+        n = weights_fp8[0]._rowwise_data.size(0)
+        k = weights_fp8[0]._rowwise_data.size(-1)
+        m_total = a_data.size(0)
+
+        # group_offs: [num_gemms+1] exclusive scan over per-group token counts.
+        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=out.device)
+        group_offs[1:] = torch.cumsum(
+            m_splits_tensor.to(device=out.device, dtype=torch.int64), 0
+        )
+
+        _run_mxfp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            out,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+        )
+
+    @staticmethod
     def _forward_blockwise_fp8_triton(
         ctx,
         *,
@@ -981,6 +1081,23 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
             )
 
+        # FlyDSL MXFP8 grouped GEMM (ROCm gfx950) opt-in. Unlike the blockwise-triton
+        # path this does NOT quantize: it rides off TE's existing quantization and is
+        # dispatched inline at the forward GEMM (see below), like the triton grouped path.
+        use_grouped_gemm_flydsl = _GroupedLinear._is_flydsl_mxfp8_grouped_gemm_supported(
+            fp8=fp8,
+            recipe=blockwise_recipe,
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=weights[0].size(-1),
+            out_features=weights[0].size(0),
+        )
+
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
             if FP8GlobalStateManager.get_fp8_recipe().custom():
@@ -1150,25 +1267,34 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        if use_grouped_gemm_triton:
-            general_grouped_gemm_func = general_grouped_gemm_triton
-            kwargs = {"m_splits_tensor": m_splits_tensor}
+        if use_grouped_gemm_flydsl:
+            _GroupedLinear._grouped_gemm_flydsl_mxfp8(
+                inputmats=inputmats,
+                weights_fp8=weights_fp8,
+                out=out,
+                m_splits=m_splits,
+                m_splits_tensor=m_splits_tensor,
+            )
         else:
-            general_grouped_gemm_func = general_grouped_gemm
-            kwargs = {}
-        general_grouped_gemm_func(
-            weights_fp8,
-            inputmats,
-            [out],
-            output_quantizers,
-            activation_dtype,
-            single_output=True,
-            m_splits=m_splits,
-            bias=biases,
-            use_bias=use_bias,
-            use_split_accumulator=use_split_accumulator,
-            **kwargs,
-        )
+            if use_grouped_gemm_triton:
+                general_grouped_gemm_func = general_grouped_gemm_triton
+                kwargs = {"m_splits_tensor": m_splits_tensor}
+            else:
+                general_grouped_gemm_func = general_grouped_gemm
+                kwargs = {}
+            general_grouped_gemm_func(
+                weights_fp8,
+                inputmats,
+                [out],
+                output_quantizers,
+                activation_dtype,
+                single_output=True,
+                m_splits=m_splits,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=use_split_accumulator,
+                **kwargs,
+            )
 
         output_unpadded = False
         if (

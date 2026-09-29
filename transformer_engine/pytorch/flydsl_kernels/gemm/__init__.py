@@ -41,9 +41,10 @@ def _check_flydsl_version() -> None:
 _check_flydsl_version()
 
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_wrappers import te_generic_gemm_flydsl
+from .gemm_wrappers import te_generic_gemm_flydsl, _run_mxfp8_grouped
 
 __all__ = [
     "FlyDSLUnsupportedError",
     "te_generic_gemm_flydsl",
+    "_run_mxfp8_grouped",
 ]
