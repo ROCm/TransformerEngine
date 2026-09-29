@@ -297,6 +297,7 @@ def grouped_gemm_a8w4_fprop(
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
     weight_row: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    weight_scale_transposed: bool = False,
 ) -> torch.Tensor:
     """Grouped a8w4 forward: ``C[g] = A[g] @ W[g]^T`` (contract K).
 
@@ -310,6 +311,9 @@ def grouped_gemm_a8w4_fprop(
         m_splits: per-group token counts (len G).
         weight_row: optional pre-quantized row-wise MXFP4 weights
             ``(data [G, N, K/2], scale [G, N, K/32])`` -- skips the weight cast.
+        weight_scale_transposed: set ``True`` when ``weight_row``'s scale is already the
+            transposed ``[G, K/32, N]`` swizzle layout (a cached transpose); otherwise the
+            plain ``[G, N, K/32]`` scale is transposed here.
 
     Returns:
         [total_M, N] output in ``out_dtype``.
@@ -322,6 +326,7 @@ def grouped_gemm_a8w4_fprop(
         b_data, b_scale = weight_row
         N = b_data.shape[1]
         _check_splits(m_splits, a.shape[0], b_data.shape[0])
+        b_scale_is_transposed = weight_scale_transposed  # caller declares the cached layout
     else:
         N = weights[0].shape[0]
         _check_splits(m_splits, a.shape[0], len(weights))
@@ -332,12 +337,13 @@ def grouped_gemm_a8w4_fprop(
             b_scales.append(s)
         b_data = torch.stack(b_datas, dim=0)  # (G, N, K/2)
         b_scale = torch.stack(b_scales, dim=0)  # (G, N, K/32)
+        b_scale_is_transposed = False  # fresh weight quant is always plain [G, N, K/32]
 
     a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)  # a_scale [K/32, total_M]
-    # a8w4 swizzle: the kernel consumes both scales transposed.
-    # Normalise the weight scale to [G, K/32, N] (plain weight quant / weight_row is
-    # [G, N, K/32]; a caller may also pass it already transposed to keep the cache free).
-    if b_scale.shape[-1] != N:
+    # a8w4 swizzle: the kernel consumes both scales transposed ([G, K/32, N]). The plain
+    # weight quant / documented weight_row is [G, N, K/32]; transpose unless the caller
+    # already cached it transposed (weight_scale_transposed).
+    if not b_scale_is_transposed:
         b_scale = b_scale.transpose(1, 2).contiguous()
     group_offs = _prefix_offsets(m_splits, a.device)
     return grouped_gemm_a8w4_triton_kernel(
@@ -463,12 +469,12 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     N = b_data.shape[1]
     K = b_data.shape[2] * 2  # weights are packed 2 e2m1 elems/byte along K
     _check_contract(K, "K")
-    if a_data.shape[0] == 0:  # empty MoE routing batch: no tokens for this GPU's experts
-        return torch.empty((0, N), dtype=out_dtype, device=a_data.device)
     _check_splits(m_splits, a_data.shape[0], b_data.shape[0])
     _check_prequantized_operands(
         a_data, a_scale, b_data, b_scale, a_is_mxfp8=a_is_mxfp8, scale_transposed=scale_transposed
     )
+    if a_data.shape[0] == 0:  # empty MoE routing batch: no tokens for this GPU's experts
+        return torch.empty((0, N), dtype=out_dtype, device=a_data.device)
 
     group_offs = _prefix_offsets(m_splits, a_data.device)
     kernel = grouped_gemm_a8w4_triton_kernel if a_is_mxfp8 else grouped_gemm_mxfp4_triton_kernel

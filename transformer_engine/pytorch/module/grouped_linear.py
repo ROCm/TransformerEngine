@@ -591,6 +591,10 @@ class _GroupedLinear(torch.autograd.Function):
         debug,
         unpad_output,
         actual_m_splits,
+        out,
+        dgrad_out,
+        fuse_wgrad_accumulation,
+        wgrad_store,
         in_features,
         out_features,
     ) -> bool:
@@ -598,7 +602,10 @@ class _GroupedLinear(torch.autograd.Function):
         factory yields the plain-layout MXFP4 reference quantizers.
 
         a8w4 is forward-only (backward raises); a4w4 also wires the low-precision
-        dgrad/wgrad (see :meth:`_forward_grouped_mxfp4_triton`).
+        dgrad/wgrad (see :meth:`_forward_grouped_mxfp4_triton`). Gated off for options this
+        self-contained path does not honor -- caller ``out``/``dgrad_out`` buffers,
+        ``fuse_wgrad_accumulation``, and delayed wgrad (``wgrad_store``) -- so those fall
+        back to the standard path.
         """
         if not (IS_HIP_EXTENSION and fp8 and recipe is not None and recipe.custom()):
             return False
@@ -614,6 +621,10 @@ class _GroupedLinear(torch.autograd.Function):
             or debug
             or unpad_output
             or actual_m_splits is not None
+            or out is not None
+            or dgrad_out is not None
+            or fuse_wgrad_accumulation
+            or (wgrad_store is not None and wgrad_store.delay_wgrad_compute())
         ):
             return False
         try:
@@ -1243,6 +1254,10 @@ class _GroupedLinear(torch.autograd.Function):
             debug=debug,
             unpad_output=unpad_output,
             actual_m_splits=actual_m_splits,
+            out=out,
+            dgrad_out=dgrad_out,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            wgrad_store=wgrad_store,
             in_features=weights[0].size(-1),
             out_features=weights[0].size(0),
         ):
