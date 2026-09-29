@@ -246,6 +246,51 @@ jobs:
           path: ci-weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # Runs before the ci-rerun cache is saved, because it writes this attempt's
+      # rendered section into that same tree for the next attempt to replay.
+      - name: Generate test report
+        if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+
+          # $GITHUB_STEP_SUMMARY starts empty on every attempt, so a re-run's
+          # summary replaces the full run's rather than adding to it -- the job
+          # page would lose every result the re-run did not queue. Each attempt
+          # therefore renders into its own file under the cached ci-rerun tree,
+          # and the summary is assembled from all of them.
+          ARCHIVE=ci-rerun/summary
+          mkdir -p "$ARCHIVE"
+          THIS="$ARCHIVE/attempt-${ATTEMPT}.md"
+          : > "$THIS"
+
+          # One report per suite; each appends its own section. An empty subdir
+          # means the suite crashed before writing XML on a first attempt, or
+          # simply was not re-queued on a later one -- junit_report.py tells the
+          # two apart from --attempt and words the section accordingly.
+          GITHUB_STEP_SUMMARY="$THIS" python3 ci/junit_report.py test-results/torch \
+            --title "sGPU PyTorch (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          GITHUB_STEP_SUMMARY="$THIS" python3 ci/junit_report.py test-results/jax \
+            --title "sGPU JAX (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          GITHUB_STEP_SUMMARY="$THIS" python3 ci/junit_report.py test-results/core \
+            --title "sGPU Core (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          if [ -f test-results/logs/report/schedule.md ]; then
+            cat test-results/logs/report/schedule.md >> "$THIS"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
+
+          # Newest first: the attempt someone opened the page to look at is at
+          # the top, with every earlier one intact underneath. A gap in the
+          # sequence (an attempt cancelled before it reported) is skipped rather
+          # than failing the step.
+          for n in $(seq "$ATTEMPT" -1 1); do
+            if [ -f "$ARCHIVE/attempt-${n}.md" ]; then
+              cat "$ARCHIVE/attempt-${n}.md" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       # Saved under this attempt's number so the next one restores it by prefix.
       # Saved even when the queue passed: the file is then empty, and restoring
       # an empty list is what stops a third attempt re-running the second's work.
@@ -255,25 +300,6 @@ jobs:
         with:
           path: ci-rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Generate test report
-        if: always()
-        run: |
-          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
-          # One report per suite; each appends its own section to the job summary.
-          # An empty subdir (suite crashed before writing XML) yields an explicit
-          # "no results" warning attributable to that suite.
-          python3 ci/junit_report.py test-results/torch \
-            --title "sGPU PyTorch (${{ matrix.arch_label }})"
-          python3 ci/junit_report.py test-results/jax \
-            --title "sGPU JAX (${{ matrix.arch_label }})"
-          python3 ci/junit_report.py test-results/core \
-            --title "sGPU Core (${{ matrix.arch_label }})"
-          if [ -f test-results/logs/report/schedule.md ]; then
-            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::no schedule.md -- the queue did not reach its report phase"
-          fi
 
       - name: Check suite failure status
         if: always()
@@ -308,6 +334,7 @@ jobs:
             ci-weights/*.txt
             ci-rerun/*.tsv
             ci-rerun/tests/*.txt
+            ci-rerun/summary/*.md
           if-no-files-found: ignore
           retention-days: 5
           # A re-run uploads under a name the first attempt already used, which

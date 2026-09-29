@@ -170,22 +170,41 @@ def emit(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: junit_report.py <results-dir> [--title TITLE]", file=sys.stderr)
+        print(
+            "usage: junit_report.py <results-dir> [--title TITLE] [--attempt N]",
+            file=sys.stderr,
+        )
         return 0
     results_dir = sys.argv[1]
     title = "Test Results"
     if "--title" in sys.argv:
         title = sys.argv[sys.argv.index("--title") + 1]
+    # Which attempt of the run this is. A re-run queues only what failed, so its
+    # report covers a subset of the suite and its counts mean nothing without the
+    # attempt they belong to. The workflow keeps each attempt's section and stacks
+    # them newest-first, so the number in the heading is what tells two sections of
+    # the same suite apart. Absent or unparseable means attempt 1, which reports
+    # exactly as it did before this argument existed.
+    attempt = 1
+    if "--attempt" in sys.argv:
+        try:
+            attempt = max(1, int(sys.argv[sys.argv.index("--attempt") + 1]))
+        except (IndexError, ValueError):
+            attempt = 1
 
     xml_files = sorted(glob.glob(os.path.join(results_dir, "*.xml")))
     # Sidecars left behind by te_ci_result_sink when a run hard-exited before
     # writing its JUnit XML (glob.glob("*.xml") does not match "*.xml.partial").
     partial_files = sorted(glob.glob(os.path.join(results_dir, "*.xml.partial")))
 
-    lines = []
-    lines.append(f"## {title}\n")
-
     if not xml_files and not partial_files:
+        # On a re-run an empty results dir is the ordinary case: the suite passed
+        # the attempt being re-run, so the queue had no reason to bring any of it
+        # back. A section saying only that is noise -- the suite's real result is
+        # one screen down, under the attempt that produced it -- so say nothing.
+        if attempt > 1:
+            return 0
+        lines = [f"## {title}\n"]
         lines.append(
             "> :warning: **No JUnit XML files were produced.** No test file "
             "completed far enough to write results -- the run likely crashed or "
@@ -194,6 +213,11 @@ def main():
         )
         emit(lines)
         return 0
+
+    lines = []
+    lines.append(f"## {title}{f' -- attempt {attempt}' if attempt > 1 else ''}\n")
+    if attempt > 1:
+        lines.append(f"_Re-run of what failed attempt {attempt - 1}; the rest is below._\n")
 
     totals = defaultdict(float)  # passed/failed/error/skipped/timeout/incomplete/time
     per_file = []                # (name, counts, time)

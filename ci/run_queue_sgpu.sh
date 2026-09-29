@@ -47,6 +47,20 @@ declare -a SUITE_ARGS=()
 GPU_SOURCE=""
 OVERALL_RC=0
 
+# The scheduler helpers share a queue_files module and import it by bare name,
+# which normally works because Python puts a script's own directory on sys.path.
+# ci/_utils.sh turns that off -- it exports PYTHONSAFEPATH=1 so pytest collection
+# cannot import the source tree instead of the installed package -- and Phase 3
+# sources _utils.sh into this shell. The import therefore succeeds in Phase 2 and
+# fails from Phase 6 on, taking the weight update and the schedule report with it
+# and leaving the job with no summary. Name the directory explicitly instead, the
+# same way pytest_run does for its plugin.
+SCHEDULER_DIR="${REPO_ROOT}/ci/scheduler"
+scheduler_py() {
+    local script="$1"; shift
+    PYTHONPATH="${SCHEDULER_DIR}${PYTHONPATH:+:$PYTHONPATH}" python3 "${SCHEDULER_DIR}/${script}" "$@"
+}
+
 if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
     log_error() { echo "::error::$*" >&2; }
     log_warn()  { echo "::warning::$*" >&2; }
@@ -334,7 +348,7 @@ if [[ -s "$RERUN_FILE" ]]; then
     fi
 fi
 
-if ! python3 "$REPO_ROOT/ci/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
+if ! scheduler_py build_weights.py order "$QUEUE_FILE.raw" \
         --weights "$WEIGHTS_FILE" \
         --output "$QUEUE_FILE" \
         --default-weight "$DEFAULT_WEIGHT" \
@@ -633,7 +647,7 @@ rm -rf "$RERUN_TESTS_DIR"
 if [[ ${#FAILED_KEYS[@]} -gt 0 && -n "${JUNITXML_PREFIX:-}" ]]; then
     echo "== Re-run granularity: which failed items can come back as single tests =="
     printf '%s\n' "${FAILED_KEYS[@]}" \
-        | python3 "$REPO_ROOT/ci/scheduler/rerun_tests.py" \
+        | scheduler_py rerun_tests.py \
               --junit-prefix "$JUNITXML_PREFIX" --junit-suffix "${JUNITXML_SUFFIX:-}" \
               -o "$RERUN_TESTS_DIR" \
         || log_warn "could not work out per-test re-runs; each failed item will re-run whole"
@@ -654,7 +668,7 @@ if [[ -n "$RERUN_MODE" ]]; then
     # being re-run already merged its own measurements, so sitting this one out
     # costs the table nothing.
     echo "== Weights: left alone -- a re-run's timings are not a full queue's =="
-elif ! python3 "$REPO_ROOT/ci/scheduler/build_weights.py" update "$TIMINGS_FILE" \
+elif ! scheduler_py build_weights.py update "$TIMINGS_FILE" \
         --items "$ITEMS_FILE" -o "$WEIGHTS_FILE"; then
     log_warn "could not update $WEIGHTS_FILE; the next run will use the table as it stands"
 fi
@@ -662,7 +676,7 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 7: scheduling report
 # ---------------------------------------------------------------------------
-if ! python3 "$REPO_ROOT/ci/scheduler/schedule_report.py" "$LOG_DIR" \
+if ! scheduler_py schedule_report.py "$LOG_DIR" \
         --gpus "${GPU_IDS[*]}" \
         --wall "$WALL" \
         --expand-secs "$EXPAND_SECS" \

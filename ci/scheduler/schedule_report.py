@@ -243,20 +243,23 @@ def render_report_md(
         f"## {REPORT_TITLE}",
         "",
         f"{mark} **{ran} items** on {n_gpus} GPUs -- {failed} failed{note} "
-        f"-- {wall}s in the queue at {util:.1f}% GPU utilisation"
+        f"-- {wall}s in the queue"
+        # Utilisation is left out of a re-run's headline rather than shown and
+        # disclaimed: a handful of items on eight GPUs reads as single digits,
+        # which says only that the queue was short and invites the wrong fix.
+        + ("" if rerun else f" at {util:.1f}% GPU utilisation")
         + (f", {clock['total']}s end to end" if clock["total"] else ""),
         "",
     ]
 
-    # Ahead of everything else, because it changes how the whole report reads: a
-    # re-run queues only what failed, so the low utilisation below is the queue
-    # being short rather than the schedule being bad, and the weight table was
-    # deliberately not updated from these timings.
+    # Ahead of everything else, because it changes how the whole report reads:
+    # what follows is one queue's worth of items rather than the suite, and the
+    # sections a full run ends with are absent by design, not missing.
     if rerun:
         out.append("> :repeat: **Re-run of the failed items only.** Everything absent from")
-        out.append("> the schedule below passed on an earlier attempt of this run. GPU")
-        out.append("> utilisation is not comparable to a full queue, and the learned")
-        out.append("> weights were left as the full run wrote them.")
+        out.append("> the schedule below passed on an earlier attempt of this run.")
+        out.append("> Utilisation and weight tables are omitted: a short queue's timings")
+        out.append("> are not a full queue's, and the weights were left as it wrote them.")
         out.append("")
 
     if ran != total_items:
@@ -266,17 +269,26 @@ def render_report_md(
         out.extend(f"> - `{key}`" for key in missing)
         out.append("")
 
-    for heading, rows in (
-        ("Efficiency", calculate_efficiency_table(frame, wall, n_gpus, clock)),
-        ("Per-GPU utilisation", calculate_gpu_utilisation_table(frame, wall, gpu_ids)),
-    ):
-        out += [f"### {heading}", ""] + render_md(rows) + [""]
+    # Both of these read a re-run's short queue as a badly packed one -- five
+    # idle GPUs are what queueing three items looks like, not a scheduling
+    # fault -- so they are a full run's sections only.
+    if not rerun:
+        for heading, rows in (
+            ("Efficiency", calculate_efficiency_table(frame, wall, n_gpus, clock)),
+            ("Per-GPU utilisation", calculate_gpu_utilisation_table(frame, wall, gpu_ids)),
+        ):
+            out += [f"### {heading}", ""] + render_md(rows) + [""]
 
-    # The two big tables are collapsed: they are the detail you open once you
-    # know from the sections above that something is worth looking at. Each
-    # carries a legend, because the words in its Result/Learned column are the
-    # whole point of the table and are not self-explanatory.
-    for summary, rows, legend in (
+    # The big tables are collapsed: they are the detail you open once you know
+    # from the sections above that something is worth looking at. Each carries a
+    # legend, because the words in its Result/Learned column are the whole point
+    # of the table and are not self-explanatory.
+    #
+    # The schedule stays on a re-run even though the sections above it go. It is
+    # the only place an opaque whole-suite item -- `examples/whole`, `core/whole`
+    # -- reports its verdict at all, since those produce no per-test JUnit XML
+    # for the suite reports to pick up. Dropping it would hide their failures.
+    tables = [
         (
             "Schedule -- what ran where, in execution order",
             calculate_schedule_table(frame, default_weight),
@@ -286,14 +298,20 @@ def render_report_md(
             "from outside. Only the first three are timings; the last two are "
             "just where the item stopped.",
         ),
-        (
-            "Updated weights for next run",
-            calculate_updated_weights_table(frame, weights, default_weight),
-            "A failing item still feeds the table -- it cost what it cost. Only "
-            "the rows marked `not learned` are held out, and those keep the "
-            "weight they came in with, so their Next and Used columns match.",
-        ),
-    ):
+    ]
+    # Titled "for next run", and on a re-run that is a lie: phase 6 skips the
+    # update entirely, so every Next weight here is one nothing will ever write.
+    if not rerun:
+        tables.append(
+            (
+                "Updated weights for next run",
+                calculate_updated_weights_table(frame, weights, default_weight),
+                "A failing item still feeds the table -- it cost what it cost. Only "
+                "the rows marked `not learned` are held out, and those keep the "
+                "weight they came in with, so their Next and Used columns match.",
+            )
+        )
+    for summary, rows, legend in tables:
         out += [f"<details><summary>{summary}</summary>", ""] + render_md(rows)
         out += ["", legend, "", "</details>", ""]
     return out

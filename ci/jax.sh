@@ -58,7 +58,7 @@ run_test_config() {
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # skip smallseq in normal flow
-    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run_lbl "smallseq" 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # Using FAv2 for forward and backward pass
     # bf16 atomic dq accumulation (dq_shuffle post-kernel). Default is fp32 (atomic32/dq_convert), so the
