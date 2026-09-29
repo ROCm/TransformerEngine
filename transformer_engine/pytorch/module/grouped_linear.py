@@ -578,6 +578,106 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _is_grouped_mxfp4_triton_supported(
+        *,
+        fp8,
+        recipe,
+        input_quantizers,
+        weight_quantizers,
+        grad_output_quantizers,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        dgrad_out,
+        fuse_wgrad_accumulation,
+        wgrad_store,
+        in_features,
+        out_features,
+    ) -> bool:
+        """Triton grouped MXFP4 / a8w4 path: gfx950 + a ``CustomRecipe`` whose
+        factory yields the plain-layout MXFP4 reference quantizers.
+
+        a8w4 is forward-only (backward raises); a4w4 also wires the low-precision
+        dgrad/wgrad (see :meth:`_forward_grouped_mxfp4_triton`). Gated off for options this
+        self-contained path does not honor -- a caller ``dgrad_out`` buffer,
+        ``fuse_wgrad_accumulation``, and delayed wgrad (``wgrad_store``) -- so those fall
+        back to the standard path. (A forward ``out`` buffer is honored.)
+        """
+        if not (IS_HIP_EXTENSION and fp8 and recipe is not None and recipe.custom()):
+            return False
+        # The persistent forward kernel steps the K=in_features contraction in 128s (both
+        # a8w4 and a4w4). out_features (the dgrad N contraction) is required only for a4w4
+        # below, since a8w4 is forward-only and the forward masks arbitrary N.
+        if in_features % 128 != 0:
+            return False
+        if (
+            use_bias
+            or backward_override
+            or cpu_offloading
+            or save_original_input
+            or debug
+            or unpad_output
+            or actual_m_splits is not None
+            or dgrad_out is not None
+            or fuse_wgrad_accumulation
+            or (wgrad_store is not None and wgrad_store.delay_wgrad_compute())
+        ):
+            return False
+        try:
+            from ..triton_kernels.grouped_gemm_mxfp4 import _is_gfx950
+            from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+            from ..custom_recipes.quantization_mxfp4_grouped import MXFP8E4M3QuantizerRef
+        except ImportError:
+            return False
+        if not _is_gfx950():
+            return False
+
+        def _plain_layout(q) -> bool:
+            # The grouped Triton kernels need plain (un-shuffled, un-swizzled,
+            # no-Hadamard) operands. MXFP8E4M3QuantizerRef is always plain; an
+            # MXFP4QuantizerRef must have every layout-transform flag off.
+            if isinstance(q, MXFP8E4M3QuantizerRef):
+                return True
+            if not isinstance(q, MXFP4QuantizerRef):
+                return False
+            return not (
+                q.shuffle_rowwise_data
+                or q.shuffle_columnwise_data
+                or q.with_gemm_swizzled_scales
+                or q.use_hadamard
+            )
+
+        # Weight is always plain-layout E2M1; activation is E2M1 (a4w4) or E4M3 (a8w4).
+        # Check every expert quantizer -- a shuffled/swizzled/Hadamard variant of the
+        # same class would silently feed the wrong layout to the kernel.
+        if not all(
+            isinstance(q, MXFP4QuantizerRef) and _plain_layout(q) for q in weight_quantizers
+        ):
+            return False
+        if not all(_plain_layout(q) for q in input_quantizers):
+            return False
+        # The forward quantizes the whole grouped activation in one format chosen from
+        # input_quantizers[0], so every expert's input quantizer must be the same format;
+        # a mixed list would silently drop the later formats.
+        if all(isinstance(q, MXFP8E4M3QuantizerRef) for q in input_quantizers):
+            return True  # a8w4: forward-only, only the K=in_features contraction matters
+        if not all(isinstance(q, MXFP4QuantizerRef) for q in input_quantizers):
+            return False  # mixed activation formats -> fall back to the standard path
+        # a4w4 runs the low-precision backward, which quantizes grad_output as plain E2M1;
+        # the recipe's grad_output quantizer must match (plain MXFP4) or the fast path would
+        # silently use a different grad quantization than the recipe specifies.
+        if not all(
+            isinstance(q, MXFP4QuantizerRef) and _plain_layout(q) for q in grad_output_quantizers
+        ):
+            return False
+        # dgrad contracts over N=out_features in 128s.
+        return out_features % 128 == 0
+
+    @staticmethod
     def _forward_blockwise_fp8_triton(
         ctx,
         *,
@@ -880,6 +980,195 @@ class _GroupedLinear(torch.autograd.Function):
             *grad_biases,
         )
 
+    @staticmethod
+    def _forward_grouped_mxfp4_triton(
+        ctx,
+        *,
+        inp,
+        m_splits,
+        weights,
+        input_quantizers,
+        weight_quantizers,
+        activation_dtype,
+        is_grad_enabled,
+        is_first_microbatch,
+        weight_workspaces,
+        cache_weight,
+        out=None,
+    ):
+        """Grouped MXFP4 / a8w4 forward (ROCm Triton, gfx950).
+
+        Selected from :meth:`forward` under a ``CustomRecipe`` whose factory yields
+        the plain-layout MXFP4 reference quantizers (see
+        :meth:`_is_grouped_mxfp4_triton_supported`). The recipe's own reference
+        quantizers own the quantization; their packed E2M1/E4M3 data + E8M0 scales
+        feed straight into the persistent grouped kernel
+        (:func:`grouped_gemm_mxfp4_fprop_prequantized`), so the grouped-path numerics
+        match the reference ``qgemm``. a4w4 wires the low-precision backward; a8w4
+        is forward-only (see :meth:`_backward_grouped_mxfp4_triton`).
+        """
+        from ..triton_kernels.grouped_gemm_mxfp4_impl import (
+            _row_operand,
+            _row_operand_mxfp8,
+            grouped_gemm_mxfp4_fprop_prequantized,
+        )
+        from ..custom_recipes.quantization_mxfp4_grouped import MXFP8E4M3QuantizerRef
+
+        num_gemms = len(weights)
+        in_features = weights[0].size(-1)
+        if inp.size(-1) != in_features:
+            raise ValueError(
+                f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
+                f"weight tensor (shape={tuple(weights[0].size())})"
+            )
+        m_splits_list = (
+            m_splits.tolist() if isinstance(m_splits, torch.Tensor) else [int(m) for m in m_splits]
+        )
+
+        # Activation: quantize the whole grouped [total_M, K] once (row-wise scales
+        # do not cross groups). Detach: the low-precision forward is not differentiated
+        # through (a custom backward handles grads).
+        a = inp.reshape(-1, in_features).to(activation_dtype).contiguous().detach()
+        input_quantizer = input_quantizers[0]
+        a_is_mxfp8 = isinstance(input_quantizer, MXFP8E4M3QuantizerRef)
+        if a_is_mxfp8:
+            # a8w4 activation: fused single-pass MXFP8 e4m3 downcast on gfx950; emit the
+            # scale transposed ([K/32, M]) for the kernel's swizzle path.
+            a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)
+        else:
+            a_data, a_scale = _row_operand(a)
+
+        # Weights: per-expert row-wise E2M1, stacked to the kernel's [G, N, *] layout.
+        # The a4w4 backward additionally needs the col-wise weight for the dgrad kernel.
+        # Cache the quantized weights across microbatches (is_first_microbatch): the
+        # weight quant is a fixed per-call cost (~G*N*K) that otherwise dominates the
+        # grouped GEMM, so reuse the cache whenever this is not the first microbatch.
+        # a4w4 dgrad consumes the col-wise weight, so only request/quantize it when an
+        # input gradient is actually needed (matches the standard grouped path); a8w4 is
+        # forward-only and never needs it.
+        want_wcol = is_grad_enabled and not a_is_mxfp8 and inp.requires_grad
+        update_ws = is_first_microbatch is None or is_first_microbatch
+        cached = weight_workspaces[0] if weight_workspaces else None
+        new_workspaces = [None] * num_gemms
+        # Reuse the cached quantized weights only when they came from a compatible call.
+        # _fp8_workspaces is shared and only cleared when the recipe class changes, so a
+        # workspace from another CustomRecipe (or a prior fallback) may sit here. The cache
+        # tuple tags the operand format (a_is_mxfp8) -- a8w4 stores the weight scale
+        # transposed [G, K/32, N], a4w4 plain [G, N, K/32] -- so the two are never mixed.
+        # Validate the structure before indexing, and re-quantize on any mismatch.
+        expected_b = (num_gemms, weights[0].size(0), in_features // 2)
+        reuse = (
+            not update_ws
+            and isinstance(cached, tuple)
+            and len(cached) == 5
+            and cached[0] == a_is_mxfp8
+            and isinstance(cached[1], torch.Tensor)
+            and tuple(cached[1].shape) == expected_b
+            and (not want_wcol or cached[3] is not None)
+        )
+        if reuse:
+            _, b_data, b_scale, w_col_data, w_col_scale = cached
+        else:
+            b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []
+            for i in range(num_gemms):
+                wq = weight_quantizers[i]
+                wq.set_usage(rowwise=True, columnwise=want_wcol)
+                wref = wq.quantize(weights[i].detach())
+                b_datas.append(wref.data)
+                b_scales.append(wref.scale)
+                if want_wcol:
+                    wcol_datas.append(wref.data_t)
+                    wcol_scales.append(wref.scale_t)
+            b_data = torch.stack(b_datas, dim=0)
+            b_scale = torch.stack(b_scales, dim=0)
+            if a_is_mxfp8:
+                # a8w4 swizzle: cache the weight scale transposed ([G, K/32, N])
+                b_scale = b_scale.transpose(1, 2).contiguous()
+            w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
+            w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
+            if cache_weight:
+                new_workspaces[0] = (a_is_mxfp8, b_data, b_scale, w_col_data, w_col_scale)
+
+        result_out = _GroupedLinear._validate_or_alloc_output(
+            out, a_data.shape[0], b_data.shape[1], activation_dtype, a_data.device
+        )
+        result = grouped_gemm_mxfp4_fprop_prequantized(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            m_splits_list,
+            a_is_mxfp8=a_is_mxfp8,
+            out_dtype=activation_dtype,
+            scale_transposed=a_is_mxfp8,
+            out=result_out,
+        )
+
+        if is_grad_enabled:
+            ctx.use_grouped_mxfp4_triton = True
+            ctx.grouped_mxfp4_is_a8w4 = a_is_mxfp8
+            ctx.num_gemms = num_gemms
+            ctx.grouped_mxfp4_inp_shape = inp.shape
+            ctx.grouped_mxfp4_m_splits = m_splits_list
+            if not a_is_mxfp8:
+                # a4w4 low-precision backward: dgrad consumes the reference col weight;
+                # wgrad re-quantizes the saved hp activation + grad_out in the kernel.
+                ctx.grouped_mxfp4_requires_dgrad = inp.requires_grad
+                ctx.grouped_mxfp4_weight_requires_grad = weights[0].requires_grad
+                ctx.save_for_backward(a, w_col_data, w_col_scale)
+
+        return result.view(-1, *inp.shape[1:-1], result.shape[-1]), new_workspaces
+
+    @staticmethod
+    def _backward_grouped_mxfp4_triton(ctx, grad_output):
+        """Backward for the grouped MXFP4 / a8w4 Triton path.
+
+        a4w4 uses the low-precision ``grouped_gemm_mxfp4_dgrad`` / ``_wgrad`` kernels.
+        a8w4 (Kimi-K3) is a forward-only QAT recipe: its high-precision (STE) backward
+        is plain bf16, not a dedicated grouped kernel, and is intentionally not wired -- run a8w4
+        under inference (``torch.no_grad``).
+        """
+        if getattr(ctx, "grouped_mxfp4_is_a8w4", False):
+            raise NotImplementedError(
+                "a8w4 (Kimi-K3) is a forward-only QAT recipe on the grouped Triton path; its "
+                "high-precision backward is not wired. Run a8w4 under inference (torch.no_grad)."
+            )
+        from ..triton_kernels.grouped_gemm_mxfp4_impl import (
+            grouped_gemm_mxfp4_dgrad,
+            grouped_gemm_mxfp4_wgrad,
+        )
+
+        a, w_col_data, w_col_scale = ctx.saved_tensors
+        m_splits = ctx.grouped_mxfp4_m_splits
+        go = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
+
+        grad_a = grad_weight = None
+        if ctx.grouped_mxfp4_requires_dgrad:
+            grad_a = grouped_gemm_mxfp4_dgrad(
+                go, None, m_splits, out_dtype=a.dtype, weight_col=(w_col_data, w_col_scale)
+            )
+        if ctx.grouped_mxfp4_weight_requires_grad:
+            grad_weight = grouped_gemm_mxfp4_wgrad(a, go, m_splits, out_dtype=a.dtype)
+
+        wgrad_list = (
+            list(torch.unbind(grad_weight, dim=0))
+            if grad_weight is not None
+            else [None] * ctx.num_gemms
+        )
+        grad_biases = [None] * ctx.num_gemms
+        dgrad = grad_a.view(ctx.grouped_mxfp4_inp_shape) if grad_a is not None else None
+        # Grads match forward inputs: (inp, m_splits, non_tensor_args, out, dgrad_out,
+        # *weights, *biases).
+        return (
+            dgrad,
+            None,  # m_splits
+            None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
+            *wgrad_list,
+            *grad_biases,
+        )
+
     # pylint: disable=keyword-arg-before-vararg
     @staticmethod
     def forward(
@@ -979,6 +1268,43 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_x=blockwise_recipe.fp8_quant_fwd_inp.power_2_scale,
                 pow2_w=blockwise_recipe.fp8_quant_fwd_weight.power_2_scale,
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
+            )
+
+        # Grouped MXFP4 / a8w4 (Triton, gfx950) under a CustomRecipe. Runs its
+        # own reference-quantizer quantization + persistent grouped GEMM and returns
+        # early. a4w4 also runs the backward; a8w4 is forward-only.
+        if _GroupedLinear._is_grouped_mxfp4_triton_supported(
+            fp8=fp8,
+            recipe=blockwise_recipe,
+            input_quantizers=input_quantizers,
+            weight_quantizers=weight_quantizers,
+            grad_output_quantizers=grad_output_quantizers,
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            dgrad_out=dgrad_out,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            wgrad_store=wgrad_store,
+            in_features=weights[0].size(-1),
+            out_features=weights[0].size(0),
+        ):
+            return _GroupedLinear._forward_grouped_mxfp4_triton(
+                ctx,
+                inp=inp,
+                m_splits=m_splits,
+                weights=weights,
+                input_quantizers=input_quantizers,
+                weight_quantizers=weight_quantizers,
+                activation_dtype=activation_dtype,
+                is_grad_enabled=is_grad_enabled,
+                is_first_microbatch=is_first_microbatch,
+                weight_workspaces=weight_workspaces,
+                cache_weight=cache_weight,
+                out=out,
             )
 
         # Configure quantizers
@@ -1499,6 +1825,8 @@ class _GroupedLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
+            if getattr(ctx, "use_grouped_mxfp4_triton", False):
+                return _GroupedLinear._backward_grouped_mxfp4_triton(ctx, grad_output)
             if getattr(ctx, "use_blockwise_fp8_triton", False):
                 return _GroupedLinear._backward_blockwise_fp8_triton(ctx, grad_output)
             if ctx.use_grouped_tensor_path:
@@ -2453,8 +2781,21 @@ class GroupedLinear(TransformerEngineBaseModule):
                 autograd_ctx = [None]
 
             cache_weight = is_first_microbatch is not None
+            # The MXFP4 grouped fast path caches a raw tuple; isolate it in its own workspace
+            # namespace so it never lands in the shared weight{i} slot that the standard /
+            # blockwise paths consume as a quantized weight (_fp8_workspaces is shared and only
+            # clears on a recipe *class* change, not between two CustomRecipe factories).
+            ws_prefix = "weight"
+            if cache_weight and self.fp8:
+                try:
+                    from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+
+                    if isinstance(weight_quantizers[0], MXFP4QuantizerRef):
+                        ws_prefix = "mxfp4_grouped_weight"
+                except ImportError:
+                    pass
             weight_workspaces = (
-                [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
+                [self._fp8_workspaces.get(f"{ws_prefix}{i}") for i in range(num_gemms)]
                 if cache_weight
                 else [None] * num_gemms
             )
@@ -2501,7 +2842,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     if ws is not None:
                         if isinstance(ws, torch.Tensor):
                             ws = ws.detach()
-                        self._fp8_workspaces[f"weight{i}"] = ws
+                        self._fp8_workspaces[f"{ws_prefix}{i}"] = ws
 
         finally:
             self.end_forward()
