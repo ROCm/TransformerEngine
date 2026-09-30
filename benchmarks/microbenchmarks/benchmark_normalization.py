@@ -10,8 +10,8 @@ Normalization micro-benchmark using the fusible-ops LayerNorm / RMSNorm.
 Run with ``python benchmark_normalization.py`` (a pytest module under the hood;
 see conftest.py).
 
-Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8) that TE training
-recipes produce. In FP8/FP4 training the norm is fused with the following
+Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8, MXFP4, NVFP4)
+that TE training recipes produce. In FP8/FP4 training the norm is fused with the following
 Linear (LayerNormLinear / LayerNormMLP) and writes its output already
 quantized. That is reproduced here with ``ops.Sequential(Norm, Quantize)``: the
 op fuser threads the Quantize op's input quantizer into the norm, so the norm
@@ -19,13 +19,19 @@ writes the quantized output directly under ``autocast``. The Quantize op is an
 identity outside ``autocast``, so the bf16 baseline uses the same harness.
 
 Forward only: the quantize epilogue is a forward-pass phenomenon; the norm
-backward reads/writes high precision and is precision-independent. NVFP4/MXFP4
-norm outputs are not swept (no validated norm->FP4 cast path). Precisions
+backward reads/writes high precision and is precision-independent. On ROCm,
+MXFP8/MXFP4/NVFP4 norms run unfused (bf16 norm + separate cast kernel), so
+those rows measure norm + cast as LayerNormLinear sees it. Precisions
 unsupported on the current device are skipped.
 
 These are memory-bound; we report GB/s (input read + output write).
 Output: benchmark_normalization.csv (written to cwd)
 """
+
+import atexit
+import ctypes
+import os
+import sys
 
 import pytest
 import torch
@@ -45,10 +51,8 @@ NORM_TYPES = [
 
 BENCHMARK_LABEL = "Normalization Forward"
 
-# Quantized-output precisions validated for the norm cast; tests/pytorch/
-# triton_kernels/test_norms.py exercises fp8 and mxfp8 norm quantizers. bf16 is
-# the plain baseline (Quantize is an identity outside autocast).
-RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
+# bf16 is the plain baseline (Quantize is an identity outside autocast).
+RECIPES = build_recipes()
 
 # Forward output bytes/elem by precision. Under autocast the norm quantizes
 # through the recipe-created quantizers, which default to columnwise usage on, so
@@ -58,10 +62,14 @@ RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
 #   bf16  : 2.0                    (single bf16 output; Quantize is identity)
 #   fp8   : 2.0                    (rowwise + columnwise E4M3/E5M2 data; scale ~ 0)
 #   mxfp8 : 2.0 + 2/32 = 2 + 1/16  (rowwise + columnwise data + both E8M0 scales)
+#   mxfp4 : 1.0 + 2/32 = 1 + 1/16  (packed E2M1 data x2 + E8M0 scale per 32)
+#   nvfp4 : 1.0 + 2/16 = 1 + 1/8   (packed E2M1 data x2 + E4M3 scale per 16)
 _FWD_WRITE_BYTES = {
     "bf16": 2.0,
     "fp8": 2.0,
     "mxfp8": 2.0 + 1.0 / 16,
+    "mxfp4": 1.0 + 1.0 / 16,
+    "nvfp4": 1.0 + 1.0 / 8,
 }
 
 
@@ -139,13 +147,41 @@ def pytest_generate_tests(metafunc):
         metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
 
 
+_EXIT_SESSION = None
+
+
+def _exit_skipping_hip_teardown():
+    # Registered late, so run the earlier Python exit handlers ourselves before os._exit.
+    atexit.unregister(_exit_skipping_hip_teardown)
+    atexit._run_exitfuncs()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    ctypes.CDLL(None).fflush(None)
+    os._exit(int(_EXIT_SESSION.exitstatus))
+
+
+def _skip_hip_teardown_at_exit(session):
+    """Work around a ROCm 7.14 bug: after a cooperative launch in a torch process, HIP's
+    exit-time hsa_shut_down segfaults. Not under rocprofv3, which writes traces in it."""
+    global _EXIT_SESSION
+    if _EXIT_SESSION is None and "ROCP_TOOL_LIBRARIES" not in os.environ:
+        _EXIT_SESSION = session
+        atexit.register(_exit_skipping_hip_teardown)
+
+
 @pytest.mark.benchmark
-def test_norm(microbench, case, monkeypatch):
+def test_norm(request, microbench, case, monkeypatch):
     if case["Backend"] == "triton":
         var = ("NVTE_USE_RMSNORM_TRITON" if case["NormType"] == "RMSNorm"
                else "NVTE_USE_LAYERNORM_TRITON")
         if not te_honors_env(var):
             pytest.skip("Triton norm backend not available in this TE build")
+        if case["Precision"] == "mxfp4":
+            # Imperative xfail (not run): the GPU memory fault would abort the whole session.
+            pytest.xfail("Triton norm lacks MXFP4Quantizer handling: GPU memory fault")
+    if case["Backend"] == "hip" and case["hidden_size"] == 16384:
+        # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch.
+        _skip_hip_teardown_at_exit(request.session)
     apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
     microbench.run(
         case,
@@ -154,6 +190,5 @@ def test_norm(microbench, case, monkeypatch):
 
 
 if __name__ == "__main__":
-    import sys
     # Make the file runnable directly: python benchmark_normalization.py [--csv -k ...].
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
