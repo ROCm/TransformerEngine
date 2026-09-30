@@ -71,10 +71,12 @@ run_test_config(){
     run_default_fa 1 test_quantized_tensor.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
+    run_default_fa 1 test_fused_optimizer.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
+    run_default_fa 1 test_gemm_sm_count.py
     # test_gemm_backends.py self-gates on backend availability and flips
     # NVTE_GEMM_BACKEND per call, so a single invocation runs every supported
     # backend (Triton where pytorch-triton-rocm is installed, FlyDSL on gfx950).
@@ -132,10 +134,6 @@ run_test_config(){
 run_test_config_mgpu(){
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
-    run_default_fa 1 test_fused_optimizer.py
-    #this test is not really mGPU but time sensitive so run it here because sGPU tests
-    #run in parallel on CI and it affects timing
-    run_default_fa 1 test_gemm_sm_count.py
     run_default_fa_lbl "mgpu" 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 3 distributed/test_rocm_fused_overlap.py
