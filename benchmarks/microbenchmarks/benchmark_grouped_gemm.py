@@ -62,9 +62,14 @@ _BACKENDS_BY_PRECISION = {
 
 
 # (Case, recipe, backend, direction, B, M) grouped-GEMM configs that hang hipBLASLt on
-# gfx950 (algo/workspace)
+# gfx950
 _GFX950_HANG_CONFIGS = {
     ("DSV3-GateUP", "bf16", "hipblaslt", "fwd", 8, 1024),
+    ("DSV3-GateUP", "bf16", "hipblaslt", "bwd", 8, 1024),
+    ("DSV3-GateUP", "bf16", "hipblaslt", "fwd", 16, 1024),
+    ("DSV3-GateUP", "bf16", "hipblaslt", "bwd", 16, 1024),
+    ("DSV3-GateUP", "bf16", "hipblaslt", "fwd", 32, 1024),
+    ("DSV3-GateUP", "bf16", "hipblaslt", "bwd", 32, 1024),
     ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 8, 512),
     ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 16, 512),
     ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 32, 512),
@@ -137,10 +142,11 @@ def _backends_for(recipe):
     return _BACKENDS_BY_PRECISION.get(recipe, ["hipblaslt"])
 
 
-def _ck_grouped_fell_back(fn):
-    """Run *fn* once with CK grouped fallback warnings on; True if the CK grouped
-    path fell back to the default backend. The warning is a C++ NVTE_WARN to
-    stderr, so capture at the fd level rather than via ``warnings``."""
+def _grouped_fallback_count(fn):
+    """Run *fn* once with grouped-GEMM fallback warnings on; return how many of its
+    grouped GEMMs fell back to hipBLASLt. Counts the dispatcher's per-call NVTE_WARN
+    (HipKittens' own messages are latched once per process in C++); it is C++ stderr,
+    so capture at the fd level rather than via ``warnings``."""
     prev = os.environ.get("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK")
     os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
     saved = os.dup(2)
@@ -155,7 +161,7 @@ def _ck_grouped_fell_back(fn):
                 os.dup2(saved, 2)
             tmp.seek(0)
             out = tmp.read().decode(errors="ignore")
-        return "ck_tile" in out and "grouped_gemm" in out
+        return out.count("Fallback to cuBLAS grouped GEMM")
     finally:
         os.close(saved)
         if prev is None:
@@ -278,10 +284,14 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
         for param in grouped_linear.parameters():
             param.grad = None
 
-    if os.environ.get(_CK) == "1" and _ck_grouped_fell_back(
-        fwd_bwd_func if Direction == "bwd" else fwd_func
-    ):
-        pytest.skip("CK grouped GEMM fell back to the default backend for this config")
+    if os.environ.get(_CUTLASS) == "1":
+        # bwd is derived as fwd_bwd - fwd, so only fallbacks beyond the forward pass count.
+        fwd_fallbacks = _grouped_fallback_count(fwd_func)
+        fell_back = (fwd_fallbacks > 0 if Direction == "fwd"
+                     else _grouped_fallback_count(fwd_bwd_func) > fwd_fallbacks)
+        if fell_back:
+            name = "HipKittens" if os.environ.get(_HK) == "1" else "CK"
+            pytest.skip(f"{name} grouped GEMM fell back to hipBLASLt for this config")
 
     fwd_total_flops = 2 * sum_M * N * K
     # hipBLASLt grouped GEMM runs the experts across compute streams; the profiler
