@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
 """Tensor class with MXFP4 data"""
@@ -42,9 +42,14 @@ def _logical_to_columnwise_data_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]
 class MXFP4Quantizer(Quantizer):
     """Builder class for FP4 tensors with MX block scaling
 
-    High-precision tensors (e.g. in FP32 or BF16) are quantized to FP4 by
-    dividing them into groups of 32 elements, each scaled and cast
-    separately using AITER's per_1x32_f4_quant_hip kernel.
+    High-precision tensors are quantized to FP4 by dividing them into groups
+    of 32 elements, each scaled and cast separately.
+
+    Supported input dtypes depend on the cast backend:
+    - C++ cast kernel (default): BF16 only; other dtypes raise a RuntimeError.
+    - Triton cast kernel (``NVTE_USE_CAST_TRANSPOSE_TRITON=1``): BF16, FP16, and FP32.
+
+    ``is_quantizable`` checks dimensions only, not the input dtype.
 
     The quantization produces:
     - FP4 data: [M, K/2] uint8 (2 FP4 values packed per byte)
