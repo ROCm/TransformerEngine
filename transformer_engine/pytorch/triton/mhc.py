@@ -33,6 +33,8 @@ ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") 
 
 def _dot_precision(precision):
     """Map NVIDIA TF32 tl.dot precisions to the closest gfx-supported equivalents."""
+    if not IS_HIP_EXTENSION:
+        return precision
     return {"tf32": "ieee", "tf32x3": "bf16x3"}.get(precision, precision)
 
 
@@ -544,8 +546,7 @@ class mHCProjectionOp(torch.autograd.Function):
         if precision == "ieee" and x.dtype == torch.bfloat16 and phi.dtype == torch.float32:
             precision = "tf32x3"
         # gfx-series HIP Triton rejects 'tf32'/'tf32x3'; remap to a supported precision on ROCm.
-        if IS_HIP_EXTENSION:
-            precision = _dot_precision(precision)
+        precision = _dot_precision(precision)
         ctx.precision = precision
 
         _mhc_projection_fwd_fused[grid](
@@ -656,11 +657,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_phik=1,
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
-                precision=(
-                    _dot_precision("tf32" if ctx.use_tf32 else "ieee")
-                    if IS_HIP_EXTENSION
-                    else "tf32" if ctx.use_tf32 else "ieee"
-                ),
+                precision=_dot_precision("tf32" if ctx.use_tf32 else "ieee"),
                 USE_SPLIT_M=ctx.use_split_k,
             )
 
@@ -1153,11 +1150,7 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_xCn=1,
             stride_grad_xm=nC,
             stride_grad_xCn=1,
-            precision=(
-                _dot_precision("tf32" if ctx.use_tf32 else "ieee")
-                if IS_HIP_EXTENSION
-                else "tf32" if ctx.use_tf32 else "ieee"
-            ),
+            precision=_dot_precision("tf32" if ctx.use_tf32 else "ieee"),
             FUSE_GRAD_X_ACC=ctx.fused_grad_x_acc_buffer is not None,
         )
 
@@ -1333,11 +1326,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
             stride_grad_bias_ws_c=1,
             stride_grad_xm=n * C,
             stride_grad_xCn=1,
-            precision=(
-                _dot_precision("tf32" if ctx.use_tf32 else "ieee")
-                if IS_HIP_EXTENSION
-                else "tf32" if ctx.use_tf32 else "ieee"
-            ),
+            precision=_dot_precision("tf32" if ctx.use_tf32 else "ieee"),
             HAS_BIAS=bias is not None,
             FUSE_GRAD_X_ACC=ctx.fused_grad_x_acc_buffer is not None,
             DETERMINISTIC=ENFORCE_DETERMINISTIC,

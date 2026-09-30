@@ -384,10 +384,9 @@ def test_dot_product_attention(
                     is_training,
                 )
             if len(fused_attn_backends) == 2:
-                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "0"
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
-                fused_attn_fwd, _, fused_attn_bwd = _run_dot_product_attention(
+                fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
                     dtype,
                     config,
                     "FusedAttention",
@@ -396,7 +395,6 @@ def test_dot_product_attention(
                     pad_between_seqs,
                     is_training,
                 )
-                os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
                 os.environ["NVTE_CK_USES_FWD_V3"] = "1"
