@@ -35,6 +35,7 @@ from utils import (
 
 BENCHMARK_LABEL = "Grouped GEMM"
 
+# FIXME: Add mxfp4 when https://github.com/ROCm/TransformerEngine/pull/745 is merged
 RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8", "nvfp4"))
 
 # Env recipes to force a grouped-GEMM kernel backend (None unsets the var). Per the
