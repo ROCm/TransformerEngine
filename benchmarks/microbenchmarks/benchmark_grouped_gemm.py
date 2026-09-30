@@ -7,8 +7,8 @@
 """Grouped GEMM micro-benchmark using te.GroupedLinear across precisions and backends.
 
 Run with ``python benchmark_grouped_gemm.py`` (a pytest module under the hood;
-see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16, FP8, and MXFP8,
-crossed with the selectable kernel backend for each precision (hipBLASLt /
+see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16, FP8, MXFP8, and
+NVFP4, crossed with the selectable kernel backend for each precision (hipBLASLt /
 CK_Tile / Triton / HipKittens) and forward/backward direction.
 
     python benchmark_grouped_gemm.py --csv
@@ -35,7 +35,7 @@ from utils import (
 
 BENCHMARK_LABEL = "Grouped GEMM"
 
-RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
+RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8", "nvfp4"))
 
 # Env recipes to force a grouped-GEMM kernel backend (None unsets the var). Per the
 # C++ dispatch (cublaslt_gemm.cu / rocm_gemm.cu): all-unset -> multi-stream hipBLASLt;
@@ -57,6 +57,79 @@ _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "ck_tile", "triton"],
     "fp8": ["hipblaslt", "ck_tile"],
     "mxfp8": ["hipblaslt", "hipkittens", "ck_tile"],
+    "nvfp4": ["hipblaslt"],
+}
+
+
+# (Case, recipe, backend, direction, B, M) grouped-GEMM configs that hang hipBLASLt on
+# gfx950 (algo/workspace)
+_GFX950_HANG_CONFIGS = {
+    ("DSV3-GateUP", "bf16", "hipblaslt", "fwd", 8, 1024),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 8, 512),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 16, 512),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 32, 512),
+}
+
+
+# (Case, recipe, backend, direction, B, M) nvfp4 grouped configs that fail on gfx950 with
+# 'NVFP4 GEMM requires ... workspace': FP4 dequant scratch exceeds the fixed grouped-GEMM
+# workspace.
+_GFX950_XFAIL_CONFIGS = {
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 5, 1024),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 5, 1024),
+    ("DSV2-Down", "nvfp4", "hipblaslt", "bwd", 5, 2048),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 5, 4096),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 5, 4096),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 10, 1024),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 10, 1024),
+    ("DSV2-Down", "nvfp4", "hipblaslt", "bwd", 10, 2048),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 10, 4096),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 10, 4096),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 20, 1024),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 20, 1024),
+    ("DSV2-Down", "nvfp4", "hipblaslt", "bwd", 20, 2048),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "fwd", 20, 4096),
+    ("DSV2-GateUP", "nvfp4", "hipblaslt", "bwd", 20, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 8, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 8, 1024),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 8, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 8, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 8, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 8, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 8, 4096),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 8, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 16, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 16, 1024),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 16, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 16, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 16, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 16, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 16, 4096),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 16, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 32, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 32, 1024),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 32, 1024),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 32, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 32, 2048),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "fwd", 32, 4096),
+    ("DSV3-GateUP", "nvfp4", "hipblaslt", "bwd", 32, 4096),
+    ("DSV3-Down", "nvfp4", "hipblaslt", "bwd", 32, 4096),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "fwd", 1, 512),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "bwd", 1, 512),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "fwd", 1, 512),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "bwd", 1, 512),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "fwd", 1, 1024),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "bwd", 1, 1024),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "fwd", 1, 1024),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "bwd", 1, 1024),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "fwd", 1, 2048),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "bwd", 1, 2048),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "fwd", 1, 2048),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "bwd", 1, 2048),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "fwd", 1, 4096),
+    ("Grok-V2-GateUP", "nvfp4", "hipblaslt", "bwd", 1, 4096),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "fwd", 1, 4096),
+    ("Grok-V2-Down", "nvfp4", "hipblaslt", "bwd", 1, 4096),
 }
 
 
@@ -148,10 +221,8 @@ def _generate_moe_test_cases(
 
 
 def generate_deepseekv3_test_cases():
-    # DSV3-GateUP hangs on some hardware; only benchmark DSV3-Down.
     return _generate_moe_test_cases(
         "DSV3", n_routed_experts=256, moe_intermediate_size=2048, hidden_size=7168,
-        skip_shapes=["GateUP"],
     )
 
 
@@ -249,8 +320,15 @@ def pytest_generate_tests(metafunc):
 
 
 @pytest.mark.benchmark
-def test_grouped_gemm(microbench, case, monkeypatch):
+def test_grouped_gemm(request, microbench, case, monkeypatch):
     backend = case["Backend"]
+    sig = (case["Case"], case["recipe"], backend, case["Direction"], case["B"], case["M"])
+    if get_device_compute_capability() == (9, 5) and sig in _GFX950_XFAIL_CONFIGS:
+        request.node.add_marker(pytest.mark.xfail(
+            reason="nvfp4 grouped FP4 dequant workspace too small on gfx950",
+            raises=RuntimeError, strict=False))
+    if get_device_compute_capability() == (9, 5) and sig in _GFX950_HANG_CONFIGS:
+        pytest.skip("known hipBLASLt grouped-GEMM hang on gfx950")
     if backend in ("ck_tile", "hipkittens") and case["B"] <= 1:
         pytest.skip(f"{backend} grouped GEMM needs num_groups > 1")
     if backend == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
