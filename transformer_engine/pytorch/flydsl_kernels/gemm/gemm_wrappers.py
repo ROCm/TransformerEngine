@@ -1150,6 +1150,107 @@ def _run_mxfp8_grouped(
     return D
 
 
+def _run_mxfp8_grouped_wgrad(
+    dy_cols,          # list[G] of per-expert dY columnwise fp8 data, each [m_e, N_out]
+    dy_scales,        # list[G] of per-expert dY columnwise scale, each [m_e/32, N_out]
+    x_cols,           # list[G] of per-expert X  columnwise fp8 data, each [m_e, K_in]
+    x_scales,         # list[G] of per-expert X  columnwise scale, each [m_e/32, K_in]
+    dW,               # output [G*N_out, K_in]
+    *,
+    m_splits,         # list[int] per-expert token counts
+    n_out,
+    k_in,
+    dy_fp8_dtype,
+    x_fp8_dtype,
+    output_dtype,
+):
+    """Grouped MXFP8 wgrad (NT): dW_e = dY_e^T @ X_e, per expert, one launch.
+
+    Fixed uniform padding (phase 1): every expert's token count m_e is padded up to
+    a common M_pad (a multiple of BLOCK_M and 32); the padded rows are zero, so they
+    contribute nothing to the token-axis contraction -- no atomics or masking needed,
+    the dense NT pipeline runs unchanged. dY and X are packed on the contraction
+    (token) axis to [G*M_pad, *]; dW is packed on the output-M axis to [G*N_out, K_in]
+    and each expert's output tile is written via the kernel's store_m_expert_off.
+    """
+    from .mxfp8_gemm import BLOCK_M, BLOCK_N, SCALE_GROUP_SIZE
+
+    num_groups = len(m_splits)
+    device = dW.device
+    if n_out % BLOCK_M != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad requires N_out divisible by BLOCK_M={BLOCK_M}, got {n_out}"
+        )
+    if k_in % BLOCK_N != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad requires K_in divisible by BLOCK_N={BLOCK_N}, got {k_in}"
+        )
+
+    # Uniform pad target: the largest per-expert token count, rounded up to BLOCK_M
+    # (also a multiple of 32). Enforce the two-page pipeline minimum (>= 4 K128
+    # tiles => M_pad >= 512).
+    max_m = max(int(m) for m in m_splits)
+    m_pad = ((max_m + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
+    m_pad = max(m_pad, 512)
+
+    def _pad_rows(t, rows):
+        if t.size(0) == rows:
+            return t.contiguous()
+        out = t.new_zeros((rows, *t.shape[1:]))
+        out[: t.size(0)].copy_(t)
+        return out
+
+    scale_rows = m_pad // SCALE_GROUP_SIZE
+    dy_data = torch.cat([_pad_rows(t, m_pad) for t in dy_cols], dim=0)
+    dy_scale = torch.cat([_pad_rows(t, scale_rows) for t in dy_scales], dim=0)
+    x_data = torch.cat([_pad_rows(t, m_pad) for t in x_cols], dim=0)
+    x_scale = torch.cat([_pad_rows(t, scale_rows) for t in x_scales], dim=0)
+
+    if dy_data.dtype == torch.uint8:
+        dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
+    if x_data.dtype == torch.uint8:
+        x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
+
+    dW = _validate_or_allocate_output(
+        dW,
+        shape=torch.Size((num_groups * n_out, k_in)),
+        dtype=output_dtype,
+        device=device,
+        backend_name="MXFP8 grouped wgrad NT",
+    )
+
+    # Descriptor queue: one (pid_m, pid_n, expert) per output tile of every expert's
+    # [N_out, K_in] weight-gradient block. pid_m/pid_n are LOCAL (per-expert); the
+    # kernel re-packs the output row via expert*N_out.
+    num_pid_m = n_out // BLOCK_M
+    num_pid_n = k_in // BLOCK_N
+    descriptors = [
+        (pid_m, pid_n, g)
+        for g in range(num_groups)
+        for pid_m in range(num_pid_m)
+        for pid_n in range(num_pid_n)
+    ]
+    num_tiles = len(descriptors)
+    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
+    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
+    sched = _select_grouped_sched(num_tiles, device)
+
+    mxfp8_matmul(
+        dy_data,
+        dy_scale,
+        x_data,
+        x_scale,
+        dW,
+        group=False,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+    )
+    return dW
+
+
 def _select_fp8_storage_for_layout(A, transa, B, transb):
     """Select existing TE FP8 backings and normalize to one core contract.
 

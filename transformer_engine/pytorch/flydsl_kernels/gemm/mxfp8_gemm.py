@@ -260,6 +260,7 @@ def _compile_kernel(
     epilogue: str = "DEFAULT",
     group: bool = False,
     sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Build one compile-time-specialized TN, NN, or NT kernel.
 
@@ -518,10 +519,14 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
     ):
-        # Total output tiles over the packed [M_total, N] result. Dense uses this
-        # as the grid extent; grouped uses it as the drain bound for the persistent
-        # work-stealing loop (see the dispatch at the end of the kernel).
+        # Total output tiles. Dense uses this as the grid extent; grouped uses it as
+        # the drain bound for the persistent loop. For fwd/dgrad, c_m = M_total spans
+        # all experts, so this is already the total. For wgrad, c_m = N_out is the
+        # PER-EXPERT output-row count (the packed output [G*N_out, K_in] is addressed
+        # via store_m_expert_off), so multiply by num_groups for the full count.
         num_tiles = (c_m // BLOCK_M) * (c_n // BLOCK_N)
+        if const_expr(wgrad):
+            num_tiles = num_tiles * num_groups
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -546,6 +551,10 @@ def _compile_kernel(
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
+        # Both the grouped fwd/dgrad path and the wgrad specialization use the same
+        # persistent descriptor-queue driver; ``grouped`` gates that shared setup.
+        grouped = group or wgrad
+
         # Persistent work-stealing driver.
         #
         # Dense path (group is False): the XCD-swizzled block id owns exactly one
@@ -562,7 +571,7 @@ def _compile_kernel(
         # without any kernel change. B is packed [G*N, K] and B-scale [K128, G*N],
         # so B reads use the expert-shifted column ``expert*N + n`` with stride
         # ``G*N`` while A / A-scale / C / bias keep absolute-row / local-N coords.
-        if const_expr(group):
+        if const_expr(grouped):
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
             wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
 
@@ -635,28 +644,55 @@ def _compile_kernel(
             #     and B-scale stride stay per-expert (c_n = K_in, unchanged).
             #
             # Dense (group is False) zeroes every expert term.
-            if const_expr(group):
+            #
+            #   wgrad (NT, dW = dY^T @ X): a separate specialization. Both operands
+            #     transpose-read and BOTH contract over the token axis M_tok (the
+            #     kernel's compile-time K = the per-expert padded token count M_pad).
+            #     Experts are padded to a uniform M_pad and packed on the contraction
+            #     axis, so both a (dY [G*M_pad, N_out]) and b (X [G*M_pad, K_in])
+            #     shift by expert*K along k_base (a_expert_k_off / b_expert_k_off) and
+            #     expert*NUM_K_TILES along their scale k128 terms. The output is packed
+            #     [G*N_out, K_in] on the OUTPUT-M axis, so the store row gets an extra
+            #     expert*N_out (= expert*c_m) offset (store_m_expert_off); the a/b
+            #     operand row/col coords stay per-expert (local pid_m over N_out).
+            if const_expr(wgrad):
+                by_n_b_idx = by_n_idx
+                c_n_bs = c_n
+                a_expert_k_off = fx.Index(expert * fx.Int32(K))
+                b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                as_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                store_m_expert_off = fx.Index(expert * fx.Int32(c_m))
+            elif const_expr(group):
                 if const_expr(b_transpose_read):
-                    # NN/NT: expert on the contraction axis. The kernel's
-                    # compile-time ``K`` IS the contraction dim (= N_out for dgrad),
-                    # so the packed weight [G*N_out, K_in] shifts by expert*K
-                    # elements along k_base, and its scale [G*N_out/128, K_in] by
-                    # expert*NUM_K_TILES along the k128 term.
+                    # NN: expert on the contraction axis. The kernel's compile-time
+                    # ``K`` IS the contraction dim (= N_out for dgrad), so the packed
+                    # weight [G*N_out, K_in] shifts by expert*K elements along k_base,
+                    # and its scale [G*N_out/128, K_in] by expert*NUM_K_TILES.
                     by_n_b_idx = by_n_idx
                     c_n_bs = c_n
+                    a_expert_k_off = fx.Index(0)
                     b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                    as_expert_k128_off = fx.Int32(0)
                     bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                    store_m_expert_off = fx.Index(0)
                 else:
                     # TN: expert on the output-N axis.
                     by_n_b_idx = fx.Index(expert * fx.Int32(c_n) + by_n)
                     c_n_bs = num_groups * c_n
+                    a_expert_k_off = fx.Index(0)
                     b_expert_k_off = fx.Index(0)
+                    as_expert_k128_off = fx.Int32(0)
                     bs_expert_k128_off = fx.Int32(0)
+                    store_m_expert_off = fx.Index(0)
             else:
                 by_n_b_idx = by_n_idx
                 c_n_bs = c_n
+                a_expert_k_off = fx.Index(0)
                 b_expert_k_off = fx.Index(0)
+                as_expert_k128_off = fx.Int32(0)
                 bs_expert_k128_off = fx.Int32(0)
+                store_m_expert_off = fx.Index(0)
 
             wave_id = tx_i32 // fx.Int32(WARP_SIZE)
             lane = tx_i32 % fx.Int32(WARP_SIZE)
@@ -710,7 +746,12 @@ def _compile_kernel(
             # Per-CTA tile base in C elements, folded into each store's linear
             # coordinate below (matching the scale-load addressing on this build;
             # add_offset on a dynamic Index is unsupported here).
-            c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
+            # store_m_expert_off (grouped wgrad only) shifts the output row into this
+            # tile's expert block of the packed [G*N_out, K_in] weight-gradient; the
+            # a/b operands used local (per-expert) pid_m, so the store re-packs here.
+            c_tile_base_elems = (
+                (bx_m_idx + store_m_expert_off) * fx.Index(c_n) + by_n_idx
+            )
             gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
             c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
             c_store_atom = fx.make_copy_atom(
@@ -863,7 +904,10 @@ def _compile_kernel(
                 rocdl.sched_barrier(0)
 
             def load_a_scale_row(k128, row):
-                off = k128 * c_m_idx + bx_m_idx + row
+                # as_expert_k128_off shifts the contraction-128 base to this tile's
+                # expert A-scale block for grouped wgrad (both operands packed on the
+                # token/contraction axis); 0 for every other path.
+                off = (k128 + fx.Index(as_expert_k128_off)) * c_m_idx + bx_m_idx + row
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
                 fx.copy(scale_ld_atom, fx.slice(as_div, (None, fx.Int32(off))), reg)
                 return fx.memref_load_vec(reg)[0]
@@ -899,9 +943,14 @@ def _compile_kernel(
                 )
 
             def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
+                # a_expert_k_off shifts the contraction base to this tile's expert
+                # A block for grouped wgrad (dY packed on the token axis); 0 for
+                # every other path.
                 a_g2s.load_one(
                     lds_a[subtile],
-                    fx.Int32(_a_global_base(k_base, subtile, c_m, bx_m_idx)),
+                    fx.Int32(
+                        _a_global_base(k_base + a_expert_k_off, subtile, c_m, bx_m_idx)
+                    ),
                     pass_in_subtile,
                 )
 
@@ -1635,7 +1684,7 @@ def _compile_kernel(
             expert = _desc_field(slot, fx.Int32(2))
             process_tile(pid_m, pid_n, expert)
 
-        if const_expr(group):
+        if const_expr(grouped):
             if const_expr(sched == "static"):
                 stride = fx.Int32(gpu.grid_dim.x)
                 slot = fx.Int32(gpu.block_id("x"))
@@ -1681,7 +1730,7 @@ def _compile_kernel(
         # num-CU grid of persistent workgroups that steal tiles from the atomic
         # work queue (num_tiles spans the packed [M_total, N] output).
         grid_x = (c_m // BLOCK_M) * (c_n // BLOCK_N)
-        if const_expr(group):
+        if const_expr(group or wgrad):
             grid_x = get_num_cus()
         kernel_gemm(
             A,
@@ -1719,6 +1768,7 @@ def do_gemm(
     work_queue: fx.Tensor = None,
     work_counter: fx.Tensor = None,
     sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Launch one cached compile-time MXFP8 layout specialization.
 
@@ -1747,9 +1797,20 @@ def do_gemm(
     else:
         assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
 
-    # Grouped: the kernel launches over the per-expert output width, which is
-    # always C's last dim (TN: N_out; NN: K_in). The kernel re-derives the packed
-    # B / B-scale stride from num_groups internally.
+    # Grouped wgrad (NT): both operands (dY, X) are packed on the token/contraction
+    # axis to G*M_pad, but the kernel's compile-time contraction is the PER-EXPERT
+    # padded token count M_pad. M_runtime (=N_out) and N_runtime (=K_in) are already
+    # per-expert; only K_runtime must be de-packed.
+    if wgrad:
+        assert K_runtime % num_groups == 0, (
+            f"grouped wgrad contraction {K_runtime} not divisible by num_groups={num_groups}"
+        )
+        K_runtime = K_runtime // num_groups
+
+    # Grouped fwd/dgrad launch over the per-expert output width = C's last dim (TN:
+    # N_out; NN: K_in); the kernel re-derives the packed stride from num_groups.
+    # wgrad keeps M_runtime/N_runtime per-expert (C is packed on the output-M axis,
+    # handled in-kernel via store_m_expert_off).
     if group:
         N_runtime = C.shape[-1]
     supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -1774,24 +1835,30 @@ def do_gemm(
         ("C", C),
     )
 
-    expected_as = (K_runtime // _BLOCK_K, M_runtime)
-    # Packed B-scale shape. TN packs B along N, so the scale's row count is the
-    # per-K128 count and its column count is the packed G*N_out. NN packs B along
-    # the contraction axis, so the packed count is on the K128 (contraction) axis
-    # instead: [G*N_out/128, K_in] = (Kb_runtime // BLOCK_K, N_runtime).
-    if group and layout == "NN":
-        expected_bs = (Kb_runtime // _BLOCK_K, N_runtime)
+    # Packed scale shapes.
+    if wgrad:
+        # wgrad (NT): both A (dY) and B (X) scales are packed on the contraction
+        # axis to G*M_pad/128. A-scale [G*M_pad/128, N_out], B-scale [.., K_in].
+        packed_k128 = (K_runtime * num_groups) // _BLOCK_K
+        expected_as = (packed_k128, M_runtime)
+        expected_bs = (packed_k128, N_runtime)
     else:
-        n_packed = N_runtime * num_groups if group else N_runtime
-        expected_bs = (K_runtime // _BLOCK_K, n_packed)
+        expected_as = (K_runtime // _BLOCK_K, M_runtime)
+        # TN packs B along N (column count = G*N_out); NN packs B along the
+        # contraction axis (row count on K128 = G*N_out/128).
+        if group and layout == "NN":
+            expected_bs = (Kb_runtime // _BLOCK_K, N_runtime)
+        else:
+            n_packed = N_runtime * num_groups if group else N_runtime
+            expected_bs = (K_runtime // _BLOCK_K, n_packed)
     assert As.dtype == torch.int32, f"As dtype {As.dtype} != torch.int32 packed scales"
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
     assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
     assert tuple(Bs.shape) == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
-    assert tuple(C.shape) == (
-        M_runtime,
-        N_runtime,
-    ), f"C shape {tuple(C.shape)} != {(M_runtime, N_runtime)}"
+    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad C is the
+    # unpacked (M_runtime, N_runtime).
+    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
+    assert tuple(C.shape) == expected_c, f"C shape {tuple(C.shape)} != {expected_c}"
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
             f"C dtype must be torch.float16, torch.bfloat16, or torch.float32, got {C.dtype}"
@@ -1858,8 +1925,9 @@ def do_gemm(
         Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
 
     # Grouped runtime tensors are required by the kernel signature; the dense
-    # binary never dereferences them but still needs placeholder buffers.
-    if group:
+    # binary never dereferences them but still needs placeholder buffers. wgrad
+    # uses the same persistent descriptor queue as the grouped fwd/dgrad path.
+    if group or wgrad:
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
@@ -1875,6 +1943,7 @@ def do_gemm(
         epilogue,
         group,
         sched,
+        wgrad,
     )(
         A_arg,
         As_arg,
@@ -1902,6 +1971,7 @@ def _cached_launch(
     epilogue: str = "DEFAULT",
     group: bool = False,
     sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Cache independent TN/NN/NT binaries with no runtime layout argument."""
     return _compile_kernel(
@@ -1913,6 +1983,7 @@ def _cached_launch(
         epilogue,
         group,
         sched,
+        wgrad,
     )
 
 
@@ -1942,6 +2013,67 @@ def _validate_common_payloads(
         )
 
 
+def _mxfp8_matmul_grouped_wgrad(
+    a,           # dY packed [G*M_pad, N_out], columnwise fp8
+    a_scale,     # [G*M_pad/32, N_out] raw E8M0 uint8
+    b,           # X packed [G*M_pad, K_in], columnwise fp8
+    b_scale,     # [G*M_pad/32, K_in] raw E8M0 uint8
+    D,           # dW packed [G*N_out, K_in]
+    *,
+    stream,
+    num_groups,
+    work_queue,
+    work_counter,
+    sched,
+):
+    """Grouped wgrad (NT) launch: dW = dY^T @ X, contracting over padded tokens.
+
+    Both operands transpose-read (columnwise) and contract over the token axis; the
+    kernel's compile-time contraction is the per-expert padded token count
+    M_pad = (G*M_pad)/G. Experts are packed on the contraction axis for a/b and on
+    the output-M axis for D. Operands arrive already packed + MXFP8-quantized.
+    """
+    gm, n_out = a.shape          # gm = G*M_pad, n_out = per-expert N_out
+    gm_b, k_in = b.shape
+    if gm != gm_b:
+        raise ValueError(f"wgrad a/b token dims differ: {gm} vs {gm_b}")
+    if gm % num_groups != 0:
+        raise ValueError(f"wgrad packed tokens {gm} not divisible by num_groups={num_groups}")
+    m_pad = gm // num_groups
+    if m_pad % SCALE_GROUP_SIZE != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad padded per-expert tokens M_pad={m_pad} must be divisible by "
+            f"{SCALE_GROUP_SIZE}"
+        )
+    if tuple(D.shape) != (num_groups * n_out, k_in):
+        raise ValueError(
+            f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}"
+        )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("FlyDSL MXFP8 wgrad expects raw E8M0 scales as torch.uint8")
+
+    # NT transpose-read: both scales are packed from their columnwise (K-major)
+    # source into the kernel's [K/128, dim] int32 layout.
+    a_scale_hk = pack_mx32_scales_for_hk(a_scale, source_colwise=True, stream=stream)
+    b_scale_hk = pack_mx32_scales_for_hk(b_scale, source_colwise=True, stream=stream)
+
+    do_gemm(
+        a,
+        a_scale_hk,
+        b,
+        b_scale_hk,
+        D,
+        layout="NT",
+        stream=stream,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+    )
+    return D
+
+
 def mxfp8_matmul(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -1959,6 +2091,7 @@ def mxfp8_matmul(
     work_queue: fx.Tensor = None,
     work_counter: fx.Tensor = None,
     sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Normalize scale orientation and launch a compile-time layout binary.
 
@@ -1976,6 +2109,20 @@ def mxfp8_matmul(
     K-major payloads and use ``ds_read_b64_tr_b8`` inside their
     compile-time-specialized kernels.
     """
+
+    if wgrad:
+        return _mxfp8_matmul_grouped_wgrad(
+            a,
+            a_scale,
+            b,
+            b_scale,
+            D,
+            stream=stream,
+            num_groups=num_groups,
+            work_queue=work_queue,
+            work_counter=work_counter,
+            sched=sched,
+        )
 
     if group and layout not in ("TN", "NN"):
         raise ValueError("FlyDSL MXFP8 Group GEMM only supports the TN and NN layouts")
