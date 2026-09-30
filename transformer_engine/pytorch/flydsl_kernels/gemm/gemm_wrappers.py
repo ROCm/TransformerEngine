@@ -1043,29 +1043,37 @@ def _run_mxfp8_grouped(
     n,
     k,
     output_dtype: torch.dtype,
+    layout: str = "TN",
     bias=None,
 ):
-    """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel (TN only).
+    """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel.
 
-    Operand contract (TN, single packed launch spanning all groups):
+    Two layouts, both single packed launches spanning all groups:
 
+      TN (forward, C = A @ B^T):
         a = packed activations   [M_total, K]      scales [M_total, K/32]
         b = packed weights        [G*N,     K]      scales [G*N,     K/32]
-        group_offs                [G+1]  exclusive scan of per-group row counts
+        output width n = N_out (per expert); experts pack on B's output-N axis.
 
-    Each group ``g`` owns rows ``[group_offs[g], group_offs[g+1])`` of ``a`` and the
-    weight block ``b[g*N:(g+1)*N]``. ``group_offs`` is consumed on the host to build
-    the persistent kernel's per-tile ``(pid_m, pid_n, expert)`` descriptor queue, so
-    the kernel itself does no group lookup. This iteration assumes the operands arrive
-    already MXFP8-quantized and packed -- it takes the pre-selected rowwise payloads
-    directly and performs no quantization, packing, or BLAS operand-ownership swap
-    (unlike :func:`_run_mxfp8`).
+      NN (dgrad, dX = dY @ W):
+        a = packed grad_output    [M_total, N_out]  scales [M_total, N_out/32]
+        b = packed weights        [G*N_out, K_in]   scales [G*N_out/32, K_in]
+        output width n = K_in; experts pack on B's contraction (N_out) axis.
+
+    In both, ``k`` is A's per-expert contraction (TN: K_in; NN: N_out) and ``n`` is
+    the output width. Each group ``g`` owns activation/grad rows
+    ``[group_offs[g], group_offs[g+1])``; ``group_offs`` is consumed on the host to
+    build the persistent kernel's per-tile ``(pid_m, pid_n, expert)`` descriptor
+    queue, so the kernel does no group lookup. Operands arrive already
+    MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
     """
+    if layout not in ("TN", "NN"):
+        raise FlyDSLUnsupportedError(f"FlyDSL MXFP8 grouped GEMM supports TN/NN, got {layout}")
     if k % 32 != 0:
         raise FlyDSLUnsupportedError(f"K={k} must be divisible by MXFP8 scale group size 32")
     if n % 128 != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 grouped GEMM requires N divisible by 128, got N={n}"
+            f"FlyDSL MXFP8 grouped GEMM requires output width N divisible by 128, got N={n}"
         )
 
     a_fp8_dtype = getattr(a_data, "_fp8_dtype", None)
@@ -1083,7 +1091,7 @@ def _run_mxfp8_grouped(
         shape=torch.Size((m_total, n)),
         dtype=output_dtype,
         device=a_data.device,
-        backend_name="MXFP8 grouped TN",
+        backend_name=f"MXFP8 grouped {layout}",
     )
 
     # Persistent-kernel work distribution:
@@ -1130,7 +1138,7 @@ def _run_mxfp8_grouped(
         b_data,
         b_scale,
         D.view(m_total, n),
-        layout="TN",
+        layout=layout,
         epilogue=epilogue,
         bias=bias_arg,
         group=True,

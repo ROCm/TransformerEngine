@@ -678,6 +678,63 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _backward_flydsl_mxfp8_grouped(
+        *,
+        grad_output,
+        weights_for_dgrad,
+        dgrad,
+        m_splits,
+        m_splits_tensor,
+    ):
+        """FlyDSL grouped dgrad: dX = dY @ W through the packed NN kernel.
+
+        Rides off backward's existing quantization -- ``grad_output`` are the
+        per-group MXFP8 activations (rowwise) and ``weights_for_dgrad`` the
+        per-expert MXFP8 weights with columnwise payloads ensured by the caller.
+        Packs dY as the NN kernel-A ``[M_total, N_out]`` and W (columnwise) as the
+        contraction-packed kernel-B ``[G*N_out, K_in]``, then issues one grouped NN
+        launch writing into ``dgrad`` ``[M_total, K_in]``. No quantization here.
+        """
+        from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+
+        num_gemms = len(grad_output)
+        # NN kernel-A = dY, rowwise (contraction over N_out): concat on the token
+        # (M) axis. NN kernel-B = W, columnwise (transpose-read, contraction on the
+        # N_out axis): concat on the packed N_out axis. Each MXFP8 operand carries
+        # its selected payload + E8M0 scale.
+        a_data = torch.cat([g._rowwise_data for g in grad_output], dim=0)
+        a_scale = torch.cat([g._rowwise_scale_inv for g in grad_output], dim=0)
+        b_data = torch.cat([w._columnwise_data for w in weights_for_dgrad], dim=0)
+        b_scale = torch.cat([w._columnwise_scale_inv for w in weights_for_dgrad], dim=0)
+
+        a_data._fp8_dtype = grad_output[0]._fp8_dtype
+        b_data._fp8_dtype = weights_for_dgrad[0]._fp8_dtype
+
+        n_out = grad_output[0]._rowwise_data.size(-1)  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        # group_offs: [num_gemms+1] exclusive scan over per-group token counts.
+        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=dgrad.device)
+        group_offs[1:] = torch.cumsum(
+            m_splits_tensor.to(device=dgrad.device, dtype=torch.int64), 0
+        )
+
+        _run_mxfp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            dgrad,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=k_in,  # NN output width is K_in
+            k=n_out,  # NN per-expert contraction is N_out
+            output_dtype=dgrad.dtype,
+            layout="NN",
+        )
+
+    @staticmethod
     def _forward_blockwise_fp8_triton(
         ctx,
         *,
@@ -1322,6 +1379,9 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.use_grouped_tensor_path = False
+            # FlyDSL grouped forward routes dgrad through the grouped NN path; the
+            # shared backward branches on this flag (wgrad still uses the default).
+            ctx.use_flydsl_mxfp8_grouped = use_grouped_gemm_flydsl
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
@@ -1770,25 +1830,37 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                if ctx.use_grouped_gemm_triton:
-                    general_grouped_gemm_func = general_grouped_gemm_triton
-                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                if getattr(ctx, "use_flydsl_mxfp8_grouped", False):
+                    # dgrad dX = dY @ W through the FlyDSL grouped NN kernel, riding
+                    # off the already-quantized grad_output (rowwise) and weights
+                    # (columnwise, ensured above). wgrad still uses the default path.
+                    _GroupedLinear._backward_flydsl_mxfp8_grouped(
+                        grad_output=grad_output,
+                        weights_for_dgrad=weights_for_dgrad,
+                        dgrad=dgrad,
+                        m_splits=ctx.m_splits,
+                        m_splits_tensor=ctx.m_splits_tensor,
+                    )
                 else:
-                    general_grouped_gemm_func = general_grouped_gemm
-                    kwargs = {}
-                general_grouped_gemm_func(
-                    weights_for_dgrad,
-                    grad_output,
-                    [dgrad],
-                    ctx.grad_input_quantizers,
-                    ctx.activation_dtype,
-                    single_output=True,
-                    layout="NN",
-                    m_splits=ctx.m_splits,
-                    grad=True,
-                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    **kwargs,
-                )
+                    if ctx.use_grouped_gemm_triton:
+                        general_grouped_gemm_func = general_grouped_gemm_triton
+                        kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                    else:
+                        general_grouped_gemm_func = general_grouped_gemm
+                        kwargs = {}
+                    general_grouped_gemm_func(
+                        weights_for_dgrad,
+                        grad_output,
+                        [dgrad],
+                        ctx.grad_input_quantizers,
+                        ctx.activation_dtype,
+                        single_output=True,
+                        layout="NN",
+                        m_splits=ctx.m_splits,
+                        grad=True,
+                        use_split_accumulator=dgrad_gemm_use_split_accumulator,
+                        **kwargs,
+                    )
 
                 if (
                     ctx.actual_m_splits is not None

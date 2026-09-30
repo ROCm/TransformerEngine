@@ -616,16 +616,47 @@ def _compile_kernel(
             bx_m_idx = fx.Index(bx_m)
             by_n_idx = fx.Index(by_n)
 
-            # B-operand column base and B-scale row stride. In the dense path these
-            # collapse to the C column base / c_n; in the grouped path they carry the
-            # expert offset (from the descriptor) into the packed [G*N, K] weight and
-            # [K128, G*N] scale.
+            # Per-expert offsets into the packed B operand / B-scale. Where the
+            # expert index lands depends on the layout, because the packed weight
+            # stacks experts on B's *first* logical axis, which is a different
+            # kernel axis for TN vs the transpose-read (NN/NT) case:
+            #
+            #   TN (forward, C = A @ B^T): B is packed [G*N, K], experts on the
+            #     OUTPUT-N axis. Expert offset folds into the B column base
+            #     (by_n_b_idx = expert*N + n) and the B-scale row stride grows to
+            #     G*N (c_n_bs). The B-scale k128 term is untouched.
+            #
+            #   NN (dgrad, C = A @ B where A=dY[M,N_out], B=W[N_out,K_in]): the
+            #     kernel contraction axis IS N_out, and B is packed [G*N_out, K_in]
+            #     with experts on that CONTRACTION axis. Expert offset instead folds
+            #     into the contraction (k_base) term as expert*N_out elements
+            #     (b_expert_k_off), and into the B-scale's k128 (contraction-128)
+            #     term as expert*(N_out/128) (bs_expert_k128_off). The B column base
+            #     and B-scale stride stay per-expert (c_n = K_in, unchanged).
+            #
+            # Dense (group is False) zeroes every expert term.
             if const_expr(group):
-                by_n_b_idx = fx.Index(expert * fx.Int32(c_n) + by_n)
-                c_n_bs = num_groups * c_n
+                if const_expr(b_transpose_read):
+                    # NN/NT: expert on the contraction axis. The kernel's
+                    # compile-time ``K`` IS the contraction dim (= N_out for dgrad),
+                    # so the packed weight [G*N_out, K_in] shifts by expert*K
+                    # elements along k_base, and its scale [G*N_out/128, K_in] by
+                    # expert*NUM_K_TILES along the k128 term.
+                    by_n_b_idx = by_n_idx
+                    c_n_bs = c_n
+                    b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                    bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                else:
+                    # TN: expert on the output-N axis.
+                    by_n_b_idx = fx.Index(expert * fx.Int32(c_n) + by_n)
+                    c_n_bs = num_groups * c_n
+                    b_expert_k_off = fx.Index(0)
+                    bs_expert_k128_off = fx.Int32(0)
             else:
                 by_n_b_idx = by_n_idx
                 c_n_bs = c_n
+                b_expert_k_off = fx.Index(0)
+                bs_expert_k128_off = fx.Int32(0)
 
             wave_id = tx_i32 // fx.Int32(WARP_SIZE)
             lane = tx_i32 % fx.Int32(WARP_SIZE)
@@ -838,7 +869,9 @@ def _compile_kernel(
                 return fx.memref_load_vec(reg)[0]
 
             def load_b_scale_row(k128, row):
-                off = k128 * c_n_bs_idx + by_n_b_idx + row
+                # bs_expert_k128_off shifts the contraction-128 base to this tile's
+                # expert scale block for grouped NN/NT; 0 for dense and grouped TN.
+                off = (k128 + fx.Index(bs_expert_k128_off)) * c_n_bs_idx + by_n_b_idx + row
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
                 fx.copy(scale_ld_atom, fx.slice(bs_div, (None, fx.Int32(off))), reg)
                 return fx.memref_load_vec(reg)[0]
@@ -873,9 +906,16 @@ def _compile_kernel(
                 )
 
             def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
+                # b_expert_k_off shifts the contraction base to this tile's expert
+                # weight block for the grouped transpose-read (NN/NT) path; it is 0
+                # for dense and for grouped TN (which offsets via by_n_b_idx).
                 b_g2s.load_one(
                     lds_b[subtile],
-                    fx.Int32(_b_global_base(k_base, subtile, c_n, by_n_b_idx)),
+                    fx.Int32(
+                        _b_global_base(
+                            k_base + b_expert_k_off, subtile, c_n, by_n_b_idx
+                        )
+                    ),
                     pass_in_subtile,
                 )
 
@@ -1697,11 +1737,19 @@ def do_gemm(
     else:
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
+    # Grouped NN packs B along the contraction axis, so B's contraction dim is
+    # G x A's (Kb_runtime = G*N_out vs K_runtime = N_out). Every other case has
+    # them equal.
+    if group and layout == "NN":
+        assert Kb_runtime == num_groups * K_runtime, (
+            f"grouped NN B.K={Kb_runtime} != num_groups*A.K={num_groups * K_runtime}"
+        )
+    else:
+        assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
 
-    # Grouped TN: B is packed [G*N, K], so B's leading dim is num_groups * N_out.
-    # The kernel launches over the per-expert output width (C's N) and re-derives
-    # the packed B / B-scale stride from num_groups internally.
+    # Grouped: the kernel launches over the per-expert output width, which is
+    # always C's last dim (TN: N_out; NN: K_in). The kernel re-derives the packed
+    # B / B-scale stride from num_groups internally.
     if group:
         N_runtime = C.shape[-1]
     supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -1727,10 +1775,15 @@ def do_gemm(
     )
 
     expected_as = (K_runtime // _BLOCK_K, M_runtime)
-    # Grouped B / B-scale are packed over all experts (num_groups * N_out); the
-    # kernel indexes them by expert. N_runtime here is the per-expert output N.
-    n_packed = N_runtime * num_groups if group else N_runtime
-    expected_bs = (K_runtime // _BLOCK_K, n_packed)
+    # Packed B-scale shape. TN packs B along N, so the scale's row count is the
+    # per-K128 count and its column count is the packed G*N_out. NN packs B along
+    # the contraction axis, so the packed count is on the K128 (contraction) axis
+    # instead: [G*N_out/128, K_in] = (Kb_runtime // BLOCK_K, N_runtime).
+    if group and layout == "NN":
+        expected_bs = (Kb_runtime // _BLOCK_K, N_runtime)
+    else:
+        n_packed = N_runtime * num_groups if group else N_runtime
+        expected_bs = (K_runtime // _BLOCK_K, n_packed)
     assert As.dtype == torch.int32, f"As dtype {As.dtype} != torch.int32 packed scales"
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
     assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
@@ -1914,6 +1967,9 @@ def mxfp8_matmul(
         TN: a [M,K], b [N,K], scales [M,K/32] and [N,K/32]
             (group): a [M_total,K], b [G*N,K] scales [M_total,K/32] and [G*N,K/32]
         NN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
+            (group): a [M_total,Kc], b [G*Kc,N] scales [M_total,Kc/32] and
+                     [G*Kc/32,N] -- grouped NN is the dgrad dX=dY@W: the kernel
+                     contraction Kc is N_out and experts pack on that axis.
         NT: a [K,M], b [K,N], scales [K/32,M] and [K/32,N]
 
     TN consumes the selected rowwise payloads directly. NN and NT preserve
@@ -1921,8 +1977,8 @@ def mxfp8_matmul(
     compile-time-specialized kernels.
     """
 
-    if group and layout != "TN":
-        raise ValueError("FlyDSL MXFP8 Group GEMM only supports the TN layout")
+    if group and layout not in ("TN", "NN"):
+        raise ValueError("FlyDSL MXFP8 Group GEMM only supports the TN and NN layouts")
 
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
@@ -1939,24 +1995,53 @@ def mxfp8_matmul(
         k, m = a.shape
         kb, n = b.shape
 
-    if kb != k:
+    # Grouped GEMM is G INDEPENDENT matmuls stacked into one launch, not a dense
+    # A @ B_packed. Where the packed B axis lands, and hence which operand shape
+    # unpacks, depends on the layout:
+    #
+    #   TN forward (C = A @ B^T): B is packed [G*N_out, K] on the OUTPUT-N axis.
+    #     The kernel-K contraction (K_in) matches A's K, so kb == k. The output
+    #     width unpacks: n = G*N_out -> n_out = N_out. D = [M_total, N_out].
+    #     (Per expert g: A_g[m_g,K] @ W_g^T[K,N_out] = D_g[m_g,N_out]; stacking the
+    #     rows gives [M_total, N_out] -- the packed G*N_out rows are storage only,
+    #     never the output width; a dense A@B_packed^T would give [M_total,G*N_out],
+    #     G x too much compute, which grouped GEMM avoids.)
+    #
+    #   NN dgrad (dX = dY @ W): the kernel CONTRACTION is N_out, and B=W is packed
+    #     [G*N_out, K_in] on that CONTRACTION axis. So B's first dim kb = G*N_out
+    #     is G x A's per-expert contraction k = N_out (kb != k by design), and the
+    #     output width n = K_in is NOT packed. D = [M_total, K_in] = (m, n).
+    if group and layout == "TN":
+        if n % num_groups != 0:
+            raise ValueError(
+                f"Grouped MXFP8 TN packed N={n} is not divisible by num_groups={num_groups}"
+            )
+        n_out = n // num_groups
+        expected_kb = k  # contraction unpacked; B rows already per-K
+    elif group and layout == "NN":
+        if kb % num_groups != 0:
+            raise ValueError(
+                f"Grouped MXFP8 NN packed contraction={kb} not divisible by "
+                f"num_groups={num_groups}"
+            )
+        if kb // num_groups != k:
+            raise ValueError(
+                f"Grouped MXFP8 NN per-expert contraction {kb // num_groups} "
+                f"!= A contraction {k}"
+            )
+        n_out = n  # output width (K_in) is not packed
+        expected_kb = kb  # B rows are G*N_out, checked above
+    else:
+        n_out = n
+        expected_kb = k
+
+    if kb != expected_kb:
         raise ValueError(
             f"Incompatible MXFP8 {layout} operands: A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
-    # Grouped TN packs the per-expert weights along N, so ``n`` (and the B scale)
-    # span ``num_groups * N_out``. The output and the kernel's ``c_n`` use the
-    # per-expert ``n_out``; the kernel re-derives the packed B-scale stride
-    # (num_groups * c_n) internally.
-    if group:
-        if n % num_groups != 0:
-            raise ValueError(
-                f"Grouped MXFP8 packed N={n} is not divisible by num_groups={num_groups}"
-            )
-        n_out = n // num_groups
-    else:
-        n_out = n
-
+    # D is the full stacked output [M_total, n_out]; expert g writes its
+    # [m_g, n_out] slice into rows [group_offs[g], group_offs[g+1]).
     if tuple(D.shape) != (m, n_out):
         raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n_out)}")
     if k % SCALE_GROUP_SIZE != 0:
@@ -1970,9 +2055,12 @@ def mxfp8_matmul(
         expected_a_scale = (m, k // SCALE_GROUP_SIZE)
 
     if layout == "TN":
+        # Grouped TN packs B along N, so the B scale spans n = G*N_out rows.
         expected_b_scale = (n, k // SCALE_GROUP_SIZE)
     else:
-        expected_b_scale = (k // SCALE_GROUP_SIZE, n)
+        # NN/NT B scale is [contraction/32, N]. Grouped NN packs B along the
+        # contraction axis, so use kb (= G*N_out) not the per-expert k.
+        expected_b_scale = (kb // SCALE_GROUP_SIZE, n)
 
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
