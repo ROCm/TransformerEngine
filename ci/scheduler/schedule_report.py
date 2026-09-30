@@ -252,16 +252,6 @@ def render_report_md(
         "",
     ]
 
-    # Ahead of everything else, because it changes how the whole report reads:
-    # what follows is one queue's worth of items rather than the suite, and the
-    # sections a full run ends with are absent by design, not missing.
-    if rerun:
-        out.append("> :repeat: **Re-run of the failed items only.** Everything absent from")
-        out.append("> the schedule below passed on an earlier attempt of this run.")
-        out.append("> Utilisation and weight tables are omitted: a short queue's timings")
-        out.append("> are not a full queue's, and the weights were left as it wrote them.")
-        out.append("")
-
     if ran != total_items:
         out.append(f"> :warning: **Only {ran} of {total_items} items produced a timing")
         out.append("> record.** The rest were never dispatched, which means a worker died:")
@@ -292,7 +282,13 @@ def render_report_md(
         (
             "Schedule -- what ran where, in execution order",
             calculate_schedule_table(frame, default_weight),
-            "`pass` / `fail` / `error` ran to the end. `incomplete` hard-exited "
+            # A re-run's schedule is a handful of rows someone is reading to find
+            # out whether the thing that failed still fails. The vocabulary is
+            # worth a paragraph against a full run's ninety rows, not against
+            # three, so the legend is a full run's.
+            ""
+            if rerun
+            else "`pass` / `fail` / `error` ran to the end. `incomplete` hard-exited "
             "mid-test (a per-test timeout, a segfault or an OOM-kill -- the same "
             "condition the JUnit report calls incomplete); `killed` was stopped "
             "from outside. Only the first three are timings; the last two are "
@@ -313,7 +309,7 @@ def render_report_md(
         )
     for summary, rows, legend in tables:
         out += [f"<details><summary>{summary}</summary>", ""] + render_md(rows)
-        out += ["", legend, "", "</details>", ""]
+        out += ([""] + [legend] if legend else []) + ["", "</details>", ""]
     return out
 
 

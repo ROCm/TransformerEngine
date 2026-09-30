@@ -179,12 +179,11 @@ def main():
     title = "Test Results"
     if "--title" in sys.argv:
         title = sys.argv[sys.argv.index("--title") + 1]
-    # Which attempt of the run this is. A re-run queues only what failed, so its
-    # report covers a subset of the suite and its counts mean nothing without the
-    # attempt they belong to. The workflow keeps each attempt's section and stacks
-    # them newest-first, so the number in the heading is what tells two sections of
-    # the same suite apart. Absent or unparseable means attempt 1, which reports
-    # exactly as it did before this argument existed.
+    # Which attempt of the run this is. Used only to tell an empty results dir
+    # apart: on a first attempt that means the suite crashed before writing any
+    # XML, on a later one it means the suite had nothing to re-run. Absent or
+    # unparseable means attempt 1, which reports exactly as it did before this
+    # argument existed.
     attempt = 1
     if "--attempt" in sys.argv:
         try:
@@ -198,26 +197,28 @@ def main():
     partial_files = sorted(glob.glob(os.path.join(results_dir, "*.xml.partial")))
 
     if not xml_files and not partial_files:
-        # On a re-run an empty results dir is the ordinary case: the suite passed
-        # the attempt being re-run, so the queue had no reason to bring any of it
-        # back. A section saying only that is noise -- the suite's real result is
-        # one screen down, under the attempt that produced it -- so say nothing.
-        if attempt > 1:
-            return 0
         lines = [f"## {title}\n"]
-        lines.append(
-            "> :warning: **No JUnit XML files were produced.** No test file "
-            "completed far enough to write results -- the run likely crashed or "
-            "hung before any suite finished. Inspect the uploaded `*.log` "
-            "artifacts to see where it stopped.\n"
-        )
+        if attempt > 1:
+            # The ordinary case on a re-run: nothing of this suite failed, so the
+            # queue had no reason to bring any of it back. The heading still goes
+            # out -- a re-run's summary stands on its own, and a suite missing from
+            # it reads as lost rather than as passed.
+            lines.append(
+                "> :white_check_mark: **Nothing to re-run.** Every test in this "
+                "suite passed on an earlier attempt of this run.\n"
+            )
+        else:
+            lines.append(
+                "> :warning: **No JUnit XML files were produced.** No test file "
+                "completed far enough to write results -- the run likely crashed or "
+                "hung before any suite finished. Inspect the uploaded `*.log` "
+                "artifacts to see where it stopped.\n"
+            )
         emit(lines)
         return 0
 
     lines = []
-    lines.append(f"## {title}{f' -- attempt {attempt}' if attempt > 1 else ''}\n")
-    if attempt > 1:
-        lines.append(f"_Re-run of what failed attempt {attempt - 1}; the rest is below._\n")
+    lines.append(f"## {title}\n")
 
     totals = defaultdict(float)  # passed/failed/error/skipped/timeout/incomplete/time
     per_file = []                # (name, counts, time)
