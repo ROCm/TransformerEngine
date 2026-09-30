@@ -344,17 +344,20 @@ def _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff):
 def _fused_moe_aux_loss_bwd(topk, coeff, residuals, g):
     del topk, coeff
     const_buf, tokens_per_expert, num_tokens = residuals
+<<<<<<< 03afd8f813300417ee1a41a4471d89be71c88f2d
     # Rank-0, matching FusedMoEAuxLossBwdPrimitive's shardy sharding rule, which
     # declares this operand with no factor labels. The rule can only name one
     # rank, and the other caller (moe.py's aux-loss backward) already passes a
     # rank-0 scalar. Reshaping to (1,) here instead makes the rule disagree with
     # the operand and fails at global view.
     grad_aux_loss = g.reshape(())
+=======
+>>>>>>> 0bf88ec4aebb94a093422ac57290d85e5c515b6a
 
     grad_probs = fused_moe_aux_loss_bwd(
         const_buf,
         tokens_per_expert,
-        grad_aux_loss,
+        g,
         num_tokens,
     )
     return grad_probs, None
