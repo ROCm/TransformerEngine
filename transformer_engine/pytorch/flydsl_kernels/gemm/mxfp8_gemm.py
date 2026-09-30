@@ -28,6 +28,8 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -57,6 +59,10 @@ BLOCK_M = _BLOCK_M
 BLOCK_N = _BLOCK_N
 BLOCK_K = _BLOCK_K
 SCALE_GROUP_SIZE = 32
+
+
+def get_num_cus() -> int:
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
 def _debug_enabled() -> bool:
@@ -252,6 +258,9 @@ def _compile_kernel(
     output_dtype: torch.dtype,
     layout: str,
     epilogue: str = "DEFAULT",
+    group: bool = False,
+    sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Build one compile-time-specialized TN, NN, or NT kernel.
 
@@ -491,6 +500,9 @@ def _compile_kernel(
         b0_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
         b1_0: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
         b1_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        # Persistent grouped path: one-int32 scratch to broadcast the atomically
+        # claimed queue slot from thread 0 to the whole workgroup.
+        claim_slot: fx.Array[fx.Int32, 1, 16]
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
@@ -503,7 +515,19 @@ def _compile_kernel(
         Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
+        num_groups: fx.Int32 = 0,
+        work_queue: fx.Tensor = None,
+        work_counter: fx.Tensor = None,
     ):
+        # Total output tiles. Dense uses this as the grid extent; grouped uses it as
+        # the drain bound for the persistent loop. For fwd/dgrad, c_m = M_total spans
+        # all experts, so this is already the total. For wgrad, c_m = N_out is the
+        # PER-EXPERT output-row count (the packed output [G*N_out, K_in] is addressed
+        # via store_m_expert_off), so multiply by num_groups for the full count.
+        num_tiles = (c_m // BLOCK_M) * (c_n // BLOCK_N)
+        if const_expr(wgrad):
+            num_tiles = num_tiles * num_groups
+
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
         lds_a1 = (lds.a1_0, lds.a1_1)
@@ -522,972 +546,1168 @@ def _compile_kernel(
         bs_div = fx.logical_divide(bs_rsrc, fx.make_layout(1, 1))
         scale_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         tx = gpu.thread_id("x")
+        tx_i32 = fx.Int32(tx)
 
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
-        pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
+        # Both the grouped fwd/dgrad path and the wgrad specialization use the same
+        # persistent descriptor-queue driver; ``grouped`` gates that shared setup.
+        grouped = group or wgrad
 
-        bx_m = pid_m * BLOCK_M
-        by_n = pid_n * BLOCK_N
+        # Persistent work-stealing driver.
+        #
+        # Dense path (group is False): the XCD-swizzled block id owns exactly one
+        # (pid_m, pid_n) output tile; the body below runs once.
+        #
+        # Grouped path (group is True, packed TN, const_expr-folded so the dense
+        # binary is untouched): the launch is a fixed num-CU grid of persistent
+        # workgroups. Each workgroup claims a queue slot by atomically fetch-adding
+        # the shared counter (``work_counter[0]``), reads the precomputed
+        # ``(pid_m, pid_n, expert)`` descriptor at that slot from ``work_queue``, and
+        # keeps claiming until the queue drains -- so faster CUs process more tiles.
+        # The host bakes the tile->expert mapping into the descriptor list (no
+        # in-kernel search), and may permute it (XCD-aware, group-balanced, ...)
+        # without any kernel change. B is packed [G*N, K] and B-scale [K128, G*N],
+        # so B reads use the expert-shifted column ``expert*N + n`` with stride
+        # ``G*N`` while A / A-scale / C / bias keep absolute-row / local-N coords.
+        if const_expr(grouped):
+            wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
+            wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
 
-        # The flattened/XCD-swizzled block coordinates are i32, while global
-        # address arithmetic below is expressed in MLIR index type. Convert
-        # once here and use these index-typed tile bases for every address.
-        bx_m_idx = fx.Index(bx_m)
-        by_n_idx = fx.Index(by_n)
+            # LDS broadcast scratch (one int32), following the persistent-kernel
+            # idiom in mega_moe_stage1: recast the LDS slot to an int32 iterator and
+            # a 1-element view. Thread 0 writes via ptr_store; every thread reads via
+            # the view after a workgroup barrier.
+            claim_iter = fx.recast_iter(fx.Int32, lds.claim_slot.ptr)
+            claim_view = fx.make_view(claim_iter, fx.make_layout(1, 1))
 
-        tx_i32 = fx.Int32(tx)
-        wave_id = tx_i32 // fx.Int32(WARP_SIZE)
-        lane = tx_i32 % fx.Int32(WARP_SIZE)
+            def _global_i32_ptr(tensor, index):
+                # Build an address-space-1 !llvm.ptr to tensor[index] (int32).
+                # llvm.atomicrmw requires an !llvm.ptr (not !fly.ptr).
+                ptr_ty = ir.Type.parse("!llvm.ptr<1>")
+                base = _fly.extract_aligned_pointer_as_index(ptr_ty, tensor)
+                base = llvm.PtrToIntOp(T.i64, base).result
+                byte_off = fx.as_ir_value(fx.Int64(fx.Index(index) * fx.Index(4)))
+                addr = llvm.AddOp(base, byte_off, llvm.IntegerOverflowFlags(0)).result
+                return llvm.IntToPtrOp(ptr_ty, addr).result
 
-        # Compile-time global leading dimensions:
-        #   normal source    [X,K] -> leading dimension K
-        #   transpose source [K,X] -> leading dimension X
-        a_leading_dim = _a_leading_dim(c_m)
-        b_leading_dim = _b_leading_dim(c_n)
+            def _claim_next_slot():
+                # One atomic per workgroup: thread 0 fetch-adds the shared counter
+                # and stores the pre-update value into the LDS scratch; a barrier
+                # then broadcasts it so every thread returns the same slot.
+                if tx_i32 == fx.Int32(0):
+                    old = llvm.AtomicRMWOp(
+                        llvm.AtomicBinOp.add,
+                        _global_i32_ptr(work_counter, fx.Int32(0)),
+                        fx.as_ir_value(fx.Int32(1)),
+                        llvm.AtomicOrdering.monotonic,
+                        syncscope="agent",
+                        alignment=4,
+                    ).result
+                    fx.ptr_store(fx.Vector.from_elements([fx.Int32(old)], fx.Int32), claim_iter)
+                fx.barrier()
+                return fx.Vector(claim_view.load())[0]
 
-        # gl_off_a/gl_off_b: per-lane lists of LOAD_PASSES_HALF swizzled flat
-        # global offsets, indexed by DMA pass. gl_off_a[step] is this lane's
-        # static 16-byte source for pass `step`; G2SLoader adds the dynamic
-        # K-tile base as soffset. Offsets are pre-swizzled so bytes land in the
-        # bank-conflict-free LDS slots the MFMA read (S2RLoader) expects.
-        gl_off_a = compute_global_swizzle(
-            lane,
-            wave_id,
-            a_leading_dim,
-            LOAD_PASSES_HALF,
-            preshuffled=False,
-        )
-        gl_off_b = compute_global_swizzle(
-            lane,
-            wave_id,
-            b_leading_dim,
-            LOAD_PASSES_HALF,
-            preshuffled=False,
-        )
-        a_g2s = G2SLoader(
-            a_div,
-            gl_off_a,
-            LOAD_PASSES_HALF,
-            a_f8_ir_t,
-            wave_id,
-        )
-        b_g2s = G2SLoader(
-            b_div,
-            gl_off_b,
-            LOAD_PASSES_HALF,
-            b_f8_ir_t,
-            wave_id,
-        )
-        s2r = S2RLoader(fx.Int32(0), 1)
-
-        layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = fx.idx2crd(fx.Int32(lane), layout_lane16)
-        lane_div_16 = fx.get(coord_lane16, 0)
-        lane_mod_16 = fx.get(coord_lane16, 1)
-
-        # Per-CTA tile base in C elements, folded into each store's linear
-        # coordinate below (matching the scale-load addressing on this build;
-        # add_offset on a dynamic Index is unsupported here).
-        c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
-        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
-        c_store_atom = fx.make_copy_atom(
-            fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
-            output_fx_dtype,
-        )
-
-        # Bias is a length-N fp32 vector indexed by the output-feature (N)
-        # coordinate and broadcast across the M/token rows. Only staged when
-        # the epilogue requests it; DEFAULT receives a dummy 1-element tensor.
-        # const_expr folds this compile-time flag at trace time so the setup
-        # (and load_bias) are inlined into the kernel scope with no runtime
-        # dispatch branch.
-        if const_expr(has_bias):
-            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
-            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
-            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-
-            def load_bias(col):
-                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+            def _desc_field(slot, field):
+                # Read one int32 of the packed (pid_m, pid_n, expert) descriptor.
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+                fx.copy(scale_ld_atom, fx.slice(wq_div, (None, slot * fx.Int32(3) + field)), reg)
                 return fx.memref_load_vec(reg)[0]
 
-        # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
-        # output so the backward pass can recompute the GELU gradient. Same tile
-        # base / store atom shape as C; DEFAULT gets a dummy 1-element tensor.
-        if const_expr(has_gelu):
-            gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
-            aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
-            aux_store_atom = fx.make_copy_atom(
+        def process_tile(pid_m, pid_n, expert):
+            bx_m = pid_m * BLOCK_M
+            by_n = pid_n * BLOCK_N
+
+            # The flattened/XCD-swizzled block coordinates are i32, while global
+            # address arithmetic below is expressed in MLIR index type. Convert
+            # once here and use these index-typed tile bases for every address.
+            bx_m_idx = fx.Index(bx_m)
+            by_n_idx = fx.Index(by_n)
+
+            # Per-expert offsets into the packed B operand / B-scale. Where the
+            # expert index lands depends on the layout, because the packed weight
+            # stacks experts on B's *first* logical axis, which is a different
+            # kernel axis for TN vs the transpose-read (NN/NT) case:
+            #
+            #   TN (forward, C = A @ B^T): B is packed [G*N, K], experts on the
+            #     OUTPUT-N axis. Expert offset folds into the B column base
+            #     (by_n_b_idx = expert*N + n) and the B-scale row stride grows to
+            #     G*N (c_n_bs). The B-scale k128 term is untouched.
+            #
+            #   NN (dgrad, C = A @ B where A=dY[M,N_out], B=W[N_out,K_in]): the
+            #     kernel contraction axis IS N_out, and B is packed [G*N_out, K_in]
+            #     with experts on that CONTRACTION axis. Expert offset instead folds
+            #     into the contraction (k_base) term as expert*N_out elements
+            #     (b_expert_k_off), and into the B-scale's k128 (contraction-128)
+            #     term as expert*(N_out/128) (bs_expert_k128_off). The B column base
+            #     and B-scale stride stay per-expert (c_n = K_in, unchanged).
+            #
+            # Dense (group is False) zeroes every expert term.
+            #
+            #   wgrad (NT, dW = dY^T @ X): a separate specialization. Both operands
+            #     transpose-read and BOTH contract over the token axis M_tok (the
+            #     kernel's compile-time K = the per-expert padded token count M_pad).
+            #     Experts are padded to a uniform M_pad and packed on the contraction
+            #     axis, so both a (dY [G*M_pad, N_out]) and b (X [G*M_pad, K_in])
+            #     shift by expert*K along k_base (a_expert_k_off / b_expert_k_off) and
+            #     expert*NUM_K_TILES along their scale k128 terms. The output is packed
+            #     [G*N_out, K_in] on the OUTPUT-M axis, so the store row gets an extra
+            #     expert*N_out (= expert*c_m) offset (store_m_expert_off); the a/b
+            #     operand row/col coords stay per-expert (local pid_m over N_out).
+            if const_expr(wgrad):
+                by_n_b_idx = by_n_idx
+                c_n_bs = c_n
+                a_expert_k_off = fx.Index(expert * fx.Int32(K))
+                b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                as_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                store_m_expert_off = fx.Index(expert * fx.Int32(c_m))
+            elif const_expr(group):
+                if const_expr(b_transpose_read):
+                    # NN: expert on the contraction axis. The kernel's compile-time
+                    # ``K`` IS the contraction dim (= N_out for dgrad), so the packed
+                    # weight [G*N_out, K_in] shifts by expert*K elements along k_base,
+                    # and its scale [G*N_out/128, K_in] by expert*NUM_K_TILES.
+                    by_n_b_idx = by_n_idx
+                    c_n_bs = c_n
+                    a_expert_k_off = fx.Index(0)
+                    b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                    as_expert_k128_off = fx.Int32(0)
+                    bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
+                    store_m_expert_off = fx.Index(0)
+                else:
+                    # TN: expert on the output-N axis.
+                    by_n_b_idx = fx.Index(expert * fx.Int32(c_n) + by_n)
+                    c_n_bs = num_groups * c_n
+                    a_expert_k_off = fx.Index(0)
+                    b_expert_k_off = fx.Index(0)
+                    as_expert_k128_off = fx.Int32(0)
+                    bs_expert_k128_off = fx.Int32(0)
+                    store_m_expert_off = fx.Index(0)
+            else:
+                by_n_b_idx = by_n_idx
+                c_n_bs = c_n
+                a_expert_k_off = fx.Index(0)
+                b_expert_k_off = fx.Index(0)
+                as_expert_k128_off = fx.Int32(0)
+                bs_expert_k128_off = fx.Int32(0)
+                store_m_expert_off = fx.Index(0)
+
+            wave_id = tx_i32 // fx.Int32(WARP_SIZE)
+            lane = tx_i32 % fx.Int32(WARP_SIZE)
+
+            # Compile-time global leading dimensions:
+            #   normal source    [X,K] -> leading dimension K
+            #   transpose source [K,X] -> leading dimension X
+            a_leading_dim = _a_leading_dim(c_m)
+            b_leading_dim = _b_leading_dim(c_n)
+
+            # gl_off_a/gl_off_b: per-lane lists of LOAD_PASSES_HALF swizzled flat
+            # global offsets, indexed by DMA pass. gl_off_a[step] is this lane's
+            # static 16-byte source for pass `step`; G2SLoader adds the dynamic
+            # K-tile base as soffset. Offsets are pre-swizzled so bytes land in the
+            # bank-conflict-free LDS slots the MFMA read (S2RLoader) expects.
+            gl_off_a = compute_global_swizzle(
+                lane,
+                wave_id,
+                a_leading_dim,
+                LOAD_PASSES_HALF,
+                preshuffled=False,
+            )
+            gl_off_b = compute_global_swizzle(
+                lane,
+                wave_id,
+                b_leading_dim,
+                LOAD_PASSES_HALF,
+                preshuffled=False,
+            )
+            a_g2s = G2SLoader(
+                a_div,
+                gl_off_a,
+                LOAD_PASSES_HALF,
+                a_f8_ir_t,
+                wave_id,
+            )
+            b_g2s = G2SLoader(
+                b_div,
+                gl_off_b,
+                LOAD_PASSES_HALF,
+                b_f8_ir_t,
+                wave_id,
+            )
+            s2r = S2RLoader(fx.Int32(0), 1)
+
+            layout_lane16 = fx.make_layout((4, 16), (16, 1))
+            coord_lane16 = fx.idx2crd(fx.Int32(lane), layout_lane16)
+            lane_div_16 = fx.get(coord_lane16, 0)
+            lane_mod_16 = fx.get(coord_lane16, 1)
+
+            # Per-CTA tile base in C elements, folded into each store's linear
+            # coordinate below (matching the scale-load addressing on this build;
+            # add_offset on a dynamic Index is unsupported here).
+            # store_m_expert_off (grouped wgrad only) shifts the output row into this
+            # tile's expert block of the packed [G*N_out, K_in] weight-gradient; the
+            # a/b operands used local (per-expert) pid_m, so the store re-packs here.
+            c_tile_base_elems = (
+                (bx_m_idx + store_m_expert_off) * fx.Index(c_n) + by_n_idx
+            )
+            gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
+            c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
+            c_store_atom = fx.make_copy_atom(
                 fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
                 output_fx_dtype,
             )
 
-            def gelu_tanh(x):
-                # tanh-approx GELU (matches PyTorch approximate='tanh' and the
-                # FlyDSL preshuffle reference), expressed through a non-positive
-                # exponent so exp() cannot overflow:
-                #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
-                half_f32 = fx.Float32(0.5)
-                one_f32 = fx.Float32(1.0)
-                zero_f32 = fx.Float32(0.0)
-                two_f32 = fx.Float32(2.0)
-                x3 = x * x * x
-                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
-                abs_y = fx.Float32(y).maximumf(zero_f32 - y)
-                e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
-                denom = one_f32 + e_neg2abs
-                numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
-                return half_f32 * x * (numerator * (one_f32 / denom))
+            # Bias is a length-N fp32 vector indexed by the output-feature (N)
+            # coordinate and broadcast across the M/token rows. Only staged when
+            # the epilogue requests it; DEFAULT receives a dummy 1-element tensor.
+            # const_expr folds this compile-time flag at trace time so the setup
+            # (and load_bias) are inlined into the kernel scope with no runtime
+            # dispatch branch.
+            if const_expr(has_bias):
+                gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+                bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+                bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
-        PIN_ACC_BASE = 0
+                def load_bias(col):
+                    reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                    fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                    return fx.memref_load_vec(reg)[0]
 
-        def _reg_list(prefix, start, end):
-            return ",".join(f"~{{{prefix}{r}}}" for r in range(start, end + 1))
+            # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
+            # output so the backward pass can recompute the GELU gradient. Same tile
+            # base / store atom shape as C; DEFAULT gets a dummy 1-element tensor.
+            if const_expr(has_gelu):
+                gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
+                aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
+                aux_store_atom = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                    output_fx_dtype,
+                )
 
-        def reserve_pinned_accumulators():
-            # Reserve a fixed physical AGPR bank for all accumulators. In the
-            # SSA-lowered path, the compiler generated heavy AGPR <-> VGPR traffic,
-            # including v_accvgpr_mov/read sequences, s_nop stalls, and accumulator
-            # spills. Pinning each f32x4 accumulator to a stable AGPR range keeps the
-            # scaled MFMA accumulation in place and avoids those transfers and spills.
-            #
-            # ACCS_PER_WAVE = 64 accumulator objects and each object is f32x4,
-            # so the physical bank is exactly 64 * 4 = 256 AGPRs: a[0:255].
-            clobbers = _reg_list("a", PIN_ACC_BASE, PIN_ACC_BASE + ACCS_PER_WAVE * 4 - 1)
-            llvm.InlineAsmOp(
-                None,
-                [],
-                "",
-                clobbers,
-                has_side_effects=True,
-            )
+                def gelu_tanh(x):
+                    # tanh-approx GELU (matches PyTorch approximate='tanh' and the
+                    # FlyDSL preshuffle reference), expressed through a non-positive
+                    # exponent so exp() cannot overflow:
+                    #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
+                    half_f32 = fx.Float32(0.5)
+                    one_f32 = fx.Float32(1.0)
+                    zero_f32 = fx.Float32(0.0)
+                    two_f32 = fx.Float32(2.0)
+                    x3 = x * x * x
+                    y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                    abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                    e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                    denom = one_f32 + e_neg2abs
+                    numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                    return half_f32 * x * (numerator * (one_f32 / denom))
 
-        def zero_pinned_accumulators():
-            for ai in range_constexpr(ACCS_PER_WAVE * 4):
+            PIN_ACC_BASE = 0
+
+            def _reg_list(prefix, start, end):
+                return ",".join(f"~{{{prefix}{r}}}" for r in range(start, end + 1))
+
+            def reserve_pinned_accumulators():
+                # Reserve a fixed physical AGPR bank for all accumulators. In the
+                # SSA-lowered path, the compiler generated heavy AGPR <-> VGPR traffic,
+                # including v_accvgpr_mov/read sequences, s_nop stalls, and accumulator
+                # spills. Pinning each f32x4 accumulator to a stable AGPR range keeps the
+                # scaled MFMA accumulation in place and avoids those transfers and spills.
+                #
+                # ACCS_PER_WAVE = 64 accumulator objects and each object is f32x4,
+                # so the physical bank is exactly 64 * 4 = 256 AGPRs: a[0:255].
+                clobbers = _reg_list("a", PIN_ACC_BASE, PIN_ACC_BASE + ACCS_PER_WAVE * 4 - 1)
                 llvm.InlineAsmOp(
                     None,
                     [],
-                    f"v_accvgpr_write_b32 a[{PIN_ACC_BASE + ai}], 0",
-                    f"~{{a{PIN_ACC_BASE + ai}}}",
+                    "",
+                    clobbers,
                     has_side_effects=True,
                 )
 
-        def _inline_asm_i32(asm_string, constraints, operands=None):
-            op = llvm.InlineAsmOp(
-                T.i32,
-                operands or [],
-                asm_string,
-                constraints,
-                has_side_effects=True,
-            )
-            return _one_i32_result(op)
-
-        def _one_i32_result(op):
-            # Accept the result attribute names exposed by the supported MLIR Python bindings.
-            return getattr(op, "result", getattr(op, "res", op.results[0]))
-
-        def _to_raw_inline_asm_operand(value):
-            # TODO: Replace arith._to_raw once FlyDSL exposes a supported public
-            # API for passing wrapped values to llvm.InlineAsmOp. _to_raw is
-            # deprecated, but remains heavily used internally by FlyDSL.
-            return arith._to_raw(value)
-
-        def read_physical_accumulator_slot(slot_idx):
-            acc_pin = PIN_ACC_BASE + slot_idx * 4
-            r0 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 0}]", "=v")
-            r1 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 1}]", "=v")
-            r2 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 2}]", "=v")
-            r3 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 3}]", "=v")
-            return Vec.from_elements([r0, r1, r2, r3], fx.Int32).bitcast(fx.Float32)
-
-        # As/Bs are MFMA-ready packed scale words: [K128, row] uint32.
-        # Each loaded dword already contains the four 16-row/16-col MFMA scale
-        # bytes for this lane's 64-row A/B half.  The MFMA instruction selects
-        # the byte via op_sel/op_sel_hi, so there is intentionally no hot-loop
-        # byte extraction and no 0x01010101 broadcast here.
-        c_m_idx = fx.Index(c_m)
-        c_n_idx = fx.Index(c_n)
-
-        def hot_loop_scheduler_q_refill_2n():
-            # Steady-state Q1 schedule: eight chunks of one K+2 VMEM/LDS
-            # refill pass followed by two MFMAs.
-            for _ in range_constexpr(8):
-                rocdl.sched_vmem(1)
-                rocdl.sched_mfma(2)
-
-            rocdl.sched_barrier(0)
-
-        def hot_loop_scheduler_q0_refill_a1_2n():
-            # TN/NN: one normal A-bottom LDS read per chunk.
-            # NT: one transpose-read A half plus the matching transpose-read
-            # scheduling pressure retained from the passing NT specialization.
-            for _ in range_constexpr(8):
-                rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(Q0_SCHED_DSRD)
-                rocdl.sched_mfma(2)
-
-            rocdl.sched_barrier(0)
-
-        def hot_loop_scheduler_q_prefetch_4n():
-            # TN/NN retain two scheduled DS reads per chunk. NT retains four
-            # because both carried operands use two DS_READ_TR instructions.
-            for _ in range_constexpr(8):
-                rocdl.sched_dsrd(PREFETCH_SCHED_DSRD)
-                rocdl.sched_mfma(4)
-
-            rocdl.sched_barrier(0)
-
-        def load_a_scale_row(k128, row):
-            off = k128 * c_m_idx + bx_m_idx + row
-            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-            fx.copy(scale_ld_atom, fx.slice(as_div, (None, fx.Int32(off))), reg)
-            return fx.memref_load_vec(reg)[0]
-
-        def load_b_scale_row(k128, row):
-            off = k128 * c_n_idx + by_n_idx + row
-            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-            fx.copy(scale_ld_atom, fx.slice(bs_div, (None, fx.Int32(off))), reg)
-            return fx.memref_load_vec(reg)[0]
-
-        def load_a_scale_subtile(k128, sm):
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(lane)
-            a_scale = load_a_scale_row(k128, a_row)
-            return (a_scale, a_scale, a_scale, a_scale)
-
-        def load_b_scale_subtile(k128, sn):
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(lane)
-            b_scale = load_b_scale_row(k128, b_row)
-            return (b_scale, b_scale, b_scale, b_scale)
-
-        def load_scale_tile(k128):
-            # Load all scale VGPRs needed by this wave for this K128 tile once.
-            # Return order: A-top, A-bottom, B-left, B-right.
-            return (
-                load_a_scale_subtile(k128, 0),
-                load_a_scale_subtile(k128, 1),
-                load_b_scale_subtile(k128, 0),
-                load_b_scale_subtile(k128, 1),
-            )
-
-        def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
-            a_g2s.load_one(
-                lds_a[subtile],
-                fx.Int32(_a_global_base(k_base, subtile, c_m, bx_m_idx)),
-                pass_in_subtile,
-            )
-
-        def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            b_g2s.load_one(
-                lds_b[subtile],
-                fx.Int32(_b_global_base(k_base, subtile, c_n, by_n_idx)),
-                pass_in_subtile,
-            )
-
-        def stage_a_subtile(k_base, subtile, lds_a):
-            for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
-                stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a)
-
-        def stage_b_subtile(k_base, subtile, lds_b):
-            for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
-                stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b)
-
-        def load_frag_half_at_byte_base(lds_page, row_byte_base, half):
-            # Issue exactly one 16-byte LDS read for one K64 half of an MFMA operand.
-            # Keeping the halves separate allows steady-state Q0 to schedule one
-            # A-bottom ds_read_b128 in each refill/MFMA chunk.
-            k_col = reg_lds_k_col0 if half == 0 else reg_lds_k_col1
-            return s2r.load_one(lds_page, fx.Int32(row_byte_base + k_col))
-
-        def pack_frag_halves(x0, x1):
-            return pack_i32x4_i32x8(x0, x1)
-
-        def load_frag_at_byte_base(lds_page, row_byte_base):
-            # Default complete-fragment path used outside the dedicated Q0 schedule.
-            x0 = load_frag_half_at_byte_base(lds_page, row_byte_base, 0)
-            x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
-            return pack_frag_halves(x0, x1)
-
-        def load_normal_b_frag(lds_b, local_row, half):
-            # Physical [N,K] page, ordinary TN-style fixed-row read.
-            half_row = local_row - fx.Index(half * (BLOCK_N // 2))
-            return load_frag_at_byte_base(
-                lds_b[half],
-                half_row * fx.Index(BLOCK_K),
-            )
-
-        def load_transposed_frag_half(lds_page, local_x_tile, half):
-            # Exact inverse mapping validated by the MXFP8 NN fragment probe.
-            lane_div16_i32 = fx.Int32(lane_div_16)
-            lane_in16_i32 = fx.Int32(lane_mod_16)
-            source_k = lane_div16_i32 * fx.Int32(16) + lane_in16_i32 // fx.Int32(2)
-            source_x = fx.Int32(local_x_tile) + (lane_in16_i32 % fx.Int32(2)) * fx.Int32(8)
-
-            physical_k, physical_x = swizzle_128(source_k, source_x)
-            base = physical_k * fx.Int32(128) + physical_x
-            other = base ^ fx.Int32(0x440)
-            immediate_offset = 0 if half == 0 else 0x2000
-
-            return s2r.load_one_transpose(
-                lds_page,
-                base,
-                other,
-                immediate_offset=immediate_offset,
-            )
-
-        def load_transposed_frag(lds_page, local_x_tile):
-            x0 = load_transposed_frag_half(lds_page, local_x_tile, 0)
-            x1 = load_transposed_frag_half(lds_page, local_x_tile, 1)
-            return pack_frag_halves(x0, x1)
-
-        def _acc_idx(subtile_id, mi, ni):
-            return (
-                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
-            )
-
-        def pinned_mfma(acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
-            # Fixed physical accumulator bank, visible SSA A/B/scale operands.
-            # acc_idx maps directly to a[PIN_ACC_BASE + 4*acc_idx : +3].
-            # The scale operands are MFMA-ready packed dwords.  mi/ni choose
-            # which of the four bytes inside the A/B scale dword the MFMA uses.
-            acc_pin = PIN_ACC_BASE + acc_idx * 4
-            llvm.InlineAsmOp(
-                None,
-                [
-                    _to_raw_inline_asm_operand(a_frag),
-                    _to_raw_inline_asm_operand(b_frag),
-                    _to_raw_inline_asm_operand(a_scale),
-                    _to_raw_inline_asm_operand(b_scale),
-                ],
-                "v_mfma_scale_f32_16x16x128_f8f6f4 "
-                f"a[{acc_pin}:{acc_pin + 3}], "
-                "$0, $1, "
-                f"a[{acc_pin}:{acc_pin + 3}], "
-                "$2, $3 "
-                f"op_sel:[{mi & 1},{ni & 1},0] "
-                f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
-                f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
-                f"v,v,v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
-                has_side_effects=True,
-            )
-
-        def pinned_final_mfma(dst_slot, old_acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
-            # Final-page form used by HK: destination and previous partial sum
-            # may be different AGPR ranges.  Once old_acc_idx is consumed, its
-            # physical slot is dead and can be reused as a later destination.
-            dst_pin = PIN_ACC_BASE + dst_slot * 4
-            old_pin = PIN_ACC_BASE + old_acc_idx * 4
-            llvm.InlineAsmOp(
-                None,
-                [
-                    _to_raw_inline_asm_operand(a_frag),
-                    _to_raw_inline_asm_operand(b_frag),
-                    _to_raw_inline_asm_operand(a_scale),
-                    _to_raw_inline_asm_operand(b_scale),
-                ],
-                "v_mfma_scale_f32_16x16x128_f8f6f4 "
-                f"a[{dst_pin}:{dst_pin + 3}], "
-                "$0, $1, "
-                f"a[{old_pin}:{old_pin + 3}], "
-                "$2, $3 "
-                f"op_sel:[{mi & 1},{ni & 1},0] "
-                f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
-                f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
-                f"v,v,v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}",
-                has_side_effects=True,
-            )
-
-        def mfma_4n(acc_base, a_frag, a_scale, b0, b1, b2, b3, bs0, bs1, bs2, bs3):
-            """Emit four N-direction scaled MFMAs into fixed physical AGPR accumulators."""
-            mi = (acc_base // MFMA_N_PER_SUBTILE) % MFMA_M_PER_SUBTILE
-            pinned_mfma(acc_base + 0, a_frag, b0, a_scale, bs0, mi, 0)
-            pinned_mfma(acc_base + 1, a_frag, b1, a_scale, bs1, mi, 1)
-            pinned_mfma(acc_base + 2, a_frag, b2, a_scale, bs2, mi, 2)
-            pinned_mfma(acc_base + 3, a_frag, b3, a_scale, bs3, mi, 3)
-
-        def mfma_2n(acc_base, a_frag, a_scale, b0, b1, bs0, bs1, ni_base):
-            mi = (acc_base // MFMA_N_PER_SUBTILE) % MFMA_M_PER_SUBTILE
-            pinned_mfma(acc_base + 0, a_frag, b0, a_scale, bs0, mi, ni_base + 0)
-            pinned_mfma(acc_base + 1, a_frag, b1, a_scale, bs1, mi, ni_base + 1)
-
-        def store_acc_vector_for_logical_idx(logical_acc_idx, acc):
-            subtile_id = logical_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
-            local_idx = logical_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
-            sm = subtile_id // 2
-            sn = subtile_id % 2
-            mi = local_idx // MFMA_N_PER_SUBTILE
-            ni = local_idx % MFMA_N_PER_SUBTILE
-
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
-            col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
-
-            # Bias depends only on the output-feature (N) coordinate, so read it
-            # once per column and reuse across the four M rows below. Index by
-            # the GLOBAL feature (by_n_idx + col), matching the C store's
-            # c_tile_base_elems fold; the tile-local col alone would reread
-            # bias[0..BLOCK_N) for every N-block.
-            if const_expr(has_bias):
-                bias_value = load_bias(by_n_idx + col)
-
-            for ii in range_constexpr(4):
-                row = row_base + fx.Index(ii)
-                c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
-
-                # Epilogue stages run on the fp32 accumulator, in order, before
-                # the output-dtype narrowing:
-                #   value = acc [+ bias]           (pre-activation)
-                #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
-                value = Vec(acc)[ii]
-                if const_expr(has_bias):
-                    value = value + bias_value
-
-                if const_expr(has_gelu):
-                    # Save the pre-activation (post-bias) value for backward,
-                    # then apply GELU to the C output.
-                    aux_val = value
-                    if output_dtype != torch.float32:
-                        aux_val = aux_val.to(output_fx_dtype)
-                    aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
-                    fx.memref_store_vec(Vec.filled(1, aux_val, output_fx_dtype), aux_reg)
-                    fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
-                    value = gelu_tanh(value)
-
-                if output_dtype != torch.float32:
-                    value = value.to(output_fx_dtype)
-                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
-                fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
-                fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
-
-        # Explicit register coordinates for HK-style four-quadrant mapping.
-        # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
-        # inside each 128x128 quadrant:
-        #   cA: (warp_m,     warp_n)
-        #   cB: (warp_m,     warp_n + 2)
-        #   cC: (warp_m + 2, warp_n)
-        #   cD: (warp_m + 2, warp_n + 2)
-        reg_lds_k_col0, reg_lds_k_col1 = _normal_read_columns(
-            lane_div_16,
-            lane_mod_16,
-        )
-
-        reg_subtile_m_idx0 = wave_id // 2
-        reg_subtile_n_idx0 = wave_id % 2
-
-        reserve_pinned_accumulators()
-        zero_pinned_accumulators()
-
-        def load_b_subtile_ni_regs(lds_b, scale_tile, sn, ni):
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_scales = scale_tile[2] if sn == 0 else scale_tile[3]
-
-            b_ni = _load_b_ni(
-                load_transposed_frag,
-                load_normal_b_frag,
-                lds_b,
-                sn,
-                ni,
-                reg_subtile_n_idx0,
-                lane_mod_16,
-            )
-            return b_ni, b_scales[ni]
-
-        def load_b_subtile_regs(lds_b, scale_tile, sn):
-            b0, bs0 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 0)
-            b1, bs1 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 1)
-            b2, bs2 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 2)
-            b3, bs3 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 3)
-            return b0, b1, b2, b3, bs0, bs1, bs2, bs3
-
-        def load_a_subtile_mi_half(lds_a, sm, mi, half):
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-
-            return _load_a_half(
-                load_transposed_frag_half,
-                load_frag_half_at_byte_base,
-                lds_a,
-                sm,
-                mi,
-                half,
-                reg_subtile_m_idx0,
-                lane_mod_16,
-            )
-
-        def load_a_subtile_mi_regs(lds_a, scale_tile, sm, mi):
-            # Fine-grained A register load for one 16-row M-direction MFMA slice.
-            a_scales = scale_tile[0] if sm == 0 else scale_tile[1]
-            x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
-            x1 = load_a_subtile_mi_half(lds_a, sm, mi, 1)
-            a_mi = pack_frag_halves(x0, x1)
-            a_scale_mi = a_scales[mi]
-            return a_mi, a_scale_mi
-
-        def load_a_subtile_regs(lds_a, scale_tile, sm):
-            a0, as0 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 0)
-            a1, as1 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 1)
-            a2, as2 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 2)
-            a3, as3 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 3)
-            return a0, a1, a2, a3, as0, as1, as2, as3
-
-        def hk_one_k_with_refill(
-            k128,
-            cur_a,
-            cur_b,
-            next_a,
-            next_b,
-            refill_a,
-            refill_b,
-            a0_regs,
-            b0_regs,
-            cur_scales,
-            prev_refill_scales,
-        ):
-            # Scale invariant:
-            #   cur_scales is HK MFMA-ready for K.
-            #   prev_refill_scales is HK MFMA-ready for K+1.
-            #   This iteration issues K+2 scale loads and returns them for the
-            #   next steady iteration or final tail.
-
-            # Wait only far enough for the current page; the next-page refill may remain in flight.
-            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            # Immediately issue MFMA-ready K+2 scale loads.
-            # They are returned for the next iteration without any in-kernel
-            # byte extraction or broadcast.
-            refill_scales = load_scale_tile(fx.Index(k128 + 2))
-            next_scales_ready = prev_refill_scales
-            # A-top and B-left are both carried as complete 64-row register tiles,
-            # so their LDS half-pages can be refilled immediately.
-            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
-            b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-
-            b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
-            b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
-            b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
-            b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
-
-            # Refill the current ping-pong page with K+2, alternating A and B passes.
-            k_refill = fx.Index((k128 + 2) * BLOCK_K)
-
-            # Q0: interleave the current tile's A-bottom LDS reads with K+2
-            # refills and Q0 compute. Each complete A-bottom fragment is assembled
-            # from two independently scheduled K64 halves.
-            rocdl.sched_barrier(0)
-            a10_x0 = load_a_subtile_mi_half(cur_a, 1, 0, 0)
-            stage_a_subtile_pass(k_refill, 0, 0, refill_a)
-            mfma_2n(_acc_idx(0, 0, 0), a00, as00, b00, b01, bs00, bs01, 0)
-
-            a10_x1 = load_a_subtile_mi_half(cur_a, 1, 0, 1)
-            stage_b_subtile_pass(k_refill, 0, 0, refill_b)
-            mfma_2n(_acc_idx(0, 0, 2), a00, as00, b02, b03, bs02, bs03, 2)
-
-            a11_x0 = load_a_subtile_mi_half(cur_a, 1, 1, 0)
-            stage_a_subtile_pass(k_refill, 0, 1, refill_a)
-            mfma_2n(_acc_idx(0, 1, 0), a01, as01, b00, b01, bs00, bs01, 0)
-
-            a11_x1 = load_a_subtile_mi_half(cur_a, 1, 1, 1)
-            stage_b_subtile_pass(k_refill, 0, 1, refill_b)
-            mfma_2n(_acc_idx(0, 1, 2), a01, as01, b02, b03, bs02, bs03, 2)
-
-            a12_x0 = load_a_subtile_mi_half(cur_a, 1, 2, 0)
-            stage_a_subtile_pass(k_refill, 0, 2, refill_a)
-            mfma_2n(_acc_idx(0, 2, 0), a02, as02, b00, b01, bs00, bs01, 0)
-
-            a12_x1 = load_a_subtile_mi_half(cur_a, 1, 2, 1)
-            stage_b_subtile_pass(k_refill, 0, 2, refill_b)
-            mfma_2n(_acc_idx(0, 2, 2), a02, as02, b02, b03, bs02, bs03, 2)
-
-            a13_x0 = load_a_subtile_mi_half(cur_a, 1, 3, 0)
-            stage_a_subtile_pass(k_refill, 0, 3, refill_a)
-            mfma_2n(_acc_idx(0, 3, 0), a03, as03, b00, b01, bs00, bs01, 0)
-
-            a13_x1 = load_a_subtile_mi_half(cur_a, 1, 3, 1)
-            stage_b_subtile_pass(k_refill, 0, 3, refill_b)
-            mfma_2n(_acc_idx(0, 3, 2), a03, as03, b02, b03, bs02, bs03, 2)
-
-            hot_loop_scheduler_q0_refill_a1_2n()
-
-            # Retire the eight distributed A-bottom LDS reads before K+2 refills
-            # overwrite the current page's A-bottom half-page. Keep this wait as
-            # late as possible to maximize read/compute overlap.
-            rocdl.sched_barrier(0)
-            barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            a10 = pack_frag_halves(a10_x0, a10_x1)
-            a11 = pack_frag_halves(a11_x0, a11_x1)
-            a12 = pack_frag_halves(a12_x0, a12_x1)
-            a13 = pack_frag_halves(a13_x0, a13_x1)
-            as10 = cur_scales[1][0]
-            as11 = cur_scales[1][1]
-            as12 = cur_scales[1][2]
-            as13 = cur_scales[1][3]
-
-            rocdl.sched_barrier(0)
-            stage_b_subtile_pass(k_refill, 1, 0, refill_b)
-            mfma_2n(_acc_idx(1, 0, 0), a00, as00, b10, b11, bs10, bs11, 0)
-
-            stage_a_subtile_pass(k_refill, 1, 0, refill_a)
-            mfma_2n(_acc_idx(1, 0, 2), a00, as00, b12, b13, bs12, bs13, 2)
-
-            stage_b_subtile_pass(k_refill, 1, 1, refill_b)
-            mfma_2n(_acc_idx(1, 1, 0), a01, as01, b10, b11, bs10, bs11, 0)
-
-            stage_a_subtile_pass(k_refill, 1, 1, refill_a)
-            mfma_2n(_acc_idx(1, 1, 2), a01, as01, b12, b13, bs12, bs13, 2)
-
-            stage_b_subtile_pass(k_refill, 1, 2, refill_b)
-            mfma_2n(_acc_idx(1, 2, 0), a02, as02, b10, b11, bs10, bs11, 0)
-
-            stage_a_subtile_pass(k_refill, 1, 2, refill_a)
-            mfma_2n(_acc_idx(1, 2, 2), a02, as02, b12, b13, bs12, bs13, 2)
-
-            stage_b_subtile_pass(k_refill, 1, 3, refill_b)
-            mfma_2n(_acc_idx(1, 3, 0), a03, as03, b10, b11, bs10, bs11, 0)
-
-            stage_a_subtile_pass(k_refill, 1, 3, refill_a)
-            mfma_2n(_acc_idx(1, 3, 2), a03, as03, b12, b13, bs12, bs13, 2)
-            hot_loop_scheduler_q_refill_2n()
-
-            # Leave exactly the K+2 refill and scale loads outstanding. The following
-            # LDS reads consume the already-ready next page, not the page being refilled.
-            rocdl.sched_barrier(0)
-            barrier(
-                vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES,
-                lgkmcnt=0,
-            )
-            rocdl.sched_barrier(0)
-
-            next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
-            mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 1)
-            mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 2)
-            mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 3)
-            mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 0)
-            mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 1)
-            mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 2)
-            mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 3)
-            mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            hot_loop_scheduler_q_prefetch_4n()
-
-            next_a0_regs = (
-                next_a00,
-                next_a01,
-                next_a02,
-                next_a03,
-                next_as00,
-                next_as01,
-                next_as02,
-                next_as03,
-            )
-            next_b0_regs = (
-                next_b00,
-                next_b01,
-                next_b02,
-                next_b03,
-                next_bs00,
-                next_bs01,
-                next_bs02,
-                next_bs03,
-            )
-
-            return next_a0_regs, next_b0_regs, next_scales_ready, refill_scales
-
-        def hk_one_k_tail_with_next(
-            cur_a, cur_b, next_a, next_b, a0_regs, b0_regs, cur_scales, next_scales
-        ):
-            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
-
-            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
-            b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-
-            b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
-            b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
-            b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
-            b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
-
-            mfma_4n(_acc_idx(0, 0, 0), a00, as00, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 1, 0), a01, as01, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 2, 0), a02, as02, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 3, 0), a03, as03, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            rocdl.sched_barrier(0)
-            barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
-            a11, as11 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 1)
-            a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
-            a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
-
-            mfma_4n(_acc_idx(1, 0, 0), a00, as00, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 1, 0), a01, as01, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 2, 0), a02, as02, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 3, 0), a03, as03, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            rocdl.sched_barrier(0)
-            barrier(vmcnt=LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
-            mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales, 0, 1)
-            mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales, 0, 2)
-            mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales, 0, 3)
-            mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-
-            next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales, 0, 0)
-            mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales, 0, 1)
-            mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales, 0, 2)
-            mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales, 0, 3)
-            mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
-            hot_loop_scheduler_q_prefetch_4n()
-
-            next_a0_regs = (
-                next_a00,
-                next_a01,
-                next_a02,
-                next_a03,
-                next_as00,
-                next_as01,
-                next_as02,
-                next_as03,
-            )
-            next_b0_regs = (
-                next_b00,
-                next_b01,
-                next_b02,
-                next_b03,
-                next_bs00,
-                next_bs01,
-                next_bs02,
-                next_bs03,
-            )
-
-            return next_a0_regs, next_b0_regs
-
-        def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs, cur_scales):
-            barrier(vmcnt=0, lgkmcnt=0)
-
-            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
-            b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-
-            # Materialize the remaining final-page A/B fragments once.  The
-            # subsequent schedule is entirely register/AGPR traffic.
-            b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
-            b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
-            b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
-            b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
-
-            rocdl.sched_barrier(0)
-            barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
-            a11, as11 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 1)
-            a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
-            a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
-
-            rocdl.sched_barrier(0)
-            barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
-            a_scales = (as00, as01, as02, as03, as10, as11, as12, as13)
-            b_frags = (b00, b01, b02, b03, b10, b11, b12, b13)
-            b_scales = (bs00, bs01, bs02, bs03, bs10, bs11, bs12, bs13)
-
-            # Rolling final-page epilogue.
-            #
-            # Finalize accumulators in their own physical AGPR slots, but delay
-            # each AGPR read/store until several independent final MFMAs have
-            # been issued.
-            #
-            #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
-            #   MFMA 4, drain 1, MFMA 5, drain 2, ...
-            #
-            # The buffer stores are only issued here; they may remain in flight
-            # while later MFMAs and accumulator drains continue.
-            FINAL_EPILOGUE_DEPTH = 4
-            pending = []
-
-            for old_acc_idx in range_constexpr(ACCS_PER_WAVE):
-                subtile_id = old_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
-                local_idx = old_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+            def zero_pinned_accumulators():
+                for ai in range_constexpr(ACCS_PER_WAVE * 4):
+                    llvm.InlineAsmOp(
+                        None,
+                        [],
+                        f"v_accvgpr_write_b32 a[{PIN_ACC_BASE + ai}], 0",
+                        f"~{{a{PIN_ACC_BASE + ai}}}",
+                        has_side_effects=True,
+                    )
+
+            def _inline_asm_i32(asm_string, constraints, operands=None):
+                op = llvm.InlineAsmOp(
+                    T.i32,
+                    operands or [],
+                    asm_string,
+                    constraints,
+                    has_side_effects=True,
+                )
+                return _one_i32_result(op)
+
+            def _one_i32_result(op):
+                # Accept the result attribute names exposed by the supported MLIR Python bindings.
+                return getattr(op, "result", getattr(op, "res", op.results[0]))
+
+            def _to_raw_inline_asm_operand(value):
+                # TODO: Replace arith._to_raw once FlyDSL exposes a supported public
+                # API for passing wrapped values to llvm.InlineAsmOp. _to_raw is
+                # deprecated, but remains heavily used internally by FlyDSL.
+                return arith._to_raw(value)
+
+            def read_physical_accumulator_slot(slot_idx):
+                acc_pin = PIN_ACC_BASE + slot_idx * 4
+                r0 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 0}]", "=v")
+                r1 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 1}]", "=v")
+                r2 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 2}]", "=v")
+                r3 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 3}]", "=v")
+                return Vec.from_elements([r0, r1, r2, r3], fx.Int32).bitcast(fx.Float32)
+
+            # As/Bs are MFMA-ready packed scale words: [K128, row] uint32.
+            # Each loaded dword already contains the four 16-row/16-col MFMA scale
+            # bytes for this lane's 64-row A/B half.  The MFMA instruction selects
+            # the byte via op_sel/op_sel_hi, so there is intentionally no hot-loop
+            # byte extraction and no 0x01010101 broadcast here.
+            c_m_idx = fx.Index(c_m)
+            c_n_idx = fx.Index(c_n)
+            # B-scale row stride: c_n dense, packed G*N grouped (const_expr-folded).
+            c_n_bs_idx = fx.Index(c_n_bs)
+
+            def hot_loop_scheduler_q_refill_2n():
+                # Steady-state Q1 schedule: eight chunks of one K+2 VMEM/LDS
+                # refill pass followed by two MFMAs.
+                for _ in range_constexpr(8):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(2)
+
+                rocdl.sched_barrier(0)
+
+            def hot_loop_scheduler_q0_refill_a1_2n():
+                # TN/NN: one normal A-bottom LDS read per chunk.
+                # NT: one transpose-read A half plus the matching transpose-read
+                # scheduling pressure retained from the passing NT specialization.
+                for _ in range_constexpr(8):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_dsrd(Q0_SCHED_DSRD)
+                    rocdl.sched_mfma(2)
+
+                rocdl.sched_barrier(0)
+
+            def hot_loop_scheduler_q_prefetch_4n():
+                # TN/NN retain two scheduled DS reads per chunk. NT retains four
+                # because both carried operands use two DS_READ_TR instructions.
+                for _ in range_constexpr(8):
+                    rocdl.sched_dsrd(PREFETCH_SCHED_DSRD)
+                    rocdl.sched_mfma(4)
+
+                rocdl.sched_barrier(0)
+
+            def load_a_scale_row(k128, row):
+                # as_expert_k128_off shifts the contraction-128 base to this tile's
+                # expert A-scale block for grouped wgrad (both operands packed on the
+                # token/contraction axis); 0 for every other path.
+                off = (k128 + fx.Index(as_expert_k128_off)) * c_m_idx + bx_m_idx + row
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+                fx.copy(scale_ld_atom, fx.slice(as_div, (None, fx.Int32(off))), reg)
+                return fx.memref_load_vec(reg)[0]
+
+            def load_b_scale_row(k128, row):
+                # bs_expert_k128_off shifts the contraction-128 base to this tile's
+                # expert scale block for grouped NN/NT; 0 for dense and grouped TN.
+                off = (k128 + fx.Index(bs_expert_k128_off)) * c_n_bs_idx + by_n_b_idx + row
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+                fx.copy(scale_ld_atom, fx.slice(bs_div, (None, fx.Int32(off))), reg)
+                return fx.memref_load_vec(reg)[0]
+
+            def load_a_scale_subtile(k128, sm):
+                subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+                a_row = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(lane)
+                a_scale = load_a_scale_row(k128, a_row)
+                return (a_scale, a_scale, a_scale, a_scale)
+
+            def load_b_scale_subtile(k128, sn):
+                subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+                b_row = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(lane)
+                b_scale = load_b_scale_row(k128, b_row)
+                return (b_scale, b_scale, b_scale, b_scale)
+
+            def load_scale_tile(k128):
+                # Load all scale VGPRs needed by this wave for this K128 tile once.
+                # Return order: A-top, A-bottom, B-left, B-right.
+                return (
+                    load_a_scale_subtile(k128, 0),
+                    load_a_scale_subtile(k128, 1),
+                    load_b_scale_subtile(k128, 0),
+                    load_b_scale_subtile(k128, 1),
+                )
+
+            def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
+                # a_expert_k_off shifts the contraction base to this tile's expert
+                # A block for grouped wgrad (dY packed on the token axis); 0 for
+                # every other path.
+                a_g2s.load_one(
+                    lds_a[subtile],
+                    fx.Int32(
+                        _a_global_base(k_base + a_expert_k_off, subtile, c_m, bx_m_idx)
+                    ),
+                    pass_in_subtile,
+                )
+
+            def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
+                # b_expert_k_off shifts the contraction base to this tile's expert
+                # weight block for the grouped transpose-read (NN/NT) path; it is 0
+                # for dense and for grouped TN (which offsets via by_n_b_idx).
+                b_g2s.load_one(
+                    lds_b[subtile],
+                    fx.Int32(
+                        _b_global_base(
+                            k_base + b_expert_k_off, subtile, c_n, by_n_b_idx
+                        )
+                    ),
+                    pass_in_subtile,
+                )
+
+            def stage_a_subtile(k_base, subtile, lds_a):
+                for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
+                    stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a)
+
+            def stage_b_subtile(k_base, subtile, lds_b):
+                for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
+                    stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b)
+
+            def load_frag_half_at_byte_base(lds_page, row_byte_base, half):
+                # Issue exactly one 16-byte LDS read for one K64 half of an MFMA operand.
+                # Keeping the halves separate allows steady-state Q0 to schedule one
+                # A-bottom ds_read_b128 in each refill/MFMA chunk.
+                k_col = reg_lds_k_col0 if half == 0 else reg_lds_k_col1
+                return s2r.load_one(lds_page, fx.Int32(row_byte_base + k_col))
+
+            def pack_frag_halves(x0, x1):
+                return pack_i32x4_i32x8(x0, x1)
+
+            def load_frag_at_byte_base(lds_page, row_byte_base):
+                # Default complete-fragment path used outside the dedicated Q0 schedule.
+                x0 = load_frag_half_at_byte_base(lds_page, row_byte_base, 0)
+                x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
+                return pack_frag_halves(x0, x1)
+
+            def load_normal_b_frag(lds_b, local_row, half):
+                # Physical [N,K] page, ordinary TN-style fixed-row read.
+                half_row = local_row - fx.Index(half * (BLOCK_N // 2))
+                return load_frag_at_byte_base(
+                    lds_b[half],
+                    half_row * fx.Index(BLOCK_K),
+                )
+
+            def load_transposed_frag_half(lds_page, local_x_tile, half):
+                # Exact inverse mapping validated by the MXFP8 NN fragment probe.
+                lane_div16_i32 = fx.Int32(lane_div_16)
+                lane_in16_i32 = fx.Int32(lane_mod_16)
+                source_k = lane_div16_i32 * fx.Int32(16) + lane_in16_i32 // fx.Int32(2)
+                source_x = fx.Int32(local_x_tile) + (lane_in16_i32 % fx.Int32(2)) * fx.Int32(8)
+
+                physical_k, physical_x = swizzle_128(source_k, source_x)
+                base = physical_k * fx.Int32(128) + physical_x
+                other = base ^ fx.Int32(0x440)
+                immediate_offset = 0 if half == 0 else 0x2000
+
+                return s2r.load_one_transpose(
+                    lds_page,
+                    base,
+                    other,
+                    immediate_offset=immediate_offset,
+                )
+
+            def load_transposed_frag(lds_page, local_x_tile):
+                x0 = load_transposed_frag_half(lds_page, local_x_tile, 0)
+                x1 = load_transposed_frag_half(lds_page, local_x_tile, 1)
+                return pack_frag_halves(x0, x1)
+
+            def _acc_idx(subtile_id, mi, ni):
+                return (
+                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+                )
+
+            def pinned_mfma(acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
+                # Fixed physical accumulator bank, visible SSA A/B/scale operands.
+                # acc_idx maps directly to a[PIN_ACC_BASE + 4*acc_idx : +3].
+                # The scale operands are MFMA-ready packed dwords.  mi/ni choose
+                # which of the four bytes inside the A/B scale dword the MFMA uses.
+                acc_pin = PIN_ACC_BASE + acc_idx * 4
+                llvm.InlineAsmOp(
+                    None,
+                    [
+                        _to_raw_inline_asm_operand(a_frag),
+                        _to_raw_inline_asm_operand(b_frag),
+                        _to_raw_inline_asm_operand(a_scale),
+                        _to_raw_inline_asm_operand(b_scale),
+                    ],
+                    "v_mfma_scale_f32_16x16x128_f8f6f4 "
+                    f"a[{acc_pin}:{acc_pin + 3}], "
+                    "$0, $1, "
+                    f"a[{acc_pin}:{acc_pin + 3}], "
+                    "$2, $3 "
+                    f"op_sel:[{mi & 1},{ni & 1},0] "
+                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
+                    f"v,v,v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
+                    has_side_effects=True,
+                )
+
+            def pinned_final_mfma(dst_slot, old_acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
+                # Final-page form used by HK: destination and previous partial sum
+                # may be different AGPR ranges.  Once old_acc_idx is consumed, its
+                # physical slot is dead and can be reused as a later destination.
+                dst_pin = PIN_ACC_BASE + dst_slot * 4
+                old_pin = PIN_ACC_BASE + old_acc_idx * 4
+                llvm.InlineAsmOp(
+                    None,
+                    [
+                        _to_raw_inline_asm_operand(a_frag),
+                        _to_raw_inline_asm_operand(b_frag),
+                        _to_raw_inline_asm_operand(a_scale),
+                        _to_raw_inline_asm_operand(b_scale),
+                    ],
+                    "v_mfma_scale_f32_16x16x128_f8f6f4 "
+                    f"a[{dst_pin}:{dst_pin + 3}], "
+                    "$0, $1, "
+                    f"a[{old_pin}:{old_pin + 3}], "
+                    "$2, $3 "
+                    f"op_sel:[{mi & 1},{ni & 1},0] "
+                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
+                    f"v,v,v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}",
+                    has_side_effects=True,
+                )
+
+            def mfma_4n(acc_base, a_frag, a_scale, b0, b1, b2, b3, bs0, bs1, bs2, bs3):
+                """Emit four N-direction scaled MFMAs into fixed physical AGPR accumulators."""
+                mi = (acc_base // MFMA_N_PER_SUBTILE) % MFMA_M_PER_SUBTILE
+                pinned_mfma(acc_base + 0, a_frag, b0, a_scale, bs0, mi, 0)
+                pinned_mfma(acc_base + 1, a_frag, b1, a_scale, bs1, mi, 1)
+                pinned_mfma(acc_base + 2, a_frag, b2, a_scale, bs2, mi, 2)
+                pinned_mfma(acc_base + 3, a_frag, b3, a_scale, bs3, mi, 3)
+
+            def mfma_2n(acc_base, a_frag, a_scale, b0, b1, bs0, bs1, ni_base):
+                mi = (acc_base // MFMA_N_PER_SUBTILE) % MFMA_M_PER_SUBTILE
+                pinned_mfma(acc_base + 0, a_frag, b0, a_scale, bs0, mi, ni_base + 0)
+                pinned_mfma(acc_base + 1, a_frag, b1, a_scale, bs1, mi, ni_base + 1)
+
+            def store_acc_vector_for_logical_idx(logical_acc_idx, acc):
+                subtile_id = logical_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+                local_idx = logical_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
                 sm = subtile_id // 2
                 sn = subtile_id % 2
                 mi = local_idx // MFMA_N_PER_SUBTILE
                 ni = local_idx % MFMA_N_PER_SUBTILE
 
-                a_frag_idx = sm * MFMA_M_PER_SUBTILE + mi
-                b_frag_idx = sn * MFMA_N_PER_SUBTILE + ni
+                subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+                subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+                row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
+                col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
 
-                # Final MFMA remains in-place.  The logical accumulator's own
-                # AGPR slot is unique and cannot conflict with another pending
-                # result, so no ad-hoc physical-slot permutation is needed.
-                pinned_final_mfma(
-                    old_acc_idx,
-                    old_acc_idx,
-                    a_frags[a_frag_idx],
-                    b_frags[b_frag_idx],
-                    a_scales[a_frag_idx],
-                    b_scales[b_frag_idx],
-                    mi,
+                # Bias depends only on the output-feature (N) coordinate, so read it
+                # once per column and reuse across the four M rows below. Index by
+                # the GLOBAL feature (by_n_idx + col), matching the C store's
+                # c_tile_base_elems fold; the tile-local col alone would reread
+                # bias[0..BLOCK_N) for every N-block.
+                if const_expr(has_bias):
+                    bias_value = load_bias(by_n_idx + col)
+
+                for ii in range_constexpr(4):
+                    row = row_base + fx.Index(ii)
+                    c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                    # Epilogue stages run on the fp32 accumulator, in order, before
+                    # the output-dtype narrowing:
+                    #   value = acc [+ bias]           (pre-activation)
+                    #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
+                    value = Vec(acc)[ii]
+                    if const_expr(has_bias):
+                        value = value + bias_value
+
+                    if const_expr(has_gelu):
+                        # Save the pre-activation (post-bias) value for backward,
+                        # then apply GELU to the C output.
+                        aux_val = value
+                        if output_dtype != torch.float32:
+                            aux_val = aux_val.to(output_fx_dtype)
+                        aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                        fx.memref_store_vec(Vec.filled(1, aux_val, output_fx_dtype), aux_reg)
+                        fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
+                        value = gelu_tanh(value)
+
+                    if output_dtype != torch.float32:
+                        value = value.to(output_fx_dtype)
+                    reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                    fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
+                    fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
+
+            # Explicit register coordinates for HK-style four-quadrant mapping.
+            # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
+            # inside each 128x128 quadrant:
+            #   cA: (warp_m,     warp_n)
+            #   cB: (warp_m,     warp_n + 2)
+            #   cC: (warp_m + 2, warp_n)
+            #   cD: (warp_m + 2, warp_n + 2)
+            reg_lds_k_col0, reg_lds_k_col1 = _normal_read_columns(
+                lane_div_16,
+                lane_mod_16,
+            )
+
+            reg_subtile_m_idx0 = wave_id // 2
+            reg_subtile_n_idx0 = wave_id % 2
+
+            reserve_pinned_accumulators()
+            zero_pinned_accumulators()
+
+            def load_b_subtile_ni_regs(lds_b, scale_tile, sn, ni):
+                subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+                b_scales = scale_tile[2] if sn == 0 else scale_tile[3]
+
+                b_ni = _load_b_ni(
+                    load_transposed_frag,
+                    load_normal_b_frag,
+                    lds_b,
+                    sn,
                     ni,
+                    reg_subtile_n_idx0,
+                    lane_mod_16,
                 )
-                pending.append(old_acc_idx)
+                return b_ni, b_scales[ni]
 
-                # Drain the oldest completed result only after enough newer
-                # independent MFMAs have supplied the MFMA->AGPR-read spacing.
-                if len(pending) == FINAL_EPILOGUE_DEPTH:
-                    drain_acc_idx = pending.pop(0)
+            def load_b_subtile_regs(lds_b, scale_tile, sn):
+                b0, bs0 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 0)
+                b1, bs1 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 1)
+                b2, bs2 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 2)
+                b3, bs3 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 3)
+                return b0, b1, b2, b3, bs0, bs1, bs2, bs3
+
+            def load_a_subtile_mi_half(lds_a, sm, mi, half):
+                subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+
+                return _load_a_half(
+                    load_transposed_frag_half,
+                    load_frag_half_at_byte_base,
+                    lds_a,
+                    sm,
+                    mi,
+                    half,
+                    reg_subtile_m_idx0,
+                    lane_mod_16,
+                )
+
+            def load_a_subtile_mi_regs(lds_a, scale_tile, sm, mi):
+                # Fine-grained A register load for one 16-row M-direction MFMA slice.
+                a_scales = scale_tile[0] if sm == 0 else scale_tile[1]
+                x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
+                x1 = load_a_subtile_mi_half(lds_a, sm, mi, 1)
+                a_mi = pack_frag_halves(x0, x1)
+                a_scale_mi = a_scales[mi]
+                return a_mi, a_scale_mi
+
+            def load_a_subtile_regs(lds_a, scale_tile, sm):
+                a0, as0 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 0)
+                a1, as1 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 1)
+                a2, as2 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 2)
+                a3, as3 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 3)
+                return a0, a1, a2, a3, as0, as1, as2, as3
+
+            def hk_one_k_with_refill(
+                k128,
+                cur_a,
+                cur_b,
+                next_a,
+                next_b,
+                refill_a,
+                refill_b,
+                a0_regs,
+                b0_regs,
+                cur_scales,
+                prev_refill_scales,
+            ):
+                # Scale invariant:
+                #   cur_scales is HK MFMA-ready for K.
+                #   prev_refill_scales is HK MFMA-ready for K+1.
+                #   This iteration issues K+2 scale loads and returns them for the
+                #   next steady iteration or final tail.
+
+                # Wait only far enough for the current page; the next-page refill may remain in flight.
+                barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                # Immediately issue MFMA-ready K+2 scale loads.
+                # They are returned for the next iteration without any in-kernel
+                # byte extraction or broadcast.
+                refill_scales = load_scale_tile(fx.Index(k128 + 2))
+                next_scales_ready = prev_refill_scales
+                # A-top and B-left are both carried as complete 64-row register tiles,
+                # so their LDS half-pages can be refilled immediately.
+                a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
+                b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
+
+                b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
+                b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
+                b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
+                b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
+
+                # Refill the current ping-pong page with K+2, alternating A and B passes.
+                k_refill = fx.Index((k128 + 2) * BLOCK_K)
+
+                # Q0: interleave the current tile's A-bottom LDS reads with K+2
+                # refills and Q0 compute. Each complete A-bottom fragment is assembled
+                # from two independently scheduled K64 halves.
+                rocdl.sched_barrier(0)
+                a10_x0 = load_a_subtile_mi_half(cur_a, 1, 0, 0)
+                stage_a_subtile_pass(k_refill, 0, 0, refill_a)
+                mfma_2n(_acc_idx(0, 0, 0), a00, as00, b00, b01, bs00, bs01, 0)
+
+                a10_x1 = load_a_subtile_mi_half(cur_a, 1, 0, 1)
+                stage_b_subtile_pass(k_refill, 0, 0, refill_b)
+                mfma_2n(_acc_idx(0, 0, 2), a00, as00, b02, b03, bs02, bs03, 2)
+
+                a11_x0 = load_a_subtile_mi_half(cur_a, 1, 1, 0)
+                stage_a_subtile_pass(k_refill, 0, 1, refill_a)
+                mfma_2n(_acc_idx(0, 1, 0), a01, as01, b00, b01, bs00, bs01, 0)
+
+                a11_x1 = load_a_subtile_mi_half(cur_a, 1, 1, 1)
+                stage_b_subtile_pass(k_refill, 0, 1, refill_b)
+                mfma_2n(_acc_idx(0, 1, 2), a01, as01, b02, b03, bs02, bs03, 2)
+
+                a12_x0 = load_a_subtile_mi_half(cur_a, 1, 2, 0)
+                stage_a_subtile_pass(k_refill, 0, 2, refill_a)
+                mfma_2n(_acc_idx(0, 2, 0), a02, as02, b00, b01, bs00, bs01, 0)
+
+                a12_x1 = load_a_subtile_mi_half(cur_a, 1, 2, 1)
+                stage_b_subtile_pass(k_refill, 0, 2, refill_b)
+                mfma_2n(_acc_idx(0, 2, 2), a02, as02, b02, b03, bs02, bs03, 2)
+
+                a13_x0 = load_a_subtile_mi_half(cur_a, 1, 3, 0)
+                stage_a_subtile_pass(k_refill, 0, 3, refill_a)
+                mfma_2n(_acc_idx(0, 3, 0), a03, as03, b00, b01, bs00, bs01, 0)
+
+                a13_x1 = load_a_subtile_mi_half(cur_a, 1, 3, 1)
+                stage_b_subtile_pass(k_refill, 0, 3, refill_b)
+                mfma_2n(_acc_idx(0, 3, 2), a03, as03, b02, b03, bs02, bs03, 2)
+
+                hot_loop_scheduler_q0_refill_a1_2n()
+
+                # Retire the eight distributed A-bottom LDS reads before K+2 refills
+                # overwrite the current page's A-bottom half-page. Keep this wait as
+                # late as possible to maximize read/compute overlap.
+                rocdl.sched_barrier(0)
+                barrier(lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                a10 = pack_frag_halves(a10_x0, a10_x1)
+                a11 = pack_frag_halves(a11_x0, a11_x1)
+                a12 = pack_frag_halves(a12_x0, a12_x1)
+                a13 = pack_frag_halves(a13_x0, a13_x1)
+                as10 = cur_scales[1][0]
+                as11 = cur_scales[1][1]
+                as12 = cur_scales[1][2]
+                as13 = cur_scales[1][3]
+
+                rocdl.sched_barrier(0)
+                stage_b_subtile_pass(k_refill, 1, 0, refill_b)
+                mfma_2n(_acc_idx(1, 0, 0), a00, as00, b10, b11, bs10, bs11, 0)
+
+                stage_a_subtile_pass(k_refill, 1, 0, refill_a)
+                mfma_2n(_acc_idx(1, 0, 2), a00, as00, b12, b13, bs12, bs13, 2)
+
+                stage_b_subtile_pass(k_refill, 1, 1, refill_b)
+                mfma_2n(_acc_idx(1, 1, 0), a01, as01, b10, b11, bs10, bs11, 0)
+
+                stage_a_subtile_pass(k_refill, 1, 1, refill_a)
+                mfma_2n(_acc_idx(1, 1, 2), a01, as01, b12, b13, bs12, bs13, 2)
+
+                stage_b_subtile_pass(k_refill, 1, 2, refill_b)
+                mfma_2n(_acc_idx(1, 2, 0), a02, as02, b10, b11, bs10, bs11, 0)
+
+                stage_a_subtile_pass(k_refill, 1, 2, refill_a)
+                mfma_2n(_acc_idx(1, 2, 2), a02, as02, b12, b13, bs12, bs13, 2)
+
+                stage_b_subtile_pass(k_refill, 1, 3, refill_b)
+                mfma_2n(_acc_idx(1, 3, 0), a03, as03, b10, b11, bs10, bs11, 0)
+
+                stage_a_subtile_pass(k_refill, 1, 3, refill_a)
+                mfma_2n(_acc_idx(1, 3, 2), a03, as03, b12, b13, bs12, bs13, 2)
+                hot_loop_scheduler_q_refill_2n()
+
+                # Leave exactly the K+2 refill and scale loads outstanding. The following
+                # LDS reads consume the already-ready next page, not the page being refilled.
+                rocdl.sched_barrier(0)
+                barrier(
+                    vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES,
+                    lgkmcnt=0,
+                )
+                rocdl.sched_barrier(0)
+
+                next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
+                mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 1)
+                mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 2)
+                mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 3)
+                mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 0)
+                mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 1)
+                mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 2)
+                mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 3)
+                mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                hot_loop_scheduler_q_prefetch_4n()
+
+                next_a0_regs = (
+                    next_a00,
+                    next_a01,
+                    next_a02,
+                    next_a03,
+                    next_as00,
+                    next_as01,
+                    next_as02,
+                    next_as03,
+                )
+                next_b0_regs = (
+                    next_b00,
+                    next_b01,
+                    next_b02,
+                    next_b03,
+                    next_bs00,
+                    next_bs01,
+                    next_bs02,
+                    next_bs03,
+                )
+
+                return next_a0_regs, next_b0_regs, next_scales_ready, refill_scales
+
+            def hk_one_k_tail_with_next(
+                cur_a, cur_b, next_a, next_b, a0_regs, b0_regs, cur_scales, next_scales
+            ):
+                barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+
+                a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
+                b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
+
+                b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
+                b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
+                b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
+                b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
+
+                mfma_4n(_acc_idx(0, 0, 0), a00, as00, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+                mfma_4n(_acc_idx(0, 1, 0), a01, as01, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+                mfma_4n(_acc_idx(0, 2, 0), a02, as02, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+                mfma_4n(_acc_idx(0, 3, 0), a03, as03, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                rocdl.sched_barrier(0)
+                barrier(lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
+                a11, as11 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 1)
+                a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
+                a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
+
+                mfma_4n(_acc_idx(1, 0, 0), a00, as00, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+                mfma_4n(_acc_idx(1, 1, 0), a01, as01, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+                mfma_4n(_acc_idx(1, 2, 0), a02, as02, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+                mfma_4n(_acc_idx(1, 3, 0), a03, as03, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                rocdl.sched_barrier(0)
+                barrier(vmcnt=LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
+                mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales, 0, 1)
+                mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales, 0, 2)
+                mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales, 0, 3)
+                mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+                next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales, 0, 0)
+                mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales, 0, 1)
+                mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales, 0, 2)
+                mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales, 0, 3)
+                mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+                hot_loop_scheduler_q_prefetch_4n()
+
+                next_a0_regs = (
+                    next_a00,
+                    next_a01,
+                    next_a02,
+                    next_a03,
+                    next_as00,
+                    next_as01,
+                    next_as02,
+                    next_as03,
+                )
+                next_b0_regs = (
+                    next_b00,
+                    next_b01,
+                    next_b02,
+                    next_b03,
+                    next_bs00,
+                    next_bs01,
+                    next_bs02,
+                    next_bs03,
+                )
+
+                return next_a0_regs, next_b0_regs
+
+            def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs, cur_scales):
+                barrier(vmcnt=0, lgkmcnt=0)
+
+                a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
+                b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
+
+                # Materialize the remaining final-page A/B fragments once.  The
+                # subsequent schedule is entirely register/AGPR traffic.
+                b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
+                b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
+                b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
+                b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
+
+                rocdl.sched_barrier(0)
+                barrier(lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
+                a11, as11 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 1)
+                a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
+                a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
+
+                rocdl.sched_barrier(0)
+                barrier(lgkmcnt=0)
+                rocdl.sched_barrier(0)
+
+                a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
+                a_scales = (as00, as01, as02, as03, as10, as11, as12, as13)
+                b_frags = (b00, b01, b02, b03, b10, b11, b12, b13)
+                b_scales = (bs00, bs01, bs02, bs03, bs10, bs11, bs12, bs13)
+
+                # Rolling final-page epilogue.
+                #
+                # Finalize accumulators in their own physical AGPR slots, but delay
+                # each AGPR read/store until several independent final MFMAs have
+                # been issued.
+                #
+                #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
+                #   MFMA 4, drain 1, MFMA 5, drain 2, ...
+                #
+                # The buffer stores are only issued here; they may remain in flight
+                # while later MFMAs and accumulator drains continue.
+                FINAL_EPILOGUE_DEPTH = 4
+                pending = []
+
+                for old_acc_idx in range_constexpr(ACCS_PER_WAVE):
+                    subtile_id = old_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+                    local_idx = old_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+                    sm = subtile_id // 2
+                    sn = subtile_id % 2
+                    mi = local_idx // MFMA_N_PER_SUBTILE
+                    ni = local_idx % MFMA_N_PER_SUBTILE
+
+                    a_frag_idx = sm * MFMA_M_PER_SUBTILE + mi
+                    b_frag_idx = sn * MFMA_N_PER_SUBTILE + ni
+
+                    # Final MFMA remains in-place.  The logical accumulator's own
+                    # AGPR slot is unique and cannot conflict with another pending
+                    # result, so no ad-hoc physical-slot permutation is needed.
+                    pinned_final_mfma(
+                        old_acc_idx,
+                        old_acc_idx,
+                        a_frags[a_frag_idx],
+                        b_frags[b_frag_idx],
+                        a_scales[a_frag_idx],
+                        b_scales[b_frag_idx],
+                        mi,
+                        ni,
+                    )
+                    pending.append(old_acc_idx)
+
+                    # Drain the oldest completed result only after enough newer
+                    # independent MFMAs have supplied the MFMA->AGPR-read spacing.
+                    if len(pending) == FINAL_EPILOGUE_DEPTH:
+                        drain_acc_idx = pending.pop(0)
+                        acc = read_physical_accumulator_slot(drain_acc_idx)
+                        store_acc_vector_for_logical_idx(drain_acc_idx, acc)
+
+                # Flush the final results after all final-page MFMAs have issued.
+                for drain_acc_idx in pending:
                     acc = read_physical_accumulator_slot(drain_acc_idx)
                     store_acc_vector_for_logical_idx(drain_acc_idx, acc)
 
-            # Flush the final results after all final-page MFMAs have issued.
-            for drain_acc_idx in pending:
-                acc = read_physical_accumulator_slot(drain_acc_idx)
-                store_acc_vector_for_logical_idx(drain_acc_idx, acc)
+            # Prologue: stage K0/K1 data into ping-pong LDS pages. Scales are not staged in
+            # LDS: As/Bs are already MFMA-ready preshuffled packed uint32 [K128, row],
+            # and load_scale_tile returns the current wave's scale operands in VGPRs.
 
-        # Prologue: stage K0/K1 data into ping-pong LDS pages. Scales are not staged in
-        # LDS: As/Bs are already MFMA-ready preshuffled packed uint32 [K128, row],
-        # and load_scale_tile returns the current wave's scale operands in VGPRs.
+            # Load scales first, so that they become the oldest VMEM ops.
+            scales0 = load_scale_tile(fx.Index(0))
+            scales1 = load_scale_tile(fx.Index(1))
 
-        # Load scales first, so that they become the oldest VMEM ops.
-        scales0 = load_scale_tile(fx.Index(0))
-        scales1 = load_scale_tile(fx.Index(1))
+            stage_a_subtile(fx.Index(0), 0, lds_a0)
+            stage_b_subtile(fx.Index(0), 0, lds_b0)
+            stage_b_subtile(fx.Index(0), 1, lds_b0)
+            stage_a_subtile(fx.Index(0), 1, lds_a0)
 
-        stage_a_subtile(fx.Index(0), 0, lds_a0)
-        stage_b_subtile(fx.Index(0), 0, lds_b0)
-        stage_b_subtile(fx.Index(0), 1, lds_b0)
-        stage_a_subtile(fx.Index(0), 1, lds_a0)
+            stage_a_subtile(fx.Index(BLOCK_K), 0, lds_a1)
+            stage_b_subtile(fx.Index(BLOCK_K), 0, lds_b1)
+            stage_b_subtile(fx.Index(BLOCK_K), 1, lds_b1)
+            stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
 
-        stage_a_subtile(fx.Index(BLOCK_K), 0, lds_a1)
-        stage_b_subtile(fx.Index(BLOCK_K), 0, lds_b1)
-        stage_b_subtile(fx.Index(BLOCK_K), 1, lds_b1)
-        stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
+            rocdl.sched_barrier(0)
+            barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
+            rocdl.sched_barrier(0)
 
-        rocdl.sched_barrier(0)
-        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
-        rocdl.sched_barrier(0)
+            # scales0 is already MFMA-ready; no byte extraction or broadcast is needed.
+            # Keep the hot loop consistent for k=0 and k>0:
+            # K0 is consumed directly.  K1 MFMA-ready scales are carried as
+            # prev_refill_scales and become next_scales_ready at loop entry.
 
-        # scales0 is already MFMA-ready; no byte extraction or broadcast is needed.
-        # Keep the hot loop consistent for k=0 and k>0:
-        # K0 is consumed directly.  K1 MFMA-ready scales are carried as
-        # prev_refill_scales and become next_scales_ready at loop entry.
+            # Seed the carried-register pipeline with K0 A-top. In later steady-state
+            # iterations, Q2/Q3 of the preceding iteration prefetch the next tile's
+            # A-top and B-left register tiles before their LDS half-pages are reused.
+            a0_regs = load_a_subtile_regs(lds_a0, scales0, 0)
 
-        # Seed the carried-register pipeline with K0 A-top. In later steady-state
-        # iterations, Q2/Q3 of the preceding iteration prefetch the next tile's
-        # A-top and B-left register tiles before their LDS half-pages are reused.
-        a0_regs = load_a_subtile_regs(lds_a0, scales0, 0)
+            rocdl.sched_barrier(0)
+            barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
+            rocdl.sched_barrier(0)
 
-        rocdl.sched_barrier(0)
-        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
-        rocdl.sched_barrier(0)
+            # Complete the K0 carried-register seed with B-left.
+            b0_regs = load_b_subtile_regs(lds_b0, scales0, 0)
 
-        # Complete the K0 carried-register seed with B-left.
-        b0_regs = load_b_subtile_regs(lds_b0, scales0, 0)
+            # Main HK loop: exactly one logical K128 per iteration.
+            # Even k consumes and refills LDS0; odd k does the same for LDS1.
+            # Scale tiles follow the same K128 progression but remain in VGPRs.
+            refill_scales = scales1  # K1 scales become the next ready scale tile at loop entry
+            for k128 in range_constexpr(NUM_K_TILES - 2):
+                if (k128 % 2) == 0:
+                    a0_regs, b0_regs, scales1, refill_scales = hk_one_k_with_refill(
+                        k128,
+                        lds_a0,
+                        lds_b0,
+                        lds_a1,
+                        lds_b1,
+                        lds_a0,
+                        lds_b0,
+                        a0_regs,
+                        b0_regs,
+                        scales0,
+                        refill_scales,
+                    )
+                else:
+                    a0_regs, b0_regs, scales0, refill_scales = hk_one_k_with_refill(
+                        k128,
+                        lds_a1,
+                        lds_b1,
+                        lds_a0,
+                        lds_b0,
+                        lds_a1,
+                        lds_b1,
+                        a0_regs,
+                        b0_regs,
+                        scales1,
+                        refill_scales,
+                    )
 
-        # Main HK loop: exactly one logical K128 per iteration.
-        # Even k consumes and refills LDS0; odd k does the same for LDS1.
-        # Scale tiles follow the same K128 progression but remain in VGPRs.
-        refill_scales = scales1  # K1 scales become the next ready scale tile at loop entry
-        for k128 in range_constexpr(NUM_K_TILES - 2):
-            if (k128 % 2) == 0:
-                a0_regs, b0_regs, scales1, refill_scales = hk_one_k_with_refill(
-                    k128,
+            # Common two-page tail. The penultimate tile still uses the Q2/Q3
+            # carry-prefetch scheduler to prepare A-top/B-left for the final tile,
+            # but it performs no K+2 data or scale refill. The final tile performs
+            # compute only. After the steady loop, a0_regs/b0_regs belong to the
+            # next tile to consume, while refill_scales belongs to the page most
+            # recently refilled; therefore tail page order depends on parity:
+            #   even NUM_K_TILES: consume LDS0 then final LDS1
+            #   odd  NUM_K_TILES: consume LDS1 then final LDS0
+            if (NUM_K_TILES % 2) == 0:
+                scales1 = refill_scales
+                a0_regs, b0_regs = hk_one_k_tail_with_next(
                     lds_a0,
                     lds_b0,
                     lds_a1,
                     lds_b1,
-                    lds_a0,
-                    lds_b0,
                     a0_regs,
                     b0_regs,
                     scales0,
-                    refill_scales,
+                    scales1,
                 )
+                hk_one_k_final(lds_a1, lds_b1, a0_regs, b0_regs, scales1)
             else:
-                a0_regs, b0_regs, scales0, refill_scales = hk_one_k_with_refill(
-                    k128,
+                scales0 = refill_scales
+                a0_regs, b0_regs = hk_one_k_tail_with_next(
                     lds_a1,
                     lds_b1,
                     lds_a0,
                     lds_b0,
-                    lds_a1,
-                    lds_b1,
                     a0_regs,
                     b0_regs,
                     scales1,
-                    refill_scales,
+                    scales0,
                 )
+                hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs, scales0)
 
-        # Common two-page tail. The penultimate tile still uses the Q2/Q3
-        # carry-prefetch scheduler to prepare A-top/B-left for the final tile,
-        # but it performs no K+2 data or scale refill. The final tile performs
-        # compute only. After the steady loop, a0_regs/b0_regs belong to the
-        # next tile to consume, while refill_scales belongs to the page most
-        # recently refilled; therefore tail page order depends on parity:
-        #   even NUM_K_TILES: consume LDS0 then final LDS1
-        #   odd  NUM_K_TILES: consume LDS1 then final LDS0
-        if (NUM_K_TILES % 2) == 0:
-            scales1 = refill_scales
-            a0_regs, b0_regs = hk_one_k_tail_with_next(
-                lds_a0,
-                lds_b0,
-                lds_a1,
-                lds_b1,
-                a0_regs,
-                b0_regs,
-                scales0,
-                scales1,
-            )
-            hk_one_k_final(lds_a1, lds_b1, a0_regs, b0_regs, scales1)
+        # Dispatch. Dense runs one XCD-swizzled tile. Grouped runs a persistent
+        # loop over precomputed (pid_m, pid_n, expert) descriptors, selecting the
+        # schedule at compile time (``sched``):
+        #   "worksteal": each iteration claims the next global slot via one atomic
+        #                fetch-add (dynamic load balancing across CUs).
+        #   "static":   each workgroup owns a fixed grid-stride slice of slots
+        #                (slot = blockIdx.x, blockIdx.x + gridDim.x, ...). No atomic
+        #                or LDS broadcast, so it is deadlock-proof; used as a
+        #                heuristic fast path and a correctness reference.
+        def _run_grouped_tile(slot):
+            pid_m = _desc_field(slot, fx.Int32(0))
+            pid_n = _desc_field(slot, fx.Int32(1))
+            expert = _desc_field(slot, fx.Int32(2))
+            process_tile(pid_m, pid_n, expert)
+
+        if const_expr(grouped):
+            if const_expr(sched == "static"):
+                stride = fx.Int32(gpu.grid_dim.x)
+                slot = fx.Int32(gpu.block_id("x"))
+                while slot < num_tiles:
+                    _run_grouped_tile(slot)
+                    slot = slot + stride
+            else:
+                # Single persistent loop, mirroring mega_moe_stage1: claim the next
+                # slot at the TOP of the loop body (atomic + barrier + LDS broadcast,
+                # so every thread sees the same slot), run the tile only when the
+                # slot is in range, and derive the loop-continue flag from that same
+                # broadcast slot. Keeping the barrier at one site with a uniform
+                # continue condition guarantees convergent barriers.
+                active = fx.Int32(1) == fx.Int32(1)
+                while active:
+                    slot = _claim_next_slot()
+                    in_range = slot < num_tiles
+                    if in_range:
+                        _run_grouped_tile(slot)
+                    active = in_range
         else:
-            scales0 = refill_scales
-            a0_regs, b0_regs = hk_one_k_tail_with_next(
-                lds_a1,
-                lds_b1,
-                lds_a0,
-                lds_b0,
-                a0_regs,
-                b0_regs,
-                scales1,
-                scales0,
-            )
-            hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs, scales0)
+            pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
+            process_tile(pid_m, pid_n, fx.Int32(0))
 
     @flyc.jit
     def launch_gemm(
@@ -1500,10 +1720,18 @@ def _compile_kernel(
         Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
+        num_groups: fx.Int32 = 0,
+        work_queue: fx.Tensor = None,
+        work_counter: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # The integration only dispatches aligned shapes; no partial-tile masking exists.
+        # Dense launch: one workgroup per output tile. Grouped launch: a fixed
+        # num-CU grid of persistent workgroups that steal tiles from the atomic
+        # work queue (num_tiles spans the packed [M_total, N] output).
         grid_x = (c_m // BLOCK_M) * (c_n // BLOCK_N)
+        if const_expr(group or wgrad):
+            grid_x = get_num_cus()
         kernel_gemm(
             A,
             As,
@@ -1514,6 +1742,9 @@ def _compile_kernel(
             Aux,
             c_m,
             c_n,
+            num_groups,
+            work_queue,
+            work_counter,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1532,6 +1763,12 @@ def do_gemm(
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
     aux: torch.Tensor = None,
+    group: bool = False,
+    num_groups: int = 0,
+    work_queue: fx.Tensor = None,
+    work_counter: fx.Tensor = None,
+    sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Launch one cached compile-time MXFP8 layout specialization.
 
@@ -1550,7 +1787,32 @@ def do_gemm(
     else:
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
+    # Grouped NN packs B along the contraction axis, so B's contraction dim is
+    # G x A's (Kb_runtime = G*N_out vs K_runtime = N_out). Every other case has
+    # them equal.
+    if group and layout == "NN":
+        assert Kb_runtime == num_groups * K_runtime, (
+            f"grouped NN B.K={Kb_runtime} != num_groups*A.K={num_groups * K_runtime}"
+        )
+    else:
+        assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
+
+    # Grouped wgrad (NT): both operands (dY, X) are packed on the token/contraction
+    # axis to G*M_pad, but the kernel's compile-time contraction is the PER-EXPERT
+    # padded token count M_pad. M_runtime (=N_out) and N_runtime (=K_in) are already
+    # per-expert; only K_runtime must be de-packed.
+    if wgrad:
+        assert K_runtime % num_groups == 0, (
+            f"grouped wgrad contraction {K_runtime} not divisible by num_groups={num_groups}"
+        )
+        K_runtime = K_runtime // num_groups
+
+    # Grouped fwd/dgrad launch over the per-expert output width = C's last dim (TN:
+    # N_out; NN: K_in); the kernel re-derives the packed stride from num_groups.
+    # wgrad keeps M_runtime/N_runtime per-expert (C is packed on the output-M axis,
+    # handled in-kernel via store_m_expert_off).
+    if group:
+        N_runtime = C.shape[-1]
     supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
     assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
     assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
@@ -1573,16 +1835,30 @@ def do_gemm(
         ("C", C),
     )
 
-    expected_as = (K_runtime // _BLOCK_K, M_runtime)
-    expected_bs = (K_runtime // _BLOCK_K, N_runtime)
+    # Packed scale shapes.
+    if wgrad:
+        # wgrad (NT): both A (dY) and B (X) scales are packed on the contraction
+        # axis to G*M_pad/128. A-scale [G*M_pad/128, N_out], B-scale [.., K_in].
+        packed_k128 = (K_runtime * num_groups) // _BLOCK_K
+        expected_as = (packed_k128, M_runtime)
+        expected_bs = (packed_k128, N_runtime)
+    else:
+        expected_as = (K_runtime // _BLOCK_K, M_runtime)
+        # TN packs B along N (column count = G*N_out); NN packs B along the
+        # contraction axis (row count on K128 = G*N_out/128).
+        if group and layout == "NN":
+            expected_bs = (Kb_runtime // _BLOCK_K, N_runtime)
+        else:
+            n_packed = N_runtime * num_groups if group else N_runtime
+            expected_bs = (K_runtime // _BLOCK_K, n_packed)
     assert As.dtype == torch.int32, f"As dtype {As.dtype} != torch.int32 packed scales"
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
     assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
     assert tuple(Bs.shape) == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
-    assert tuple(C.shape) == (
-        M_runtime,
-        N_runtime,
-    ), f"C shape {tuple(C.shape)} != {(M_runtime, N_runtime)}"
+    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad C is the
+    # unpacked (M_runtime, N_runtime).
+    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
+    assert tuple(C.shape) == expected_c, f"C shape {tuple(C.shape)} != {expected_c}"
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
             f"C dtype must be torch.float16, torch.bfloat16, or torch.float32, got {C.dtype}"
@@ -1648,6 +1924,16 @@ def do_gemm(
     else:
         Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
 
+    # Grouped runtime tensors are required by the kernel signature; the dense
+    # binary never dereferences them but still needs placeholder buffers. wgrad
+    # uses the same persistent descriptor queue as the grouped fwd/dgrad path.
+    if group or wgrad:
+        work_queue_arg = work_queue.contiguous().view(-1)
+        work_counter_arg = work_counter.contiguous().view(-1)
+    else:
+        work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
+        work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
+
     _cached_launch(
         K_runtime,
         A.dtype,
@@ -1655,6 +1941,9 @@ def do_gemm(
         C.dtype,
         layout,
         epilogue,
+        group,
+        sched,
+        wgrad,
     )(
         A_arg,
         As_arg,
@@ -1665,6 +1954,9 @@ def do_gemm(
         Aux_arg,
         M_runtime,
         N_runtime,
+        num_groups,
+        work_queue_arg,
+        work_counter_arg,
         stream=stream,
     )
 
@@ -1677,6 +1969,9 @@ def _cached_launch(
     output_dtype: torch.dtype,
     layout: str,
     epilogue: str = "DEFAULT",
+    group: bool = False,
+    sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Cache independent TN/NN/NT binaries with no runtime layout argument."""
     return _compile_kernel(
@@ -1686,6 +1981,9 @@ def _cached_launch(
         output_dtype,
         layout,
         epilogue,
+        group,
+        sched,
+        wgrad,
     )
 
 
@@ -1715,6 +2013,67 @@ def _validate_common_payloads(
         )
 
 
+def _mxfp8_matmul_grouped_wgrad(
+    a,           # dY packed [G*M_pad, N_out], columnwise fp8
+    a_scale,     # [G*M_pad/32, N_out] raw E8M0 uint8
+    b,           # X packed [G*M_pad, K_in], columnwise fp8
+    b_scale,     # [G*M_pad/32, K_in] raw E8M0 uint8
+    D,           # dW packed [G*N_out, K_in]
+    *,
+    stream,
+    num_groups,
+    work_queue,
+    work_counter,
+    sched,
+):
+    """Grouped wgrad (NT) launch: dW = dY^T @ X, contracting over padded tokens.
+
+    Both operands transpose-read (columnwise) and contract over the token axis; the
+    kernel's compile-time contraction is the per-expert padded token count
+    M_pad = (G*M_pad)/G. Experts are packed on the contraction axis for a/b and on
+    the output-M axis for D. Operands arrive already packed + MXFP8-quantized.
+    """
+    gm, n_out = a.shape          # gm = G*M_pad, n_out = per-expert N_out
+    gm_b, k_in = b.shape
+    if gm != gm_b:
+        raise ValueError(f"wgrad a/b token dims differ: {gm} vs {gm_b}")
+    if gm % num_groups != 0:
+        raise ValueError(f"wgrad packed tokens {gm} not divisible by num_groups={num_groups}")
+    m_pad = gm // num_groups
+    if m_pad % SCALE_GROUP_SIZE != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad padded per-expert tokens M_pad={m_pad} must be divisible by "
+            f"{SCALE_GROUP_SIZE}"
+        )
+    if tuple(D.shape) != (num_groups * n_out, k_in):
+        raise ValueError(
+            f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}"
+        )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("FlyDSL MXFP8 wgrad expects raw E8M0 scales as torch.uint8")
+
+    # NT transpose-read: both scales are packed from their columnwise (K-major)
+    # source into the kernel's [K/128, dim] int32 layout.
+    a_scale_hk = pack_mx32_scales_for_hk(a_scale, source_colwise=True, stream=stream)
+    b_scale_hk = pack_mx32_scales_for_hk(b_scale, source_colwise=True, stream=stream)
+
+    do_gemm(
+        a,
+        a_scale_hk,
+        b,
+        b_scale_hk,
+        D,
+        layout="NT",
+        stream=stream,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+    )
+    return D
+
+
 def mxfp8_matmul(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -1727,19 +2086,47 @@ def mxfp8_matmul(
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
     aux: torch.Tensor = None,
+    group: bool = False,
+    num_groups: int = 0,
+    work_queue: fx.Tensor = None,
+    work_counter: fx.Tensor = None,
+    sched: str = "worksteal",
+    wgrad: bool = False,
 ):
     """Normalize scale orientation and launch a compile-time layout binary.
 
     Wrapper-visible contracts:
 
         TN: a [M,K], b [N,K], scales [M,K/32] and [N,K/32]
+            (group): a [M_total,K], b [G*N,K] scales [M_total,K/32] and [G*N,K/32]
         NN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
+            (group): a [M_total,Kc], b [G*Kc,N] scales [M_total,Kc/32] and
+                     [G*Kc/32,N] -- grouped NN is the dgrad dX=dY@W: the kernel
+                     contraction Kc is N_out and experts pack on that axis.
         NT: a [K,M], b [K,N], scales [K/32,M] and [K/32,N]
 
     TN consumes the selected rowwise payloads directly. NN and NT preserve
     K-major payloads and use ``ds_read_b64_tr_b8`` inside their
     compile-time-specialized kernels.
     """
+
+    if wgrad:
+        return _mxfp8_matmul_grouped_wgrad(
+            a,
+            a_scale,
+            b,
+            b_scale,
+            D,
+            stream=stream,
+            num_groups=num_groups,
+            work_queue=work_queue,
+            work_counter=work_counter,
+            sched=sched,
+        )
+
+    if group and layout not in ("TN", "NN"):
+        raise ValueError("FlyDSL MXFP8 Group GEMM only supports the TN and NN layouts")
+
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
@@ -1755,12 +2142,55 @@ def mxfp8_matmul(
         k, m = a.shape
         kb, n = b.shape
 
-    if kb != k:
+    # Grouped GEMM is G INDEPENDENT matmuls stacked into one launch, not a dense
+    # A @ B_packed. Where the packed B axis lands, and hence which operand shape
+    # unpacks, depends on the layout:
+    #
+    #   TN forward (C = A @ B^T): B is packed [G*N_out, K] on the OUTPUT-N axis.
+    #     The kernel-K contraction (K_in) matches A's K, so kb == k. The output
+    #     width unpacks: n = G*N_out -> n_out = N_out. D = [M_total, N_out].
+    #     (Per expert g: A_g[m_g,K] @ W_g^T[K,N_out] = D_g[m_g,N_out]; stacking the
+    #     rows gives [M_total, N_out] -- the packed G*N_out rows are storage only,
+    #     never the output width; a dense A@B_packed^T would give [M_total,G*N_out],
+    #     G x too much compute, which grouped GEMM avoids.)
+    #
+    #   NN dgrad (dX = dY @ W): the kernel CONTRACTION is N_out, and B=W is packed
+    #     [G*N_out, K_in] on that CONTRACTION axis. So B's first dim kb = G*N_out
+    #     is G x A's per-expert contraction k = N_out (kb != k by design), and the
+    #     output width n = K_in is NOT packed. D = [M_total, K_in] = (m, n).
+    if group and layout == "TN":
+        if n % num_groups != 0:
+            raise ValueError(
+                f"Grouped MXFP8 TN packed N={n} is not divisible by num_groups={num_groups}"
+            )
+        n_out = n // num_groups
+        expected_kb = k  # contraction unpacked; B rows already per-K
+    elif group and layout == "NN":
+        if kb % num_groups != 0:
+            raise ValueError(
+                f"Grouped MXFP8 NN packed contraction={kb} not divisible by "
+                f"num_groups={num_groups}"
+            )
+        if kb // num_groups != k:
+            raise ValueError(
+                f"Grouped MXFP8 NN per-expert contraction {kb // num_groups} "
+                f"!= A contraction {k}"
+            )
+        n_out = n  # output width (K_in) is not packed
+        expected_kb = kb  # B rows are G*N_out, checked above
+    else:
+        n_out = n
+        expected_kb = k
+
+    if kb != expected_kb:
         raise ValueError(
             f"Incompatible MXFP8 {layout} operands: A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
-    if tuple(D.shape) != (m, n):
-        raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n)}")
+
+    # D is the full stacked output [M_total, n_out]; expert g writes its
+    # [m_g, n_out] slice into rows [group_offs[g], group_offs[g+1]).
+    if tuple(D.shape) != (m, n_out):
+        raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n_out)}")
     if k % SCALE_GROUP_SIZE != 0:
         raise FlyDSLUnsupportedError(
             f"K={k} must be divisible by MXFP8 scale group size {SCALE_GROUP_SIZE}"
@@ -1772,9 +2202,12 @@ def mxfp8_matmul(
         expected_a_scale = (m, k // SCALE_GROUP_SIZE)
 
     if layout == "TN":
+        # Grouped TN packs B along N, so the B scale spans n = G*N_out rows.
         expected_b_scale = (n, k // SCALE_GROUP_SIZE)
     else:
-        expected_b_scale = (k // SCALE_GROUP_SIZE, n)
+        # NN/NT B scale is [contraction/32, N]. Grouped NN packs B along the
+        # contraction axis, so use kb (= G*N_out) not the per-expert k.
+        expected_b_scale = (kb // SCALE_GROUP_SIZE, n)
 
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
@@ -1843,12 +2276,17 @@ def mxfp8_matmul(
         a_scale_hk,
         b_kernel,
         b_scale_hk,
-        D.view(m, n),
+        D.view(m, n_out),
         layout=layout,
         stream=stream,
         epilogue=epilogue,
         bias=bias,
-        aux=aux.view(m, n) if aux is not None else None,
+        aux=aux.view(m, n_out) if aux is not None else None,
+        group=group,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
     )
     return D
 

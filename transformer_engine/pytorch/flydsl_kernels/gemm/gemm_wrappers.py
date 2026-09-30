@@ -1008,6 +1008,249 @@ def _run_mxfp8(
     return D, aux
 
 
+# Above this many persistent-loop rounds, dynamic atomic work-stealing pays for
+# itself; below it a single grid-stride sweep already balances the tiles, so the
+# atomic-free static schedule is preferred. Matches the HK reference's SCHED_ROUNDS.
+_GROUPED_SCHED_ROUNDS = 4
+
+
+def _select_grouped_sched(num_tiles: int, device) -> str:
+    """Pick the grouped-GEMM schedule: 'worksteal' (atomic) or 'static' (grid-stride).
+
+    Honors the NVTE_FLYDSL_GROUPED_SCHED override ('auto', 'static', 'worksteal')
+    for testing; otherwise applies the round-count heuristic against the CU grid.
+    """
+    override = os.getenv("NVTE_FLYDSL_GROUPED_SCHED", "auto").lower()
+    if override in ("static", "worksteal"):
+        return override
+    if override not in ("auto", ""):
+        raise ValueError(
+            f"NVTE_FLYDSL_GROUPED_SCHED must be auto|static|worksteal, got {override!r}"
+        )
+    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * num_cus else "worksteal"
+
+
+def _run_mxfp8_grouped(
+    a_data,
+    a_scale,
+    b_data,
+    b_scale,
+    D,
+    *,
+    group_offs,
+    m_total,
+    n,
+    k,
+    output_dtype: torch.dtype,
+    layout: str = "TN",
+    bias=None,
+):
+    """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel.
+
+    Two layouts, both single packed launches spanning all groups:
+
+      TN (forward, C = A @ B^T):
+        a = packed activations   [M_total, K]      scales [M_total, K/32]
+        b = packed weights        [G*N,     K]      scales [G*N,     K/32]
+        output width n = N_out (per expert); experts pack on B's output-N axis.
+
+      NN (dgrad, dX = dY @ W):
+        a = packed grad_output    [M_total, N_out]  scales [M_total, N_out/32]
+        b = packed weights        [G*N_out, K_in]   scales [G*N_out/32, K_in]
+        output width n = K_in; experts pack on B's contraction (N_out) axis.
+
+    In both, ``k`` is A's per-expert contraction (TN: K_in; NN: N_out) and ``n`` is
+    the output width. Each group ``g`` owns activation/grad rows
+    ``[group_offs[g], group_offs[g+1])``; ``group_offs`` is consumed on the host to
+    build the persistent kernel's per-tile ``(pid_m, pid_n, expert)`` descriptor
+    queue, so the kernel does no group lookup. Operands arrive already
+    MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
+    """
+    if layout not in ("TN", "NN"):
+        raise FlyDSLUnsupportedError(f"FlyDSL MXFP8 grouped GEMM supports TN/NN, got {layout}")
+    if k % 32 != 0:
+        raise FlyDSLUnsupportedError(f"K={k} must be divisible by MXFP8 scale group size 32")
+    if n % 128 != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP8 grouped GEMM requires output width N divisible by 128, got N={n}"
+        )
+
+    a_fp8_dtype = getattr(a_data, "_fp8_dtype", None)
+    b_fp8_dtype = getattr(b_data, "_fp8_dtype", None)
+    if a_data.dtype == torch.uint8:
+        a_data = reinterpret_as_fp8_tensor(a_data, a_fp8_dtype)
+    if b_data.dtype == torch.uint8:
+        b_data = reinterpret_as_fp8_tensor(b_data, b_fp8_dtype)
+
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("FlyDSL MXFP8 grouped GEMM expects raw E8M0 scales as torch.uint8")
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=torch.Size((m_total, n)),
+        dtype=output_dtype,
+        device=a_data.device,
+        backend_name=f"MXFP8 grouped {layout}",
+    )
+
+    # Persistent-kernel work distribution:
+    #   work_queue   [num_tiles, 3] int32 -- one precomputed (pid_m, pid_n, expert)
+    #                descriptor per output tile. The host bakes the tile->expert
+    #                mapping here so the kernel needs no in-kernel search, and may
+    #                permute the rows (XCD-aware, group-balanced) freely.
+    #   work_counter [1] int32 -- shared atomic slot dispenser, zeroed per launch.
+    # A workgroup claims slot = atomicAdd(work_counter, 1), reads work_queue[slot],
+    # and repeats until slot >= num_tiles.
+    from .mxfp8_gemm import BLOCK_M, BLOCK_N
+
+    num_groups = int(group_offs.numel()) - 1
+    num_pid_n = n // BLOCK_N
+    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
+
+    # Per-expert M-block ranges over the packed [M_total, N] output. Each expert's
+    # token count must be BLOCK_M-aligned (enforced upstream by the tiling check),
+    # so tiles never straddle a group boundary.
+    descriptors = []
+    for g in range(num_groups):
+        m_start_blk = int(group_offs_cpu[g]) // BLOCK_M
+        m_end_blk = int(group_offs_cpu[g + 1]) // BLOCK_M
+        for pid_m in range(m_start_blk, m_end_blk):
+            for pid_n in range(num_pid_n):
+                descriptors.append((pid_m, pid_n, g))
+
+    num_tiles = len(descriptors)
+    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=a_data.device).reshape(-1)
+    work_counter = torch.zeros(1, dtype=torch.int32, device=a_data.device)
+
+    # Schedule selection (compile-time specialization on the kernel side):
+    #   "worksteal": persistent atomic tile-claiming, best for imbalanced experts.
+    #   "static":    grid-stride slot ownership, no atomic; deadlock-proof.
+    # Heuristic mirrors the HK reference: when the tile count is small relative to
+    # the launch grid, one grid-stride sweep already balances well, so the static
+    # path avoids atomic contention. NVTE_FLYDSL_GROUPED_SCHED overrides for tests.
+    sched = _select_grouped_sched(num_tiles, a_data.device)
+
+    epilogue, bias_arg = _resolve_epilogue(bias, n)
+    mxfp8_matmul(
+        a_data,
+        a_scale,
+        b_data,
+        b_scale,
+        D.view(m_total, n),
+        layout=layout,
+        epilogue=epilogue,
+        bias=bias_arg,
+        group=True,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+    )
+    return D
+
+
+def _run_mxfp8_grouped_wgrad(
+    dy_cols,          # list[G] of per-expert dY columnwise fp8 data, each [m_e, N_out]
+    dy_scales,        # list[G] of per-expert dY columnwise scale, each [m_e/32, N_out]
+    x_cols,           # list[G] of per-expert X  columnwise fp8 data, each [m_e, K_in]
+    x_scales,         # list[G] of per-expert X  columnwise scale, each [m_e/32, K_in]
+    dW,               # output [G*N_out, K_in]
+    *,
+    m_splits,         # list[int] per-expert token counts
+    n_out,
+    k_in,
+    dy_fp8_dtype,
+    x_fp8_dtype,
+    output_dtype,
+):
+    """Grouped MXFP8 wgrad (NT): dW_e = dY_e^T @ X_e, per expert, one launch.
+
+    Fixed uniform padding (phase 1): every expert's token count m_e is padded up to
+    a common M_pad (a multiple of BLOCK_M and 32); the padded rows are zero, so they
+    contribute nothing to the token-axis contraction -- no atomics or masking needed,
+    the dense NT pipeline runs unchanged. dY and X are packed on the contraction
+    (token) axis to [G*M_pad, *]; dW is packed on the output-M axis to [G*N_out, K_in]
+    and each expert's output tile is written via the kernel's store_m_expert_off.
+    """
+    from .mxfp8_gemm import BLOCK_M, BLOCK_N, SCALE_GROUP_SIZE
+
+    num_groups = len(m_splits)
+    device = dW.device
+    if n_out % BLOCK_M != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad requires N_out divisible by BLOCK_M={BLOCK_M}, got {n_out}"
+        )
+    if k_in % BLOCK_N != 0:
+        raise FlyDSLUnsupportedError(
+            f"wgrad requires K_in divisible by BLOCK_N={BLOCK_N}, got {k_in}"
+        )
+
+    # Uniform pad target: the largest per-expert token count, rounded up to BLOCK_M
+    # (also a multiple of 32). Enforce the two-page pipeline minimum (>= 4 K128
+    # tiles => M_pad >= 512).
+    max_m = max(int(m) for m in m_splits)
+    m_pad = ((max_m + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
+    m_pad = max(m_pad, 512)
+
+    def _pad_rows(t, rows):
+        if t.size(0) == rows:
+            return t.contiguous()
+        out = t.new_zeros((rows, *t.shape[1:]))
+        out[: t.size(0)].copy_(t)
+        return out
+
+    scale_rows = m_pad // SCALE_GROUP_SIZE
+    dy_data = torch.cat([_pad_rows(t, m_pad) for t in dy_cols], dim=0)
+    dy_scale = torch.cat([_pad_rows(t, scale_rows) for t in dy_scales], dim=0)
+    x_data = torch.cat([_pad_rows(t, m_pad) for t in x_cols], dim=0)
+    x_scale = torch.cat([_pad_rows(t, scale_rows) for t in x_scales], dim=0)
+
+    if dy_data.dtype == torch.uint8:
+        dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
+    if x_data.dtype == torch.uint8:
+        x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
+
+    dW = _validate_or_allocate_output(
+        dW,
+        shape=torch.Size((num_groups * n_out, k_in)),
+        dtype=output_dtype,
+        device=device,
+        backend_name="MXFP8 grouped wgrad NT",
+    )
+
+    # Descriptor queue: one (pid_m, pid_n, expert) per output tile of every expert's
+    # [N_out, K_in] weight-gradient block. pid_m/pid_n are LOCAL (per-expert); the
+    # kernel re-packs the output row via expert*N_out.
+    num_pid_m = n_out // BLOCK_M
+    num_pid_n = k_in // BLOCK_N
+    descriptors = [
+        (pid_m, pid_n, g)
+        for g in range(num_groups)
+        for pid_m in range(num_pid_m)
+        for pid_n in range(num_pid_n)
+    ]
+    num_tiles = len(descriptors)
+    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
+    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
+    sched = _select_grouped_sched(num_tiles, device)
+
+    mxfp8_matmul(
+        dy_data,
+        dy_scale,
+        x_data,
+        x_scale,
+        dW,
+        group=False,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+    )
+    return dW
+
+
 def _select_fp8_storage_for_layout(A, transa, B, transb):
     """Select existing TE FP8 backings and normalize to one core contract.
 
