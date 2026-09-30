@@ -28,6 +28,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by NVTE_MXFP4_1D_SCALING");
   NVTE_CHECK(!IS_DBIAS, "IS_DBIAS is not supported by NVTE_MXFP4_1D_SCALING");
   NVTE_CHECK(!IS_DACT, "IS_DACT is not supported by NVTE_MXFP4_1D_SCALING");
+  NVTE_CHECK(input.dtype() == DType::kBFloat16,
+             "MXFP4 quantization only supports BF16 input (got ", to_string(input.dtype()), ")");
 
   {
     hipDeviceProp_t prop;
