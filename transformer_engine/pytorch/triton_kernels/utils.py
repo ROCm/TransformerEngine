@@ -85,7 +85,7 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
     if isinstance(ln_out, MXFP8Tensor):
         return ln_out.dequantize(dtype=out_dtype).to("cuda")
     # TODO(micky774): Remove when kernels properly support MXFP8 as a fused operation
-    if isinstance(quantizer, MXFP8Quantizer):
+    if isinstance(quantizer, (MXFP8Quantizer, MXFP4Quantizer)):
         return torch.empty(input_shape, dtype=out_dtype, device='cuda')
 
     # TODO: remove when triton kernels support fp8 current scaling

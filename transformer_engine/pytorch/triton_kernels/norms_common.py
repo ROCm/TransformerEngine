@@ -401,11 +401,14 @@ def _te_norm_fwd_triton(
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
     elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or IS_FP8_BLOCKWISE or isinstance(quantizer, (NVFP4Quantizer, MXFP4Quantizer)):
-        _out = quantizer.make_empty(
-            input_tensor.shape,
-            dtype=te_dtype_to_torch_dtype(otype),
-            device=input_tensor.device
-        )
+        if isinstance(quantizer, MXFP4Quantizer) and ln_out is not None:
+            _out = ln_out
+        else:
+            _out = quantizer.make_empty(
+                input_tensor.shape,
+                dtype=te_dtype_to_torch_dtype(otype),
+                device=input_tensor.device
+            )
         if isinstance(_out, QuantizedTensor):
             out = quantizer.quantize(out, out=_out)
         else:

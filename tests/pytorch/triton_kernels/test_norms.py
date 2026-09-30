@@ -94,13 +94,11 @@ test_shapes_by_norm = (
 test_quantizations = ((None, False, None),)
 test_quantizations += tuple(
     product(
-        ('fp8', 'mxfp8'),
+        ('fp8', 'mxfp8', 'mxfp4'),
         (True, False),
         (None, 'quantized')
     )
 )
-# The Triton norm has no preallocated-ln_out path for MXFP4.
-test_quantizations += tuple(product(('mxfp4',), (True, False), (None,)))
 
 _triton_funcs = {
     "fwd": {
@@ -284,6 +282,8 @@ class TestNorms:
 
         # run the triton path
         ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if quantization == "mxfp4" and ln_out_mode is not None:
+            assert ln_out_triton is fwd_args["triton"]["ln_out"], "Expected the preallocated ln_out to be returned."
 
         # run the reference hipified kernel path
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
