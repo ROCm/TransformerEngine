@@ -2267,7 +2267,7 @@ class FusedAttention(torch.nn.Module):
                 # NVIDIA-only, so short-circuit on ROCm before touching that enumerator.
                 IS_HIP_EXTENSION
                 or fp8
-                or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"

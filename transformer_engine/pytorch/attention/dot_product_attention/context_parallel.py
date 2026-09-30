@@ -3198,9 +3198,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
             fused_attn_backend = (
-                tex.NVTE_Fused_Attn_Backend.NVTE_CK
+                FusedAttnBackend["CK"]
                 if IS_HIP_EXTENSION
-                else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                else FusedAttnBackend["F16_arbitrary_seqlen"]
             )
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
@@ -3919,9 +3919,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             rng_states[i],
                         ]
                         fused_attn_backend = (
-                            tex.NVTE_Fused_Attn_Backend.NVTE_CK
+                            FusedAttnBackend["CK"]
                             if IS_HIP_EXTENSION
-                            else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                            else FusedAttnBackend["F16_arbitrary_seqlen"]
                         )
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout

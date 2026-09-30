@@ -12,6 +12,7 @@ import math
 from typing import Any, Optional
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
@@ -617,7 +618,7 @@ class BasicLinear(BasicOperation):
         # Some FP8 recipes (e.g. blockwise) require a split accumulator for fprop; honor the
         # recipe's choice instead of the module default (matches module/linear.py).
         use_split_accumulator = _2X_ACC_FPROP
-        if with_quantized_compute:
+        if IS_HIP_EXTENSION and with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
