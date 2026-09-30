@@ -142,19 +142,25 @@ run_test_config(){
 run_test_config_mgpu(){
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
-    run_default_fa_lbl "mgpu" 3 test_sanity_import.py
-    run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
+    #TE_CI_GPUS=N tells the mGPU queue this item needs only N GPUs, so it can
+    #share the box. Declare the smallest N that runs every case the full box
+    #does; leave it off -- whole box -- for a test that sizes its world to
+    #torch.cuda.device_count(), where fewer GPUs silently shrinks coverage:
+    #test_rocm_fused_overlap (4 and 8 ranks), distributed/test_fusible_ops,
+    #test_torch_fsdp2 and test_torch_fsdp2_fp8.
+    TE_CI_GPUS=2 run_default_fa_lbl "mgpu" 3 test_sanity_import.py
+    TE_CI_GPUS=2 run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 3 distributed/test_rocm_fused_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
-    run_default_fa 2 distributed/test_numerics.py
-    run_default_fa 2 distributed/test_sanity.py
-    run_default_fa 2 distributed/test_numerics_exact.py
+    TE_CI_GPUS=4 run_default_fa 2 distributed/test_numerics.py
+    TE_CI_GPUS=2 run_default_fa 2 distributed/test_sanity.py
+    TE_CI_GPUS=4 run_default_fa 2 distributed/test_numerics_exact.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then
-        run 2 attention/test_attention_with_cp.py -k "with_fused"
+        TE_CI_GPUS=4 run 2 attention/test_attention_with_cp.py -k "with_fused"
     elif [ $_fus_attn = flash ]; then
-        run 3 attention/test_attention_with_cp.py -k "with_flash"
+        TE_CI_GPUS=4 run 3 attention/test_attention_with_cp.py -k "with_flash"
     fi
 }
 

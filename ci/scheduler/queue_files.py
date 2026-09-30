@@ -5,7 +5,7 @@
 
 """The ``timings.tsv`` contract, shared by the two tools that read it.
 
-``run_queue_sgpu.sh`` appends one row per work item as it dispatches. Two tools
+``run_queue.sh`` appends one row per work item as it finishes. Two tools
 consume that file afterwards -- ``build_weights.py`` to learn the next run's
 schedule and ``schedule_report.py`` to report on this one
 
@@ -13,7 +13,8 @@ Columns, in order:
 
   label       suite label, e.g. "torch"
   tag         work item within the suite, or "whole" for an opaque suite
-  gpu         HIP device id it ran on, as written (ids need not start at zero)
+  gpus        HIP device ids it ran on, comma-separated as written (ids need
+              not start at zero); a single id for an sGPU item
   secs        wall-clock duration
   rc          exit code of the suite invocation
   start_off   seconds from the start of the queue to this item's start
@@ -21,16 +22,18 @@ Columns, in order:
   est         the weight used to schedule it, or the caller's default weight
   incomplete  1 if the item was cut off mid-way
 
-And one column derived on read:
+And columns derived on read:
 
+  width       how many GPUs the item held, the length of ``gpus``
+  gpu_secs    ``secs * width``, the GPU-time the item took off the box
   measured    whether ``secs`` is what the item costs, or merely where it was
               stopped. See ``read_timings``.
 """
 
 import pandas as pd
 
-COLUMNS = ["label", "tag", "gpu", "secs", "rc", "start_off", "end_off", "est", "incomplete"]
-TEXT_COLUMNS = ["label", "tag", "gpu"]
+COLUMNS = ["label", "tag", "gpus", "secs", "rc", "start_off", "end_off", "est", "incomplete"]
+TEXT_COLUMNS = ["label", "tag", "gpus"]
 NUMERIC_COLUMNS = ["secs", "rc", "start_off", "end_off", "est", "incomplete"]
 
 # rc values that mean the item was killed rather than measured. 124 is a GNU
@@ -63,6 +66,8 @@ def read_timings(path):
     frame[NUMERIC_COLUMNS] = frame[NUMERIC_COLUMNS].astype(int)
 
     frame["name"] = frame["label"] + "/" + frame["tag"]
+    frame["width"] = frame["gpus"].str.count(",") + 1
+    frame["gpu_secs"] = frame["secs"] * frame["width"]
     # Whether the row is a measurement of the item or just a record of where it
     # stopped. Derived here, once, so the tool that learns from these rows and
     # the tool that reports on them cannot come to different answers.

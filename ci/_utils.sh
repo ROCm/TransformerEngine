@@ -423,8 +423,14 @@ pytest_run() {
     # -k expressions are reapplied by the script itself and never have to be
     # serialized here. The suite scripts stay the single source of truth for
     # what runs at each TEST_LEVEL.
+    #
+    # A call site that needs a fixed number of GPUs says so with a TE_CI_GPUS=N
+    # prefix, and the count rides along as a second field. Only the scheduler
+    # reads it -- a plain run still sees every visible GPU. Undeclared leaves the
+    # choice to the scheduler, which gives an mGPU item the whole box: the safe
+    # default for a test that sizes itself to torch.cuda.device_count().
     if [ -n "$TE_CI_LIST_ITEMS" ]; then
-        echo "TE_CI_ITEM $_test_name_tag"
+        echo "TE_CI_ITEM $_test_name_tag${TE_CI_GPUS:+ $TE_CI_GPUS}"
         return
     fi
     _start_ts=`date +%s`

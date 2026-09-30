@@ -222,21 +222,20 @@ jobs:
             || echo "no weight table restored; this run will be unordered"
 
           mkdir -p ci-rerun
-          wc -l ci-rerun/*.tsv 2>/dev/null \
+          wc -l ci-rerun/sgpu/*.tsv 2>/dev/null \
             || echo "no failed-item list restored; this run queues every suite"
           # Present only for items the last attempt could narrow to single
           # tests; the rest of the failed list re-runs whole.
-          wc -l ci-rerun/tests/*.txt 2>/dev/null \
+          wc -l ci-rerun/sgpu/tests/*.txt 2>/dev/null \
             || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
-            -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            te-runner bash /workspace/ci/run_queue_sgpu.sh \
+            te-runner bash /workspace/ci/run_queue.sh --queue sgpu \
               --log-dir /workspace/test-results/logs
 
       - name: Save learned test weights
@@ -278,7 +277,7 @@ jobs:
       # Saved even when the queue passed: the file is then empty, and restoring
       # an empty list is what stops a third attempt re-running the second's work.
       - name: Save this attempt's failed items
-        if: always() && hashFiles('ci-rerun/*') != ''
+        if: always() && hashFiles('ci-rerun/**') != ''
         uses: actions/cache/save@v4
         with:
           path: ci-rerun
@@ -315,8 +314,7 @@ jobs:
           path: |
             test-results/**
             ci-weights/*.txt
-            ci-rerun/*.tsv
-            ci-rerun/tests/*.txt
+            ci-rerun/sgpu/**
           if-no-files-found: ignore
           retention-days: 5
           # A re-run uploads under a name the first attempt already used, which
@@ -328,8 +326,12 @@ jobs:
         if: always()
         run: docker rm -f te-runner || true
 
+  # PyTorch and JAX multi-GPU tests share one 8-GPU runner as a single queue.
+  # Each item runs on the GPUs its call site declares (TE_CI_GPUS in
+  # ci/pytorch.sh and ci/jax.sh) or on the whole box, and items that fit side by
+  # side share it -- see ci/run_queue.sh.
   mgpu_tests:
-    name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
+    name: mGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
@@ -339,7 +341,6 @@ jobs:
       fail-fast: false
       matrix:
         arch_label: [mi30x, mi35x]
-        framework: [pytorch, jax]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -368,89 +369,132 @@ jobs:
       - *run_container
 
       - name: Install packages
-        env:
-          FRAMEWORK: ${{ matrix.framework }}
         run: |
-          docker exec -e FRAMEWORK="$FRAMEWORK" te-runner bash -c "$(cat <<'EOF'
+          docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
 
           TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          if [ "$FRAMEWORK" = "pytorch" ]; then
-            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-          else
-            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          fi
-          test -n "$TE_CORE_PKG" && test -n "$TE_FW_PKG"
+          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
+          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
           pip install --no-deps "$TE_CORE_PKG"
           pip install ninja pybind11[global]
           pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_FW_PKG"
+          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
+          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
           )"
 
-      - name: Run mGPU tests
-        id: mgpu-tests
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-weights
+          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of *this* run; see the sGPU job.
+      - name: Restore the previous attempt's failed items
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-rerun
+          key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
+
+      - name: Run mGPU tests as one queue (pytorch, jax)
+        id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
         timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          case "${{ matrix.framework }}" in
-            pytorch) TEST_SCRIPT=ci/pytorch.sh; LOG_FILE=/workspace/torch_mgpu.log; SUITE_NAME=PyTorch ;;
-            jax)     TEST_SCRIPT=ci/jax.sh;     LOG_FILE=/workspace/jax_mgpu.log;   SUITE_NAME=JAX     ;;
-            *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
-          esac
+          rm -rf test-results
 
-          rm -rf test-results && mkdir -p test-results
+          mkdir -p ci-weights
+          wc -l ci-weights/*.txt 2>/dev/null \
+            || echo "no weight table restored; this run will be unordered"
+
+          mkdir -p ci-rerun
+          wc -l ci-rerun/mgpu/*.tsv 2>/dev/null \
+            || echo "no failed-item list restored; this run queues every suite"
+          wc -l ci-rerun/mgpu/tests/*.txt 2>/dev/null \
+            || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
-            -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e TEST_SCRIPT=$TEST_SCRIPT \
-            -e LOG_FILE=$LOG_FILE \
-            -e SUITE_NAME=$SUITE_NAME \
-            -e NVTE_FRAMEWORK=${{ matrix.framework }} \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash -c "$(cat <<'EOF'
-          #!/usr/bin/bash
-          set -x -o pipefail
-          ulimit -c 0 # Disable core dumps
+            -e GITHUB_ACTIONS \
+            te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
+              --log-dir /workspace/test-results/logs"
 
-          "$TEST_SCRIPT" > "$LOG_FILE" 2>&1
-          test_rc=$?
-
-          if [ $test_rc -ne 0 ]; then
-            echo "::group::[FAILED] ${SUITE_NAME} mGPU Log"
-            cat "$LOG_FILE"
-            echo "::endgroup::"
-            echo "::error::${SUITE_NAME} mGPU tests FAILED."
-          fi
-
-          exit $test_rc
-          EOF
-          )"
+      - name: Save learned test weights
+        if: always() && hashFiles('ci-weights/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-weights
+          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
-          python3 ci/junit_report.py test-results \
-            --title "mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})"
+          python3 ci/junit_report.py test-results/torch-mgpu \
+            --title "mGPU PyTorch (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          python3 ci/junit_report.py test-results/jax-mgpu \
+            --title "mGPU JAX (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          if [ -f test-results/logs/report/schedule.md ]; then
+            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
+
+      - name: Save this attempt's failed items
+        if: always() && hashFiles('ci-rerun/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-rerun
+          key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Check suite failure status
+        if: always()
+        run: |
+          EXIT_STATUS=0
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < ci/ci_mgpu_queue.conf
+          exit $EXIT_STATUS
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
+          name: logs-mgpu-${{ matrix.arch_label }}
           path: |
-            *.log
-            test-results/*.xml
+            test-results/**
+            ci-weights/*.txt
+            ci-rerun/mgpu/**
           if-no-files-found: ignore
           retention-days: 5
+          overwrite: true
 
       - name: Cleanup container
         if: always()

@@ -3,9 +3,9 @@
 #
 # See LICENSE for license information.
 
-"""Order/Update the sGPU scheduler's weight table.
+"""Order/Update the queue scheduler's weight table.
 
-  order  : Read the cached weight table and apply it to sort the scheduler's queue by longest-processing-time first.
+  order  : Read the cached weight table and apply it to sort the scheduler's queue widest-first, then by longest-processing-time first.
   update : Read a finished run's timings and blend them into the cached weight table.
 """
 
@@ -90,7 +90,7 @@ def read_weights(path):
     return weights
 
 
-QUEUE_COLUMNS = 4  # label, cmd, tag, rest
+QUEUE_COLUMNS = 5  # label, cmd, tag, rest, gpus
 
 
 def read_queue(path):
@@ -108,19 +108,32 @@ def read_queue(path):
 
 
 def order_queue(rows, weights, default_weight):
-    """Weight every work item and sort the queue longest-processing-time first.
+    """Weight every work item and sort the queue widest first, then longest first.
 
-    LPT is the standard makespan heuristic: dispatch the long items first and
-    what is left to fill the tail is short, so no GPU is still starting a big
-    item once the others have gone idle. An item the table has never seen takes
-    ``default_weight``, which sorts it first -- see the scheduler for why that
-    gamble is the cheap direction.
+    Within one width this is LPT, the standard makespan heuristic: dispatch the
+    long items first and what is left to fill the tail is short, so no GPU is
+    still starting a big item once the others have gone idle. An item the table
+    has never seen takes ``default_weight``, which sorts it first -- see the
+    scheduler for why that gamble is the cheap direction.
+
+    Width comes before weight because the scheduler dispatches strictly in
+    order, and an item can only start once enough GPUs are free. Run the
+    whole-box items first and they go back to back on an empty box; leave one
+    until later and the box has to drain around it, idling GPUs while it waits.
+    In an sGPU queue every item is one GPU wide and this is plain LPT.
     """
     weighted = [
-        (int(weights.get(item_key(label, tag), default_weight)), label, cmd, tag, rest)
-        for label, cmd, tag, rest in rows
+        (
+            int(weights.get(item_key(label, tag), default_weight)),
+            label,
+            cmd,
+            tag,
+            rest,
+            int(gpus or 1),
+        )
+        for label, cmd, tag, rest, gpus in rows
     ]
-    weighted.sort(key=lambda row: -row[0])
+    weighted.sort(key=lambda row: (-row[5], -row[0]))
     return weighted
 
 
@@ -139,13 +152,17 @@ def plan_lines(queue, weights_path, n_weights, gpu_ids, default_weight):
 
     lines.append("== Queue plan (dispatch order; est = weight used to sort) ==")
     total = 0
-    for position, (weight, label, _cmd, tag, _rest) in enumerate(queue, 1):
-        total += weight
-        lines.append(f"  {position:3d}. est={est(weight):<8} {label:<9} {tag or '(whole suite)'}")
+    for position, (weight, label, _cmd, tag, _rest, gpus) in enumerate(queue, 1):
+        # GPU-time, not wall time: a 4-GPU item takes 4 GPUs off the box for as
+        # long as it runs.
+        total += weight * gpus
+        lines.append(
+            f"  {position:3d}. est={est(weight):<8} gpus={gpus:<2} {label:<9} {tag or '(whole suite)'}"
+        )
     lines.append("")
     lines.append(
-        f"  estimated work {total}s over {n_gpus} GPUs -> lower bound {total / n_gpus:.0f}s"
-        f" (largest item {est(queue[0][0])})"
+        f"  estimated work {total} GPU-s over {n_gpus} GPUs -> lower bound {total / n_gpus:.0f}s"
+        f" (longest item {est(max(row[0] for row in queue))})"
     )
     return lines
 
@@ -310,9 +327,7 @@ def main():
     )
 
     update = sub.add_parser("update", help="fold a finished run's timings into the table")
-    update.add_argument(
-        "timings", metavar="TIMINGS", help="timings.tsv written by run_queue_sgpu.sh"
-    )
+    update.add_argument("timings", metavar="TIMINGS", help="timings.tsv written by run_queue.sh")
     update.add_argument(
         "-o", "--output", required=True, metavar="TABLE", help="weight table to update in place"
     )

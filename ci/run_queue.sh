@@ -3,9 +3,17 @@
 #
 # See LICENSE for license information.
 #
-# Run all sGPU test suites as one global work queue across N GPUs.
+# Run test suites as one global work queue across the GPUs of this box.
 #
-# Usage: run_queue_sgpu.sh [-l|--log-dir <dir>] [<config>...]
+# Usage: run_queue.sh [-q|--queue sgpu|mgpu] [-l|--log-dir <dir>] [<config>...]
+#
+# Two queues share this script, selected by --queue (default sgpu):
+#
+#   sgpu  the suites' single-GPU tests (TEST_SGPU=1); every item takes one GPU.
+#         Default config ci/ci_sgpu_queue.conf.
+#   mgpu  the suites' multi-GPU tests (TEST_MGPU=1). An item takes the GPU count
+#         its call site declares with TE_CI_GPUS=N, and the whole box when it
+#         declares none. Default config ci/ci_mgpu_queue.conf.
 #
 # Config format (one suite per line; # comments and blank lines are ignored):
 #   <label>  <logfile>  <mode>  <command> [args...]
@@ -15,13 +23,20 @@
 # The queue uses every GPU it can see; restrict it with HIP_VISIBLE_DEVICES.
 #
 # Example usage:
-#   TEST_LEVEL=1 ci/run_queue_sgpu.sh
-#   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 ci/run_queue_sgpu.sh
+#   TEST_LEVEL=1 ci/run_queue.sh
+#   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 ci/run_queue.sh
+#   TEST_LEVEL=3 ci/run_queue.sh --queue mgpu
 set -u
 SCRIPT_START_TS=$(date +%s)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Phase 4 hands GPUs out with `wait -n -p`, which bash grew in 5.1
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+    echo "Error: bash 5.1 or newer is required (this is ${BASH_VERSION})" >&2
+    exit 1
+fi
 
 # Three directories in the repo root:
 #
@@ -69,35 +84,46 @@ else
     log_warn()  { echo "Warning: $*" >&2; }
 fi
 
-if [[ -n "${TEST_MGPU:-}" ]]; then
-    log_warn "ignoring TEST_MGPU=${TEST_MGPU}: this queue only dispatches single-GPU items"
-fi
-export TEST_SGPU=1
-export TEST_MGPU=""
-
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
+QUEUE="sgpu"
+USAGE="Usage: $0 [-q|--queue sgpu|mgpu] [-l|--log-dir <dir>] [<config>...]"
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -q|--queue)
+            QUEUE="$2"; shift 2 ;;
+        --queue=*)
+            QUEUE="${1#*=}"; shift ;;
         -l|--log-dir)
             LOG_DIR="$2"; shift 2 ;;
         --log-dir=*)
             LOG_DIR="${1#*=}"; shift ;;
         -*)
             echo "Unknown option: $1" >&2
-            echo "Usage: $0 [-l|--log-dir <dir>] [<config>...]" >&2
+            echo "$USAGE" >&2
             exit 1 ;;
         *)
             break ;;
     esac
 done
 
+# The suite scripts pick which of their functions run from TEST_SGPU/TEST_MGPU,
+# so the queue sets both and ignores what the caller passed.
+case "$QUEUE" in
+    sgpu) export TEST_SGPU=1 TEST_MGPU="" ;;
+    mgpu) export TEST_SGPU="" TEST_MGPU=1 ;;
+    *)
+        echo "Unknown queue: ${QUEUE}" >&2
+        echo "$USAGE" >&2
+        exit 1 ;;
+esac
+
 # Resolve config paths to absolute
 if [[ $# -gt 0 ]]; then
     for c in "$@"; do CONFIGS+=( "$(realpath -m "$c")" ); done
 else
-    CONFIGS=( "${SCRIPT_DIR}/ci_sgpu_queue.conf" )
+    CONFIGS=( "${SCRIPT_DIR}/ci_${QUEUE}_queue.conf" )
 fi
 for c in "${CONFIGS[@]}"; do
     if [[ ! -f "$c" ]]; then
@@ -176,24 +202,42 @@ if [[ -z "$ARCH" ]]; then
 fi
 echo "== Arch: ${ARCH} =="
 
-# The weight table is keyed by arch and TEST_LEVEL
-WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
+# The weight table is keyed by queue, arch, TEST_LEVEL and GPU count. The GPU
+# count matters because an mGPU item that declares no TE_CI_GPUS takes the whole
+# box, and those are the tests that size themselves to it: the same item on a
+# 4-GPU box is a different amount of work than on an 8-GPU one.
+WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
 mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
+# One-time migration: the sGPU table predates the queue and GPU-count keys. Pick
+# it up under the new name so the first run after the rename is still ordered.
+LEGACY_WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
+if [[ "$QUEUE" == "sgpu" && ! -e "$WEIGHTS_FILE" && -s "$LEGACY_WEIGHTS_FILE" ]]; then
+    mv "$LEGACY_WEIGHTS_FILE" "$WEIGHTS_FILE"
+fi
 
 # What failed last time, keyed the same way. Phase 5 writes it; Phase 2 reads it
 # and narrows the queue to it, which is how "re-run failed jobs" re-runs only the
 # failed tests. Nothing here decides whether this is a re-run -- the file is
 # present only when something put the previous attempt's copy in place, so the
 # scheduler needs no flag to tell the two cases apart.
-RERUN_FILE="${REPO_ROOT}/ci-rerun/failed.${ARCH}.l${TEST_LEVEL:-99}.tsv"
-mkdir -p "$(dirname "$RERUN_FILE")" 2>/dev/null
+RERUN_DIR="${REPO_ROOT}/ci-rerun/${QUEUE}"
+RERUN_FILE="${RERUN_DIR}/failed.${ARCH}.l${TEST_LEVEL:-99}.tsv"
+mkdir -p "$RERUN_DIR" 2>/dev/null
 RERUN_MODE=""   # set by Phase 2 once it has actually narrowed the queue
 
 # A second, finer layer over the same idea: one file of pytest nodeids per item,
 # named "<label>.<tag>.txt", narrowing a re-run of that item to the tests that
 # actually failed instead of the whole file. Strictly optional -- an item with no
 # file here re-runs whole -- so nothing about the queue depends on it being right.
-RERUN_TESTS_DIR="${REPO_ROOT}/ci-rerun/tests"
+RERUN_TESTS_DIR="${RERUN_DIR}/tests"
+
+# How many GPUs an item gets when its call site declares no TE_CI_GPUS. An sGPU
+# item is single-GPU by definition; an undeclared mGPU item gets the whole box,
+# which is exactly what it had before there was a queue.
+case "$QUEUE" in
+    sgpu) DEFAULT_ITEM_GPUS=1 ;;
+    mgpu) DEFAULT_ITEM_GPUS=$NUM_GPUS ;;
+esac
 
 [[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
 
@@ -269,6 +313,29 @@ LIST_TMP="$QUEUE_DIR/.expand.tmp"  # one suite's list, reused per suite
 # QUEUE_DIR covers the same case; this keeps the phase correct on its own.
 : > "$QUEUE_FILE.raw"
 
+# Usage: item_gpus <label> <tag> [<declared>]
+# Echo how many GPUs an item runs on: what its call site declared with
+# TE_CI_GPUS, else the queue's default. A count larger than the box is clamped
+# to the box -- the item still runs, but whatever needed the rest of the GPUs
+# will skip, so say so. Returns 1 on a count that is not a number.
+item_gpus() {
+    local label=$1 tag=$2 want=${3:-}
+    if [[ -z "$want" ]]; then
+        echo "$DEFAULT_ITEM_GPUS"
+        return 0
+    fi
+    if [[ ! "$want" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "${label}/${tag}: TE_CI_GPUS=${want} is not a GPU count"
+        return 1
+    fi
+    if (( want > NUM_GPUS )); then
+        log_warn "${label}/${tag} declares ${want} GPUs but only ${NUM_GPUS} are visible;" \
+                 "running it on ${NUM_GPUS}, so cases needing more will skip"
+        want=$NUM_GPUS
+    fi
+    echo "$want"
+}
+
 EXPAND_TS=$(date +%s)
 echo "== Expanding test suites into work items =="
 for i in "${!SUITE_LABELS[@]}"; do
@@ -292,14 +359,18 @@ for i in "${!SUITE_LABELS[@]}"; do
             tail -20 "$EXPAND_LOG" >&2
             exit 1
         fi
-        for tag in "${tags[@]}"; do
-            printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" >> "$QUEUE_FILE.raw"
+        # Each entry is "<tag>" or "<tag> <gpus>"; see pytest_run in _utils.sh
+        for entry in "${tags[@]}"; do
+            read -r tag declared <<< "$entry"
+            gpus=$(item_gpus "$label" "$tag" "$declared") || exit 1
+            printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" "$gpus" \
+                >> "$QUEUE_FILE.raw"
         done
 
         echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
         TE_CI_LIST_ITEMS=1 TE_CI_SKIP_CHECK_SUPPORTED=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
         all_rc=$?
-        mapfile -t all_tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
+        mapfile -t all_tags < <(sed -n 's/^TE_CI_ITEM \([^ ]*\).*/\1/p' "$LIST_TMP")
 
         if [[ $all_rc -ne 0 ]]; then
             log_warn "suite '${label}': list-all reported an error (rc=${all_rc}) after" \
@@ -311,7 +382,8 @@ for i in "${!SUITE_LABELS[@]}"; do
         fi
         echo "  ${label}: ${#tags[@]} items (${#all_tags[@]} exist at this level)"
     else
-        printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" >> "$QUEUE_FILE.raw"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" "$DEFAULT_ITEM_GPUS" \
+            >> "$QUEUE_FILE.raw"
         printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
         echo "  ${label}: 1 item (opaque)"
     fi
@@ -434,130 +506,166 @@ SETUP_SECS=$(( $(date +%s) - SETUP_TS ))   # Phase 3: CK JIT prebuild + pip prer
 # ---------------------------------------------------------------------------
 # Phase 4: run the queue
 # ---------------------------------------------------------------------------
-IDX_FILE="$QUEUE_DIR/queue.idx"    # next queue line to hand out
-LOCK_FILE="$QUEUE_DIR/queue.lock"  # guards the read-modify-write of IDX_FILE
+# Items are handed out in queue order, each to as many GPUs as its last column
+# asks for. The queue is sorted widest first and then longest first (see
+# build_weights.py), and dispatch is strictly in that order: when the next item
+# does not fit, nothing behind it jumps ahead. Jumping ahead would keep more
+# GPUs busy for a moment, but the item it jumped is wider, and every narrow item
+# let in delays it until they all drain -- which is how a whole-box item ends up
+# starting last. Widest-first makes the rule cheap: the whole-box items run back
+# to back on an empty box, and after them the narrower ones pack without holes.
+#
+# With every item one GPU wide, which is the sGPU queue, this is plain LPT list
+# scheduling: whichever GPU frees first takes the next item.
 
-# Echo the next queue index and advance it. Every worker calls this, so the
-# read-modify-write is done under flock.
-take_next() {
-    local i
-    {
-        flock 9
-        i=$(cat "$IDX_FILE")
-        echo $((i + 1)) > "$IDX_FILE"
-    } 9<>"$LOCK_FILE"
-    echo "$i"
+# Base of the torchrun rendezvous port each item is given, see run_item
+: "${TE_CI_PORT_BASE:=29600}"
+
+# Usage: run_item <gpus> <weight> <label> <cmd> <tag> <rest>
+# Run one item on <gpus> (comma-separated device ids) and append its timing
+# record to TIMINGS_FILE.
+run_item() {
+    local gpus=$1 weight=$2 label=$3 cmd=$4 tag=$5 rest=$6
+    local itemlog rc safetag junit_dir start end incomplete itemcwd only_tests port
+
+    safetag="${tag:-whole}"
+    itemlog="$ITEM_LOG_DIR/${label}.${safetag}.log"
+    if [[ -n "${JUNITXML_PREFIX:-}${JUNITXML_SUFFIX:-}" ]]; then
+        junit_dir="${JUNITXML_PREFIX:-}${label}/"
+        mkdir -p "$junit_dir"
+    else
+        junit_dir=""
+    fi
+
+    # Every item gets a working directory to itself
+    itemcwd="$ITEM_CWD_DIR/${label}.${safetag}"
+    mkdir -p "$itemcwd"
+
+    # Narrow this item to the individual tests that failed the last attempt,
+    # if one left a list for it. List-mode items only: an opaque suite runs
+    # several pytest invocations and a single nodeid list cannot speak for
+    # all of them. Empty reads to the plugin as "run the item whole", which
+    # is also what it does with a list that no longer matches anything.
+    only_tests="$RERUN_TESTS_DIR/${label}.${tag}.txt"
+    [[ -n "$tag" && -n "$junit_dir" && -s "$only_tests" ]] || only_tests=""
+
+    # torchrun binds its rendezvous store on --master-port, 29500 unless the
+    # launch says otherwise, and most distributed tests do not. Two of them
+    # running at once would collide there, so each item gets a default port of
+    # its own through PET_MASTER_PORT, which torchrun reads for an unset flag.
+    # Concurrent items never share a GPU, so the first one names a unique port.
+    port=$(( TE_CI_PORT_BASE + ${gpus%%,*} ))
+
+    # No scheduler-imposed deadline: the suite scripts' own PYTEST_TIMEOUT and
+    # the workflow's timeout-minutes are the only limits, exactly as they are
+    # outside the queue.
+    start=$(date +%s)
+    if [[ -n "$tag" ]]; then
+        ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpus PET_MASTER_PORT=$port \
+            TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
+            JUNITXML_PREFIX="$junit_dir" TE_CI_ONLY_TESTS="$only_tests" \
+            "$cmd" ${rest:-} ) < /dev/null > "$itemlog" 2>&1
+    else
+        ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpus PET_MASTER_PORT=$port \
+            JUNITXML_PREFIX="$junit_dir" \
+            "$cmd" ${rest:-} ) < /dev/null > "$itemlog" 2>&1
+    fi
+    rc=$?
+    end=$(date +%s)
+
+    # Leave the directory only when the item put something in it, so that
+    # cwd/ ends up listing exactly the items that write relative paths.
+    rmdir "$itemcwd" 2>/dev/null
+
+    echo "$rc" > "${itemlog}.rc"
+
+    # A te_ci_result_sink sidecar that outlived the process means pytest
+    # never reached its end-of-session write -- a --timeout-method=thread
+    # expiry, a segfault, or an OOM-kill -- so this duration is where the
+    # item was cut off, not what it costs. rc cannot be used to tell: a
+    # thread-method timeout exits 1, indistinguishable from an ordinary test
+    # failure, which is a perfectly good measurement. build_weights.py drops
+    # the flagged rows rather than teaching the table a truncated number.
+    incomplete=0
+    if [[ -n "$junit_dir" ]]; then
+        if [[ -n "$tag" ]]; then
+            # Items sharing a label share junit_dir, so only this item's own
+            # sidecar may be consulted -- a glob would see the in-flight
+            # sidecar of an item still running on another GPU.
+            [[ -e "${junit_dir}${tag}${JUNITXML_SUFFIX:-}.partial" ]] && incomplete=1
+        elif compgen -G "${junit_dir}*.partial" > /dev/null; then
+            incomplete=1   # opaque suite: it is the only item in its dir
+        fi
+    fi
+
+    # Update timings.tsv: Phase 6 learns the next run's weights
+    # from it. One row appended per item as
+    # it ends, so a killed run still records what had finished.
+    #
+    #   label  tag  gpus  secs  rc  start_off  end_off  est  incomplete
+    #
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$label" "$safetag" "$gpus" "$((end - start))" "$rc" \
+        "$((start - START_TS))" "$((end - START_TS))" "$weight" "$incomplete" \
+        >> "$TIMINGS_FILE"
+
+    # Console progress: one line per item as it finishes
+    #
+    #   time  gpus  start offset  duration  rc  estimate  suite  item
+    #
+    printf '[%s] gpu%-8s t+%-7s %5ss rc=%-4s est=%-8s %-9s %s\n' \
+        "$(date '+%H:%M:%S')" "$gpus" "$((start - START_TS))s" "$((end - start))" \
+        "$rc" "$([[ $weight -eq $DEFAULT_WEIGHT ]] && echo unknown || echo "${weight}s")" \
+        "$label" "$safetag"
 }
 
-# Usage: worker <gpu>
-# Pull items off the queue until it is empty, running each one on <gpu> and
-# appending its timing record to TIMINGS_FILE.
-worker() {
-    local gpu=$1
-    local i line weight label cmd tag rest itemlog rc safetag junit_dir start end incomplete
-    local itemcwd
-    while :; do
-        i=$(take_next)
-        [[ "$i" -gt "$TOTAL_ITEMS" ]] && break
-        line=$(sed -n "${i}p" "$QUEUE_FILE")
-        [[ -z "$line" ]] && break
+# The dispatcher's view of the box: which GPUs an item holds, keyed by the pid
+# of the background run_item running it. A GPU is free when no pid holds it.
+declare -A HELD_BY_PID=()
+declare -A BUSY_GPU=()
 
-        weight="${line%%$'\t'*}"; line="${line#*$'\t'}"
-        label="${line%%$'\t'*}"; line="${line#*$'\t'}"
-        cmd="${line%%$'\t'*}"; line="${line#*$'\t'}"
-        tag="${line%%$'\t'*}"
-        rest="${line#*$'\t'}"
-
-        safetag="${tag:-whole}"
-        itemlog="$ITEM_LOG_DIR/${label}.${safetag}.log"
-        if [[ -n "${JUNITXML_PREFIX:-}${JUNITXML_SUFFIX:-}" ]]; then
-            junit_dir="${JUNITXML_PREFIX:-}${label}/"
-            mkdir -p "$junit_dir"
-        else
-            junit_dir=""
-        fi
-
-        # Every item gets a working directory to itself
-        itemcwd="$ITEM_CWD_DIR/${label}.${safetag}"
-        mkdir -p "$itemcwd"
-
-        # Narrow this item to the individual tests that failed the last attempt,
-        # if one left a list for it. List-mode items only: an opaque suite runs
-        # several pytest invocations and a single nodeid list cannot speak for
-        # all of them. Empty reads to the plugin as "run the item whole", which
-        # is also what it does with a list that no longer matches anything.
-        only_tests="$RERUN_TESTS_DIR/${label}.${tag}.txt"
-        [[ -n "$tag" && -n "$junit_dir" && -s "$only_tests" ]] || only_tests=""
-
-        # No scheduler-imposed deadline: the suite scripts' own PYTEST_TIMEOUT and
-        # the workflow's timeout-minutes are the only limits, exactly as they are
-        # outside the queue.
-        start=$(date +%s)
-        if [[ -n "$tag" ]]; then
-            ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
-                JUNITXML_PREFIX="$junit_dir" TE_CI_ONLY_TESTS="$only_tests" \
-                "$cmd" ${rest:-} ) > "$itemlog" 2>&1
-        else
-            ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="$junit_dir" \
-                "$cmd" ${rest:-} ) > "$itemlog" 2>&1
-        fi
-        rc=$?
-        end=$(date +%s)
-
-        # Leave the directory only when the item put something in it, so that
-        # cwd/ ends up listing exactly the items that write relative paths.
-        rmdir "$itemcwd" 2>/dev/null
-
-        echo "$rc" > "${itemlog}.rc"
-
-        # A te_ci_result_sink sidecar that outlived the process means pytest
-        # never reached its end-of-session write -- a --timeout-method=thread
-        # expiry, a segfault, or an OOM-kill -- so this duration is where the
-        # item was cut off, not what it costs. rc cannot be used to tell: a
-        # thread-method timeout exits 1, indistinguishable from an ordinary test
-        # failure, which is a perfectly good measurement. build_weights.py drops
-        # the flagged rows rather than teaching the table a truncated number.
-        incomplete=0
-        if [[ -n "$junit_dir" ]]; then
-            if [[ -n "$tag" ]]; then
-                # Items sharing a label share junit_dir, so only this item's own
-                # sidecar may be consulted -- a glob would see the in-flight
-                # sidecar of an item still running on another GPU.
-                [[ -e "${junit_dir}${tag}${JUNITXML_SUFFIX:-}.partial" ]] && incomplete=1
-            elif compgen -G "${junit_dir}*.partial" > /dev/null; then
-                incomplete=1   # opaque suite: it is the only item in its dir
-            fi
-        fi
-
-        # Update timings.tsv: Phase 6 learns the next run's weights
-        # from it. One row appended per item as
-        # it ends, so a killed run still records what had finished.
-        #
-        #   label  tag  gpu  secs  rc  start_off  end_off  est  incomplete
-        #
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$label" "$safetag" "$gpu" "$((end - start))" "$rc" \
-            "$((start - START_TS))" "$((end - START_TS))" "$weight" "$incomplete" \
-            >> "$TIMINGS_FILE"
-
-        # Console progress: one line per item as it finishes
-        #
-        #   time  gpu  start offset  duration  rc  estimate  suite  item
-        #
-        printf '[%s] gpu%-2s t+%-7s %5ss rc=%-4s est=%-8s %-9s %s\n' \
-            "$(date '+%H:%M:%S')" "$gpu" "$((start - START_TS))s" "$((end - start))" \
-            "$rc" "$([[ $weight -eq $DEFAULT_WEIGHT ]] && echo unknown || echo "${weight}s")" \
-            "$label" "$safetag"
+# Echo the free GPUs, in GPU_IDS order
+free_gpus() {
+    local gpu
+    for gpu in "${GPU_IDS[@]}"; do
+        [[ -n "${BUSY_GPU[$gpu]:-}" ]] || echo "$gpu"
     done
 }
 
-echo 1 > "$IDX_FILE"
-: > "$LOCK_FILE"
+# Block until one running item finishes, and give its GPUs back
+reap_one() {
+    local pid="" gpu
+    local -a held
+    wait -n -p pid "${!HELD_BY_PID[@]}"
+    [[ -n "$pid" ]] || return 1
+    IFS=, read -r -a held <<< "${HELD_BY_PID[$pid]}"
+    for gpu in "${held[@]}"; do unset 'BUSY_GPU[$gpu]'; done
+    unset 'HELD_BY_PID[$pid]'
+}
+
 : > "$TIMINGS_FILE"
 START_TS=$(date +%s)
 
-for gpu in "${GPU_IDS[@]}"; do
-    worker "$gpu" &
+mapfile -t QUEUE_LINES < "$QUEUE_FILE"
+for line in "${QUEUE_LINES[@]}"; do
+    [[ -z "$line" ]] && continue
+    # Tab is whitespace to read, so a run of them -- the empty tag of an opaque
+    # item, an empty rest -- would collapse into one. Split on a separator that
+    # is not whitespace instead.
+    IFS=$'\x1f' read -r weight label cmd tag rest gpus_wanted <<< "${line//$'\t'/$'\x1f'}"
+    mapfile -t free < <(free_gpus)
+    while (( ${#free[@]} < gpus_wanted )); do
+        reap_one || { log_error "dispatcher lost track of its running items"; exit 1; }
+        mapfile -t free < <(free_gpus)
+    done
+    assigned=( "${free[@]:0:gpus_wanted}" )
+    for gpu in "${assigned[@]}"; do BUSY_GPU[$gpu]=1; done
+    assigned_csv=$(IFS=,; echo "${assigned[*]}")
+    run_item "$assigned_csv" "$weight" "$label" "$cmd" "$tag" "$rest" &
+    HELD_BY_PID[$!]=$assigned_csv
+done
+while (( ${#HELD_BY_PID[@]} > 0 )); do
+    reap_one || break
 done
 wait
 
@@ -676,7 +784,12 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 7: scheduling report
 # ---------------------------------------------------------------------------
+case "$QUEUE" in
+    sgpu) REPORT_TITLE="sGPU queue schedule" ;;
+    mgpu) REPORT_TITLE="mGPU queue schedule" ;;
+esac
 if ! scheduler_py schedule_report.py "$LOG_DIR" \
+        --title "$REPORT_TITLE" \
         --gpus "${GPU_IDS[*]}" \
         --wall "$WALL" \
         --expand-secs "$EXPAND_SECS" \

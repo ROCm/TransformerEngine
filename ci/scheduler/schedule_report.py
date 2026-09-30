@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 
-"""Render one sGPU queue run's scheduling report from its measured timings.
+"""Render one queue run's scheduling report from its measured timings.
 
 """
 
@@ -19,7 +19,6 @@ TIMINGS_PATH = ("queue", "timings.tsv")
 QUEUE_PATH = ("queue", "queue.tsv")
 REPORT_PATH = ("report", "schedule.md")
 
-REPORT_TITLE = "sGPU queue schedule"
 
 
 def outcome(rc, incomplete):
@@ -78,8 +77,11 @@ def render_md(rows):
 
 def calculate_efficiency_table(frame, wall, n_gpus, clock):
     """What the run cost, and how much of the GPU-time it bought was used.
+
+    Work is GPU-time -- an item's duration times the GPUs it held -- so a 4-GPU
+    item counts four times over, exactly as it kept four GPUs from other work.
     """
-    work = int(frame["secs"].sum())
+    work = int(frame["gpu_secs"].sum())
     if len(frame):
         biggest = frame.loc[frame["secs"].idxmax()]
         big, bigname = int(biggest["secs"]), biggest["name"]
@@ -90,7 +92,7 @@ def calculate_efficiency_table(frame, wall, n_gpus, clock):
     floor = " -- floor: splitting it would now pay" if big > work / n_gpus else ""
     rows = [
         ["Metric", "Value", "Meaning"],
-        ["total work", f"{work}s", f"sum of all {len(frame)} item durations"],
+        ["total work", f"{work} GPU-s", f"sum over all {len(frame)} items of duration x GPUs held"],
         ["queue run time", f"{wall}s", "wall clock, first item start to last item finish"],
         [
             "utilisation",
@@ -118,7 +120,10 @@ def calculate_efficiency_table(frame, wall, n_gpus, clock):
 
 def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
     """Per-GPU utilisation.
+
+    A multi-GPU item is charged in full to every GPU it held.
     """
+    frame = frame.assign(gpu=frame["gpus"].str.split(",")).explode("gpu")
     per_gpu = frame.groupby("gpu")
     busy = per_gpu["secs"].sum().reindex(gpu_ids, fill_value=0).astype(int)
     count = per_gpu.size().reindex(gpu_ids, fill_value=0).astype(int)
@@ -141,10 +146,12 @@ def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
 
 def calculate_schedule_table(frame, default_weight):
     """What ran where, in execution order, against what it was estimated to cost."""
-    order = frame.assign(_gpu=frame["gpu"].astype(int)).sort_values(
+    # Grouped by the first GPU an item held; an item's GPUs are listed in full,
+    # so a 4-GPU item shows which three others it kept busy.
+    order = frame.assign(_gpu=frame["gpus"].str.split(",").str[0].astype(int)).sort_values(
         ["_gpu", "start_off", "name"], kind="stable"
     )
-    rows = [["GPU", "Start", "Duration", "Result", "Estimate", "% change", "Test name"]]
+    rows = [["GPUs", "Start", "Duration", "Result", "Estimate", "% change", "Test name"]]
     for row in order.itertuples(index=False):
         known = row.est > 0 and row.est != default_weight
         # The % change is the scheduler feedback loop made visible: a large
@@ -157,7 +164,7 @@ def calculate_schedule_table(frame, default_weight):
         # scheduling miss whether or not it got as far as finishing.
         rows.append(
             [
-                f"gpu{row.gpu}",
+                f"gpu{row.gpus}",
                 f"t+{row.start_off}s",
                 f"{row.secs}s",
                 outcome(row.rc, row.incomplete),
@@ -225,7 +232,7 @@ def missing_items(frame, queue_keys):
 
 
 def render_report_md(
-    frame, wall, gpu_ids, total_items, default_weight, missing, weights, clock, rerun=False
+    frame, wall, gpu_ids, total_items, default_weight, missing, weights, clock, title, rerun=False
 ):
     """The Markdown report the workflow appends to the job summary."""
     n_gpus = len(gpu_ids)
@@ -236,11 +243,11 @@ def render_report_md(
     # the weights below are being read off a run that did not finish.
     stopped = int((~frame["measured"]).sum())
     note = f" ({stopped} stopped short, so not timed)" if stopped else ""
-    util = int(frame["secs"].sum()) * 100 / (wall * n_gpus)
+    util = int(frame["gpu_secs"].sum()) * 100 / (wall * n_gpus)
     mark = ":x:" if failed or ran != total_items else ":white_check_mark:"
 
     out = [
-        f"## {REPORT_TITLE}",
+        f"## {title}",
         "",
         f"{mark} **{ran} items** on {n_gpus} GPUs -- {failed} failed{note} "
         f"-- {wall}s in the queue"
@@ -317,6 +324,9 @@ def main():
     """Parse arguments, render the report, and never fail the run over it."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("log_dir", help="the queue's log directory, e.g. test-results/logs")
+    parser.add_argument(
+        "--title", default="Queue schedule", help='report heading, e.g. "mGPU queue schedule"'
+    )
     # Required, both of them: they are facts about the run that no file in the
     # log directory records, and guessing at either yields a plausible-looking
     # report with the wrong utilisation in it.
@@ -393,6 +403,7 @@ def main():
         missing,
         weights,
         clock,
+        args.title,
         rerun=args.rerun,
     )
     os.makedirs(os.path.dirname(out), exist_ok=True)
