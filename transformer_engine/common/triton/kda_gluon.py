@@ -162,7 +162,11 @@ def flash_kda_k1_prepare_gluon(
     o_c_col = gl.arange(0, C, layout=gl.SliceLayout(1, _BLK_COL))
     o_k_col = gl.arange(0, K, layout=gl.SliceLayout(0, _BLK_COL))
     g_off = (base * K + o_c_col[:, None].to(gl.int64) * (H * K) + o_k_col[None, :]).to(gl.int32)
-    b_g = gl.amd.cdna4.buffer_load(ptr=g_raw, offsets=g_off, cache=CM_LOAD).to(gl.float32)
+    # Masked: the buffer resource has no size, so rows past the tensor's end
+    # are not clamped by hardware and would fault.
+    b_g = gl.amd.cdna4.buffer_load(
+        ptr=g_raw, offsets=g_off, mask=(o_c_col < actual_len)[:, None], other=0.0, cache=CM_LOAD
+    ).to(gl.float32)
     # sigmoid(e^A * (g + bias)) with -log2(e) * e^A folded into one scalar.
     rate = _exp(gl.load(A_log + i_h)) * -_LOG2E
     if HAS_BIAS:
@@ -170,9 +174,10 @@ def flash_kda_k1_prepare_gluon(
         b_z = b_g * rate + (bias * rate)[None, :]
     else:
         b_z = b_g * rate
-    # Tail rows (g read unmasked) get a zero gate, so the cumulative gate is
-    # constant from row actual_len - 1 on: the last row is row C - 1, and the
-    # pivot row min(C / 2, actual_len - 1) is row C / 2.
+    # Tail rows get a zero gate (g = 0 alone would give lower_bound / 2, plus
+    # the bias), so the cumulative gate is constant from row actual_len - 1
+    # on: the last row is row C - 1, and the pivot row min(C / 2,
+    # actual_len - 1) is row C / 2.
     b_gate = gl.where(
         o_c_col[:, None] < actual_len, (lower_bound * _LOG2E) * _sigmoid_log2(b_z), 0.0
     )
