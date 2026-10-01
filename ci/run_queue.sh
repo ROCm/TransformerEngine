@@ -336,7 +336,6 @@ item_gpus() {
     echo "$want"
 }
 
-EXPAND_TS=$(date +%s)
 echo "== Expanding test suites into work items =="
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
@@ -431,7 +430,6 @@ fi
 rm -f "$QUEUE_FILE.raw"
 
 TOTAL_ITEMS=$(wc -l < "$QUEUE_FILE")
-EXPAND_SECS=$(( $(date +%s) - EXPAND_TS ))   # Phases 1-2: listing and ordering
 
 # ---------------------------------------------------------------------------
 # Phase 3: one-time prerequisites
@@ -449,7 +447,6 @@ EXPAND_SECS=$(( $(date +%s) - EXPAND_TS ))   # Phases 1-2: listing and ordering
 #
 # Outside the queue nothing changes: a bare ci/pytorch.sh sees neither variable
 # and still does both steps inline.
-SETUP_TS=$(date +%s)
 
 # ck_jit_prebuild and check_setup_needed live in _utils.sh, the same definitions
 # the suite scripts use -- the point of the hoist is to run that code once, not
@@ -501,7 +498,6 @@ for i in "${!SUITE_LABELS[@]}"; do
     fi
     echo "done in $(( $(date +%s) - setup_start ))s"
 done
-SETUP_SECS=$(( $(date +%s) - SETUP_TS ))   # Phase 3: CK JIT prebuild + pip prerequisites
 
 # ---------------------------------------------------------------------------
 # Phase 4: run the queue
@@ -792,8 +788,6 @@ if ! scheduler_py schedule_report.py "$LOG_DIR" \
         --title "$REPORT_TITLE" \
         --gpus "${GPU_IDS[*]}" \
         --wall "$WALL" \
-        --expand-secs "$EXPAND_SECS" \
-        --setup-secs "$SETUP_SECS" \
         --total-wall "$(( $(date +%s) - SCRIPT_START_TS ))" \
         --default-weight "$DEFAULT_WEIGHT" \
         --weights "$WEIGHTS_FILE" \

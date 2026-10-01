@@ -75,49 +75,6 @@ def render_md(rows):
             out.append("|" + "---|" * len(row))
     return out
 
-def calculate_efficiency_table(frame, wall, n_gpus, clock):
-    """What the run cost, and how much of the GPU-time it bought was used.
-
-    Work is GPU-time -- an item's duration times the GPUs it held -- so a 4-GPU
-    item counts four times over, exactly as it kept four GPUs from other work.
-    """
-    work = int(frame["gpu_secs"].sum())
-    if len(frame):
-        biggest = frame.loc[frame["secs"].idxmax()]
-        big, bigname = int(biggest["secs"]), biggest["name"]
-    else:
-        big, bigname = 0, ""
-    # Once one item exceeds the per-GPU average there is no ordering that
-    # finishes sooner than that item, so it becomes the thing to split.
-    floor = " -- floor: splitting it would now pay" if big > work / n_gpus else ""
-    rows = [
-        ["Metric", "Value", "Meaning"],
-        ["total work", f"{work} GPU-s", f"sum over all {len(frame)} items of duration x GPUs held"],
-        ["queue run time", f"{wall}s", "wall clock, first item start to last item finish"],
-        [
-            "utilisation",
-            f"{work * 100 / (wall * n_gpus):.1f}%",
-            f"share of {wall}s x {n_gpus} GPUs actually spent running tests",
-        ],
-        ["largest item", f"{big}s", bigname + floor],
-    ]
-    if clock["total"]:
-        # Named as the serial overhead it is: it is spent before any GPU starts
-        # work, so it is a fixed floor no amount of reordering can shorten, and
-        # it is the part a comparison against an older run must not drop.
-        overhead = max(clock["total"] - wall, 0)
-        rows.insert(
-            3,
-            [
-                "end-to-end",
-                f"{clock['total']}s",
-                f"the whole script: {overhead}s outside the queue, chiefly"
-                f" expansion {clock['expand']}s and prerequisites {clock['setup']}s",
-            ],
-        )
-    return rows
-
-
 def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
     """Per-GPU utilisation.
 
@@ -131,13 +88,13 @@ def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
         frame[frame["rc"] != 0].groupby("gpu").size().reindex(gpu_ids, fill_value=0).astype(int)
     )
 
-    return [["GPU", "Items", "Busy", "Idle", "Util", "Failed"]] + [
+    return [["GPU", "Items", "Busy (s)", "Idle (s)", "Util (%)", "Failed"]] + [
         [
             f"gpu{gpu}",
             f"{count[gpu]}",
-            f"{busy[gpu]}s",
-            f"{wall - busy[gpu]}s",
-            f"{busy[gpu] * 100 / wall:.1f}%",
+            f"{busy[gpu]}",
+            f"{wall - busy[gpu]}",
+            f"{busy[gpu] * 100 / wall:.1f}",
             f"{failed[gpu]}",
         ]
         for gpu in gpu_ids
@@ -145,30 +102,40 @@ def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
 
 
 def calculate_schedule_table(frame, default_weight):
-    """What ran where, in execution order, against what it was estimated to cost."""
+    """What ran where, in execution order, against its cached duration."""
     # Grouped by the first GPU an item held; an item's GPUs are listed in full,
     # so a 4-GPU item shows which three others it kept busy.
     order = frame.assign(_gpu=frame["gpus"].str.split(",").str[0].astype(int)).sort_values(
         ["_gpu", "start_off", "name"], kind="stable"
     )
-    rows = [["GPUs", "Start", "Duration", "Result", "Estimate", "% change", "Test name"]]
+    rows = [
+        [
+            "GPUs",
+            "Start (s)",
+            "Duration (s)",
+            "Result",
+            "Cached duration (s)",
+            "Run vs cached",
+            "Test item (suite/file.backend.label)",
+        ]
+    ]
     for row in order.itertuples(index=False):
         known = row.est > 0 and row.est != default_weight
-        # The % change is the scheduler feedback loop made visible: a large
+        # Run vs cached is the scheduler feedback loop made visible: a large
         # positive miss is an item that should have been dispatched earlier.
         change = f"{(row.secs - row.est) * 100 / row.est:+.0f}%" if known else "n/a"
         # Reported for a stopped item too, unlike in the weights table below:
         # there the number would describe a learning step that is not going to
         # happen, but here it describes the GPU-time the item really did take,
-        # and an item that sat on a GPU for ten times its estimate is a
+        # and an item that sat on a GPU for ten times its cached duration is a
         # scheduling miss whether or not it got as far as finishing.
         rows.append(
             [
                 f"gpu{row.gpus}",
-                f"t+{row.start_off}s",
-                f"{row.secs}s",
+                f"{row.start_off}",
+                f"{row.secs}",
                 outcome(row.rc, row.incomplete),
-                "unknown" if row.est == default_weight else f"{row.est}s",
+                "none" if row.est == default_weight else f"{row.est}",
                 change,
                 row.name,
             ]
@@ -178,6 +145,10 @@ def calculate_schedule_table(frame, default_weight):
 
 def calculate_updated_weights_table(frame, weights, default_weight):
     """What the next run will schedule each item with, and what moved it there.
+
+    A weight moves toward a run's duration by an exponential average rather
+    than taking it whole, so "Run vs weight" says how far this run was from the
+    weight -- the pull on it -- not how far the weight moved.
     """
     rows = []
     for row in frame.itertuples(index=False):
@@ -189,11 +160,11 @@ def calculate_updated_weights_table(frame, weights, default_weight):
             # item stopped, so the gap between it and the weight measures
             # nothing, and printing "+1044%" next to a weight that did not move
             # invites the reader to go looking for the bug that ate the update.
-            change = f"not learned -- {outcome(row.rc, row.incomplete)}"
+            change = f"weight kept -- {outcome(row.rc, row.incomplete)}"
         elif known:
             change = f"{(row.secs - row.est) * 100 / row.est:+.0f}%"
         else:
-            change = "first measurement"
+            change = "first run"
         rows.append(
             (
                 # An item the table does not name is one the next run has no
@@ -201,9 +172,9 @@ def calculate_updated_weights_table(frame, weights, default_weight):
                 # first here too, for the ordering claim above to hold.
                 new if new is not None else float("inf"),
                 [
-                    f"{new:.0f}s" if new is not None else "unknown",
-                    "unknown" if not known else f"{row.est}s",
-                    f"{row.secs}s",
+                    f"{new:.0f}" if new is not None else "none",
+                    "none" if not known else f"{row.est}",
+                    f"{row.secs}",
                     change,
                     row.name,
                 ],
@@ -212,9 +183,14 @@ def calculate_updated_weights_table(frame, weights, default_weight):
     # Name breaks ties so the order is stable run to run rather than dependent on
     # dispatch order.
     rows.sort(key=lambda r: (-r[0], r[1][4]))
-    return [["Next weight", "Weight used", "This run", "Learned", "Test name"]] + [
-        row for _, row in rows
+    header = [
+        "Next weight (s)",
+        "Weight used (s)",
+        "This run (s)",
+        "Run vs weight",
+        "Test item (suite/file.backend.label)",
     ]
+    return [header] + [row for _, row in rows]
 
 
 def missing_items(frame, queue_keys):
@@ -232,7 +208,16 @@ def missing_items(frame, queue_keys):
 
 
 def render_report_md(
-    frame, wall, gpu_ids, total_items, default_weight, missing, weights, clock, title, rerun=False
+    frame,
+    wall,
+    gpu_ids,
+    total_items,
+    default_weight,
+    missing,
+    weights,
+    total_wall,
+    title,
+    rerun=False,
 ):
     """The Markdown report the workflow appends to the job summary."""
     n_gpus = len(gpu_ids)
@@ -255,7 +240,7 @@ def render_report_md(
         # disclaimed: a handful of items on eight GPUs reads as single digits,
         # which says only that the queue was short and invites the wrong fix.
         + ("" if rerun else f" at {util:.1f}% GPU utilisation")
-        + (f", {clock['total']}s end to end" if clock["total"] else ""),
+        + (f", {total_wall}s end to end" if total_wall else ""),
         "",
     ]
 
@@ -266,19 +251,16 @@ def render_report_md(
         out.extend(f"> - `{key}`" for key in missing)
         out.append("")
 
-    # Both of these read a re-run's short queue as a badly packed one -- five
-    # idle GPUs are what queueing three items looks like, not a scheduling
-    # fault -- so they are a full run's sections only.
+    # This reads a re-run's short queue as a badly packed one -- five idle GPUs
+    # are what queueing three items looks like, not a scheduling fault -- so it
+    # is a full run's section only.
     if not rerun:
-        for heading, rows in (
-            ("Efficiency", calculate_efficiency_table(frame, wall, n_gpus, clock)),
-            ("Per-GPU utilisation", calculate_gpu_utilisation_table(frame, wall, gpu_ids)),
-        ):
-            out += [f"### {heading}", ""] + render_md(rows) + [""]
+        rows = calculate_gpu_utilisation_table(frame, wall, gpu_ids)
+        out += ["### Per-GPU utilisation", ""] + render_md(rows) + [""]
 
     # The big tables are collapsed: they are the detail you open once you know
     # from the sections above that something is worth looking at. Each carries a
-    # legend, because the words in its Result/Learned column are the whole point
+    # legend, because the words in its Result / Run vs weight column are the whole point
     # of the table and are not self-explanatory.
     #
     # The schedule stays on a re-run even though the sections above it go. It is
@@ -309,9 +291,11 @@ def render_report_md(
             (
                 "Updated weights for next run",
                 calculate_updated_weights_table(frame, weights, default_weight),
-                "A failing item still feeds the table -- it cost what it cost. Only "
-                "the rows marked `not learned` are held out, and those keep the "
-                "weight they came in with, so their Next and Used columns match.",
+                "Run vs weight is this run's duration against the weight used; the "
+                "weight moves part of the way toward it, so the next weight lands in "
+                "between. A failing item still updates its weight -- it cost what it "
+                "cost. Only the rows marked `weight kept` are held out, and those keep "
+                "the weight they came in with, so their Next and Used columns match.",
             )
         )
     for summary, rows, legend in tables:
@@ -346,12 +330,6 @@ def main():
         metavar="SECS",
         help="whole-script wall clock, queue plus expansion and setup; the "
         "number to compare against a run that predates the queue",
-    )
-    parser.add_argument(
-        "--expand-secs", type=int, default=0, metavar="SECS", help="seconds spent in phases 1-2"
-    )
-    parser.add_argument(
-        "--setup-secs", type=int, default=0, metavar="SECS", help="seconds spent in phase 3"
     )
     parser.add_argument(
         "--default-weight",
@@ -393,7 +371,6 @@ def main():
 
     weights = read_weights(args.weights)
 
-    clock = {"total": args.total_wall, "expand": args.expand_secs, "setup": args.setup_secs}
     report = render_report_md(
         frame,
         wall,
@@ -402,7 +379,7 @@ def main():
         args.default_weight,
         missing,
         weights,
-        clock,
+        args.total_wall,
         args.title,
         rerun=args.rerun,
     )
