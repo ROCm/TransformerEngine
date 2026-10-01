@@ -23,6 +23,8 @@ from transformer_engine.common.triton.kda import remap_xcd
 _BLK_WARP_K: gl.constexpr = gl.BlockedLayout([1, 8], [8, 8], [1, 2], [1, 0])
 _BLK1: gl.constexpr = gl.BlockedLayout([1], [64], [2], [0])
 _BLK_CC: gl.constexpr = gl.BlockedLayout([1, 1], [4, 16], [2, 1], [1, 0])
+# One whole C = 32 column per thread, for the gate's cumulative sum.
+_BLK_COL: gl.constexpr = gl.BlockedLayout([32, 1], [1, 64], [1, 2], [0, 1])
 
 _MMA_F16: gl.constexpr = gl.amd.AMDMFMALayout(
     version=4, instr_shape=[16, 16, 4], transposed=True, warps_per_cta=[2, 1]
@@ -39,6 +41,8 @@ _B8_16: gl.constexpr = gl.DotOperandLayout(1, _MMA_B16, 8)
 _SH_A: gl.constexpr = gl.SwizzledSharedLayout(8, 1, 16, [1, 0])
 _SH_B: gl.constexpr = gl.SwizzledSharedLayout(8, 1, 16, [0, 1])
 _SH_CC_F: gl.constexpr = gl.SwizzledSharedLayout(1, 2, 8, [0, 1])
+
+_LOG2E = gl.constexpr(1.4426950408889634)
 
 # Warps the K1 layouts above are built for; the launch must match.
 K1_NUM_WARPS: int = math.prod(_MMA_F16.warps_per_cta)
@@ -60,8 +64,15 @@ def _exp2(x):
 
 
 @gluon.jit
+def _sigmoid_log2(z):
+    """sigmoid(x) given z = -x * log2(e). exp2 lowers to a bare v_exp_f32, where exp adds
+    a denormal-range rescale that the sigmoid does not need."""
+    return gl.extra.libdevice.fast_dividef(1.0, 1.0 + gl.exp2(z))
+
+
+@gluon.jit
 def _sigmoid(x):
-    return gl.extra.libdevice.fast_dividef(1.0, 1.0 + _exp(-x.to(gl.float32)))
+    return _sigmoid_log2(x.to(gl.float32) * -_LOG2E)
 
 
 @gluon.jit
@@ -82,6 +93,12 @@ def _dot_f32(a, b_op, a_op: gl.constexpr, acc_layout: gl.constexpr, N: gl.conste
         b_op,
         gl.zeros([a.shape[0], N], gl.float32, acc_layout),
     )
+
+
+@gluon.jit
+def _dot_acc_f32(a, b_op, a_op: gl.constexpr, acc):
+    """``acc + a @ b`` with ``acc`` as the MFMA accumulator."""
+    return gl.amd.cdna4.mfma(gl.convert_layout(a, a_op), b_op, acc)
 
 
 @gluon.jit
@@ -155,42 +172,55 @@ def flash_kda_k1_prepare_gluon(
 
     b_q_raw = gl.amd.cdna4.buffer_load(ptr=q, offsets=qk_off, mask=m_ck, other=0.0, cache=CM_LOAD)
     b_k_raw = gl.amd.cdna4.buffer_load(ptr=k, offsets=qk_off, mask=m_ck, other=0.0, cache=CM_LOAD)
-    if HAS_BIAS:
-        bias = gl.amd.cdna4.buffer_load(ptr=dt_bias, offsets=(i_h * K).to(gl.int32) + o_k)[None, :]
 
-    b_g = gl.amd.cdna4.buffer_load(
-        ptr=g_raw, offsets=qk_off, mask=m_ck, other=0.0, cache=CM_LOAD
-    ).to(gl.float32)
+    # The gate is cumulated over rows, so it is computed with each thread owning
+    # a whole column: the scan and the row picks below are then in-thread.
+    o_c_col = gl.arange(0, C, layout=gl.SliceLayout(1, _BLK_COL))
+    o_k_col = gl.arange(0, K, layout=gl.SliceLayout(0, _BLK_COL))
+    g_off = (base * K + o_c_col[:, None].to(gl.int64) * (H * K) + o_k_col[None, :]).to(gl.int32)
+    b_g = gl.amd.cdna4.buffer_load(ptr=g_raw, offsets=g_off, cache=CM_LOAD).to(gl.float32)
+    # sigmoid(e^A * (g + bias)) with -log2(e) * e^A folded into one scalar.
+    rate = _exp(gl.load(A_log + i_h)) * -_LOG2E
     if HAS_BIAS:
-        b_g = b_g + bias
-    b_A = gl.load(A_log + i_h)
-    b_gate = lower_bound * _sigmoid(_exp(b_A) * b_g)
-    log2_e: gl.constexpr = 1.4426950408889634
-    b_gcum = gl.associative_scan(b_gate, 0, _add) * log2_e
-    b_gcum = gl.where(m_ck, b_gcum, 0.0)
-
-    b_g_last = gl.sum(gl.where(o_c[:, None] == actual_len - 1, b_gcum, 0.0), axis=0)
-    b_g_total = _exp2(b_g_last)
+        bias = gl.amd.cdna4.buffer_load(ptr=dt_bias, offsets=(i_h * K).to(gl.int32) + o_k_col)
+        b_z = b_g * rate + (bias * rate)[None, :]
+    else:
+        b_z = b_g * rate
+    # Tail rows (g read unmasked) get a zero gate, so the cumulative gate is
+    # constant from row actual_len - 1 on: the last row is row C - 1, and the
+    # pivot row min(C / 2, actual_len - 1) is row C / 2.
+    b_gate = gl.where(
+        o_c_col[:, None] < actual_len, (lower_bound * _LOG2E) * _sigmoid_log2(b_z), 0.0
+    )
+    b_gcum_col = gl.associative_scan(b_gate, 0, _add)
+    b_g_last_col = gl.sum(gl.where(o_c_col[:, None] == C - 1, b_gcum_col, 0.0), axis=0)
+    b_gp_col = gl.sum(gl.where(o_c_col[:, None] == C // 2, b_gcum_col, 0.0), axis=0)
+    b_gcum = gl.convert_layout(b_gcum_col, _BLK_WARP_K)
+    b_g_last = gl.convert_layout(b_g_last_col, gl.SliceLayout(0, _BLK_WARP_K))
+    b_g_total = _exp2(b_g_last_col)
     b_exp_g = _exp2(b_gcum)
 
+    # Tail rows of q and k load as 0 and stay 0 through the norm. Every factor
+    # they meet below is finite (the cumulative gate is constant over the
+    # tail), so the workspace tiles' tail rows come out zero without a mask.
     b_q = _l2norm(b_q_raw)
     b_k = _l2norm(b_k_raw)
 
     ws_idx = i_h * TOTAL_TILES + g_tile
     ck_off = (ws_idx * (C * K) + o_c[:, None].to(gl.int64) * K + o_k[None, :]).to(gl.int32)
     gl.amd.cdna4.buffer_store(
-        gl.where(m_ck, b_k * b_exp_g, 0.0).to(ws_kd.dtype.element_ty),
+        (b_k * b_exp_g).to(ws_kd.dtype.element_ty),
         ws_kd,
         ck_off,
         cache=CM_WS,
     )
     gl.amd.cdna4.buffer_store(
-        gl.where(m_ck, b_q * b_exp_g * scale, 0.0).to(ws_qd.dtype.element_ty),
+        (b_q * b_exp_g * scale).to(ws_qd.dtype.element_ty),
         ws_qd,
         ck_off,
         cache=CM_WS,
     )
-    b_kr_val = gl.where(m_ck, b_k * _exp2(b_g_last[None, :] - b_gcum), 0.0).to(gl.bfloat16)
+    b_kr_val = (b_k * _exp2(b_g_last[None, :] - b_gcum)).to(gl.bfloat16)
     gl.amd.cdna4.buffer_store(b_kr_val.to(ws_kr.dtype.element_ty), ws_kr, ck_off, cache=CM_WS)
     gl.amd.cdna4.buffer_store(
         gl.convert_layout(b_g_total, _BLK1),
@@ -208,14 +238,13 @@ def flash_kda_k1_prepare_gluon(
         ).to(gl.float32)
     )
 
-    o_mid = gl.minimum(C // 2, actual_len - 1)
-    b_gp = gl.sum(gl.where(o_c[:, None] == o_mid, b_gcum, 0.0), axis=0)
+    b_gp = gl.convert_layout(b_gp_col, gl.SliceLayout(0, _BLK_WARP_K))
     b_gm = b_gcum - b_gp[None, :]
     b_dec = _exp2(b_gm)
     b_inc = _exp2(-b_gm)
-    b_k_piv = gl.where(m_ck, b_k * b_dec, 0.0).to(gl.bfloat16)
-    b_q_piv = gl.where(m_ck, b_q * b_dec * scale, 0.0).to(gl.bfloat16)
-    b_k_inv = gl.where(m_ck, b_k * b_inc, 0.0).to(gl.bfloat16)
+    b_k_piv = (b_k * b_dec).to(gl.bfloat16)
+    b_q_piv = (b_q * b_dec * scale).to(gl.bfloat16)
+    b_k_inv = (b_k * b_inc).to(gl.bfloat16)
 
     b_kinv_b = _via_lds(gl.permute(b_k_inv, 1, 0), _SH_B, _B8_16)
 
@@ -249,12 +278,13 @@ def flash_kda_k1_prepare_gluon(
         b_D = b_L
     else:
         b_D = gl.where(o_i_r[:, None] // BC == o_i_c[None, :] // BC, b_L, 0.0)
-    b_INV = gl.where(o_i_r[:, None] == o_i_c[None, :], 1.0, 0.0) + b_D
+    # I + D; D is strictly lower triangular, so its diagonal is free for the 1s.
+    b_INV = gl.where(o_i_r[:, None] == o_i_c[None, :], 1.0, b_D)
     b_INV = gl.convert_layout(b_INV, _MMA_F16)
     b_Dp = _dot_f32(b_D, _via_lds(b_D, _SH_CC_F, _BF16), _AF16, _MMA_F16, C)
     for _ in gl.static_range(NUM_DOUBLING):
         dp_b = _via_lds(b_Dp, _SH_CC_F, _BF16)
-        b_INV = b_INV + _dot_f32(b_INV, dp_b, _AF16, _MMA_F16, C)
+        b_INV = _dot_acc_f32(b_INV, dp_b, _AF16, b_INV)
         b_Dp = _dot_f32(b_Dp, dp_b, _AF16, _MMA_F16, C)
 
     w = BC
@@ -266,7 +296,7 @@ def flash_kda_k1_prepare_gluon(
             m_off = ne_w
         b_off = gl.where(m_off, b_L, 0.0)
         inner = _dot_f32(b_off, _via_lds(b_INV, _SH_CC_F, _BF16), _AF16, _MMA_F16, C)
-        b_INV = b_INV + _dot_f32(b_INV, _via_lds(inner, _SH_CC_F, _BF16), _AF16, _MMA_F16, C)
+        b_INV = _dot_acc_f32(b_INV, _via_lds(inner, _SH_CC_F, _BF16), _AF16, b_INV)
         w = 2 * w
 
     gl.amd.cdna4.buffer_store(
@@ -318,11 +348,6 @@ def flash_kda_k2_layouts(nw, kw=KW, kw_big=KW_BIG):
         "SH_PLAIN": gl.SwizzledSharedLayout(1, 1, 1, [1, 0]),
         "SH_1D": gl.SwizzledSharedLayout(1, 1, 1, [0]),
     }
-
-
-@gluon.jit
-def _k2_sigmoid(x):
-    return gl.extra.libdevice.fast_dividef(1.0, 1.0 + gl.exp(-x.to(gl.float32)))
 
 
 @gluon.jit
@@ -509,7 +534,9 @@ def flash_kda_k2_ab_fused_gluon(
     s_inv = gl.allocate_shared_memory(inv_ty, [2, C, C], SH_PLAIN)
     s_v = gl.allocate_shared_memory(v_input.dtype.element_ty, [2, C, BW], SH_PLAIN)
     # gt / beta go register -> LDS once they land, so the per-thread copies
-    # of the MMA slice layout are only materialized at their use.
+    # of the MMA slice layout are only materialized at their use. beta's
+    # sigmoid is applied on the way in, one element per thread rather than
+    # once per row copy.
     s_gt = gl.allocate_shared_memory(gl.float32, [2, K], SH_1D)
     s_beta = gl.allocate_shared_memory(gl.float32, [2, C], SH_1D)
 
@@ -532,7 +559,7 @@ def flash_kda_k2_ab_fused_gluon(
         # held chunk j-1, before it is refilled.
         gl.amd.cdna4.async_copy.wait_group(0)
         s_gt.index(cur).store(gt_n)
-        s_beta.index(cur).store(beta_n)
+        s_beta.index(cur).store(_sigmoid(beta_n))
         gl.barrier()
         if j + 1 < n_chunks:
             gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, None,
@@ -548,7 +575,7 @@ def flash_kda_k2_ab_fused_gluon(
         inv_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_inv.index(cur), A_OP)
         b_v = gl.amd.cdna4.async_copy.load_shared_relaxed(s_v.index(cur), MMA).to(gl.float32)
         gt = s_gt.index(cur).load(gl.SliceLayout(1, MMA))
-        beta = _k2_sigmoid(s_beta.index(cur).load(gl.SliceLayout(1, MMA)))
+        beta = s_beta.index(cur).load(gl.SliceLayout(1, MMA))
         m_c = (tok_base + j * C + o_c_m) < tok_end
         # Written one after the other so the scheduler has two independent MFMA
         # chains to interleave.
@@ -624,6 +651,13 @@ def flash_kda_k2_c_gluon(
     n_chunks = gl.load(seg_nchunks + i_seg)
     tok_base = gl.load(seg_tok_base + i_seg).to(gl.int64)
     tok_end = gl.load(seg_tok_end + i_seg).to(gl.int64)
+    # Read up front, not after the loop: past the output stores the compiler
+    # must assume these words may have changed and loads them per lane, which
+    # leaves the final-state store a waterfall loop over a non-uniform pointer.
+    # When STORE_FINAL is false final_state is null and these must not be read.
+    if STORE_FINAL:
+        is_last = gl.load(seg_is_last + i_seg)
+        i_n = gl.load(seg_seq + i_seg).to(gl.int64)
 
     BLK_V: gl.constexpr = gl.BlockedLayout(
         [1, 8], [64 // (BW // 8), BW // 8], [gl.num_warps(), 1], [1, 0]
@@ -679,7 +713,7 @@ def flash_kda_k2_c_gluon(
         # As in pass A: chunk j is in half `cur`, and half 1 - cur is free.
         gl.amd.cdna4.async_copy.wait_group(0)
         s_gt.index(cur).store(gt_n)
-        s_beta.index(cur).store(beta_n)
+        s_beta.index(cur).store(_sigmoid(beta_n))
         gl.barrier()
         if j + 1 < n_chunks:
             gt_n, beta_n = _issue_chunk(ws_kd, ws_kr, ws_gt, ws_inv_mqk, v_input, beta_raw, ws_qd,
@@ -695,7 +729,7 @@ def flash_kda_k2_c_gluon(
         inv_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_inv.index(cur), A_OP)
         b_v = gl.amd.cdna4.async_copy.load_shared_relaxed(s_v.index(cur), MMA).to(gl.float32)
         gt = s_gt.index(cur).load(gl.SliceLayout(1, MMA))
-        beta = _k2_sigmoid(s_beta.index(cur).load(gl.SliceLayout(1, MMA)))
+        beta = s_beta.index(cur).load(gl.SliceLayout(1, MMA))
         m_c = (t0 + o_c_m) < tok_end
 
         # _recur's steps, split around the output projection: updating the
@@ -723,11 +757,8 @@ def flash_kda_k2_c_gluon(
         kr_a = gl.amd.cdna4.async_copy.load_shared_relaxed(s_kr.index(cur).permute((1, 0)), A_OP)
         h = gl.amd.cdna4.mfma(kr_a, gl.convert_layout(big_u.to(gl.bfloat16), B_OP), h * gt[:, None])
 
-    # Not merged into one condition: when STORE_FINAL is false final_state is
-    # null and seg_is_last must not be read.
     if STORE_FINAL:  # noqa: SIM102
-        if gl.load(seg_is_last + i_seg) == 1:
-            i_n = gl.load(seg_seq + i_seg).to(gl.int64)
+        if is_last == 1:
             if STATE_V_FIRST:
                 f_off = (o_w_m[None, :] * K + o_k_m[:, None]).to(gl.int32)
             else:
