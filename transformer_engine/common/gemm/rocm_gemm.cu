@@ -997,6 +997,15 @@ static NameMapper<hipblasComputeType_t> computeNameMapper(comp_name_map);
 
 static class GemmAlgoCache {
 public:
+  // Device ID used to key cached algos: legacy ID (major*100 + minor) * 100 + variant.
+  // The variant distinguishes targets sharing major/minor: 1 = gfx1250-strict (A0), 0 = default.
+  static int device_cap_id(const hipDeviceProp_t &prop)
+  {
+    const int legacy_id = prop.major * 100 + prop.minor;
+    const int variant   = std::strstr(prop.gcnArchName, "-strict") ? 1 : 0;
+    return legacy_id * 100 + variant;
+  }
+
   struct Key {
     int deviceCap;
     hipDataType a_type, b_type, d_type, bias_type, aux_type;
@@ -1064,7 +1073,7 @@ public:
     {
       hipDeviceProp_t prop;
       NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, i));
-      dev_cap[i] = prop.major*100 + prop.minor;
+      dev_cap[i] = device_cap_id(prop);
     }
     load_();
     save_();
@@ -1219,6 +1228,13 @@ protected:
 
       is >> std::skipws;
       is >> cfg.deviceCap >> c >> cfg.m >> c >> cfg.n >> c >> cfg.k >> c;
+      // Caches saved before the variant was added store the legacy ID (e.g. 904); convert it.
+      // Legacy gfx1250 entries (1205) are intentionally not converted (pre-strict tunings)
+      // and are dropped by the device filter below.
+      if (cfg.deviceCap < 1000)
+      {
+        cfg.deviceCap *= 100;
+      }
 
       //Filter out entries for devices not presented on the curent system
       bool b_found = false;
