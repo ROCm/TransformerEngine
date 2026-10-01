@@ -626,6 +626,8 @@ def _flash_fwd(
     # fp16, not bf16, for the mantissa: the inverse is bounded by 1 and K2 walks
     # it through a sequence-length recurrence.
     ws_inv_mqk = torch.empty(H * total_tiles, 2 * C, C, dtype=torch.float16, device=dev)
+    # sigmoid(beta) per tile, for the Gluon K2.
+    ws_beta = torch.empty(H * total_tiles, C, dtype=torch.float32, device=dev)
 
     k1_grid = (total_tiles if is_varlen else NT, B * H)
     if _use_gluon("k1", arch):
@@ -644,6 +646,7 @@ def _flash_fwd(
             ws_kr=ws_kr,
             ws_gt=ws_gt,
             ws_inv_mqk=ws_inv_mqk,
+            ws_beta=ws_beta,
             scale=scale,
             lower_bound=lower_bound,
             T=T,
@@ -659,6 +662,7 @@ def _flash_fwd(
             CM_LOAD=CM_LOAD,
             num_warps=_gluon_module().K1_NUM_WARPS,
             num_stages=kda_launch_config("flash_gluon_k1", arch).num_stages,
+            waves_per_eu=kda_launch_config("flash_gluon_k1", arch).waves_per_eu,
         )
     else:
         cfg = kda_launch_config("flash_prepare", arch)
@@ -676,6 +680,7 @@ def _flash_fwd(
             ws_kr=ws_kr,
             ws_gt=ws_gt,
             ws_inv_mqk=ws_inv_mqk,
+            ws_beta=ws_beta,
             scale=scale,
             lower_bound=lower_bound,
             T=T,
@@ -751,9 +756,9 @@ def _flash_fwd(
                 ws_kd=ws_kd,
                 ws_kr=ws_kr,
                 ws_gt=ws_gt,
+                ws_beta=ws_beta,
                 ws_inv_mqk=ws_inv_mqk,
                 v_input=v,
-                beta_raw=beta,
                 seg_chunk_base=seg_chunk_base,
                 seg_nchunks=seg_nchunks,
                 seg_tok_base=seg_tok_base,
@@ -820,9 +825,9 @@ def _flash_fwd(
             ws_qd=ws_qd,
             ws_kr=ws_kr,
             ws_gt=ws_gt,
+            ws_beta=ws_beta,
             ws_inv_mqk=ws_inv_mqk,
             v_input=v,
-            beta_raw=beta,
             h_in=h_in,
             seg_chunk_base=seg_chunk_base,
             seg_nchunks=seg_nchunks,

@@ -1337,6 +1337,7 @@ def _flash_kda_prepare_kernel(
     ws_kr,
     ws_gt,
     ws_inv_mqk,
+    ws_beta,
     scale,
     lower_bound,
     T,
@@ -1437,6 +1438,8 @@ def _flash_kda_prepare_kernel(
 
     p_beta = beta_raw + (bos + t_off) * H + i_h + o_c * H
     b_beta = tl.sigmoid(tl.load(p_beta, mask=m_c, other=0.0).to(tl.float32))
+    # For the Gluon K2, which copies it into LDS with the chunk's other tiles.
+    tl.store(ws_beta + ws_idx * C + o_c, b_beta, cache_modifier=CM_WS)
 
     # Decay *differences* within a chunk are O(1) near the diagonal but cannot be
     # factored as exp2(gcum[i]) * exp2(-gcum[j]); re-centering on the chunk
@@ -1847,7 +1850,9 @@ _KDA_CONFIGS = {
         "flash_segment": KDALaunchConfig({"BW": 16}, num_warps=2, num_stages=2),
         # num_warps of the scan and the Gluon kernels are chosen per call.
         "flash_seg_scan": KDALaunchConfig({}, num_stages=2),
-        "flash_gluon_k1": KDALaunchConfig({}, num_stages=2),
+        # waves_per_eu=3 holds the Gluon K1 to 168 VGPRs; left alone it lands
+        # at 170 and drops to 2 waves/SIMD (0.85x).
+        "flash_gluon_k1": KDALaunchConfig({}, num_stages=2, waves_per_eu=3),
         # Gluon K2 pass A: (BW, num_warps) wide/narrow, wide taken above
         # MIN_BLOCKS_PER_CU blocks per CU.
         "flash_gluon_k2_wide": KDALaunchConfig(

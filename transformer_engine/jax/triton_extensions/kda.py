@@ -714,6 +714,8 @@ def _flash_fwd(
         ("ws_kr", ws_shape, jnp.bfloat16),
         ("ws_gt", (H * total_tiles, K), jnp.float32),
         ("ws_inv_mqk", (H * total_tiles, 2 * C, C), jnp.float16),
+        # sigmoid(beta) per tile, for the Gluon K2.
+        ("ws_beta", (H * total_tiles, C), jnp.float32),
     ]
     k1_inputs = [
         ("q", q),
@@ -749,6 +751,7 @@ def _flash_fwd(
             dict(k1_consts, CM_WS=CM_STORE, CM_LOAD=CM_LOAD),
             num_warps=kg.K1_NUM_WARPS,
             num_stages=kda_launch_config("flash_gluon_k1", arch).num_stages,
+            waves_per_eu=kda_launch_config("flash_gluon_k1", arch).waves_per_eu,
         )
     else:
         cfg = kda_launch_config("flash_prepare", arch)
@@ -814,9 +817,9 @@ def _flash_fwd(
                     ("ws_kd", ws["ws_kd"]),
                     ("ws_kr", ws["ws_kr"]),
                     ("ws_gt", ws["ws_gt"]),
+                    ("ws_beta", ws["ws_beta"]),
                     ("ws_inv_mqk", ws["ws_inv_mqk"]),
                     ("v_input", v),
-                    ("beta_raw", beta),
                 ]
                 + [
                     (n, seg_rows[n])
@@ -884,7 +887,9 @@ def _flash_fwd(
         bw, nw, ns = flash_kda_gluon_k2c_schedule(segmented, arch)
         r = _call(
             _gluon_module().flash_kda_k2_c_gluon,
-            ws_inputs + [("v_input", v), ("beta_raw", beta), ("h_in", h_in)] + seg_inputs,
+            [(n, ws[n]) for n in ("ws_kd", "ws_qd", "ws_kr", "ws_gt", "ws_beta", "ws_inv_mqk")]
+            + [("v_input", v), ("h_in", h_in)]
+            + seg_inputs,
             out_outputs,
             (triton.cdiv(V, bw), num_segs * H),
             {
