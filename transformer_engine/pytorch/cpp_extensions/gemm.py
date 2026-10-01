@@ -334,6 +334,13 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+def _make_blockwise_scales_contiguous(t: Float8BlockwiseQTensorStorage) -> None:
+    for attr in ("_rowwise_scale_inv", "_columnwise_scale_inv"):
+        scale = getattr(t, attr)
+        if scale is not None and not scale.is_contiguous():
+            setattr(t, attr, scale.contiguous())
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -453,6 +460,10 @@ def general_gemm(
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
+        # The C++ tensor converter reads scale_inv as data_ptr + shape, ignoring strides.
+        for t in (A, B):
+            if isinstance(t, Float8BlockwiseQTensorStorage):
+                _make_blockwise_scales_contiguous(t)
 
     if IS_HIP_EXTENSION:
         use_bf16_tn_output_workaround = _should_use_bf16_output_for_nvfp4_tn(

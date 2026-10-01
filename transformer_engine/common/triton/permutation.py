@@ -244,6 +244,9 @@ def _permute_kernel(
     PERMUTE_SCALE: tl.constexpr,
     FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    # Scales are [scale_hidden_dim, tokens] (TE's blockwise GEMM layout) instead of
+    # [tokens, scale_hidden_dim]. stride_*_token / stride_*_hidden stay stride(0) / stride(1).
+    SCALE_HIDDEN_MAJOR: tl.constexpr = False,
 ):
     # Note: When FUSION_PAD=True, output buffers should be pre-zeroed by the caller
     # to ensure padding positions contain zeros.
@@ -261,7 +264,10 @@ def _permute_kernel(
     inp = tl.load(input_ptr + input_off, mask=mask)
     if PERMUTE_SCALE:
         mask_scale = cur_off < scale_hidden_dim
-        scale_off = pid_t * stride_scale_token + cur_off * stride_scale_hidden
+        if SCALE_HIDDEN_MAJOR:
+            scale_off = cur_off * stride_scale_token + pid_t * stride_scale_hidden
+        else:
+            scale_off = pid_t * stride_scale_token + cur_off * stride_scale_hidden
         scale = tl.load(scale_ptr + scale_off, mask=mask_scale)
     n_routed = tl.load(
         row_id_map_ptr
@@ -283,9 +289,15 @@ def _permute_kernel(
             dst_row = dst_row + pad_off
         output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
         if PERMUTE_SCALE:
-            permuted_scale_off = (
-                dst_row * stride_permuted_scale_token + cur_off * stride_permuted_scale_hidden
-            )
+            if SCALE_HIDDEN_MAJOR:
+                permuted_scale_off = (
+                    cur_off * stride_permuted_scale_token
+                    + dst_row * stride_permuted_scale_hidden
+                )
+            else:
+                permuted_scale_off = (
+                    dst_row * stride_permuted_scale_token + cur_off * stride_permuted_scale_hidden
+                )
             tl.store(permuted_scale_ptr + permuted_scale_off, scale, mask=mask_scale)
         if PERMUTE_PROBS:
             prob_off = pid_t * stride_probs_token + expert_idx * stride_probs_expert

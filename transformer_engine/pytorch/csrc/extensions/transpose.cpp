@@ -285,6 +285,107 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   return std::move(*out);
 }
 
+std::tuple<at::Tensor, std::optional<at::Tensor>, std::optional<at::Tensor>>
+fp8_blockwise_1d_rowwise_to_columnwise_grouped(at::Tensor rowwise_data,
+                                                at::Tensor rowwise_scale_inv,
+                                                std::vector<int64_t> split_sections,
+                                                DType fp8_dtype, bool columnwise, double epsilon,
+                                                bool force_pow_2_scales, bool direct) {
+  init_extension();
+  NVTE_CHECK(rowwise_data.dim() == 2, "Rowwise data must be 2D [M, K].");
+  const auto data = rowwise_data.contiguous();
+  const auto scale_inv = rowwise_scale_inv.contiguous();
+  const int64_t n_rows = data.size(0);
+  const int64_t n_cols = data.size(1);
+  constexpr int64_t block_len = 128;
+
+  const auto fp32_opts = at::TensorOptions().dtype(at::kFloat).device(data.device());
+  at::Tensor rs_out = at::empty({scale_inv.numel()}, fp32_opts);
+  std::optional<at::Tensor> col_data, col_scale_inv;
+  TensorWrapper te_col_data, te_col_scale_inv;
+  if (columnwise) {
+    col_data = at::empty({n_rows * n_cols}, data.options());
+    col_scale_inv = at::empty({n_rows / block_len, n_cols}, fp32_opts);
+    te_col_data = makeTransformerEngineTensor(
+        col_data->data_ptr(), std::vector<size_t>{static_cast<size_t>(n_rows * n_cols)},
+        fp8_dtype);
+    te_col_scale_inv = makeTransformerEngineTensor(*col_scale_inv);
+  }
+
+  const auto te_data = makeTransformerEngineTensor(
+      data.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(n_rows), static_cast<size_t>(n_cols)}, fp8_dtype);
+  const auto te_scale_inv = makeTransformerEngineTensor(scale_inv);
+  for (const auto m : split_sections) {
+    NVTE_CHECK(m >= 0, "Split sections must be non-negative, got ", m, ".");
+  }
+  const std::vector<size_t> group_lens(split_sections.begin(), split_sections.end());
+  auto te_rs_out = makeTransformerEngineTensor(rs_out);
+  nvte_fp8_blockwise_1d_rowwise_to_columnwise_grouped(
+      te_data.data(), te_scale_inv.data(), group_lens.data(), group_lens.size(), te_rs_out.data(),
+      te_col_data.data(), te_col_scale_inv.data(), static_cast<float>(epsilon),
+      force_pow_2_scales, direct, at::cuda::getCurrentCUDAStream());
+  return {rs_out, col_data, col_scale_inv};
+}
+
+std::vector<py::object> fp8_blockwise_1d_split_grouped(
+    at::Tensor rowwise_data, at::Tensor rowwise_scale_inv,
+    std::vector<int64_t> split_sections, py::handle quantizer, DType fp8_dtype,
+    at::ScalarType fake_dtype, bool columnwise, double epsilon, bool force_pow_2_scales,
+    bool direct) {
+  init_extension();
+  NVTE_CHECK(rowwise_data.dim() == 2, "Rowwise data must be 2D [M, K].");
+  constexpr int64_t block_len = 128;
+  const auto data = rowwise_data.contiguous();
+  const int64_t n_cols = data.size(1);
+  const int64_t k_blocks = n_cols / block_len;
+
+  auto [rs_out, col_data, col_scale_inv] = fp8_blockwise_1d_rowwise_to_columnwise_grouped(
+      data, rowwise_scale_inv, split_sections, fp8_dtype, columnwise, epsilon, force_pow_2_scales,
+      direct);
+
+  // Same construction as Float8BlockQuantizer::create_tensor for internal quantizers.
+  const py::object py_fp8_dtype = MakePythonDType(fp8_dtype);
+  const py::object py_fake_dtype = py::cast(fake_dtype);
+  const py::object py_false = py::bool_(false);
+  const py::object py_none = py::none();
+  const py::tuple args(0);
+  std::vector<py::object> chunks;
+  chunks.reserve(split_sections.size());
+  int64_t off = 0;
+  for (const auto m : split_sections) {
+    py::dict kwargs;
+    kwargs["rowwise_data"] =
+        py::cast(data.as_strided({m, n_cols}, {n_cols, 1}, data.storage_offset() + off * n_cols));
+    kwargs["rowwise_scale_inv"] = py::cast(
+        rs_out.as_strided({k_blocks, m}, {m, 1}, rs_out.storage_offset() + k_blocks * off));
+    if (columnwise) {
+      kwargs["columnwise_data"] = py::cast(col_data->as_strided(
+          {n_cols, m}, {m, 1}, col_data->storage_offset() + n_cols * off));
+      kwargs["columnwise_scale_inv"] = py::cast(
+          col_scale_inv->as_strided({m / block_len, n_cols}, {n_cols, 1},
+                                    col_scale_inv->storage_offset() + off / block_len * n_cols));
+    } else {
+      kwargs["columnwise_data"] = py_none;
+      kwargs["columnwise_scale_inv"] = py_none;
+    }
+    kwargs["fp8_dtype"] = py_fp8_dtype;
+    kwargs["quantizer"] = quantizer;
+    kwargs["is_2D_scaled"] = py_false;
+    kwargs["fake_dtype"] = py_fake_dtype;
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass),
+                      args.ptr(), kwargs.ptr());
+    if (result == nullptr) {
+      PyErr_Print();
+    }
+    NVTE_CHECK(result != nullptr, "Failed to create Float8BlockwiseQTensorStorage instance");
+    chunks.emplace_back(py::reinterpret_steal<py::object>(result));
+    off += m;
+  }
+  return chunks;
+}
+
 void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
                                      std::vector<at::Tensor> columnwise_data_list,
                                      std::vector<at::Tensor> rowwise_scale_inv_list,

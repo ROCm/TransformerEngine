@@ -345,6 +345,34 @@ void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
  */
 void nvte_swap_first_dims(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Regroup a packed 1x128 blockwise FP8 tensor per group, optionally building its
+ *         128x1 columnwise operand, in one launch.
+ *
+ *  Every group length must be a multiple of 128. Outputs are group-contiguous, so each group's
+ *  part is a dense slice. With \p direct (requires \p force_pow_2_scales), each 128x128 tile takes
+ *  the max of its row scales as the columnwise scale and re-encodes the FP8 bytes by exponent
+ *  arithmetic instead of dequantizing and requantizing.
+ *
+ *  \param[in]     rowwise_data              FP8 data, shape [M, K]. M and K multiples of 128.
+ *  \param[in]     rowwise_scale_inv         FP32, contiguous [K/128, M].
+ *  \param[in]     group_lens                Host array of group lengths, summing to M.
+ *  \param[in]     num_groups                Number of groups, at most 256.
+ *  \param[out]    grouped_rowwise_scale_inv FP32, K/128 * M elements; group g at offset
+ *                                           K/128 * off_g, shape [K/128, m_g].
+ *  \param[out]    columnwise_data           FP8, M * K elements; group g at offset K * off_g,
+ *                                           shape [K, m_g]. Null data skips the columnwise outputs.
+ *  \param[out]    columnwise_scale_inv      FP32, shape [M/128, K].
+ *  \param[in]     epsilon                   Amax floor for the requantizing path.
+ *  \param[in]     force_pow_2_scales        Round columnwise scales down to powers of two.
+ *  \param[in]     direct                    Use the exponent-arithmetic transpose.
+ *  \param[in]     stream                    CUDA stream used for the operation.
+ */
+void nvte_fp8_blockwise_1d_rowwise_to_columnwise_grouped(
+    const NVTETensor rowwise_data, const NVTETensor rowwise_scale_inv,
+    const size_t *group_lens, size_t num_groups, NVTETensor grouped_rowwise_scale_inv,
+    NVTETensor columnwise_data, NVTETensor columnwise_scale_inv, float epsilon,
+    int force_pow_2_scales, int direct, cudaStream_t stream);
+
 /*! \brief Transpose NVFP4 packed data.
  *
  *  Unlike FP8, NVFP4 packs two 4-bit values per byte. This function correctly

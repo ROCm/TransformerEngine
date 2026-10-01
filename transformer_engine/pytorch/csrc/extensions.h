@@ -235,6 +235,19 @@ void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale)
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
+std::tuple<at::Tensor, std::optional<at::Tensor>, std::optional<at::Tensor>>
+fp8_blockwise_1d_rowwise_to_columnwise_grouped(at::Tensor rowwise_data,
+                                                at::Tensor rowwise_scale_inv,
+                                                std::vector<int64_t> split_sections,
+                                                DType fp8_dtype, bool columnwise, double epsilon,
+                                                bool force_pow_2_scales, bool direct);
+
+std::vector<py::object> fp8_blockwise_1d_split_grouped(
+    at::Tensor rowwise_data, at::Tensor rowwise_scale_inv,
+    std::vector<int64_t> split_sections, py::handle quantizer, DType fp8_dtype,
+    at::ScalarType fake_dtype, bool columnwise, double epsilon, bool force_pow_2_scales,
+    bool direct);
+
 /***************************************************************************************************
  * Activations
  **************************************************************************************************/

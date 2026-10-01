@@ -129,6 +129,7 @@ def permute_with_mask_map(
     num_out_tokens: int,
     hidden_size: int,
     scale_hidden_dim: int,
+    scale_hidden_major: bool = False,
 ):
     """
     Permute the input tensor based on the row_id_map.
@@ -156,6 +157,9 @@ def permute_with_mask_map(
         Hidden size of the input tensor.
     scale_hidden_dim : int
         Hidden size of the scale tensor.
+    scale_hidden_major : bool
+        If True, ``scale`` is ``[scale_hidden_dim, num_tokens]`` and the permuted
+        scale is returned contiguous as ``[scale_hidden_dim, num_out_tokens]``.
     """
     # Use torch.zeros when pad_offsets is provided to ensure padding regions are zeroed.
     # The kernel writes only to valid positions, leaving padding positions at zero.
@@ -164,11 +168,14 @@ def permute_with_mask_map(
     permuted_probs = (
         alloc((num_out_tokens,), dtype=probs.dtype, device="cuda") if probs is not None else None
     )
-    permuted_scale = (
-        alloc((num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda")
-        if scale is not None
-        else None
-    )
+    permuted_scale = None
+    if scale is not None:
+        scale_shape = (
+            (scale_hidden_dim, num_out_tokens)
+            if scale_hidden_major
+            else (num_out_tokens, scale_hidden_dim)
+        )
+        permuted_scale = alloc(scale_shape, dtype=scale.dtype, device="cuda")
     # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _permute_kernel[grid](
@@ -205,6 +212,7 @@ def permute_with_mask_map(
         PERMUTE_PROBS=probs is not None,
         PERMUTE_SCALE=scale is not None,
         FUSION_PAD=pad_offsets is not None,
+        SCALE_HIDDEN_MAJOR=scale_hidden_major,
     )
     return output, permuted_scale, permuted_probs
 

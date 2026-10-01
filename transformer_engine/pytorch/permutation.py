@@ -331,12 +331,13 @@ def moe_permute_mask_map_forward(
         fake_dtype = inp.dtype
         # blockwise scaling
         if blockwise_recipe:
-            fp8_scale = inp._rowwise_scale_inv.T.contiguous()
-            scale_hidden_dim = fp8_scale.shape[1]
-            if num_tokens != fp8_scale.shape[0]:
+            # [K/128, T]. The kernel reads this layout and writes [K/128, M] directly.
+            fp8_scale = inp._rowwise_scale_inv
+            scale_hidden_dim = fp8_scale.shape[0]
+            if num_tokens != fp8_scale.shape[1]:
                 raise ValueError(
                     f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
-                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"fp8_scale.shape[1] ({fp8_scale.shape[1]}). "
                     f"Input shape: ({num_tokens}, {hidden_size}), "
                     f"scale shape: {tuple(fp8_scale.shape)}."
                 )
@@ -378,6 +379,7 @@ def moe_permute_mask_map_forward(
         num_out_tokens,
         hidden_size,
         scale_hidden_dim,
+        scale_hidden_major=blockwise_recipe,
     )
 
     if fp8:
@@ -394,7 +396,7 @@ def moe_permute_mask_map_forward(
                 shape=output.shape,
                 dtype=fake_dtype,
                 rowwise_data=output,
-                rowwise_scale_inv=permuted_scale.T.contiguous(),
+                rowwise_scale_inv=permuted_scale,
                 columnwise_data=None,
                 columnwise_scale_inv=None,
                 fp8_dtype=fp8_dtype,
@@ -695,13 +697,14 @@ def moe_unpermute_mask_map_backward_no_probs(
             unpermuted_act_grad = unpermuted_act_grad._data
         # blockwise scaling
         elif blockwise_recipe:
-            fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
+            # Same layout swap as the forward permute: read [K/128, T], write [K/128, M].
+            fp8_scale = unpermuted_act_grad._rowwise_scale_inv
             unpermuted_act_grad = unpermuted_act_grad._rowwise_data
-            scale_hidden_dim = fp8_scale.shape[1]
-            if num_tokens != fp8_scale.shape[0]:
+            scale_hidden_dim = fp8_scale.shape[0]
+            if num_tokens != fp8_scale.shape[1]:
                 raise ValueError(
                     f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
-                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"fp8_scale.shape[1] ({fp8_scale.shape[1]}). "
                     f"Scale shape: {tuple(fp8_scale.shape)}."
                 )
         # mxfp8 scaling
@@ -733,6 +736,7 @@ def moe_unpermute_mask_map_backward_no_probs(
         num_permuted_tokens,
         hidden_size,
         scale_hidden_dim,
+        scale_hidden_major=blockwise_recipe,
     )
 
     if fp8:
@@ -749,7 +753,7 @@ def moe_unpermute_mask_map_backward_no_probs(
                 shape=act_grad.shape,
                 dtype=fake_dtype,
                 rowwise_data=act_grad,
-                rowwise_scale_inv=permuted_scale.T.contiguous(),
+                rowwise_scale_inv=permuted_scale,
                 columnwise_data=None,
                 columnwise_scale_inv=None,
                 fp8_dtype=fp8_dtype,

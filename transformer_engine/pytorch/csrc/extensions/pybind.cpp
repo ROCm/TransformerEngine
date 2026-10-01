@@ -449,6 +449,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_blockwise_1d_rowwise_to_columnwise_grouped",
+        &transformer_engine::pytorch::fp8_blockwise_1d_rowwise_to_columnwise_grouped,
+        "Group-contiguous 1x128 blockwise FP8 scales, and optionally the columnwise operand",
+        py::arg("rowwise_data"), py::arg("rowwise_scale_inv"), py::arg("split_sections"),
+        py::arg("fp8_dtype"), py::kw_only(), py::arg("columnwise"), py::arg("epsilon"),
+        py::arg("force_pow_2_scales"), py::arg("direct"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_blockwise_1d_split_grouped",
+        &transformer_engine::pytorch::fp8_blockwise_1d_split_grouped,
+        "Grouped 1x128 blockwise FP8 restripe, returned as per-group tensors",
+        py::arg("rowwise_data"), py::arg("rowwise_scale_inv"), py::arg("split_sections"),
+        py::arg("quantizer"), py::arg("fp8_dtype"),
+        py::arg("fake_dtype"), py::kw_only(), py::arg("columnwise"), py::arg("epsilon"),
+        py::arg("force_pow_2_scales"), py::arg("direct"));
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,

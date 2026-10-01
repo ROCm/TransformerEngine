@@ -67,6 +67,7 @@ from ..quantized_tensor import (
 )
 from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.mxfp8_tensor import MXFP8Tensor
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
@@ -99,8 +100,26 @@ class _GroupedLinear(torch.autograd.Function):
         inp: QuantizedTensorStorage,
         m_splits: list,
         in_features: int,
+        columnwise: bool = False,
     ) -> list:
-        """Split an already-quantized activation along dim 0 without re-quantizing."""
+        """Split an already-quantized activation along dim 0 without re-quantizing.
+
+        With ``columnwise=True``, 1D blockwise chunks also carry columnwise data:
+        built for all chunks at once, or per chunk when
+        ``NVTE_FP8_BLOCKWISE_1D_ROWWISE_TO_COLWISE=0``. For other formats callers
+        synthesize it per chunk via ``update_usage``.
+        """
+        if isinstance(inp, Float8BlockwiseQTensorStorage):
+            chunks = inp.split_grouped(
+                m_splits,
+                columnwise=columnwise,
+                grouped_columnwise=bool(
+                    int(os.environ.get("NVTE_FP8_BLOCKWISE_1D_ROWWISE_TO_COLWISE", "1"))
+                ),
+            )
+            if chunks is not None:
+                return chunks
+
         data = None
         scales = None
         if hasattr(inp, "_rowwise_data") and inp._rowwise_data is not None:
@@ -210,12 +229,14 @@ class _GroupedLinear(torch.autograd.Function):
         dequant+requant in ``update_usage``.
         """
         in_features = grad_output.shape[-1]
-        gy_dgrad = _GroupedLinear._split_quantized_input(
-            grad_output, ctx.m_splits, in_features
-        )
-
         need_wgrad = (
             ctx.weights_requires_grad and ctx.grad_output_quantizers[0] is not None
+        )
+        gy_dgrad = _GroupedLinear._split_quantized_input(
+            grad_output,
+            ctx.m_splits,
+            in_features,
+            columnwise=need_wgrad,
         )
         # Per-tensor FP8 (Float8Tensor) shares one scalar scale between layouts,
         # so columnwise == transpose(rowwise); no dequantize needed for wgrad.
@@ -1265,7 +1286,17 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if input_already_quantized:
-            inputmats = _GroupedLinear._split_quantized_input(inp, m_splits, in_features)
+            inputmats = _GroupedLinear._split_quantized_input(
+                inp,
+                m_splits,
+                in_features,
+                columnwise=(
+                    is_grad_enabled
+                    and weight_requires_grad
+                    and not save_original_input
+                    and backward_override is None
+                ),
+            )
         elif fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,

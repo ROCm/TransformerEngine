@@ -273,6 +273,7 @@ list(APPEND transformer_engine_cuda_sources
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      transpose/quantize_transpose_vector_blockwise.cu
+     transpose/fp8_blockwise_restripe.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/context_parallel.cu

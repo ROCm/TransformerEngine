@@ -9,8 +9,9 @@
 from __future__ import annotations
 import math
 import os
-from typing import Optional, Dict, Any, Tuple, Union
+from typing import Optional, Dict, Any, List, Tuple, Union
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
@@ -460,6 +461,83 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             )
             _old_data.data = _empty_tensor()
             del _old_data
+
+    def split_grouped(
+        self,
+        m_splits: List[int],
+        columnwise: bool = False,
+        grouped_columnwise: bool = True,
+    ) -> Optional[List[Float8BlockwiseQTensorStorage]]:
+        """Split a 1x128 rowwise tensor along dim 0 into group-contiguous chunks.
+
+        One kernel re-lays the rowwise scale_inv per group, and the chunk storages
+        are built in C++. The split lengths reach the kernel as launch arguments,
+        so no device copy of ``m_splits`` is needed. Columnwise data is optional:
+
+        * ``columnwise=False``: rowwise chunks only.
+        * ``columnwise=True, grouped_columnwise=True``: the same kernel also
+          restripes the whole tensor rowwise -> columnwise, writing each group's
+          [K, m_i] payload contiguously.
+        * ``columnwise=True, grouped_columnwise=False``: each chunk builds its own
+          columnwise data with ``_create_columnwise``.
+
+        Returns ``None`` when the tensor does not qualify (not 1D-scaled, already
+        columnwise, K or a split not a multiple of 128, more than 256 splits, or
+        not on ROCm); callers then split per chunk.
+        """
+        block_len = 128
+        data = self._rowwise_data
+        scales = self._rowwise_scale_inv
+        if (
+            not IS_HIP_EXTENSION
+            or self._is_2D_scaled
+            or data is None
+            or scales is None
+            or self._columnwise_data is not None
+        ):
+            return None
+        in_features = data.shape[-1]
+        if (
+            in_features % block_len
+            or len(m_splits) > 256
+            or any(m % block_len for m in m_splits)
+        ):
+            return None
+        data = data.reshape(-1, in_features)
+        num_tokens = data.shape[0]
+        if (
+            data.stride(-1) != 1
+            or scales.dim() != 2
+            or tuple(scales.shape) != (in_features // block_len, num_tokens)
+            or sum(m_splits) != num_tokens
+        ):
+            return None
+
+        quantizer = self._quantizer
+        epsilon = float(getattr(quantizer, "amax_epsilon", 0.0) or 0.0)
+        force_pow_2_scales = bool(getattr(quantizer, "force_pow_2_scales", True))
+        grouped = columnwise and grouped_columnwise
+        direct = (
+            grouped
+            and force_pow_2_scales
+            and bool(int(os.environ.get("NVTE_FP8_BLOCKWISE_1D_DIRECT_TRANSPOSE", "0")))
+        )
+        chunks = tex.fp8_blockwise_1d_split_grouped(
+            data,
+            scales,
+            m_splits,
+            quantizer,
+            self._fp8_dtype,
+            self._dtype,
+            columnwise=grouped,
+            epsilon=epsilon,
+            force_pow_2_scales=force_pow_2_scales,
+            direct=direct,
+        )
+        if columnwise and not grouped:
+            for chunk in chunks:
+                chunk._create_columnwise()
+        return chunks
 
     def __repr__(self):
         try:
