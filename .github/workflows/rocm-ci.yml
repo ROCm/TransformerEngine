@@ -98,14 +98,88 @@ jobs:
           echo "Selected base image tag: $IMAGE_BASE"
           echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
+  # Which suites this run needs. Pull requests are gated by the paths they
+  # change (ci/change_scope.py); everything else -- pushes to dev and release
+  # branches, manual runs -- runs every suite, as does a PR labelled ci-skip-scope.
+  # The rules are read from the PR's base branch, not from the PR, so a PR
+  # cannot change the rules that gate it: a PR editing ci/change_scope.py is
+  # judged by the reviewed copy, which sends any ci/ change to every suite.
+  scope:
+    name: Select Test Suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_build: ${{ steps.scope.outputs.run_build }}
+      sgpu_suites: ${{ steps.scope.outputs.sgpu_suites }}
+      mgpu_suites: ${{ steps.scope.outputs.mgpu_suites }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # A PR is diffed against its base branch, which needs the history
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Select suites
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          SKIP_SCOPE: ${{ contains(github.event.pull_request.labels.*.name, 'ci-skip-scope') }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RULES_FROM_SOURCE: ${{ inputs.test_config_from_source }}
+        run: |
+          # Selecting every suite does not consult the rules, so this checkout's
+          # own copy of the script serves for it.
+          everything() {
+            python3 ci/change_scope.py --all "$1" \
+              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [[ "$EVENT" != "pull_request" ]]; then
+            everything "${EVENT} runs are not gated"
+            exit 0
+          fi
+          if [[ "$SKIP_SCOPE" == "true" ]]; then
+            everything "the PR is labelled ci-skip-scope"
+            exit 0
+          fi
+
+          # The base branch's copy of the rules; the PR's own only when asked
+          # to debug it (test_config_from_source, as for ci_config.json).
+          RULES=/tmp/change_scope.py
+          if [[ "$RULES_FROM_SOURCE" == "true" ]]; then
+            echo "::notice::Debugging mode: using ci/change_scope.py from the PR"
+            cp ci/change_scope.py "$RULES"
+          elif ! git show "origin/${BASE_REF}:ci/change_scope.py" > "$RULES" 2>/dev/null; then
+            everything "${BASE_REF} has no ci/change_scope.py yet"
+            exit 0
+          fi
+
+          # The whole PR against its merge base, not just the latest push.
+          # --no-renames lists a moved file at both its old and its new path.
+          if ! git diff --name-status --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed.txt; then
+            echo "::warning::could not list the PR's changes; running every suite"
+            everything "the PR's changes could not be listed"
+            exit 0
+          fi
+          if ! python3 "$RULES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" \
+                < /tmp/changed.txt; then
+            echo "::warning::ci/change_scope.py failed; running every suite"
+            everything "the gating rules failed"
+          fi
+
   build:
+    needs: scope
+    if: needs.scope.outputs.run_build == 'true'
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
-    needs: [select_image, build]
+    needs: [scope, select_image, build]
+    if: needs.scope.outputs.sgpu_suites != ''
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
@@ -236,6 +310,7 @@ jobs:
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
             te-runner bash /workspace/ci/run_queue.sh --queue sgpu \
+              --suites "${{ needs.scope.outputs.sgpu_suites }}" \
               --log-dir /workspace/test-results/logs
 
       - name: Save learned test weights
@@ -249,6 +324,7 @@ jobs:
         if: always()
         env:
           ATTEMPT: ${{ github.run_attempt }}
+          SUITES: ${{ needs.scope.outputs.sgpu_suites }}
         run: |
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
 
@@ -261,12 +337,15 @@ jobs:
           # means the suite crashed before writing XML on a first attempt, or
           # simply was not re-queued on a later one -- junit_report.py tells the
           # two apart from --attempt and words the section accordingly.
-          python3 ci/junit_report.py test-results/torch \
-            --title "sGPU PyTorch (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
-          python3 ci/junit_report.py test-results/jax \
-            --title "sGPU JAX (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
-          python3 ci/junit_report.py test-results/core \
-            --title "sGPU Core (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          # A suite the PR's changes did not select has nothing to report; the
+          # schedule report below names it as not selected.
+          report() {
+            [[ " $SUITES " == *" $1 "* ]] || return 0
+            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+          }
+          report torch "sGPU PyTorch (${{ matrix.arch_label }})"
+          report jax "sGPU JAX (${{ matrix.arch_label }})"
+          report core "sGPU Core (${{ matrix.arch_label }})"
           if [ -f test-results/logs/report/schedule.md ]; then
             cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
           else
@@ -332,7 +411,8 @@ jobs:
   # side share it -- see ci/run_queue.sh.
   mgpu_tests:
     name: mGPU Tests (${{ matrix.arch_label }})
-    needs: [select_image, build]
+    needs: [scope, select_image, build]
+    if: needs.scope.outputs.mgpu_suites != ''
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
@@ -427,6 +507,7 @@ jobs:
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
+            -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
               --log-dir /workspace/test-results/logs"
 
@@ -441,12 +522,17 @@ jobs:
         if: always()
         env:
           ATTEMPT: ${{ github.run_attempt }}
+          SUITES: ${{ needs.scope.outputs.mgpu_suites }}
         run: |
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
-          python3 ci/junit_report.py test-results/torch-mgpu \
-            --title "mGPU PyTorch (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
-          python3 ci/junit_report.py test-results/jax-mgpu \
-            --title "mGPU JAX (${{ matrix.arch_label }})" --attempt "$ATTEMPT"
+          # A suite the PR's changes did not select has nothing to report; the
+          # schedule report below names it as not selected.
+          report() {
+            [[ " $SUITES " == *" $1 "* ]] || return 0
+            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+          }
+          report torch-mgpu "mGPU PyTorch (${{ matrix.arch_label }})"
+          report jax-mgpu "mGPU JAX (${{ matrix.arch_label }})"
           if [ -f test-results/logs/report/schedule.md ]; then
             cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
           else

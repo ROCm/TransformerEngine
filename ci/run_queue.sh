@@ -5,7 +5,8 @@
 #
 # Run test suites as one global work queue across the GPUs of this box.
 #
-# Usage: run_queue.sh [-q|--queue sgpu|mgpu] [-l|--log-dir <dir>] [<config>...]
+# Usage: run_queue.sh [-q|--queue sgpu|mgpu] [-s|--suites "<label>..."] [-l|--log-dir <dir>]
+#                     [<config>...]
 #
 # Two queues share this script, selected by --queue (default sgpu):
 #
@@ -22,10 +23,15 @@
 #
 # The queue uses every GPU it can see; restrict it with HIP_VISIBLE_DEVICES.
 #
+# --suites (or TE_CI_SUITES) runs only the named suites of the config; the rest
+# pass without running, with a verdict that says so. CI sets it from
+# ci/change_scope.py, which works out from a PR's changed paths what it needs.
+#
 # Example usage:
 #   TEST_LEVEL=1 ci/run_queue.sh
 #   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 ci/run_queue.sh
 #   TEST_LEVEL=3 ci/run_queue.sh --queue mgpu
+#   TEST_LEVEL=1 ci/run_queue.sh --suites "torch examples"
 set -u
 SCRIPT_START_TS=$(date +%s)
 
@@ -59,6 +65,11 @@ declare -a SUITE_LOGFILES=()
 declare -a SUITE_MODES=()
 declare -a SUITE_CMDS=()
 declare -a SUITE_ARGS=()
+# Suites of the config that --suites left out, with their log file names, so
+# Phase 5 can still give each one a verdict
+declare -a SKIPPED_LABELS=()
+declare -a SKIPPED_LOGFILES=()
+declare -a SKIPPED_OPAQUE=()
 GPU_SOURCE=""
 OVERALL_RC=0
 
@@ -88,9 +99,16 @@ fi
 # Parse arguments
 # ---------------------------------------------------------------------------
 QUEUE="sgpu"
-USAGE="Usage: $0 [-q|--queue sgpu|mgpu] [-l|--log-dir <dir>] [<config>...]"
+# Set, even to nothing, means "only these"; unset means every suite
+SELECTED_SUITES="${TE_CI_SUITES-}"
+FILTER_SUITES="${TE_CI_SUITES+1}"
+USAGE="Usage: $0 [-q|--queue sgpu|mgpu] [-s|--suites \"<label>...\"] [-l|--log-dir <dir>] [<config>...]"
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -s|--suites)
+            SELECTED_SUITES="$2"; FILTER_SUITES=1; shift 2 ;;
+        --suites=*)
+            SELECTED_SUITES="${1#*=}"; FILTER_SUITES=1; shift ;;
         -q|--queue)
             QUEUE="$2"; shift 2 ;;
         --queue=*)
@@ -161,6 +179,61 @@ if [[ -n "$dupe_labels" ]]; then
     log_error "duplicate suite labels across configs:"
     echo "$dupe_labels" >&2
     exit 1
+fi
+
+# Keep only the --suites the caller asked for. A name the configs do not define
+# is an error rather than a no-op: it means the caller (ci/change_scope.py) and
+# the configs disagree on a label, and quietly running nothing for it would
+# pass a PR that was never tested.
+if [[ -n "$FILTER_SUITES" ]]; then
+    read -r -a wanted <<< "$SELECTED_SUITES"
+    for name in "${wanted[@]}"; do
+        if ! printf '%s\n' "${SUITE_LABELS[@]}" | grep -qxF -- "$name"; then
+            log_error "--suites names '${name}', which ${CONFIGS[*]} do not define"
+            exit 1
+        fi
+    done
+    declare -a kept=()
+    for i in "${!SUITE_LABELS[@]}"; do
+        if printf '%s\n' "${wanted[@]}" | grep -qxF -- "${SUITE_LABELS[$i]}"; then
+            kept+=( "$i" )
+        else
+            SKIPPED_LABELS+=( "${SUITE_LABELS[$i]}" )
+            SKIPPED_LOGFILES+=( "${SUITE_LOGFILES[$i]}" )
+            # An opaque suite's weight is keyed by its bare label, which Phase 6
+            # prunes when the label is missing from the census. It is not gone,
+            # just not run, so it stays in the census.
+            [[ "${SUITE_MODES[$i]}" == "list" ]] || SKIPPED_OPAQUE+=( "${SUITE_LABELS[$i]}" )
+        fi
+    done
+    for array in SUITE_LABELS SUITE_LOGFILES SUITE_MODES SUITE_CMDS SUITE_ARGS; do
+        declare -n src=$array
+        declare -a picked=()
+        for i in "${kept[@]}"; do picked+=( "${src[$i]}" ); done
+        src=( "${picked[@]}" )
+        unset -n src
+    done
+    echo "== Suites: running ${SUITE_LABELS[*]:-none}; not selected: ${SKIPPED_LABELS[*]:-none} =="
+fi
+
+# Usage: write_skipped_verdicts <suite log dir>
+# Give each suite --suites left out a passing verdict that says why. The
+# workflow's gate reads these files, and a missing one reads as a failure.
+write_skipped_verdicts() {
+    local k
+    for k in "${!SKIPPED_LABELS[@]}"; do
+        echo "not run: not selected (--suites), e.g. the PR changes nothing it tests" \
+            > "$1/${SKIPPED_LOGFILES[$k]}"
+        echo 0 > "$1/${SKIPPED_LOGFILES[$k]}.rc"
+    done
+}
+
+# Nothing left to run needs no GPU, no setup and no report
+if [[ ${#SUITE_LABELS[@]} -eq 0 ]]; then
+    mkdir -p "$LOG_DIR/suites"
+    write_skipped_verdicts "$LOG_DIR/suites"
+    echo "== No suite selected: nothing to run =="
+    exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -287,6 +360,10 @@ ITEMS_FILE="$QUEUE_DIR/items.tsv"        # Phase 1 writes, Phase 6 reads
 TIMINGS_FILE="$QUEUE_DIR/timings.tsv"    # Phase 4 writes, Phases 6 and 7 read
 : > "$QUEUE_FILE"
 : > "$ITEMS_FILE"
+write_skipped_verdicts "$SUITE_LOG_DIR"
+for label in "${SKIPPED_OPAQUE[@]}"; do
+    printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
+done
 
 # ---------------------------------------------------------------------------
 # Phase 1: expand every suite into work items
@@ -791,6 +868,7 @@ if ! scheduler_py schedule_report.py "$LOG_DIR" \
         --total-wall "$(( $(date +%s) - SCRIPT_START_TS ))" \
         --default-weight "$DEFAULT_WEIGHT" \
         --weights "$WEIGHTS_FILE" \
+        --skipped "${SKIPPED_LABELS[*]}" \
         ${RERUN_MODE:+--rerun}; then
     log_warn "could not write the scheduling report"
 fi

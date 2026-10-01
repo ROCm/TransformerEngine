@@ -218,6 +218,7 @@ def render_report_md(
     total_wall,
     title,
     rerun=False,
+    skipped=(),
 ):
     """The Markdown report the workflow appends to the job summary."""
     n_gpus = len(gpu_ids)
@@ -243,6 +244,12 @@ def render_report_md(
         + (f", {total_wall}s end to end" if total_wall else ""),
         "",
     ]
+
+    if skipped:
+        # Said up front so a short report is not read as a lost one: these
+        # suites were left out on purpose (run_queue.sh --suites).
+        names = ", ".join(f"`{name}`" for name in skipped)
+        out += [f"Not selected, so not run: {names}.", ""]
 
     if ran != total_items:
         out.append(f"> :warning: **Only {ran} of {total_items} items produced a timing")
@@ -345,6 +352,12 @@ def main():
         "reads it to show what the next run will schedule with",
     )
     parser.add_argument(
+        "--skipped",
+        default="",
+        metavar="LABELS",
+        help="space-separated suites the run left out on purpose (run_queue.sh --suites)",
+    )
+    parser.add_argument(
         "--rerun",
         action="store_true",
         help="this run queued only the items that failed a previous attempt; "
@@ -382,6 +395,7 @@ def main():
         args.total_wall,
         args.title,
         rerun=args.rerun,
+        skipped=args.skipped.split(),
     )
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as handle:
