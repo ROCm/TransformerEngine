@@ -7,8 +7,11 @@
 """
 Normalization micro-benchmark using the fusible-ops LayerNorm / RMSNorm.
 
-Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8) that TE training
-recipes produce. In FP8/FP4 training the norm is fused with the following
+Run with ``python benchmark_normalization.py`` (a pytest module under the hood;
+see conftest.py).
+
+Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8, MXFP4, NVFP4)
+that TE training recipes produce. In FP8/FP4 training the norm is fused with the following
 Linear (LayerNormLinear / LayerNormMLP) and writes its output already
 quantized. That is reproduced here with ``ops.Sequential(Norm, Quantize)``: the
 op fuser threads the Quantize op's input quantizer into the norm, so the norm
@@ -16,22 +19,29 @@ writes the quantized output directly under ``autocast``. The Quantize op is an
 identity outside ``autocast``, so the bf16 baseline uses the same harness.
 
 Forward only: the quantize epilogue is a forward-pass phenomenon; the norm
-backward reads/writes high precision and is precision-independent. NVFP4/MXFP4
-norm outputs are not swept (no validated norm->FP4 cast path). Precisions
+backward reads/writes high precision and is precision-independent. On ROCm,
+MXFP8/MXFP4/NVFP4 norms run unfused (bf16 norm + separate cast kernel), so
+those rows measure norm + cast as LayerNormLinear sees it. Precisions
 unsupported on the current device are skipped.
 
 These are memory-bound; we report GB/s (input read + output write).
 Output: benchmark_normalization.csv (written to cwd)
 """
 
+import atexit
+import ctypes
+import os
+import sys
+
+import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import ops
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     build_recipes,
-    time_func, compute_gbps, make_metric_record, run_benchmarks,
-    make_input,
+    apply_backend_env, time_func_dual, compute_gbps, make_metric_record,
+    make_input, te_honors_env,
 )
 
 NORM_TYPES = [
@@ -41,10 +51,8 @@ NORM_TYPES = [
 
 BENCHMARK_LABEL = "Normalization Forward"
 
-# Quantized-output precisions validated for the norm cast; tests/pytorch/
-# triton_kernels/test_norms.py exercises fp8 and mxfp8 norm quantizers. bf16 is
-# the plain baseline (Quantize is an identity outside autocast).
-RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
+# bf16 is the plain baseline (Quantize is an identity outside autocast).
+RECIPES = build_recipes()
 
 # Forward output bytes/elem by precision. Under autocast the norm quantizes
 # through the recipe-created quantizers, which default to columnwise usage on, so
@@ -54,35 +62,58 @@ RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8"))
 #   bf16  : 2.0                    (single bf16 output; Quantize is identity)
 #   fp8   : 2.0                    (rowwise + columnwise E4M3/E5M2 data; scale ~ 0)
 #   mxfp8 : 2.0 + 2/32 = 2 + 1/16  (rowwise + columnwise data + both E8M0 scales)
+#   mxfp4 : 1.0 + 2/32 = 1 + 1/16  (packed E2M1 data x2 + E8M0 scale per 32)
+#   nvfp4 : 1.0 + 2/16 = 1 + 1/8   (packed E2M1 data x2 + E4M3 scale per 16)
 _FWD_WRITE_BYTES = {
     "bf16": 2.0,
     "fp8": 2.0,
     "mxfp8": 2.0 + 1.0 / 16,
+    "mxfp4": 1.0 + 1.0 / 16,
+    "nvfp4": 1.0 + 1.0 / 8,
 }
 
 
-def _generate_test_cases():
-    test_cases = []
+# Backend axis (None unsets, so "hip" is the native C++ path even if the ambient
+# env has a toggle set). "triton" flips the Triton RMSNorm/LayerNorm kernel (each
+# NormType reads only its own toggle).
+NORM_BACKENDS = {
+    "hip": {"NVTE_USE_RMSNORM_TRITON": None, "NVTE_USE_LAYERNORM_TRITON": None},
+    "triton": {"NVTE_USE_RMSNORM_TRITON": "1", "NVTE_USE_LAYERNORM_TRITON": "1"},
+}
+
+_NORM_CLS = {name: cls for name, cls in NORM_TYPES}
+
+
+def generate_cases():
+    """Cross models x norm type x precision x backend x M (forward only)."""
+    cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
-        for norm_name, norm_op_cls in NORM_TYPES:
+        for norm_name in _NORM_CLS:
             for precision in RECIPES:
-                for M in M_SIZE_LIST:
-                    test_cases.append({
-                        "Case": f"{model_name}/{norm_name}",
-                        "Precision": precision,
-                        "M": M,
-                        "hidden_size": hidden,
-                        "norm_op_cls": norm_op_cls,
-                        "dtype": torch.bfloat16,
-                    })
-    return test_cases
+                for backend in NORM_BACKENDS:
+                    for M in M_SIZE_LIST:
+                        cases.append({
+                            "Case": model_name,
+                            "NormType": norm_name,
+                            "Precision": precision,
+                            "Backend": backend,
+                            "M": M,
+                            "hidden_size": hidden,
+                        })
+    return cases
 
 
-def bench_norm(Case, Precision, M, hidden_size, norm_op_cls, dtype):
+def _case_id(c):
+    return f"{c['Case']}-{c['NormType']}-{c['Precision']}-{c['Backend']}-M{c['M']}"
+
+
+def bench_norm(NormType, Precision, M, hidden_size):
     device = "cuda"
+    dtype = torch.bfloat16
 
     recipe = RECIPES[Precision]
     use_fp8 = recipe is not None
+    norm_op_cls = _NORM_CLS[NormType]
 
     # Norm followed by Quantize so the norm writes its output directly in the
     # target precision under autocast (identity when use_fp8 is False).
@@ -101,17 +132,63 @@ def bench_norm(Case, Precision, M, hidden_size, norm_op_cls, dtype):
     # BF16 read + quantized write.
     fwd_bytes = int(M * hidden_size * (2 + _FWD_WRITE_BYTES[Precision]))
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
-
+    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
     return [make_metric_record(
-        BENCHMARK_LABEL, fwd_ms, "GB/s", fwd_gbps, measurement=fwd_measurement,
+        BENCHMARK_LABEL, fwd_ms, "GB/s", compute_gbps(fwd_bytes, fwd_ms),
+        measurement=fwd_measurement,
+        kernel_ms=fwd_kernel_ms,
+        kernel_throughput=compute_gbps(fwd_bytes, fwd_kernel_ms) if fwd_kernel_ms else None,
     )]
 
 
-if __name__ == "__main__":
-    run_benchmarks(
-        test_cases=_generate_test_cases(),
-        bench_fn=bench_norm,
-        param_columns=["Case", "Precision", "M", "hidden_size", "dtype"],
+def pytest_generate_tests(metafunc):
+    if "case" in metafunc.fixturenames:
+        cases = generate_cases()
+        metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
+
+
+_EXIT_SESSION = None
+
+
+def _exit_skipping_hip_teardown():
+    # Registered late, so run the earlier Python exit handlers ourselves before os._exit.
+    atexit.unregister(_exit_skipping_hip_teardown)
+    atexit._run_exitfuncs()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    ctypes.CDLL(None).fflush(None)
+    os._exit(int(_EXIT_SESSION.exitstatus))
+
+
+def _skip_hip_teardown_at_exit(session):
+    """Work around a ROCm 7.14 bug: after a cooperative launch in a torch process, HIP's
+    exit-time hsa_shut_down segfaults. Not under rocprofv3, which writes traces in it."""
+    global _EXIT_SESSION
+    if _EXIT_SESSION is None and "ROCP_TOOL_LIBRARIES" not in os.environ:
+        _EXIT_SESSION = session
+        atexit.register(_exit_skipping_hip_teardown)
+
+
+@pytest.mark.benchmark
+def test_norm(request, microbench, case, monkeypatch):
+    if case["Backend"] == "triton":
+        var = ("NVTE_USE_RMSNORM_TRITON" if case["NormType"] == "RMSNorm"
+               else "NVTE_USE_LAYERNORM_TRITON")
+        if not te_honors_env(var):
+            pytest.skip("Triton norm backend not available in this TE build")
+        if case["Precision"] == "mxfp4":
+            # Imperative xfail (not run): the GPU memory fault would abort the whole session.
+            pytest.xfail("Triton norm lacks MXFP4Quantizer handling: GPU memory fault")
+    if case["Backend"] == "hip" and case["hidden_size"] == 16384:
+        # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch.
+        _skip_hip_teardown_at_exit(request.session)
+    apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
+    microbench.run(
+        case,
+        lambda: bench_norm(case["NormType"], case["Precision"], case["M"], case["hidden_size"]),
     )
+
+
+if __name__ == "__main__":
+    # Make the file runnable directly: python benchmark_normalization.py [--csv -k ...].
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
