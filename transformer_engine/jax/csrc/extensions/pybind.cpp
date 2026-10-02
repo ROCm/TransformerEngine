@@ -170,13 +170,9 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-<<<<<<< HEAD
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-#ifndef USE_ROCM
-=======
   m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
         pybind11::arg("fused_attn_params"));
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+#ifndef USE_ROCM
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
 #endif
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);

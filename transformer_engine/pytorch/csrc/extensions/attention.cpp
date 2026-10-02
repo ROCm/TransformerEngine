@@ -10,7 +10,6 @@
 #include "common.h"
 #include "pybind.h"
 
-<<<<<<< HEAD
 // ROCm: at::cuda::CUDAGuard is unavailable on older torch; masquerade the HIP guard.
 #include <torch/version.h>
 #if USE_ROCM && TORCH_VERSION_MINOR < 11
@@ -19,8 +18,6 @@ using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
 using TECUDAGuard = at::cuda::CUDAGuard;
 #endif
 
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
