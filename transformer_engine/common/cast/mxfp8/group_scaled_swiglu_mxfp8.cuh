@@ -43,6 +43,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 namespace group_scaled_swiglu_kernel {
 
 using namespace dispatch::common;
@@ -387,6 +388,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 }
 
 }  // namespace group_scaled_swiglu_kernel
+#endif  // __HIP_PLATFORM_AMD__
 
 // Host launcher: grouped scaled SwiGLU -> columnwise MXFP8.
 //   input  : GroupedTensor [N, 2H] ([act|gate]) in a floating input dtype.
