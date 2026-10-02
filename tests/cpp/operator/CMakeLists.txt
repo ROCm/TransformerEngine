@@ -21,12 +21,8 @@ add_executable(test_operator
                test_cast_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
-<<<<<<< HEAD
+               test_fused_group_requantize_mxfp8.cu #CUDA-only test
                test_dequantize_float8blockwise_grouped.cu #CUDA-only test
-=======
-               test_fused_group_requantize_mxfp8.cu
-               test_dequantize_float8blockwise_grouped.cu
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
@@ -58,6 +54,7 @@ if(USE_ROCM)
               test_grouped_gemm.cu
               test_cast_current_scaling_grouped.cu
               test_cast_float8blockwise_grouped.cu
+              test_fused_group_requantize_mxfp8.cu
               test_dequantize_float8blockwise_grouped.cu)
   list(APPEND test_cuda_sources
               test_multi_tensor_transpose_bhsd.cu

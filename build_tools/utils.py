@@ -179,7 +179,6 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-<<<<<<< HEAD
 def rocm_build() -> bool:
     """
     Determines which build platform to use:
@@ -209,12 +208,10 @@ def rocm_build() -> bool:
             if nvte_use_rocm:
                 raise FileNotFoundError("Could not find ROCm installation.")
     # Try to detect CUDA if NVTE_USE_ROCM is set to "0" or ROCm is not found
-    try:
-        nvcc_path()
+    if nvcc_path() is not None:
         return False
-    except FileNotFoundError:
-        # If neither ROCm nor CUDA is detected, raise an error
-        raise FileNotFoundError("Could not detect ROCm or CUDA platform")
+    # If neither ROCm nor CUDA is detected, raise an error
+    raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 
 def _rocm_sdk_path_root() -> Optional[Path]:
@@ -269,12 +266,8 @@ def rocm_version() -> Tuple[int, ...]:
         raise RuntimeError("Could not determine ROCm version.")
 
 
-def cuda_toolkit_include_path() -> Tuple[str, str]:
-    """Returns root path for cuda toolkit includes.
-=======
 def nvcc_path() -> Optional[Path]:
     """Get the NVCC binary path.
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     Returns `None` if NVCC is not found.
     """
