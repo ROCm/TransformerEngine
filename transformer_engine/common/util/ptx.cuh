@@ -7,7 +7,7 @@
  ************************************************************************/
 
 /*! \file ptx.cuh
- *  \brief BW PTX
+*  \brief Helper functions with explicit PTX instructions
  */
 
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
@@ -301,6 +301,7 @@ __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+<<<<<<< HEAD
 __device__ __forceinline__ void try_cancel_cta(uint64_t *mbar, __uint128_t *response_data_ptr) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
@@ -359,6 +360,8 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
 
 #endif  // __HIP_PLATFORM_AMD__
 
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 constexpr uint32_t BF16_MANTISSA_BITS = 7;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
@@ -401,6 +404,7 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
+<<<<<<< HEAD
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #ifndef __HIP_PLATFORM_AMD__
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
@@ -440,6 +444,8 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 }
 
 #ifndef __HIP_PLATFORM_AMD__
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
@@ -648,6 +654,7 @@ __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const 
   return copysignf(q, (x != x) ? 1.0f : x);
 }
 
+<<<<<<< HEAD
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
@@ -1122,6 +1129,8 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
 }
 
 #endif //!__HIP_PLATFORM_AMD__
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 #endif  // FP4_TYPE_SUPPORTED
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1332,22 +1341,6 @@ __device__ __forceinline__ void fma_f32_bf16(float &out, uint16_t const &a, uint
 #else
   NVTE_DEVICE_ERROR("fma_f32_bf16 is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
-__device__ __forceinline__ void reduce_sync_max_abs_f32(float &out, float const &in) {
-  constexpr bool is_sm_100f = NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>);
-  if constexpr (is_sm_100f) {
-    asm volatile("redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;" : "=f"(out) : "f"(in));
-  } else {
-    asm volatile(
-        "{\n\t"
-        ".reg.b32 val;\n"
-        "abs.f32 val, %1;\n"
-        "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-        "}\n\t"
-        : "=r"(reinterpret_cast<uint32_t &>(out))
-        : "f"(in));
-  }
 }
 
 __device__ __forceinline__ bf16 get_amax(bf16 a, bf16 b) {
