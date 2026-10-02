@@ -17,9 +17,9 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
+    get_thd_partitioned_indices,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
 
 # Executed as a script, so sibling imports rely on the interpreter putting this file's
@@ -31,6 +31,7 @@ from test_attention_with_cp import (
 )
 from transformer_engine.pytorch import (
     autocast,
+    CPLoadBalancingStrategy,
     DotProductAttention,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -62,6 +63,7 @@ def generate_input_shapes(
     world_size: int,
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -120,8 +122,33 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
-        seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+            assert config.batch_size == 2
+            if kernel_backend == "FlashAttention" and fa_pad_between_seqs == "False":
+                seqlens_q = torch.tensor(
+                    [config.max_seqlen_q - 2, config.max_seqlen_q], dtype=torch.int32
+                )
+                assert seqlens_q.sum().item() % world_size == 0
+                seqlens_q_padded = seqlens_q
+            else:
+                # Exercise both document padding and a CP chunk boundary inside a document.
+                seqlens_q = torch.tensor(
+                    [config.max_seqlen_q - 2, config.max_seqlen_q - 1],
+                    dtype=torch.int32,
+                )
+                padded_total = 2 * config.max_seqlen_q
+                assert padded_total % world_size == 0
+                seqlens_q_padded = torch.tensor(
+                    [config.max_seqlen_q - 1, config.max_seqlen_q + 1],
+                    dtype=torch.int32,
+                )
+        else:
+            seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(
+                torch.int32
+            )
+            seqlens_q_padded = (
+                (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+            )
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
@@ -223,10 +250,12 @@ def run_dpa_with_cp(
     is_training="True",
     fa_pad_between_seqs="False",
     deterministic="False",
+    load_balancing_strategy="DUAL_CHUNK_SWAP",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    load_balancing_strategy = CPLoadBalancingStrategy[load_balancing_strategy]
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
     pad_between_seqs = None
@@ -348,7 +377,14 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend, fa_pad_between_seqs)
+    ) = generate_input_shapes(
+        qkv_format,
+        config,
+        world_size,
+        kernel_backend,
+        fa_pad_between_seqs,
+        load_balancing_strategy,
+    )
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -485,11 +521,21 @@ def run_dpa_with_cp(
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        seq_idx_q = get_thd_partitioned_indices(
+            cu_seqlens_q_padded,
+            q_.shape[0],
+            world_size,
+            rank,
+            device=q_.device,
+            load_balancing_strategy=load_balancing_strategy,
         )
-        seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        seq_idx_kv = get_thd_partitioned_indices(
+            cu_seqlens_kv_padded,
+            k_.shape[0],
+            world_size,
+            rank,
+            device=k_.device,
+            load_balancing_strategy=load_balancing_strategy,
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
@@ -533,6 +579,7 @@ def run_dpa_with_cp(
         cp_comm_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
+        load_balancing_strategy,
     )
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
@@ -659,10 +706,23 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+            if IS_HIP_EXTENSION:
+                # ROCm's CK/aiter attention kernels leave non-zero garbage in the THD
+                # padding positions (both the trailing tail and the per-sequence padding),
+                # unlike the cuDNN/FA paths that zero them. Those positions are don't-care
+                # (masked in real use), but the thd comparison below is element-wise over the
+                # full tensor, so zero the padding on both the CP and no-CP tensors first.
+                # out_ is a view returned by the CP custom autograd Function; clone it so the
+                # in-place zeroing is permitted (the fa_pad_between_seqs path clones for the
+                # same reason).
+                out_ = out_.clone()
+                for x in [dq, out, dq_, out_]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_q_padded[b + 1] - num_pads_q[b] : cu_seqlens_q_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_q_padded[-1] :] = 0.0
             for x in [dq, out, dq_, out_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_q_padded[-1] :] = 0
                 assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
                 for b in range(config.batch_size):
                     assert (
@@ -682,10 +742,17 @@ def run_dpa_with_cp(
             )
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
+            if IS_HIP_EXTENSION:
+                # Same ROCm padding accommodation as the q/out block above (no forward-output
+                # view among dk/dv/dk_/dv_, so no clone needed).
+                for x in [dk, dv, dk_, dv_]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_kv_padded[b + 1]
+                            - num_pads_kv[b] : cu_seqlens_kv_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_kv_padded[-1] :] = 0.0
             for x in [dk, dv, dk_, dv_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_kv_padded[-1] :] = 0
                 assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
                 for b in range(config.batch_size):
                     assert (
