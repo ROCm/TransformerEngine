@@ -30,5 +30,10 @@ python test_single_gpu_mnist.py --use-fp8
 
 cd "${REPO_ROOT}/examples/jax/encoder"
 pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-python test_single_gpu_encoder.py
-python test_single_gpu_encoder.py --use-fp8
+# These scripts import their sibling common.py, and ci/_utils.sh exports
+# PYTHONSAFEPATH=1, which drops the script's own directory from sys.path. Name the
+# directory explicitly rather than opting out: the flag is what keeps the source tree
+# from shadowing the installed package, and it is still wanted here.
+ENCODER_PYTHONPATH="${REPO_ROOT}/examples/jax/encoder${PYTHONPATH:+:${PYTHONPATH}}"
+PYTHONPATH="$ENCODER_PYTHONPATH" python test_single_gpu_encoder.py
+PYTHONPATH="$ENCODER_PYTHONPATH" python test_single_gpu_encoder.py --use-fp8
