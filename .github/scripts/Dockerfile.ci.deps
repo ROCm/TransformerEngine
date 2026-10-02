@@ -21,11 +21,13 @@ ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 ARG GPU_ARCH=gfx950;gfx942
 
-# Base OS packages.
+# Package sources. Noble has no Python ${PYTHON_VERSION}, so add deadsnakes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && add-apt-repository -y ppa:deadsnakes/ppa
+
+# Base OS packages.
+RUN apt-get install -y --no-install-recommends \
     ca-certificates curl \
     git vim \
     build-essential cmake ninja-build pkg-config liblzma-dev \

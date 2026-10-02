@@ -18,8 +18,6 @@ ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
 FROM $BASE_IMAGE
 
 ARG ROCM_REPO_URL=https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/
-# The ROCM_MAJOR_VERSION here has to match the one in the images the wheels are tested
-# on (ci/ci_config.json)
 ARG ROCM_DEVEL_PACKAGE=amdrocm-core-devel10.0-gfx950
 
 # Set up ROCm repo

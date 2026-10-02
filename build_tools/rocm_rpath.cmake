@@ -4,8 +4,8 @@
 # RUNPATH configuration for the ROCm shared objects.
 include_guard(GLOBAL)
 
-# Inplace builds leave the objects in the source tree, out of $ORIGIN's reach.
-# Empty otherwise: a redistributable wheel must not carry a build-machine path.
+# Set for builds that leave the objects in the source tree -- `pip install -e .`
+# and `setup.py build_ext --inplace` -- where no $ORIGIN entry reaches site-packages
 set(TE_ROCM_PURELIB "" CACHE STRING
     "site-packages of the building interpreter (inplace builds only)")
 
@@ -13,12 +13,9 @@ set(TE_ROCM_PURELIB "" CACHE STRING
 function(te_rocm_rpath out_var)
   set(_core _rocm_sdk_core/lib _rocm_sdk_libraries/lib)
 
-  # TheRock tarball layout, next to the wheel.
-  set(_rpaths "$ORIGIN/../rocm/lib" "$ORIGIN/../../rocm/lib")
-
-  # rocm-sdk packages. TE ships objects at two depths and one list goes on every
-  # object, so emit both; the loader skips entries whose directories are absent.
+  set(_rpaths "")
   foreach(_origin_to_site "$ORIGIN/.." "$ORIGIN/../..")
+    list(APPEND _rpaths "${_origin_to_site}/rocm/lib")
     foreach(_lib IN LISTS _core)
       list(APPEND _rpaths "${_origin_to_site}/${_lib}")
     endforeach()
