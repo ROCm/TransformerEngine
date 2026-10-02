@@ -938,7 +938,7 @@ endif()
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
-  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+  te_set_rocm_rpath(transformer_engine "$ORIGIN/lib" "$ORIGIN/transformer_engine/lib")
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")

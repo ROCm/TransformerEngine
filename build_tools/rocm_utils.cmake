@@ -3,6 +3,9 @@
 
 include_guard(GLOBAL)
 
+#Wheel-relative RUNPATH helpers for TheRock (rocm-sdk) builds
+include("${CMAKE_CURRENT_LIST_DIR}/rocm_rpath.cmake")
+
 #Determine ROCM_PATH
 if(NOT "$ENV{ROCM_PATH}" STREQUAL "")
     set(ROCM_PATH "$ENV{ROCM_PATH}")

@@ -68,8 +68,8 @@ export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeou
 # the script's directory. The checkout has no compiled libraries and none of the files
 # generated at build time, while the .so lookup falls back to site-packages -- so an
 # import landing there runs source-tree Python against installed native libraries, with
-# mismatched halves. On ROCm wheels it also skips the rocm-sdk preload, which segfaults
-# during test collection. PYTHONSAFEPATH drops both implicit sys.path entries, so the
+# mismatched halves. On ROCm wheels it also skips the ROCM_PATH setup in _rocm_init.py,
+# which the runtime CK-JIT compile needs. PYTHONSAFEPATH drops both implicit sys.path entries, so the
 # installed package always wins; being an env var, it applies to torchrun/mpirun children
 # and subprocesses too. Editable installs are unaffected: they resolve through a finder
 # in site-packages, not through cwd. Note that any non-empty value enables it -- unset

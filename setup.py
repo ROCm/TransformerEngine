@@ -48,7 +48,6 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 _ROCM_INIT_TEMPLATE = current_file_path / "build_tools" / "templates" / "_rocm_init.py"
 
-
 class BuildPy(_build_py):
     """Generate _rocm_init.py for ROCm builds only."""
 
@@ -56,8 +55,8 @@ class BuildPy(_build_py):
         # Generated into the source tree so build_py picks it up as an ordinary module of
         # the package, putting the same file in the checkout and in the wheel. Both need
         # it: transformer_engine/__init__.py imports it with `from . import _rocm_init`
-        # and tolerates its absence, so an install without it silently skips the rocm-sdk
-        # preload and loads the native libraries against an uninitialized ROCm runtime.
+        # and tolerates its absence, so an install without it silently leaves ROCM_PATH
+        # unset and the runtime CK-JIT compile cannot find a toolchain.
         # The generated file is gitignored.
         #
         # The write has to stay ahead of super().run(): build_py globs the package
@@ -120,6 +119,7 @@ def setup_common_extension() -> CMakeExtension:
         # not yet functional on ROCm, so force the static kernels here.
         cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_NORM=ON")
         cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON")
+
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")

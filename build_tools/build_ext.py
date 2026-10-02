@@ -46,7 +46,7 @@ class CMakeExtension(setuptools.Extension):
         self.cmake_path: Path = cmake_path
         self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
 
-    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
+    def _build_cmake(self, build_dir: Path, install_dir: Path, inplace: bool = False) -> None:
         # Make sure paths are str
         _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
@@ -73,6 +73,14 @@ class CMakeExtension(setuptools.Extension):
                 f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
                 f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
             ]
+        if rocm_build():
+            # An inplace build leaves the objects in the source tree, out of
+            # $ORIGIN's reach, and only ever runs where it was built. Passed
+            # either way: the CMake build dir persists, so omitting it would
+            # leave an earlier inplace build's value cached.
+            purelib = sysconfig.get_path("purelib") if inplace else ""
+            configure_command.append(f"-DTE_ROCM_PURELIB={purelib}")
+
         configure_command += self.cmake_flags
 
         #ROCm: below variable is not used by CMake build. Leave it here for reference
@@ -148,6 +156,7 @@ def get_build_ext(
                     ext._build_cmake(
                         build_dir=build_dir,
                         install_dir=install_dir,
+                        inplace=self.inplace,
                     )
                     continue
 
