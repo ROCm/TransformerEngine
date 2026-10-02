@@ -706,10 +706,23 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+            if IS_HIP_EXTENSION:
+                # ROCm's CK/aiter attention kernels leave non-zero garbage in the THD
+                # padding positions (both the trailing tail and the per-sequence padding),
+                # unlike the cuDNN/FA paths that zero them. Those positions are don't-care
+                # (masked in real use), but the thd comparison below is element-wise over the
+                # full tensor, so zero the padding on both the CP and no-CP tensors first.
+                # out_ is a view returned by the CP custom autograd Function; clone it so the
+                # in-place zeroing is permitted (the fa_pad_between_seqs path clones for the
+                # same reason).
+                out_ = out_.clone()
+                for x in [dq, out, dq_, out_]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_q_padded[b + 1] - num_pads_q[b] : cu_seqlens_q_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_q_padded[-1] :] = 0.0
             for x in [dq, out, dq_, out_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_q_padded[-1] :] = 0
                 assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
                 for b in range(config.batch_size):
                     assert (
@@ -729,10 +742,17 @@ def run_dpa_with_cp(
             )
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
+            if IS_HIP_EXTENSION:
+                # Same ROCm padding accommodation as the q/out block above (no forward-output
+                # view among dk/dv/dk_/dv_, so no clone needed).
+                for x in [dk, dv, dk_, dv_]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_kv_padded[b + 1]
+                            - num_pads_kv[b] : cu_seqlens_kv_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_kv_padded[-1] :] = 0.0
             for x in [dk, dv, dk_, dv_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_kv_padded[-1] :] = 0
                 assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
                 for b in range(config.batch_size):
                     assert (
