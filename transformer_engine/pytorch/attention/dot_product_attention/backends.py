@@ -1972,17 +1972,25 @@ def _fused_attn_setup_ctx(
     bwd_args.fast_zero_fill = fwd_args.fast_zero_fill
 
     qkv_layout = ctx_attrs["qkv_layout"]
+    offload_reloaded = False
     if NVTE_CPU_OFFLOAD_V1 and is_current_layer_offloaded() and is_cpu_offload_enabled():
         # If interleaved tensor is offloaded, reloaded tensor will be
         # non-interleaved, so we need to modify the QKV layout
         # for backward
         bwd_args.qkv_layout = _reload_qkv_layout(qkv_layout)
+        offload_reloaded = True
     else:
         bwd_args.qkv_layout = qkv_layout
         if fwd_args.fp8 and not fp8:
             bwd_args.qkv_layout = ctx_attrs["original_qkv_layout"]
-    # dqkv should have the same layout as the original qkv
-    bwd_args.dqkv_layout = ctx_attrs["original_qkv_layout"]
+    # dqkv should have the same layout as the original qkv. On ROCm the fused-attn
+    # kernel uses a single qkv_layout for both inputs and gradients, so when CPU
+    # offload reload de-interleaves the inputs (qkv_layout != original), the
+    # gradients must follow the same de-interleaved layout. (Issue: cpu_offloading_v1)
+    if IS_HIP_EXTENSION and offload_reloaded:
+        bwd_args.dqkv_layout = bwd_args.qkv_layout
+    else:
+        bwd_args.dqkv_layout = ctx_attrs["original_qkv_layout"]
 
     bwd_args.attn_bias_type = fwd_args.attn_bias_type
     bwd_args.attn_mask_type = fwd_args.attn_mask_type
@@ -1990,7 +1998,9 @@ def _fused_attn_setup_ctx(
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
     bwd_args.fused_attention_backend = (
-        ctx_attrs["fused_attention_backend"] if fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
+        ctx_attrs["fused_attention_backend"]
+        if (IS_HIP_EXTENSION or fp8)
+        else FusedAttnBackend["F16_arbitrary_seqlen"]
     )
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
@@ -2307,86 +2317,10 @@ class FusedAttnFunc(torch.autograd.Function):
         tensors_to_save, tensor_objects = prepare_for_saving(*tensors_to_save)
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
-<<<<<<< HEAD
-        ctx.fp8_meta = fp8_meta
-
-        ctx.layer_number = layer_number
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.dQKV_quantizer = dQKV_quantizer
-        ctx.dO_quantizer = dO_quantizer
-        ctx.dP_quantizer = dP_quantizer
-        ctx.S_quantizer = S_quantizer
-        ctx.qkv_type = qkv_type
-        if ctx.fp8 and isinstance(ctx.S_quantizer, Float8Quantizer):
-            ctx.S_quantizer = S_quantizer.copy()
-            ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_kv = max_seqlen_kv
-        ctx.attn_scale = attn_scale
-        ctx.dropout_p = dropout_p
-        ctx.fast_zero_fill = fast_zero_fill
-
-        offload_reloaded = False
-        if NVTE_CPU_OFFLOAD_V1:
-            # If interleaved tensor is offloaded, reloaded tensor will be
-            # non-interleaved, so we need to modify the QKV layout
-            # for backward
-            if is_current_layer_offloaded() and is_cpu_offload_enabled():
-                reload_layout = ""
-                split_list = qkv_layout.split("_")
-                for split in split_list:
-                    temp_layout = ""
-                    rep_count = 1
-                    for s in split:
-                        if s.isalpha():
-                            temp_layout = temp_layout + s
-                        else:
-                            rep_count = int(s)
-                    for _ in range(rep_count):
-                        reload_layout = reload_layout + temp_layout + "_"
-                ctx.qkv_layout = reload_layout[:-1]
-                offload_reloaded = True
-            else:
-                ctx.qkv_layout = qkv_layout
-                if fp8 and not ctx.fp8:
-                    ctx.qkv_layout = original_qkv_layout
-        else:
-            ctx.qkv_layout = qkv_layout
-            if fp8 and not ctx.fp8:
-                ctx.qkv_layout = original_qkv_layout
-
-        ctx.o_format = o_format
-        ctx.qkv_scale_inv_format = qkv_scale_inv_format
-        # dqkv should have the same layout as the original qkv. On ROCm the fused-attn
-        # kernel uses a single qkv_layout for both inputs and gradients, so when CPU
-        # offload reload de-interleaves the inputs (ctx.qkv_layout != original), the
-        # gradients must follow the same de-interleaved layout. (Issue: cpu_offloading_v1)
-        if IS_HIP_EXTENSION and offload_reloaded:
-            ctx.dqkv_layout = ctx.qkv_layout
-        else:
-            ctx.dqkv_layout = original_qkv_layout
-        ctx.attn_bias_type = attn_bias_type
-        ctx.attn_mask_type = attn_mask_type
-        ctx.softmax_type = softmax_type
-        ctx.window_size = window_size
-        ctx.bottom_right_diagonal = bottom_right_diagonal
-        ctx.fused_attention_backend = (
-            fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
-        )
-        ctx.use_FAv2_bwd = use_FAv2_bwd
-        ctx.deterministic = deterministic
-
-        if return_max_logit:
-            return out_ret, *max_logit
-        return out_ret
-=======
         ctx.backward_objects = bwd_args
         if fwd_args.return_max_logit:
             return out, max_logit
         return out
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     @staticmethod
     def backward(ctx, d_out, *_args):

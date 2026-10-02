@@ -825,22 +825,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             q_dtype=input_dtype,
             # self._assert_dtypes enforces Q, K, V, bias to have the same dtype, so
             # using input_dtype as kv dtype is sufficient.
-<<<<<<< HEAD
-            input_dtype,
-            kernel_qkv_layout,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            self.attention_dropout,
-            self.num_attention_heads,
-            self.num_gqa_groups,
-            seqlen_q,
-            seqlen_kv,
-            head_dim_qk,
-            head_dim_v,
-            self.window_size,
-            return_max_logit=self.return_max_logit,
-=======
             kv_dtype=input_dtype,
             qkv_layout=kernel_qkv_layout,
             attn_bias_type=attn_bias_type,
@@ -861,7 +845,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=self.max_segments_per_seq,
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         )
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend

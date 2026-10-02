@@ -26,6 +26,7 @@ if IS_HIP_EXTENSION:
 else:
     NUM_WARPS = 32
 
+
 def cross_entropy_forward(
     _input: torch.Tensor,
     target: torch.Tensor,
@@ -52,27 +53,6 @@ def cross_entropy_forward(
     n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device) if reduce_loss else None
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
-<<<<<<< HEAD
-
-    online_softmax_kernel[(n_rows,)](
-        X_ptr=_input,
-        X_stride=_input.stride(-2),
-        Y_ptr=target,
-        Y_stride=target.stride(-1),  # always 1
-        m_d_X_y_ptr=m_d_X_y,
-        m_d_X_y_stride=m_d_X_y.stride(-1),
-        rank=rank,
-        n_cols=V,
-        ignore_idx=ignore_idx,
-        n_non_ignore=n_non_ignore,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=NUM_WARPS,
-    )
-
-    n_non_ignore = torch.clamp(n_non_ignore, min=1)
-
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
 
     if world_size == 1:
@@ -93,7 +73,7 @@ def cross_entropy_forward(
             COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            num_warps=NUM_WARPS,
         )
     else:
         local_data = torch.empty((n_rows, 4), dtype=torch.float32, device=_input.device)
@@ -114,7 +94,7 @@ def cross_entropy_forward(
             COMPUTE_X_SUM=label_smoothing > 0,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            num_warps=NUM_WARPS,
         )
         gathered_data = torch.empty(
             (world_size * n_rows, 4), dtype=torch.float32, device=_input.device
@@ -176,47 +156,4 @@ def cross_entropy_backward(
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=NUM_WARPS,
     )
-<<<<<<< HEAD
-
-    loss = (
-        torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
-    )
-
-    return loss, grad_input
-
-
-def cross_entropy_backward(
-    grad_input: torch.Tensor, grad_output: torch.Tensor, is_cg_capturable: bool = False
-):
-    """Backward implementation of cross entropy loss kernel"""
-
-    # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    # Only check torch.equal when not in CUDA graph capturable mode
-    if not is_cg_capturable and torch.equal(
-        grad_output, torch.tensor(1.0, device=grad_output.device)
-    ):
-        pass
-    else:
-        B, SQ, V = grad_input.shape
-        n_rows = B * SQ
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-
-        # element_mul_kernel indexes grad_output per row with unit stride, so a broadcasted
-        # gradient (single element, stride 0) would read out of bounds. Make it contiguous.
-        if grad_output.numel() > 1:
-            grad_output = grad_output.contiguous()
-
-        element_mul_kernel[(n_rows,)](
-            grad_input,
-            grad_input.stride(-2),
-            grad_output.contiguous(),
-            1 if grad_output.numel() > 1 else 0,
-            V,
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=NUM_WARPS,
-        )
-
-    return grad_input
-=======
     return saved_input
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47

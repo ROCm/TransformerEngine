@@ -1561,14 +1561,6 @@ def get_attention_backend(
         ):
             fu_core_attention_bias_shape = (batch_size, num_heads, max_seqlen_q, max_seqlen_kv)
 
-<<<<<<< HEAD
-    # rocm ck backend supports 4 bias shapes (11ss, 1hss, b1ss, and bhss)
-    if IS_HIP_EXTENSION:
-        if use_fused_attention and fu_core_attention_bias_shape == "111s":
-            logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
-            use_fused_attention = False
-    elif (
-=======
     fu_core_attention_bias_shape_type = None
     if (
         fu_core_attention_bias_type == "post_scale_bias"
@@ -1589,8 +1581,12 @@ def get_attention_backend(
                 '{"bhss", "1hss", "b1ss", "11ss", "111s"} shapes. '
                 f"Found (b,h,sq,skv) = ({b},{h},{sq},{_skv})"
             )
-    if (
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+    # rocm ck backend supports 4 bias shapes (11ss, 1hss, b1ss, and bhss)
+    if IS_HIP_EXTENSION:
+        if use_fused_attention and fu_core_attention_bias_shape_type == "111s":
+            logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
+            use_fused_attention = False
+    elif (
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape_type != "1hss"
@@ -1769,7 +1765,7 @@ def get_attention_backend(
             and (not IS_HIP_EXTENSION)
             and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
             and fu_core_attention_bias_type == "post_scale_bias"
-            and fu_core_attention_bias_shape != "1hss"
+            and fu_core_attention_bias_shape_type != "1hss"
         ):
             logger.debug(
                 "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
@@ -1842,8 +1838,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-<<<<<<< HEAD
-=======
         # Observed: cuDNN deterministic F16/BF16 THD backward asks for ~128 * BHSS bytes
         # of workspace on sm90; at 1 << 30 that's 128 GiB, which does not fit on H100's
         # 80 GB. Held exactly at B=2 + power-of-2 S in our sweep; for B>=3 the workspace
@@ -1869,7 +1863,6 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
 
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
     use_flash_attention_3 = use_flash_attention and use_flash_attention_3

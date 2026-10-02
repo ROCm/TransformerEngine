@@ -55,55 +55,6 @@ from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
 
 __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
-<<<<<<< HEAD
-
-# Triton-backed primitives are imported lazily: callers on the PURE_JAX
-# permutation backend should not need ``triton`` installed. The TRITON
-# branches in this module call ``_require_triton()`` first to raise a
-# clear error if the import failed.
-try:
-    from .triton_extensions.permutation import (
-        make_chunk_sort_map,
-        make_row_id_map,
-        permute_with_mask_map,
-        permute_with_mask_map_and_pad,
-        sort_chunks_by_map,
-        unpermute_bwd_with_merging_probs,
-        unpermute_bwd_with_merging_probs_and_unpad,
-        unpermute_with_mask_map,
-        unpermute_with_mask_map_and_unpad,
-    )
-
-    _TRITON_AVAILABLE = True
-    _TRITON_IMPORT_ERROR = None
-except (ImportError, RuntimeError, ValueError) as _triton_import_error:
-    _TRITON_AVAILABLE = False
-    _TRITON_IMPORT_ERROR = _triton_import_error
-    make_chunk_sort_map = None
-    make_row_id_map = None
-    permute_with_mask_map = None
-    permute_with_mask_map_and_pad = None
-    sort_chunks_by_map = None
-    unpermute_bwd_with_merging_probs = None
-    unpermute_bwd_with_merging_probs_and_unpad = None
-    unpermute_with_mask_map = None
-    unpermute_with_mask_map_and_unpad = None
-
-
-def _require_triton():
-    """Raise a clear error if Triton permutation kernels are unavailable."""
-    if not _TRITON_AVAILABLE:
-        raise ImportError(
-            "PermutationBackend.TRITON requires"
-            " ``transformer_engine.jax.triton_extensions`` (and ``triton``)."
-            " Install Triton or pass PermutationBackend.PURE_JAX."
-        ) from _TRITON_IMPORT_ERROR
-
-
-PRNGKey = Any
-Shape = Tuple[int, ...]
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
