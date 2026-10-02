@@ -21,6 +21,31 @@ _PRELOAD_LIBS = (
 )
 
 
+def _profiler_owns_rocm_mappings() -> bool:
+    """True when rocprofv3 already mapped the devel-tree ROCm/LLVM libraries.
+
+    The TheRock split puts identical SONAMEs in both ``_rocm_sdk_core`` and
+    ``_rocm_sdk_devel`` as *different inodes*. ``rocm_sdk.preload_libraries``
+    dlopens the core copies by absolute path. ``rocprofv3`` LD_PRELOADs
+    ``librocprofiler-sdk.so`` from the devel tree, which already pulled in
+    devel ``libamd_comgr`` / ``libLLVM``. A second core mapping of LLVM then
+    aborts with ``CommandLine option registered more than once``, and
+    rocprofv3's SIGABRT handler appears to hang.
+
+    Skip TE's core-wheel preload in that process so the linker keeps the
+    single devel mapping rocprofv3 already established.
+    """
+    if os.getenv("NVTE_ROCM_SKIP_SDK_PRELOAD", "0") == "1":
+        return True
+    ld_preload = os.getenv("LD_PRELOAD", "")
+    if "rocprofiler" in ld_preload:
+        return True
+    # rocprofv3 always writes this into the child environment.
+    if os.getenv("ROCPROFILER_LIBRARY_CTOR") is not None:
+        return True
+    return False
+
+
 def initialize() -> None:
     """Preload ROCm runtime wheels before TE native libraries are loaded."""
     try:
@@ -41,4 +66,6 @@ def initialize() -> None:
                 break
         else:
             os.environ["ROCM_PATH"] = str(get_devel_root())
+    if _profiler_owns_rocm_mappings():
+        return
     rocm_sdk.initialize_process(preload_shortnames=list(_PRELOAD_LIBS))
