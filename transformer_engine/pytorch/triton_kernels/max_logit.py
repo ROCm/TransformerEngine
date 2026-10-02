@@ -21,15 +21,10 @@ import triton.language as tl
 SUPPORTED_MASK_TYPES = ("no_mask", "causal", "causal_bottom_right")
 SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
 
-# Fixed launch configs, tuned on MI355X (gfx950); no autotune: training shapes change often and
-# tuning stalls a step. The default puts 128 q rows on each wave (BLOCK_M / num_warps): twice the
-# MFMA work per K tile read from LDS compared to 64 rows.
-# QSPLIT: q is loaded as QSPLIT head-dim slices (one dot each per K block), which divides the LDS
-#   used to stage q into registers, so two programs still fit per CU.
-# ASYNC_COPY: compile with direct-to-LDS K loads into a ring of num_stages LDS buffers, one
-#   barrier per K block. This is the double buffering of K, done by Triton's stream pipeliner.
-# GQA_STACK: max number of q heads sharing a K head that one program stacks along M (causal only:
-#   fewer rows per head means less wasted work on the masked diagonal).
+# Fixed launch configs; no autotune: training shapes change often and tuning stalls a step.
+# QSPLIT: number of head-dim slices q is loaded as (one dot each per K block).
+# ASYNC_COPY: direct-to-LDS K loads, double buffered by Triton's stream pipeliner.
+# GQA_STACK: max number of q heads sharing a K head that one program stacks along M (causal only).
 # SPLIT: number of K chunks per q block; None picks it from the grid size.
 _DEFAULT_CONFIG = dict(
     BLOCK_M=512,
@@ -43,20 +38,15 @@ _DEFAULT_CONFIG = dict(
     GQA_STACK=4,
     SPLIT=None,
 )
-# head_dim > 128: 64 q rows per wave, or q no longer fits in registers.
 _LARGE_D_CONFIG = dict(BLOCK_M=256)
-# Causal without GQA stacking, moderate sizes: half the rows per program (same rows per wave)
-# wastes less work on the masked diagonal and balances the uneven q blocks better.
 _CAUSAL_CONFIG = dict(BLOCK_M=256, num_warps=2)
-# Few query rows in total (a few programs per CU, the longest one sets the runtime): fewer rows
-# per wave.
 _FEW_ROWS_CONFIG = dict(BLOCK_M=256, BLOCK_N=64, QSPLIT=1)
 _TINY_CONFIG = dict(BLOCK_M=128, BLOCK_N=64, QSPLIT=1)
-# Other GPUs (not tuned): the original config, without async copies.
+# Fallback for other devices.
 _FALLBACK_CONFIG = dict(
     _DEFAULT_CONFIG, BLOCK_M=256, BLOCK_N=64, QSPLIT=1, num_stages=2, ASYNC_COPY=False
 )
-# Split K while the grid has fewer waves than this per CU (2 per SIMD are resident).
+# Split K while the grid has fewer waves than this per CU.
 _MIN_WAVES_PER_CU = 8
 _MIN_SPLIT_KEYS = 512
 _ASYNC_COPY_ENV = "TRITON_HIP_USE_ASYNC_COPY"
@@ -65,7 +55,7 @@ _DEVICE_INFO = {}
 
 
 def _device_info(device: torch.device) -> tuple:
-    """(number of CUs, whether the device is gfx950), cached per device."""
+    """(number of CUs, whether the default configs apply to the device), cached per device."""
     idx = device.index if device.index is not None else torch.cuda.current_device()
     if idx not in _DEVICE_INFO:
         props = torch.cuda.get_device_properties(idx)
@@ -96,12 +86,7 @@ def _pick_config(
 
 @contextlib.contextmanager
 def _async_copy(enable: bool):
-    """Set triton.knobs.amd.use_async_copy around the launch (it is only read when compiling).
-
-    The knob is mirrored into an env var that is part of the on-disk cache key, and the kernel has
-    an ASYNC_COPY constexpr so the in-memory cache is keyed on it too. Both are restored on exit,
-    so other kernels are not affected.
-    """
+    """Set triton.knobs.amd.use_async_copy (and its env var) for the launch, then restore both."""
     knobs = triton.knobs.amd
     saved = (knobs.__dict__.get("use_async_copy", _UNSET), os.environ.get(_ASYNC_COPY_ENV))
     knobs.use_async_copy = enable
@@ -149,10 +134,8 @@ def _max_logit_k_blocks(
 ):
     """Max of q.k^T over K blocks [nb_lo, nb_hi); blocks outside [nb_flo, nb_fhi) are masked.
 
-    One loop over all blocks, so the pipelined K prefetch also runs across the masked and
-    unmasked blocks. Key j is allowed for row r iff lo_row[r] <= j <= hi_row[r].
-    Returns the max over all rows (GS == 1) or over each head's BLOCK_M // GS rows ([GS]).
-    The running max is kept elementwise and only reduced across threads after the loop.
+    Key j is allowed for row r iff lo_row[r] <= j <= hi_row[r]. Returns the max over all rows
+    (GS == 1) or over each head's BLOCK_M // GS rows ([GS]).
     """
     offs_n0 = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, CHUNK)
@@ -174,13 +157,11 @@ def _max_logit_k_blocks(
                 ok = ok & (offs_n[None, :] >= lo_row[:, None])
             s = tl.where(ok, s, float("-inf"))
         if GS == 1:
-            # Only the overall max is needed, so the elements may be reduced in any order: this
-            # lets the compiler keep the reduction within each thread.
+            # Only the overall max is needed, so the elements may be reduced in any order.
             s = tl.reshape(s, [BLOCK_M * BLOCK_N // 16, 16], can_reorder=True)
             m_acc = tl.maximum(m_acc, tl.max(s, axis=1))
         else:
-            # Rows of different heads must stay apart: reduce groups of 4 adjacent columns, which
-            # the 16x16 MFMA result layout keeps within each thread.
+            # Rows of different heads must stay apart: only reduce across columns.
             s = tl.reshape(s, [BLOCK_M, BLOCK_N // 4, 4])
             m_acc = tl.maximum(m_acc, tl.max(s, axis=2))
     if GS == 1:
@@ -222,10 +203,9 @@ def _max_logit_fwd_kernel(
     INT64_OFFS: tl.constexpr,
     ASYNC_COPY: tl.constexpr,  # not used in the body: keys the in-memory cache on the knob
 ):
-    # Grid is (B * H / GS, n_q_blocks, n_split). A program covers ROWS query rows of each of GS
-    # consecutive heads (sharing one K head), stacked along M. q blocks are launched last-to-first:
-    # under a causal mask the last q blocks see the most keys, so starting them first avoids a
-    # long tail.
+    # Grid is (B * H / GS, n_q_blocks, n_split); a program covers ROWS query rows of each of GS
+    # consecutive heads sharing one K head. q blocks are launched last-to-first: under a causal
+    # mask the last q blocks see the most keys, so starting them first avoids a long tail.
     ROWS: tl.constexpr = BLOCK_M // GS
     pid_g = tl.program_id(0)
     pid_m = tl.num_programs(1) - 1 - tl.program_id(1)
@@ -235,7 +215,7 @@ def _max_logit_fwd_kernel(
     pid_b = pid_g // (num_heads // GS)
     out_ptr = Out + pid_b.to(tl.int64) * stride_ob + pid_h * stride_oh + pid_m * n_split + pid_s
     if INT64_OFFS:
-        # in-tile offsets (up to BLOCK_M * stride_qs, BLOCK_N * stride_ks) would overflow int32
+        # in-tile offsets would overflow int32
         stride_qs = stride_qs.to(tl.int64)
         stride_qh = stride_qh.to(tl.int64)
         stride_ks = stride_ks.to(tl.int64)
@@ -271,13 +251,13 @@ def _max_logit_fwd_kernel(
         # rows past seqlen_q are masked below, so a partial q block has no mask-free K block
         nb_fhi = nb_flo
 
-    # Split-K (small grids): this program only visits its share of the touched K blocks.
+    # Split-K: this program only visits its share of the K blocks.
     chunk = tl.cdiv(nb_hi - nb_lo, n_split)
     nb_lo = tl.minimum(nb_lo + pid_s * chunk, nb_hi)
     nb_hi = tl.minimum(nb_lo + chunk, nb_hi)
 
     # Row r is query offs_m[r] of head pid_h + r // ROWS. Per-row inclusive key range; rows past
-    # seqlen_q (q loaded as 0) allow no key.
+    # seqlen_q allow no key.
     offs_r = tl.arange(0, BLOCK_M)
     offs_m = m0 + offs_r % ROWS
     hi_row = tl.full([BLOCK_M], seqlen_k - 1, tl.int32)
@@ -320,8 +300,7 @@ def _max_logit_fwd_kernel(
         GS,
         HAS_LEFT,
     )
-    # scale > 0 commutes with max, and -inf * scale stays -inf. Rounding to q.dtype is monotonic,
-    # so it commutes with the final max over programs too.
+    # scale > 0 commutes with max, and -inf * scale stays -inf.
     m = (m * scale).to(Out.dtype.element_ty)
     if GS == 1:
         tl.store(out_ptr, m)
@@ -399,8 +378,7 @@ def max_logit_fwd(
     n_waves = batch * (num_heads // gs) * n_q_blocks * cfg["num_warps"]
     split = cfg["SPLIT"]
     if split is None:
-        # Too few programs leave SIMDs idle: split the K range of each q block, keeping at least
-        # _MIN_SPLIT_KEYS keys per program. Causal q blocks are uneven, so aim for twice as many.
+        # Small grid: split the K range of each q block, at least _MIN_SPLIT_KEYS keys per program.
         split = 1
         target = _MIN_WAVES_PER_CU * num_cus * (2 if is_causal else 1)
         while n_waves * split < target and seqlen_k // (2 * split) >= _MIN_SPLIT_KEYS:
