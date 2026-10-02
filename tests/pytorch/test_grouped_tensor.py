@@ -61,6 +61,13 @@ reason_for_no_fp8_current_scaling_grouped = (
     if not fp8_available
     else "Grouped FP8 current-scaling quantize is not implemented on ROCm."
 )
+# Grouped scaled SwiGLU MXFP8 has no ROCm kernel.
+group_scaled_swiglu_available = mxfp8_available and not IS_HIP_EXTENSION
+reason_for_no_group_scaled_swiglu = (
+    reason_for_no_mxfp8
+    if not mxfp8_available
+    else "Grouped scaled SwiGLU MXFP8 is not implemented on ROCm."
+)
 
 def test_mark_grouped_tensor_supports_plain_tensor():
     tensor = torch.empty(16)
@@ -792,7 +799,7 @@ class TestGroupedTensor:
         assert torch.equal(grouped_output.scale_inv, expected_output.scale_inv)
 
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.skipif(not group_scaled_swiglu_available, reason=reason_for_no_group_scaled_swiglu)
     def test_group_scaled_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
         """Test the grouped scaled SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
 
@@ -842,7 +849,7 @@ class TestGroupedTensor:
             tex.group_scaled_swiglu(input_2h, strided_prob, quantizer, num_tensors, first_dims)
 
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.skipif(not group_scaled_swiglu_available, reason=reason_for_no_group_scaled_swiglu)
     def test_group_scaled_clamped_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
         """Test the clamped variant's binding plumbs shapes, dtypes and clamp parameters.
 
@@ -896,7 +903,7 @@ class TestGroupedTensor:
 
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("clamped", [False, True])
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.skipif(not group_scaled_swiglu_available, reason=reason_for_no_group_scaled_swiglu)
     def test_group_scaled_swiglu_matches_reference(
         self, clamped: bool, optimize_for_gemm: bool
     ) -> None:

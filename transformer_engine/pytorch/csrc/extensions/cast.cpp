@@ -905,6 +905,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
              "Requantizing a grouped input requires dims that are multiples of 128, but got (",
              total_tokens, ", ", hidden_dim, ").");
 
+#ifndef USE_ROCM  // Disabled on ROCm
   // Fused path (default; NVTE_FUSED_GROUP_REQUANTIZE=0 recovers the unfused chain): one
   // kernel replaces the group_dequantize -> group_quantize(columnwise) ->
   // grouped_swizzle(rowwise scales) chain below, with the dequantized values living only in
@@ -1001,6 +1002,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     }
     return py::none();
   }
+#endif
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
   // undefined when nothing consumes it, which skips the pass entirely.

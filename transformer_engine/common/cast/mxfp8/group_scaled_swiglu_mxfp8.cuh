@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -395,6 +397,9 @@ template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
                          GroupedTensor *output, const ParamOP &p,
                          const QuantizationConfig *quant_config, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__  // Disabled on ROCm
+  NVTE_ERROR("group_scaled_swiglu is not supported on ROCm.");
+#else
   using namespace group_scaled_swiglu_kernel;
 
   checkCuDriverContext(stream);
@@ -546,6 +551,7 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
           );           // NOLINT(*)
       );               // NOLINT(*)
   );                   // NOLINT(*)
+#endif  // __HIP_PLATFORM_AMD__
 }
 
 }  // namespace mxfp8

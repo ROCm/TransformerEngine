@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -464,9 +466,11 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  *                                 path.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 void nvte_group_requantize(const NVTETensor input, NVTETensor output,
                            const NVTETensor tensor_offsets, NVTETensor dequantized,
                            const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+#endif
 
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *
