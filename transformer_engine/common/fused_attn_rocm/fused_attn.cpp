@@ -11,6 +11,7 @@
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
 #include "../common.h"
+#include "../fused_attn/config_and_params.h"
 #include "../util/cuda_runtime.h" //cuda::sm_arch
 #include "../util/system.h" //getenv
 #include "utils.h"
@@ -541,6 +542,50 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
+}
+
+// Parameter-object entry points: unpack and dispatch to the ROCm implementations above
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
+                                                       const char **message) {
+  NVTE_API_CALL(nvte_get_fused_attn_backend_v2);
+  const auto &cfg = *transformer_engine::fused_attn::get_fused_attn_config(config);
+  const NVTE_Fused_Attn_Backend backend = nvte_get_fused_attn_backend(
+      cfg.is_training, cfg.qkv_dtype, cfg.qkv_dtype, cfg.qkv_layout, cfg.bias_type,
+      cfg.attn_mask_type, cfg.softmax_type, cfg.dropout, cfg.num_attn_heads, cfg.num_gqa_groups,
+      cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.head_dim_qk, cfg.head_dim_v, cfg.window_size_left,
+      cfg.window_size_right, cfg.return_max_logit, cfg.cuda_graph, cfg.deterministic);
+  if (message != nullptr) {
+    *message = (backend == NVTE_Fused_Attn_Backend::NVTE_No_Backend)
+                   ? "No ROCm fused attention backend (CK, AOTriton) supports this configuration."
+                   : "";
+  }
+  return backend;
+}
+
+void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
+  NVTE_API_CALL(nvte_fused_attn_fwd_v2);
+  const auto &p = *transformer_engine::fused_attn::get_fused_attn_fwd_params(params);
+  nvte_fused_attn_fwd(p.Q, p.K, p.V, p.Bias, p.SoftmaxOffset, p.S, p.O, p.Aux_CTX_Tensors,
+                      p.cu_seqlens_q, p.cu_seqlens_kv, p.cu_seqlens_q_padded,
+                      p.cu_seqlens_kv_padded, p.page_table_k, p.page_table_v, p.rng_state,
+                      p.max_seqlen_q, p.max_seqlen_kv, p.is_training, p.return_max_logit,
+                      p.cuda_graph, p.attn_scale, p.dropout, p.qkv_layout, p.o_format,
+                      p.qkv_scale_inv_format, p.bias_type, p.attn_mask_type, p.softmax_type,
+                      p.window_size_left, p.window_size_right, p.bottom_right_diagonal,
+                      p.workspace, p.stream);
+}
+
+void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
+  NVTE_API_CALL(nvte_fused_attn_bwd_v2);
+  const auto &p = *transformer_engine::fused_attn::get_fused_attn_bwd_params(params);
+  nvte_fused_attn_bwd(p.Q, p.K, p.V, p.O, p.dO, p.S, p.dP, p.Aux_CTX_Tensors, p.dQ, p.dK, p.dV,
+                      p.dBias, p.dSoftmaxOffset, p.cu_seqlens_q, p.cu_seqlens_kv,
+                      p.cu_seqlens_q_padded, p.cu_seqlens_kv_padded, p.max_seqlen_q,
+                      p.max_seqlen_kv, p.attn_scale, p.dropout, p.qkv_layout, p.o_format,
+                      p.do_format, p.dqkv_layout, p.qkv_scale_inv_format, p.do_scale_inv_format,
+                      p.bias_type, p.attn_mask_type, p.softmax_type, p.window_size_left,
+                      p.window_size_right, p.bottom_right_diagonal, p.deterministic,
+                      p.cuda_graph, p.workspace, p.stream);
 }
 
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t max_batch_size,
