@@ -20,6 +20,10 @@
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
 #ifdef __HIP_PLATFORM_AMD__
+struct KosmosComm_;
+#endif
+
+#ifdef __HIP_PLATFORM_AMD__
 #define NVTE_COMM_OVERLAP_MAX_STREAMS NVTE_ROCM_MAX_RINGS
 #else
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
@@ -348,10 +352,22 @@ class CommOverlapP2PBase : public CommOverlapCore {
   uint64_t _ag_signal_base = 0;
   uint64_t _rs_signal_base = 0;
   bool _fused{false};
+#ifdef __HIP_PLATFORM_AMD__
+  // KOSMOS backend of the fused methods: a wrapped view of _ubuf, created on first use
+  size_t _ubuf_bytes{0};
+  ::KosmosComm_ *_kosmos_comm{nullptr};
+  bool _kosmos_tried{false};
+  int _rs_backend{0};
+  unsigned _kosmos_logged{0};
+#endif
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, bool aggregate);
+#ifdef __HIP_PLATFORM_AMD__
+  ::KosmosComm_ *kosmos_comm();
+  void kosmos_log(int op, bool kosmos, const char *what);
+#endif
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
@@ -479,6 +495,12 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         cudaStream_t stream_main) override;
 
   bool is_fused() override { return _fused; }
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool fused_bulk_rs_fp32();
+#else
+  bool fused_bulk_rs_fp32() { return false; }
+#endif
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.

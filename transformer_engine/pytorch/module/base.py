@@ -783,6 +783,7 @@ def fused_bulk_rs_eligible(
     tp_size: int,
     fp8: bool,
     bias: Optional[torch.Tensor] = None,
+    fuse_wgrad_accumulation: bool = False,
 ) -> bool:
     """Whether this call may use the bulk reduce-scatter overlap."""
     if not IS_HIP_EXTENSION:
@@ -792,6 +793,13 @@ def fused_bulk_rs_eligible(
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+    if eligible and fuse_wgrad_accumulation and weight.requires_grad:
+        # The wgrad GEMM then writes (or accumulates into) the fp32 main_grad: only the KOSMOS backend
+        # has that epilogue, otherwise take the non-fused path.
+        main_grad = getattr(weight, "main_grad", None)
+        eligible = (main_grad is None or main_grad.dtype == torch.float32) and get_ub(
+            name, False
+        ).fused_bulk_rs_fp32()
     _ub_fused_bulk_decisions[name] = eligible
     return eligible
 

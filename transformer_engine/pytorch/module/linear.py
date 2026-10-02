@@ -2122,6 +2122,7 @@ class Linear(TransformerEngineBaseModule):
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 self.ub_name + "_wgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
+                self.fuse_wgrad_accumulation,
             ):
                 ub_bulk_wgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None

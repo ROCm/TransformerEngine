@@ -883,5 +883,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
+      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream)
+      .def("fused_bulk_rs_fp32", &CommOverlapP2P::fused_bulk_rs_fp32);
 }  // NOLINT(readability/fn_size)

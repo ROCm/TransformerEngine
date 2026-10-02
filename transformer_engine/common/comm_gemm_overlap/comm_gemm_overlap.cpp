@@ -24,6 +24,9 @@
 #ifdef USE_HIPKITTENS_GEMM
 #include "../gemm/kittens/comm_gemm.h"
 #endif
+#ifdef NVTE_WITH_KOSMOS
+#include "tpsp/tpsp.h"
+#endif
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
@@ -846,9 +849,19 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     }
   }
 
+#ifdef NVTE_WITH_KOSMOS
+  if (_fused) {
+    // KOSMOS keeps its cross-rank flags in the buffer tail, zeroed by the allocation below.
+    buffer_bytes += kosmos_comm_flag_bytes(_tp_size) + 256;
+  }
+#endif
+
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
+#ifdef __HIP_PLATFORM_AMD__
+  _ubuf_bytes = buffer_bytes;
+#endif
   _ubuf = TensorWrapper(
       buffer_ptr,
       std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_view_chunks, buffer_shape[1]},
@@ -909,6 +922,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
+#ifdef NVTE_WITH_KOSMOS
+  if (_kosmos_comm != nullptr) {
+    kosmos_comm_destroy(_kosmos_comm);
+  }
+#endif
   if (!_with_cublasmp) {
     cudaEventDestroy(_stop_recv);
     cudaEventDestroy(_stop_send);

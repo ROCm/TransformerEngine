@@ -17,6 +17,9 @@
 #ifdef USE_HIPKITTENS_GEMM
 #include "../gemm/kittens/comm_gemm.h"
 #endif
+#ifdef NVTE_WITH_KOSMOS
+#include "tpsp/tpsp.h"
+#endif
 
 namespace transformer_engine {
 #if 0
@@ -407,12 +410,119 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 }
 #endif
 
+enum KosmosOp { kKosmosAg = 0, kKosmosRs, kKosmosBulkAg, kKosmosBulkRs };
+
+#ifdef NVTE_WITH_KOSMOS
+static const char *const kosmos_op_names[] = {"AG+GEMM", "GEMM+RS", "bulk AG", "bulk RS"};
+
+// NVTE_KOSMOS_BULK=0 keeps the bulk (dgrad AG / wgrad RS) overlaps on HipKittens while the others use KOSMOS.
+static bool kosmos_bulk_enabled() {
+  static const bool enabled = getenv<bool>("NVTE_KOSMOS_BULK", true);
+  return enabled;
+}
+
+// True when KOSMOS enqueued the op; false on hipErrorNotSupported (nothing enqueued, fall back).
+static bool kosmos_launched(hipError_t err, KosmosComm *comm, KosmosOp op) {
+  if (err == hipErrorNotSupported) {
+    return false;
+  }
+  NVTE_CHECK(err == hipSuccess, "KOSMOS ", kosmos_op_names[op], " failed (", hipGetErrorString(err),
+             "): ", kosmos_comm_error(comm));
+  return true;
+}
+#endif
+
+// NVTE_KOSMOS_LOG=1 reports once per buffer, op and backend which backend served a fused overlap.
+void CommOverlapP2PBase::kosmos_log(int op, bool kosmos, const char *what) {
+#ifdef NVTE_WITH_KOSMOS
+  static const bool log = getenv<bool>("NVTE_KOSMOS_LOG", false);
+  const unsigned bit = 1u << (2 * op + (kosmos ? 1 : 0));
+  if (!log || _tp_id != 0 || (_kosmos_logged & bit) != 0) {
+    return;
+  }
+  _kosmos_logged |= bit;
+  printf("[KOSMOS] ub %d %s: %s%s%s\n", _ub_reg, kosmos_op_names[op], kosmos ? "KOSMOS" : "HipKittens",
+         what[0] != '\0' ? " -- " : "", what);
+#endif
+}
+
+// Wraps _ubuf and its Userbuffers peer mappings as a KOSMOS communicator on the buffer's first fused call.
+// NVTE_USE_KOSMOS=0 at that point keeps the buffer on the in-tree HipKittens kernels.
+KosmosComm_ *CommOverlapP2PBase::kosmos_comm() {
+#ifdef NVTE_WITH_KOSMOS
+  if (_kosmos_tried) {
+    return _kosmos_comm;
+  }
+  _kosmos_tried = true;
+  const int peer_first = (_ub_comm->myrank - _tp_id) % _ub_comm->nvsize;
+  if (!getenv<bool>("NVTE_USE_KOSMOS", true) || !_fused || peer_first + _tp_size > _ub_comm->nvsize) {
+    return nullptr;
+  }
+  KosmosExternalBuffers ext{};
+  ext.local  = _ubuf.dptr();
+  ext.peers  = reinterpret_cast<void *const *>(_ub_comm->gpu_ptrs) + _ub_reg * _ub_comm->nvsize + peer_first;
+  ext.bytes  = _ubuf_bytes;
+  ext.rank   = _tp_id;
+  ext.nranks = _tp_size;
+  NVTE_CHECK_CUDA(kosmos_comm_wrap(&_kosmos_comm, &ext));
+  return _kosmos_comm;
+#else
+  return nullptr;
+#endif
+}
+
+// Whether fused_overlap_bulk_rs serves an fp32 D (the wgrad GEMM writing or accumulating into an fp32 main_grad).
+// Only the KOSMOS backend has that epilogue; the module eligibility checks keep such calls off this path otherwise.
+bool CommOverlapP2PBase::fused_bulk_rs_fp32() {
+#ifdef NVTE_WITH_KOSMOS
+  const int peer_first = (_ub_comm->myrank - _tp_id) % _ub_comm->nvsize;
+  return _fused && kosmos_bulk_enabled() && getenv<bool>("NVTE_USE_KOSMOS", true) &&
+         peer_first + _tp_size <= _ub_comm->nvsize && _ubuf.dtype() == DType::kBFloat16;
+#else
+  return false;
+#endif
+}
+
 void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool transa,
                                 const TensorWrapper &B, bool transb, TensorWrapper &D,
                                 TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                                 TensorWrapper &workspace, bool grad, bool accumulate,
                                 bool use_split_accumulator, TensorWrapper &rs_output,
                                 cudaStream_t stream_main) {
+  const bool d_fp32 = D.dtype() == DType::kFloat32;
+#ifdef NVTE_WITH_KOSMOS
+  // D[n][m] = B[k][n]^T A[k][m] (D += with accumulate, fp32 D only), reduce-scattering _ubuf ([k][m]) in place
+  // into its local chunk.
+  const bool fits = kosmos_bulk_enabled() && !transa && transb && (d_fp32 || !accumulate) && bias.numel() == 0 &&
+      pre_gelu_out.numel() == 0 && rs_output.numel() == 0 && A.dtype() == DType::kBFloat16 &&
+      B.dtype() == DType::kBFloat16 && (D.dtype() == DType::kBFloat16 || d_fp32) &&
+      _ubuf.dtype() == DType::kBFloat16 && A.size(0) == _ubuf.size(0) && A.size(1) == _ubuf.size(1) &&
+      D.size(0) == B.size(1) && D.size(1) == A.size(1);
+  if (!fits) {
+    kosmos_log(kKosmosBulkRs, false, "operands outside the KOSMOS contract");
+  } else if (KosmosComm *kc = kosmos_comm()) {
+    KosmosRsGemmArgs args{};
+    args.A              = A.dptr();
+    args.B              = B.dptr();
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(1));
+    args.n              = static_cast<int>(B.size(1));
+    args.k              = static_cast<int>(A.size(0));
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    args.d_fp32         = d_fp32 ? 1 : 0;
+    args.accumulate     = accumulate ? 1 : 0;
+    if (kosmos_launched(kosmos_bulk_rs_gemm(kc, &args, stream_main), kc, kKosmosBulkRs)) {
+      kosmos_log(kKosmosBulkRs, true, "");
+      return;
+    }
+    kosmos_log(kKosmosBulkRs, false, kosmos_comm_error(kc));
+  }
+#endif
+  NVTE_CHECK(!accumulate && !d_fp32,
+             "fused bulk RS: an fp32 / accumulating wgrad (gradient-accumulation fusion) needs the KOSMOS backend "
+             "(NVTE_USE_KOSMOS=1, NVTE_KOSMOS_BULK=1); fused_bulk_rs_eligible should have declined this call");
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_bulk_rs_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_bulk_rs_gemm(A, transa, B, transb, D, bias, pre_gelu_out, workspace,
@@ -431,6 +541,31 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
+#ifdef NVTE_WITH_KOSMOS
+  // D[n][m] = Xg[n][k] op(A), Xg = _ubuf gathered in place; TN (transa) or NN.
+  const bool fits = !transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
+      B_copy.numel() == 0 && A.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16 &&
+      _ubuf.dtype() == DType::kBFloat16 && ((transa) ? A.size(1) : A.size(0)) == _ubuf.size(1);
+  if (!fits) {
+    kosmos_log(kKosmosAg, false, "operands outside the KOSMOS contract");
+  } else if (KosmosComm *kc = kosmos_comm()) {
+    KosmosAgGemmArgs args{};
+    args.A              = A.dptr();
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>((transa) ? A.size(0) : A.size(1));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(_ubuf.size(1));
+    args.transa         = transa ? 1 : 0;
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    if (kosmos_launched(kosmos_ag_gemm(kc, &args, stream_main), kc, kKosmosAg)) {
+      kosmos_log(kKosmosAg, true, "");
+      return;
+    }
+    kosmos_log(kKosmosAg, false, kosmos_comm_error(kc));
+  }
+#endif
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy,
@@ -450,6 +585,33 @@ void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool tran
                                 TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                                 TensorWrapper &workspace, bool grad, bool accumulate,
                                 bool use_split_accumulator, cudaStream_t stream_main) {
+#ifdef NVTE_WITH_KOSMOS
+  // D[n][m] = B[n][k] A[k][m], all-gathering _ubuf ([n][m]) in place alongside.
+  const bool fits = kosmos_bulk_enabled() && !transa && !transb && !accumulate && bias.numel() == 0 &&
+      pre_gelu_out.numel() == 0 && A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
+      D.dtype() == DType::kBFloat16 && _ubuf.dtype() == DType::kBFloat16 && A.size(1) == _ubuf.size(1) &&
+      D.size(0) == _ubufs[0].size(0) * _tp_size;
+  if (!fits) {
+    kosmos_log(kKosmosBulkAg, false, "operands outside the KOSMOS contract");
+  } else if (KosmosComm *kc = kosmos_comm()) {
+    KosmosAgGemmArgs args{};
+    args.A              = A.dptr();
+    args.B              = B.dptr();
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(1));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(A.size(0));
+    args.transa         = 0;
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    if (kosmos_launched(kosmos_bulk_ag_gemm(kc, &args, stream_main), kc, kKosmosBulkAg)) {
+      kosmos_log(kKosmosBulkAg, true, "");
+      return;
+    }
+    kosmos_log(kKosmosBulkAg, false, kosmos_comm_error(kc));
+  }
+#endif
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_bulk_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, workspace,
@@ -468,6 +630,36 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator,
                                 TensorWrapper &rs_output, cudaStream_t stream_main) {
+#ifdef NVTE_WITH_KOSMOS
+  // rs_output = this rank's band of B[n][k] A[m][k]^T; _ubuf holds the two sentinel-armed stage halves,
+  // so a buffer stays with the backend that served its first call.
+  const bool fits = transa && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
+      A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
+      rs_output.dtype() == DType::kBFloat16 && A.size(0) == _ubuf.size(1);
+  if (!fits || _rs_backend == 2) {
+    kosmos_log(kKosmosRs, false, fits ? "buffer armed by HipKittens" : "operands outside the KOSMOS contract");
+  } else if (KosmosComm *kc = kosmos_comm()) {
+    KosmosRsGemmArgs args{};
+    args.A              = B.dptr();
+    args.B              = A.dptr();
+    args.D              = rs_output.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(0));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(A.size(1));
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    if (kosmos_launched(kosmos_gemm_rs(kc, &args, stream_main), kc, kKosmosRs)) {
+      _rs_backend = 1;
+      kosmos_log(kKosmosRs, true, "");
+      return;
+    }
+    kosmos_log(kKosmosRs, false, kosmos_comm_error(kc));
+  }
+  NVTE_CHECK(_rs_backend != 1, "fused GEMM+RS: KOSMOS refused a call on a buffer it already serves (",
+             _kosmos_comm != nullptr ? kosmos_comm_error(_kosmos_comm) : "", ")");
+  _rs_backend = 2;
+#endif
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_rs_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_fused_rs_gemm(A, transa, B, transb, bias, pre_gelu_out, rs_output,

@@ -138,6 +138,11 @@ def setup_common_extension() -> CMakeExtension:
         if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", "0"))):
             cmake_flags.append("-DNVTE_ENABLE_ROCSHMEM=ON")
 
+        if os.getenv("NVTE_KOSMOS_ROOT"):
+            cmake_flags.append(f"-DNVTE_KOSMOS_ROOT={os.path.abspath(os.getenv('NVTE_KOSMOS_ROOT'))}")
+            if os.getenv("NVTE_KOSMOS_LIB"):
+                cmake_flags.append(f"-DNVTE_KOSMOS_LIB={os.path.abspath(os.getenv('NVTE_KOSMOS_LIB'))}")
+
     else:
         cmake_flags.extend(("-DUSE_ROCM=OFF", "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)))
 

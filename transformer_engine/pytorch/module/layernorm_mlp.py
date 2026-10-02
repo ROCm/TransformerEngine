@@ -28,6 +28,7 @@ from .base import (
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
+    fused_bulk_rs_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -428,6 +429,11 @@ class _LayerNormMLP(torch.autograd.Function):
             "fc1_dgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
         ):
             ub_bulk_dgrad = False
+        if ub_bulk_wgrad and not fused_bulk_rs_eligible(
+            "fc1_wgrad", inp, fc1_weight, activation_dtype, tp_size, fp8, fc1_bias,
+            fuse_wgrad_accumulation,
+        ):
+            ub_bulk_wgrad = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
