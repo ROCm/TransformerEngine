@@ -124,6 +124,8 @@ struct MXFP8GroupedGemmArgs {
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
+    // If set, only validate and store the required workspace size; nothing is launched.
+    size_t *workspace_size_out;
 };
 
 struct MXFP8WgradArgs {
@@ -140,6 +142,8 @@ struct MXFP8WgradArgs {
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
+    // If set, only validate and store the required workspace size; nothing is launched.
+    size_t *workspace_size_out;
 };
 
 class MXFP8GemmBackend {
@@ -196,8 +200,27 @@ inline bool kittens_grouped_mxfp8_gemm(
     MXFP8GroupedGemmArgs args{
         A_array, B_array, C_array, scale_A_array, scale_B_array,
         M, N_array, K, num_experts, transa, transb,
-        a_dtype, b_dtype, out_dtype, workspace, workspace_size, stream};
+        a_dtype, b_dtype, out_dtype, workspace, workspace_size, stream, nullptr};
     return backend->grouped_gemm(args);
+}
+
+// Workspace bytes kittens_grouped_mxfp8_gemm needs for these operands; 0 if it would decline them.
+inline size_t kittens_grouped_mxfp8_gemm_workspace_size(
+    const void *const *A_array, const void *const *B_array, void *const *C_array,
+    const void *const *scale_A_array, const void *const *scale_B_array,
+    int M, const int *N_array, int K, int num_experts,
+    bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype) {
+    MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
+    if (backend == nullptr) {
+        return 0;
+    }
+
+    size_t needed = 0;
+    MXFP8GroupedGemmArgs args{
+        A_array, B_array, C_array, scale_A_array, scale_B_array,
+        M, N_array, K, num_experts, transa, transb,
+        a_dtype, b_dtype, out_dtype, nullptr, 0, nullptr, &needed};
+    return backend->grouped_gemm(args) ? needed : 0;
 }
 
 inline bool kittens_grouped_mxfp8_wgrad(
@@ -215,6 +238,25 @@ inline bool kittens_grouped_mxfp8_wgrad(
     MXFP8WgradArgs args{
         A_array, B_array, D_array, scale_A_array, scale_B_array,
         N, K, M_array, num_experts, a_dtype, b_dtype, out_dtype, accumulate,
-        workspace, workspace_size, stream};
+        workspace, workspace_size, stream, nullptr};
     return backend->grouped_wgrad(args);
+}
+
+// Workspace bytes kittens_grouped_mxfp8_wgrad needs for these operands; 0 if it would decline them.
+inline size_t kittens_grouped_mxfp8_wgrad_workspace_size(
+    const void *const *A_array, const void *const *B_array, void *const *D_array,
+    const void *const *scale_A_array, const void *const *scale_B_array,
+    int N, int K, const int *M_array, int num_experts,
+    int a_dtype, int b_dtype, int out_dtype, bool accumulate) {
+    MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
+    if (backend == nullptr) {
+        return 0;
+    }
+
+    size_t needed = 0;
+    MXFP8WgradArgs args{
+        A_array, B_array, D_array, scale_A_array, scale_B_array,
+        N, K, M_array, num_experts, a_dtype, b_dtype, out_dtype, accumulate,
+        nullptr, 0, nullptr, &needed};
+    return backend->grouped_wgrad(args) ? needed : 0;
 }

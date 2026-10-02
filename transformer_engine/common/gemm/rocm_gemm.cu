@@ -604,6 +604,29 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
+// hipBLASLt consumes NVFP4 natively only on gfx1250; elsewhere the operands are dequantized to BF16.
+static bool use_native_nvfp4_gemm() {
+#if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
+  return cuda::sm_arch() == 125;
+#else
+  return false;
+#endif
+}
+
+// Workspace bytes setup_nvfp4_gemm_native reserves: K-tiled block scales of A and B plus c0.
+static size_t nvfp4_native_workspace_bytes(int m, int n, int k) {
+  auto align256 = [](size_t x) { return (x + 255) & ~static_cast<size_t>(255); };
+  const size_t num_ktiles = (static_cast<size_t>(k) / 16 + 7) / 8;
+  return align256(num_ktiles * m * 8) + align256(num_ktiles * n * 8) + 256;
+}
+
+// Workspace bytes dequant_fp4_gemm_inputs carves: alpha vector plus BF16 copies of FP4 operands.
+static size_t nvfp4_dequant_workspace_bytes(int m, int n, int k, bool a_fp4, bool b_fp4) {
+  return static_cast<size_t>(m) * sizeof(float) +
+         (a_fp4 ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0) +
+         (b_fp4 ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0);
+}
+
 // Prepare a native (gfx1250) NVFP4 hipBLASLt GEMM: swizzle the block scales and fold the per-tensor
 // amax correction into a HOST scalar alpha.
 //
@@ -1474,7 +1497,7 @@ void hipblaslt_gemm(const Tensor *inputA,
   // Every other architecture, and hipBLASLt versions without the VEC16_UE4M3 scale mode, use the
   // BF16 dequant fallback instead.
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-  const bool use_nvfp4_native = use_nvfp4 && cuda::sm_arch() == 125;
+  const bool use_nvfp4_native = use_nvfp4 && use_native_nvfp4_gemm();
 #else
   const bool use_nvfp4_native = false;
 #endif
@@ -2171,6 +2194,24 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
 
 } // namespace
 
+// Workspace bytes hipblaslt_gemm carves out for NVFP4 operands, on top of hipBLASLt's own workspace.
+size_t nvfp4_gemm_workspace_size(const Tensor *inputA, const Tensor *inputB, bool transa,
+                                 bool transb) {
+  const bool a_fp4 = is_nvfp_scaling(inputA->scaling_mode);
+  const bool b_fp4 = is_nvfp_scaling(inputB->scaling_mode);
+  if (!a_fp4 && !b_fp4) {
+    return 0;
+  }
+  const int m = transa ? inputA->flat_first_dim() : inputA->flat_last_dim();
+  const int n = transb ? inputB->flat_last_dim() : inputB->flat_first_dim();
+  const int k = transa ? inputA->flat_last_dim() : inputA->flat_first_dim();
+  if (m <= 0 || n <= 0) {
+    return 0;
+  }
+  return use_native_nvfp4_gemm() ? nvfp4_native_workspace_bytes(m, n, k)
+                                 : nvfp4_dequant_workspace_bytes(m, n, k, a_fp4, b_fp4);
+}
+
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wmissing-declarations"
@@ -2420,13 +2461,14 @@ static bool kittens_grouped_warn_fallback() {
     return warn;
 }
 
-bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, const NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
-    bool accumulate, cudaStream_t stream) {
+    bool accumulate, cudaStream_t stream, size_t *workspace_size_out) {
     if (accumulate || num_gemms <= 1) return false;
     if (!kittens_grouped_mxfp8_enabled()) return false;
 
-    const bool warn_fallback = kittens_grouped_warn_fallback();
+    // A size query declines silently; only real launches report why they fall back.
+    const bool warn_fallback = workspace_size_out == nullptr && kittens_grouped_warn_fallback();
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms);
     std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);
@@ -2504,6 +2546,16 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         n_offset += n_arr[i];
     }
 
+    if (workspace_size_out != nullptr) {
+        *workspace_size_out = kittens_grouped_mxfp8_gemm_workspace_size(
+            a_ptrs.data(), b_ptrs.data(), (void *const *)c_ptrs.data(),
+            sa_ptrs.data(), sb_ptrs.data(),
+            ref_m, n_arr.data(), ref_k,
+            num_gemms, transa, transb,
+            a_dtype, b_dtype, out_dtype);
+        return *workspace_size_out > 0;
+    }
+
     auto *ws = convertNVTETensorCheck(workspace[0]);
 
     return kittens_grouped_mxfp8_gemm(
@@ -2515,16 +2567,17 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         ws->data.dptr, ws->data.shape[0], stream);
 }
 
-bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, const NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
-    bool accumulate, cudaStream_t stream) {
+    bool accumulate, cudaStream_t stream, size_t *workspace_size_out) {
     // NT only
     if (transa || !transb) return false;
     if (num_gemms <= 1) return false;
 
     if (!kittens_grouped_mxfp8_enabled()) return false;
 
-    const bool warn_fallback = kittens_grouped_warn_fallback();
+    // A size query declines silently; only real launches report why they fall back.
+    const bool warn_fallback = workspace_size_out == nullptr && kittens_grouped_warn_fallback();
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms);
     std::vector<void *>       d_ptrs(num_gemms);
@@ -2591,6 +2644,15 @@ bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, N
     }
 
     if (ref_n < 0) return false;
+
+    if (workspace_size_out != nullptr) {
+        *workspace_size_out = kittens_grouped_mxfp8_wgrad_workspace_size(
+            a_ptrs.data(), b_ptrs.data(), d_ptrs.data(),
+            sa_ptrs.data(), sb_ptrs.data(),
+            ref_n, ref_k, m_arr.data(), num_gemms,
+            a_dtype, b_dtype, out_dtype, accumulate);
+        return *workspace_size_out > 0;
+    }
 
     auto *ws = convertNVTETensorCheck(workspace[0]);
 

@@ -331,6 +331,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset = -1);
+// Implemented in rocm_gemm.cu
+size_t nvfp4_gemm_workspace_size(const Tensor *inputA, const Tensor *inputB, bool transa,
+                                 bool transb);
 #else // Use cublasLt
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -1100,14 +1103,25 @@ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHan
 
 #ifdef USE_HIPKITTENS_GEMM
 namespace transformer_engine {
-bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+// With workspace_size_out set, only report the workspace a launch would need; nothing runs.
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, const NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
-    bool accumulate, cudaStream_t stream);
-bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    bool accumulate, cudaStream_t stream, size_t *workspace_size_out = nullptr);
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, const NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
-    bool accumulate, cudaStream_t stream);
+    bool accumulate, cudaStream_t stream, size_t *workspace_size_out = nullptr);
 }
 #endif
+
+namespace {
+
+bool grouped_gemm_backend_requested() {
+  return transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false) ||
+         transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false) ||
+         transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
+}
+
+}  // namespace
 
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
@@ -1124,9 +1138,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
 #endif
-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)
-                        || transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false)
-                        || transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
+  const bool use_cutlass = grouped_gemm_backend_requested();
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 
@@ -1256,4 +1268,53 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     }
     cublas_path();
   }
+}
+
+void nvte_multi_tensor_gemm_workspace_sizes(const NVTETensor *A, const NVTETensor *B,
+                                            const NVTETensor *D, const NVTETensor *bias,
+                                            const NVTETensor *pre_gelu_out, const int num_gemms,
+                                            bool transa, bool transb, bool accumulate,
+                                            size_t *workspace_sizes, const int num_workspaces) {
+  NVTE_API_CALL(nvte_multi_tensor_gemm_workspace_sizes);
+#ifdef __HIP_PLATFORM_AMD__
+  using namespace transformer_engine;
+  if (num_gemms <= 0 || num_workspaces <= 0) {
+    return;
+  }
+
+  // Mirrors the backend selection in nvte_multi_tensor_gemm.
+#ifdef USE_HIPKITTENS_GEMM
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
+  if (grouped_gemm_backend_requested() && num_gemms > 1 && is_empty_arr(bias) &&
+      is_empty_arr(pre_gelu_out) && is_mxfp8_scaling(convertNVTETensorCheck(A[0])->scaling_mode)) {
+    size_t needed = 0;
+    if (try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb, nullptr, accumulate,
+                                       nullptr, &needed) ||
+        try_kittens_grouped_mxfp8_wgrad(A, B, D, num_gemms, transa, transb, nullptr, accumulate,
+                                        nullptr, &needed)) {
+      workspace_sizes[0] = std::max(workspace_sizes[0], needed);
+      return;
+    }
+  }
+#endif
+
+  // Per-GEMM path: each GEMM stages NVFP4 operands in the workspace of the stream it runs on.
+  const int num_streams = nvte_get_num_compute_streams();
+  const std::vector<size_t> base(workspace_sizes, workspace_sizes + num_workspaces);
+  for (int i = 0; i < num_gemms; i++) {
+    const int s = i % num_streams;
+    if (s >= num_workspaces) continue;
+    const size_t extra = nvfp4_gemm_workspace_size(convertNVTETensorCheck(A[i]),
+                                                   convertNVTETensorCheck(B[i]), transa, transb);
+    if (extra > 0) {
+      workspace_sizes[s] = std::max(workspace_sizes[s], base[s] + extra);
+    }
+  }
+#endif  // __HIP_PLATFORM_AMD__
 }
