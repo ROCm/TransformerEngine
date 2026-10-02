@@ -98,6 +98,7 @@ run_test_config(){
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 attention/test_cu_seqlens_cache.py
+    run_default_fa 1 attention/test_mixed_thd_attention.py
     run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
@@ -150,6 +151,7 @@ run_test_config_mgpu(){
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 2 distributed/test_sanity.py
     run_default_fa 2 distributed/test_numerics_exact.py
+    run_default_fa 1 distributed/test_parallel_cross_entropy.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then

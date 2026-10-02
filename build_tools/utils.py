@@ -17,7 +17,7 @@ import subprocess
 import sys
 import platform
 from pathlib import Path
-from importlib.metadata import version as get_version
+from importlib.metadata import PackageNotFoundError, distribution, version as get_version
 from subprocess import CalledProcessError
 from typing import Callable, List, Optional, Tuple, Union
 
