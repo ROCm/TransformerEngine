@@ -6,11 +6,8 @@
 
 import math
 import os
-<<<<<<< HEAD
 import warnings
-=======
 from contextlib import contextmanager, nullcontext
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 from typing import Dict, List, Tuple, Optional
 import pytest
 

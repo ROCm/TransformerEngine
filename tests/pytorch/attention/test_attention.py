@@ -319,7 +319,7 @@ def test_dot_product_mem_calc(monkeypatch):
 
     monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
     monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
-    _run_dot_product_attention(
+    run_dot_product_attention(
         dtype,
         config,
         "FusedAttention",
@@ -429,7 +429,7 @@ def test_dot_product_attention(
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
+    # FlashAttention does not support pad_between_seqs, but run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes.
     # On ROCm the FlashAttention backend is disabled for THD with padding between sequences
     # (flash-attn 2 cannot handle it and flash-attn 3 is not available), so do not force the
@@ -469,12 +469,11 @@ def test_dot_product_attention(
 
     # FusedAttention backend
     if fused_attn_supported:
-<<<<<<< HEAD
         if IS_HIP_EXTENSION:
             # ROCm exercises multiple fused-attn backends (CK V2/V3, AOTriton) when
             # more than one is available, comparing them against each other below.
             if len(fused_attn_backends) == 1:
-                fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
+                fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
                     dtype,
                     config,
                     "FusedAttention",
@@ -486,7 +485,7 @@ def test_dot_product_attention(
             if len(fused_attn_backends) == 2:
                 os.environ["NVTE_FUSED_ATTN_CK"] = "0"
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "1"
-                fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
+                fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
                     dtype,
                     config,
                     "FusedAttention",
@@ -499,7 +498,7 @@ def test_dot_product_attention(
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
                 os.environ["NVTE_CK_USES_FWD_V3"] = "1"
                 os.environ["NVTE_CK_USES_BWD_V3"] = "1"
-                fused_attn_fwd_1, _, fused_attn_bwd_1 = _run_dot_product_attention(
+                fused_attn_fwd_1, _, fused_attn_bwd_1 = run_dot_product_attention(
                     dtype,
                     config,
                     "FusedAttention",
@@ -513,7 +512,7 @@ def test_dot_product_attention(
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
                 os.environ["NVTE_CK_USES_FWD_V3"] = "0"
                 os.environ["NVTE_CK_USES_BWD_V3"] = "0"
-                fused_attn_fwd_2, _, fused_attn_bwd_2 = _run_dot_product_attention(
+                fused_attn_fwd_2, _, fused_attn_bwd_2 = run_dot_product_attention(
                     dtype,
                     config,
                     "FusedAttention",
@@ -523,7 +522,7 @@ def test_dot_product_attention(
                     is_training,
                 )
         else:
-            fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -533,18 +532,6 @@ def test_dot_product_attention(
                 is_training,
                 declarative_packed=declarative_packed,
             )
-=======
-        fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
-            dtype,
-            config,
-            "FusedAttention",
-            ckpt_attn,
-            qkv_layout,
-            pad_between_seqs,
-            is_training,
-            declarative_packed=declarative_packed,
-        )
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -3098,8 +3085,6 @@ def _get_fp8_vs_f16_config(model, qkv_layout):
             "causal_bottom_right": "padding_causal_bottom_right",
         }.get(config.attn_mask_type, config.attn_mask_type)
     return config
-<<<<<<< HEAD
-=======
 
 
 def _dpa_fp8_vs_f16_seqlens(config, qkv_format):
@@ -3164,7 +3149,6 @@ def _mha_fp8_vs_f16_seqlens(config, qkv_format):
         seqlens_q[-1] += -seqlens_q.sum() % 8
         seqlens_kv[-1] += -seqlens_kv.sum() % 8
     return seqlens_q, seqlens_kv
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
@@ -3365,47 +3349,7 @@ def _run_mha_fp8_vs_f16(
         if not is_training:
             mha = mha.eval()
 
-<<<<<<< HEAD
-    def random_seqlens(max_seqlen):
-        if qkv_format != "thd":
-            return torch.randint(
-                1, max_seqlen, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-        # Reserve seven positions so total-token alignment only increases the final length.
-        return torch.cat(
-            (
-                torch.randint(
-                    1,
-                    max_seqlen,
-                    [config.batch_size - 1],
-                    dtype=torch.int32,
-                    device="cuda",
-                ),
-                torch.randint(1, max_seqlen - 6, [1], dtype=torch.int32, device="cuda"),
-            )
-        )
-
-    if "padding" in config.attn_mask_type or qkv_format == "thd":
-        if config.attn_type == "self":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = seqlens_q
-        if config.attn_type == "cross":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = random_seqlens(config.max_seqlen_kv)
-    else:
-        seqlens_q = torch.full(
-            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-        )
-        seqlens_kv = torch.full(
-            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-        )
-    if qkv_format == "thd":
-        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
-        seqlens_q[-1] += -seqlens_q.sum() % 8
-        seqlens_kv[-1] += -seqlens_kv.sum() % 8
-=======
     seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -3473,13 +3417,10 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = _get_fp8_vs_f16_config(model, qkv_layout)
-<<<<<<< HEAD
-=======
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
     if not is_training and fp8_dpa_bwd:
         pytest.skip("fp8_dpa_bwd=True not applicable for inference")
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -4326,8 +4267,8 @@ def test_deterministic_bwd_ck(
         is_training=True,
     )
 
-    out1, _, grads1 = _run_dot_product_attention(**kwargs)
-    out2, _, grads2 = _run_dot_product_attention(**kwargs)
+    out1, _, grads1 = run_dot_product_attention(**kwargs)
+    out2, _, grads2 = run_dot_product_attention(**kwargs)
 
     # Bitwise reproducibility across consecutive runs (output + gradients)
     torch.testing.assert_close(out1, out2, atol=0, rtol=0, msg="output not bitwise reproducible")

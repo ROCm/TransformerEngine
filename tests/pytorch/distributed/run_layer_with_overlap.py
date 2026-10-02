@@ -21,14 +21,11 @@ from functools import partial
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
-<<<<<<< HEAD
-=======
 
 try:
     from torch._dynamo.utils import counters as dynamo_counters
 except ImportError:  # pragma: no cover
     dynamo_counters = None
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
@@ -628,16 +625,13 @@ def _train(opts):
                 test_x.grad = None
             torch.compiler.cudagraph_mark_step_begin()
         test_out = run_fwd_bwd(test_model, test_x)
-<<<<<<< HEAD
+        if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
+            skips = dynamo_counters["inductor"]["cudagraph_skips"]
+            assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
     dist_print(
         "UB BULK ELIGIBLE: "
         + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
     )
-=======
-        if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
-            skips = dynamo_counters["inductor"]["cudagraph_skips"]
-            assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():

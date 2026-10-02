@@ -48,6 +48,8 @@ COMM_GEMM_QUANTIZATION_PARAMS = [
     pytest.param(True, "fp8", id="cublasmp-fp8"),
     pytest.param(True, "mxfp8", id="cublasmp-mxfp8"),
 ]
+if IS_HIP_EXTENSION:
+    COMM_GEMM_QUANTIZATION_PARAMS = [p for p in COMM_GEMM_QUANTIZATION_PARAMS if not p.values[0]]
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(torch.cuda.device_count(), MAX_GPUS_TO_USE)
@@ -203,12 +205,7 @@ def _run_layer_with_overlap(
     _assert_subprocess_succeeded(result)
 
 
-<<<<<<< HEAD
-@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
-=======
 @pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 @pytest.mark.parametrize("aggregate", (False, True))
 def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     """
@@ -218,12 +215,7 @@ def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization, use_cublasmp)
 
 
-<<<<<<< HEAD
-@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
-=======
 @pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 @pytest.mark.parametrize("p2p", (False, True))
 def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     """
@@ -322,9 +314,6 @@ def test_layers_with_overlap_bf16(
     )
 
 
-<<<<<<< HEAD
-@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
-=======
 @pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
 @pytest.mark.parametrize(
     "quantization",
@@ -364,8 +353,7 @@ def test_linear_with_overlap_compile(
     )
 
 
-@pytest.mark.parametrize("use_cublasmp", (False, True))
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
 @pytest.mark.parametrize(
     "quantization",
     ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],

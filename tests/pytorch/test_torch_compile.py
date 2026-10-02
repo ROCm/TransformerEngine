@@ -12,15 +12,12 @@ import warnings
 
 import pytest
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 
 try:
     from torch._dynamo.utils import counters
 except ImportError:  # pragma: no cover
     counters = None
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
 try:

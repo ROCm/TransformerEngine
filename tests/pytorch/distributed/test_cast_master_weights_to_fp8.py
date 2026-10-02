@@ -1009,7 +1009,6 @@ def run_parallel_tests() -> None:
     print("starting cast master weights to fp8 test")
     for quantization in quantizations:
         for post_ag_processing in manual_post_all_gather_processings:
-<<<<<<< HEAD
             for keep_fp8_weight_transpose_cache in keep_fp8_weight_transpose_caches:
                 _test_cast_master_weights_to_fp8(
                     quantization, dp_group, post_ag_processing, keep_fp8_weight_transpose_cache
@@ -1017,13 +1016,9 @@ def run_parallel_tests() -> None:
                 _test_fsdp_cast_master_weights_to_fp8(
                     quantization, dp_group, post_ag_processing, keep_fp8_weight_transpose_cache
                 )
-=======
-            _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-            _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
     if is_mxfp8_available():
         print("starting mxfp8 empty master shard test")
         _test_mxfp8_empty_master_shard(dp_group)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
         print("starting cast master weights to nvfp4 test")

@@ -238,26 +238,6 @@ class TestDistributedCrossAttn:
 
         batch, seqlen, num_head, hidden = data_shape
 
-<<<<<<< HEAD
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BSHD_BS2HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
             mesh_axes,
@@ -265,9 +245,6 @@ class TestDistributedCrossAttn:
             data_shape,
             softmax_type,
         )
-=======
-        col_ref = self.generate_collectives_count_ref()
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -548,7 +525,6 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-<<<<<<< HEAD
         # skip unsupported AOTriton configurations
         if is_hip_extension() and int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) == 0:
             if kv_groups != 1:
@@ -556,8 +532,6 @@ class TestDistributedContextParallelSelfAttn:
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and mesh_shape[1] != 1: #CP
                 pytest.skip(f"Skipping CAUSAL_MASK and CP={mesh_shape[1]} for AOTriton")
 
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         if return_max_logit:
             runner.test_forward(
                 return_max_logit=True,

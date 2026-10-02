@@ -53,7 +53,6 @@ reason_for_no_fp8_block_scaling_grouped = (
     )
 )
 
-<<<<<<< HEAD
 # Grouped FP8 current-scaling quantize is not implemented on ROCm; plain FP8 is otherwise
 # available, so gate the grouped tests separately.
 fp8_current_scaling_grouped_available = fp8_available and not IS_HIP_EXTENSION
@@ -62,7 +61,6 @@ reason_for_no_fp8_current_scaling_grouped = (
     if not fp8_available
     else "Grouped FP8 current-scaling quantize is not implemented on ROCm."
 )
-=======
 
 def test_mark_grouped_tensor_supports_plain_tensor():
     tensor = torch.empty(16)
@@ -101,7 +99,6 @@ def test_mark_grouped_tensor_marks_quantized_columnwise_storage():
     assert columnwise_data.grouped_tensor_scale_inv is False
     assert columnwise_scale_inv.grouped_tensor_scale_inv is True
 
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 _quantization_params = [
     pytest.param(

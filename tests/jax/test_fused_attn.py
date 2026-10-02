@@ -102,7 +102,6 @@ def general_dot_product_attention(
     if bias is not None:
         logits = logits.reshape((b, h_kv * num_groups, s_q, s_kv))
         logits = logits + bias
-<<<<<<< HEAD
         # [ROCm] Detect query rows where ALL bias values are -inf (fully masked out).
         # These rows would produce NaN in softmax; zero logits to prevent NaN since
         # the softmax output for these rows is zeroed out below anyway.
@@ -111,8 +110,6 @@ def general_dot_product_attention(
             bias_all_neg_mask = jnp.all(bias == -jnp.inf, axis=-1, keepdims=True)
             logits = jnp.where(bias_all_neg_mask, 0, logits)
         # reshape logits back to original
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         logits = logits.reshape((b, h_kv, num_groups, s_q, s_kv))
 
     if mask is not None:
@@ -689,7 +686,6 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
-<<<<<<< HEAD
         if self.head_dim_qk == 192 and self.head_dim_v == 128:
             if self.attn_bias_type != AttnBiasType.NO_BIAS or self.bias_shape is not None:
                 pytest.skip("Aiter currently supports MLA hd192_hd128 only without bias.")
@@ -702,43 +698,6 @@ class FusedAttnRunner:
             if self.seq_desc_format != SeqDescFormat.Mask:
                 pytest.skip("Aiter currently supports MLA hd192_hd128 only with mask-based SeqDescFormat.")
 
-        self.backend = FusedAttnHelper(
-            self.is_training,
-            self.dtype,
-            self.dtype,
-            self.qkv_layout,
-            self.attn_bias_type,
-            self.attn_mask_type,
-            self.softmax_type,
-            self.dropout_prob,
-            self.num_heads_q,
-            self.num_heads_kv,
-            self.max_seqlen_q,
-            self.max_seqlen_kv,
-            self.head_dim_qk,
-            self.head_dim_v,
-            (-1, -1) if self.window_size is None else self.window_size,
-            self.return_max_logit,
-        ).get_fused_attn_backend()
-        if is_hip_extension():
-            if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-                pytest.skip("Unsupported inputs combination or device compute capability.")
-            # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
-            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
-            # produces different attention patterns than the top-left aligned reference.
-            if (
-                self.window_size is not None
-                and self.max_seqlen_q != self.max_seqlen_kv
-                and not self.attn_mask_type.is_causal()
-            ):
-                pytest.skip(
-                    "CK backend uses bottom-right mask alignment for non-causal SWA,"
-                    " which diverges from the top-left reference for cross-attention"
-                )
-        else:
-            if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                pytest.skip("Unsupported inputs combination or device compute capability.")
-=======
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
         if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             if self.bias_shape == BiasShape._1HSS:
@@ -768,6 +727,7 @@ class FusedAttnRunner:
             head_dim_qk=self.head_dim_qk,
             head_dim_v=self.head_dim_v,
             window_size=(-1, -1) if self.window_size is None else self.window_size,
+            return_max_logit=self.return_max_logit,
             bottom_right_diagonal=self.attn_mask_type.is_bottom_right(),
             bias_batch=bias_batch,
             bias_heads=bias_heads,
@@ -775,9 +735,24 @@ class FusedAttnRunner:
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=self._get_max_segments_per_sequence(),
         ).get_fused_attn_backend()
-        if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            pytest.skip(message)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+        if is_hip_extension():
+            if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+                pytest.skip(message)
+            # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
+            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
+            # produces different attention patterns than the top-left aligned reference.
+            if (
+                self.window_size is not None
+                and self.max_seqlen_q != self.max_seqlen_kv
+                and not self.attn_mask_type.is_causal()
+            ):
+                pytest.skip(
+                    "CK backend uses bottom-right mask alignment for non-causal SWA,"
+                    " which diverges from the top-left reference for cross-attention"
+                )
+        else:
+            if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+                pytest.skip(message)
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -787,14 +762,6 @@ class FusedAttnRunner:
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for non-padding mask"
                 )
-<<<<<<< HEAD
-            elif (not is_hip_extension()) and self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                pytest.skip(
-                    "B1SS, BHSS and 11SS bias shapes are only supported for "
-                    "the F16_arbitrary_seqlen backend."
-                )
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     def _setup_segments_ck_smallseq(self, generate_random_segment_ids):
         """
