@@ -1002,7 +1002,12 @@ public:
   static int device_cap_id(const hipDeviceProp_t &prop)
   {
     const int legacy_id = prop.major * 100 + prop.minor;
-    const int variant   = std::strstr(prop.gcnArchName, "-strict") ? 1 : 0;
+    int variant = 0;
+    if (legacy_id == 1205)
+    {
+      // gfx1250 A0 is reported as gfx1250-strict
+      variant = std::strstr(prop.gcnArchName, "-strict") ? 1 : 0;
+    }
     return legacy_id * 100 + variant;
   }
 
