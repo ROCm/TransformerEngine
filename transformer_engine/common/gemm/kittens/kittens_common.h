@@ -6,6 +6,7 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+#include <cassert>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,15 @@ enum KittensDType {
     KITTENS_FP8E4M3  = 7,
     KITTENS_FP8E5M2  = 8,
 };
+
+// MFMA cbsz/blgp operand format code, fixed by v_mfma_scale_f32_16x16x128_f8f6f4.
+inline int fp8_code(KittensDType dt) {
+    switch (dt) {
+    case KITTENS_FP8E4M3: return 0;
+    case KITTENS_FP8E5M2: return 1;
+    default: assert(0 && "unexpected FP8 dtype"); return 0;
+    }
+}
 
 // Values match NVTEScalingMode in transformer_engine.h
 enum KittensScalingMode {
