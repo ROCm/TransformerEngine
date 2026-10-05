@@ -821,6 +821,10 @@ def test_linear():
             continue
         if kwargs.get("use_compile", False) and QUANTIZATION == "fp8":
             continue
+        # TE falls back to an eager path that fullgraph cannot trace when this torch build
+        # lacks the opaque-object API.
+        if kwargs.get("use_compile", False) and te.utils._compile_disabled_reason is not None:
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
