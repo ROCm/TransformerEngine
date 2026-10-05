@@ -432,7 +432,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ):
             ub_overlap_ag_fprop = False
         ub_fused_dgrad_wgrad = False
-        if ub_overlap_ag_dgrad and mxfp8:
+        if ub_overlap_ag_dgrad and mxfp8 and _ub_is_fused("fc2_dgrad"):
             # MXFP8 has no standalone NN AG+GEMM: the FC2 backward overlaps only as the fused
             # dY all-gather + dgrad + wgrad.
             ub_fused_dgrad_wgrad = fused_ag_dgrad_wgrad_eligible(

@@ -1088,7 +1088,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             inputmat_total.update_usage(columnwise_usage=True)
             if bwd_args.fuse_wgrad_accumulation:
                 if main_grad.dtype != torch.float32:
-                    raise RuntimeError("The fused MXFP8 dgrad+wgrad accumulates into an fp32 main_grad only")
+                    raise RuntimeError(
+                        "The fused MXFP8 dgrad+wgrad accumulates into an fp32 main_grad only"
+                    )
                 fused_wgrad = main_grad
                 if bwd_args.is_first_microbatch is not None:
                     fused_wgrad_accumulate = not bwd_args.is_first_microbatch
@@ -2166,15 +2168,14 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
 
+            mxfp8 = self.fp8 and self.fp8_meta["recipe"].mxfp8()
             if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
                 self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
-                mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=mxfp8,
             ):
                 ub_overlap_ag_fprop = False
-            mxfp8 = self.fp8 and self.fp8_meta["recipe"].mxfp8()
             ub_fused_dgrad_wgrad = False
-            if ub_overlap_ag_dgrad and mxfp8:
+            if ub_overlap_ag_dgrad and mxfp8 and _ub_is_fused(self.ub_name + "_dgrad"):
                 # MXFP8 has no standalone NN AG+GEMM: the row-parallel backward overlaps only as the
                 # fused dY all-gather + dgrad + wgrad.
                 ub_fused_dgrad_wgrad = fused_ag_dgrad_wgrad_eligible(
