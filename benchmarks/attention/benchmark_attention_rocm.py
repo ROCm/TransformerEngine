@@ -22,7 +22,7 @@ from tests.pytorch.utils import (
     ModelConfig,
     get_available_attention_backends,
 )
-from tests.pytorch.attention.test_attention import _run_dot_product_attention
+from tests.pytorch.attention.test_attention import run_dot_product_attention
 
 pd.set_option("display.precision", 4)
 
@@ -203,7 +203,7 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
     for i in range(warmup_iters):
-        attn_fwd, _, attn_bwd = _run_dot_product_attention(
+        attn_fwd, _, attn_bwd = run_dot_product_attention(
                 dtype,
                 config,
                 attention,
@@ -223,7 +223,7 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     attn_start = time.time()
     
     for i in range(num_iters):
-        attn_fwd, _, attn_bwd = _run_dot_product_attention(
+        attn_fwd, _, attn_bwd = run_dot_product_attention(
                 dtype,
                 config,
                 attention,
