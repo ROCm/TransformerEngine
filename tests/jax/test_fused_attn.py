@@ -409,6 +409,7 @@ def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
         )
 
 
+@pytest.mark.skipif(is_hip_extension(), reason="Checks cuDNN backend messages.")
 def test_fused_attn_backend_message():
     """Test the error messaging of the fused attention backend query."""
     baseline = FusedAttnHelper(

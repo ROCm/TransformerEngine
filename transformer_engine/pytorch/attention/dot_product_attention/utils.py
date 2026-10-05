@@ -866,6 +866,10 @@ def get_attention_backend(
                 "head_dim <= 256, and no context parallelism)"
             )
             use_flash_attention_3 = False
+        if use_flash_attention_2 and IS_HIP_EXTENSION:
+            # ROCm flash-attn accepts softcap but does not apply it.
+            logger.debug("Disabling FlashAttention 2 for softcap on ROCm")
+            use_flash_attention_2 = False
         if use_flash_attention_2 and not FlashAttentionUtils.v2_6_0_plus:
             logger.debug("Disabling FlashAttention 2 for softcap (requires flash-attn >= 2.6.0)")
             use_flash_attention_2 = False

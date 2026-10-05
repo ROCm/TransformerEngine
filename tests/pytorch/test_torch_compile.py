@@ -1,3 +1,4 @@
+# This file was modified for portability to AMDGPU
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
@@ -1845,6 +1846,7 @@ def test_tensor_spec_create_tensor(factory, shape, fake):
         assert isinstance(getattr(out, name), FakeTensor) == fake
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("factory, shape", _SPEC_QUANTIZERS)
 def test_tensor_spec_create_tensor_compiles(factory, shape):
     """``TensorSpec.create_tensor`` traces under ``fullgraph=True`` (CPU)."""

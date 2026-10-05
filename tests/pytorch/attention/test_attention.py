@@ -162,6 +162,7 @@ def test_flash_attention_supported_version_message():
     )
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Checks cuDNN backend messages and NVTE_FP8.")
 def test_fused_attn_backend_message():
     """Test the error messaging of the fused attention backend query."""
     baseline = FusedAttentionParams(
@@ -585,6 +586,7 @@ _CACHE_EVENT = re.compile(
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="cuDNN graph cache is not used on ROCm.")
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_fused_attn_graph_cache():
     """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
