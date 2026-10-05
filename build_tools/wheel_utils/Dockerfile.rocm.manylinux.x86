@@ -29,8 +29,7 @@ RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0"
 RUN dnf install -y --disablerepo=epel ${ROCM_DEVEL_PACKAGE}
 
 # xz-devel installs lzma needed by AOTriton
-# patchelf sets the RUNPATH on the prebuilt ROCm shared objects TE copies in
-RUN dnf install -y gcc-toolset-13 xz-devel patchelf
+RUN dnf install -y gcc-toolset-13 xz-devel
 
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*

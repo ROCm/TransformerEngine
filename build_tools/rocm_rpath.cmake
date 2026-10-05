@@ -44,35 +44,3 @@ function(te_set_rocm_rpath target)
     # Build-tree link directories only exist on the build machine.
     INSTALL_RPATH_USE_LINK_PATH OFF)
 endfunction()
-
-# Rewrite the RUNPATH of shared objects TE copies in rather than links, so has no
-# link step to set one on. DT_RUNPATH is not inherited, so without this they rely
-# on libtransformer_engine.so being loaded first. Paths may be globs and resolve
-# at install time, so call this after the install() rule that places the files.
-#
-#   te_patchelf_rocm_rpath(<path or glob>...)
-function(te_patchelf_rocm_rpath)
-  find_program(TE_PATCHELF_EXECUTABLE NAMES patchelf)
-  if(NOT TE_PATCHELF_EXECUTABLE)
-    message(FATAL_ERROR
-            "patchelf is required to bake RUNPATHs into the prebuilt ROCm shared "
-            "objects but was not found.")
-  endif()
-
-  te_rocm_rpath(_rocm_rpath)
-  list(INSERT _rocm_rpath 0 "$ORIGIN")
-  string(REPLACE ";" ":" _rpath "${_rocm_rpath}")
-
-  foreach(_pattern IN LISTS ARGN)
-    install(CODE "
-      file(GLOB _te_rpath_files \"${_pattern}\")
-      foreach(_te_rpath_file IN LISTS _te_rpath_files)
-        if(NOT IS_SYMLINK \"\${_te_rpath_file}\")
-          message(STATUS \"Setting ROCm RUNPATH: \${_te_rpath_file}\")
-          execute_process(
-            COMMAND \"${TE_PATCHELF_EXECUTABLE}\" --set-rpath \"${_rpath}\" \"\${_te_rpath_file}\"
-            COMMAND_ERROR_IS_FATAL ANY)
-        endif()
-      endforeach()")
-  endforeach()
-endfunction()

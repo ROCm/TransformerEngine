@@ -241,9 +241,3 @@ if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
   install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${AITER_MHA_INSTALL_DIR})
 endif()
 install(TARGETS ck_fused_attn DESTINATION ${AITER_MHA_INSTALL_DIR})
-
-# The MHA libs come from the QoLA/CK-JIT build or a prebuilt AITER cache, so we
-# have no link step to set a RUNPATH on. Patch the installed copies instead.
-te_patchelf_rocm_rpath(
-  "${AITER_MHA_INSTALL_DIR}/te_libmha_fwd.so"
-  "${AITER_MHA_INSTALL_DIR}/te_libmha_bwd.so")
