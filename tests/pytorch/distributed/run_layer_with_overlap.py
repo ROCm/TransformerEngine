@@ -50,10 +50,10 @@ class multi_module_model(torch.nn.Module):
         self.num_layers = num_layers
         self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
 
-    def forward(self, x, layer_contexts):
+    def forward(self, x, layer_contexts, **kwargs):
         for layer, context in zip(self.layers, layer_contexts):
             with context():
-                x = layer(x)
+                x = layer(x, **kwargs)
         return x
 
 
@@ -92,6 +92,10 @@ def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
     }
     if config.no_bias:
         kwargs["bias"] = False
+    if config.fuse_wgrad_accumulation:
+        kwargs["fuse_wgrad_accumulation"] = True
+    if config.delay_wgrad_compute:
+        kwargs["delay_wgrad_compute"] = True
 
     if config.layer_type in [te.Linear, te.LayerNormLinear]:
         if config.linear_parallel_mode == "row":
@@ -189,6 +193,56 @@ def _parse_args(argv=None, namespace=None):
         default="none",
         choices=["none", "fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
         help="Quantization recipe",
+    )
+    parser.add_argument(
+        "--fp8-format",
+        type=str.lower,
+        default=None,
+        choices=["e4m3", "hybrid"],
+        help="FP8 format of the recipe (default: e4m3 for MXFP8, hybrid otherwise).",
+    )
+    parser.add_argument(
+        "--fuse-wgrad-accumulation",
+        action="store_true",
+        default=False,
+        help="Accumulate weight gradients into fp32 main_grad buffers (compared instead of .grad).",
+    )
+    parser.add_argument(
+        "--overwrite-main-grad",
+        action="store_true",
+        default=False,
+        help="With --fuse-wgrad-accumulation: mark the weights overwrite_main_grad.",
+    )
+    parser.add_argument(
+        "--microbatches",
+        type=int,
+        default=1,
+        help="Microbatches per step (is_first_microbatch=True, then False), each with its input.",
+    )
+    parser.add_argument(
+        "--delay-wgrad-compute",
+        action="store_true",
+        default=False,
+        help="Delay the wgrad GEMMs to backward_dw() after the backward pass.",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Run the overlapped model this many times (poisoning buffers before each run) and "
+        "require bit-identical results.",
+    )
+    parser.add_argument(
+        "--fp32-truth",
+        action="store_true",
+        default=False,
+        help="Also compare the overlapped and reference runs against an fp32 ground truth.",
+    )
+    parser.add_argument(
+        "--poison",
+        action="store_true",
+        default=False,
+        help="Fill the all-gather Userbuffers regions with NaN before every overlapped run.",
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -339,6 +393,8 @@ def _digest(tensors):
 
 
 def _compare_tensors(name, test, ref, rtol, atol):
+    if not torch.isfinite(test).all():
+        return 1, f"NUMERICAL CHECK FAILED: {name} has non-finite values"
     # Make sure tensors aren't zero and we don't pass trivially
     if test.count_nonzero() == 0:
         if ref.count_nonzero() == 0:
@@ -432,9 +488,12 @@ def _train(opts):
             " --num-heads or --head-dim for other cases."
         )
     if opts.out_features is not None:
-        assert opts.layer_type is te.LayerNormLinear and opts.linear_parallel_mode == "column", (
-            "--out-features is only used to configure column-tensor-parallel LayerNormLinear"
-            " layers. Use --num-heads or --head-dim for other cases."
+        assert (
+            opts.layer_type in (te.Linear, te.LayerNormLinear)
+            and opts.linear_parallel_mode == "column"
+        ), (
+            "--out-features is only used to configure column-tensor-parallel Linear and"
+            " LayerNormLinear layers. Use --num-heads or --head-dim for other cases."
         )
 
     def dist_print(msg, src=None, end="\n", debug=False, error=False):
@@ -525,6 +584,8 @@ def _train(opts):
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
+    if opts.fp8_format is not None:
+        fp8_format = Format.E4M3 if opts.fp8_format == "e4m3" else Format.HYBRID
     fp8_recipe = None
     if opts.quantization == "fp8_delayed_scaling":
         fp8_recipe = DelayedScaling(
@@ -533,7 +594,11 @@ def _train(opts):
     elif opts.quantization == "fp8_current_scaling":
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
     elif opts.quantization == "mxfp8":
-        fp8_recipe = MXFP8BlockScaling()
+        fp8_recipe = (
+            MXFP8BlockScaling()
+            if opts.fp8_format is None
+            else MXFP8BlockScaling(fp8_format=fp8_format)
+        )
 
     if opts.fp8:
         fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
@@ -552,19 +617,24 @@ def _train(opts):
         for i in range(opts.num_layers)
     ]
 
-    # Prepare random input tensors
-    test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
-    test_x.retain_grad()
-    ref_x = torch.empty_like(test_x).requires_grad_(True)
-    with torch.no_grad():
-        ref_x.copy_(test_x)
-    torch.testing.assert_close(test_x, ref_x, rtol=0.0, atol=0.0)
-    ref_x.retain_grad()
+    # Prepare random input tensors, one per microbatch
+    test_xs, ref_xs = [], []
+    for _ in range(opts.microbatches):
+        test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
+        test_x.retain_grad()
+        ref_x = torch.empty_like(test_x).requires_grad_(True)
+        with torch.no_grad():
+            ref_x.copy_(test_x)
+        torch.testing.assert_close(test_x, ref_x, rtol=0.0, atol=0.0)
+        ref_x.retain_grad()
+        test_xs.append(test_x)
+        ref_xs.append(ref_x)
 
     # Execute fwd/bwd and collect tensors to test
-    def run_fwd_bwd(model, x):
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            y = model(x, layer_contexts)
+    def run_fwd_bwd(model, x, truth=False, **kwargs):
+        contexts = [nullcontext] * opts.num_layers if truth else layer_contexts
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=not truth):
+            y = model(x, contexts, **kwargs)
             if isinstance(y, tuple):
                 out, *_ = y
             else:
@@ -573,27 +643,144 @@ def _train(opts):
             loss.backward()
         return out
 
+    def poison_userbuffers():
+        # NaN (0xFF in fp8 E4M3 and E8M0) in every all-gather region, so a gather that misses a
+        # piece cannot pass on the previous call's data. Reduce-scatter regions hold the backend's
+        # armed stage halves and are left alone.
+        torch.cuda.synchronize()
+        dist.barrier(group=nccl_world)
+        for (name, _), ub in te.module.base._ub_communicators.items():
+            if name not in te.module.base._ub_fused_names or name in (
+                "proj_fprop",
+                "fc2_fprop",
+                "qkv_wgrad",
+                "fc1_wgrad",
+            ):
+                continue
+            buf = ub.get_buffer()
+            if buf.dtype != torch.uint8:
+                buf.fill_(float("nan"))
+                continue
+            buf.fill_(0xFF)
+            if ub.has_scale_buffer():
+                ub.get_scale_buffer(shape=[buf.numel() // 32]).fill_(0xFF)
+            if ub.has_dgrad_wgrad_buffer():
+                ub.get_columnwise_buffer(False, [buf.numel()]).fill_(0xFF)
+                ub.get_columnwise_buffer(True, [buf.numel() // 32]).fill_(0xFF)
+        torch.cuda.synchronize()
+        dist.barrier(group=nccl_world)
+
+    def run_step(model, xs, truth=False):
+        # fuse_wgrad_accumulation: fp32 main_grad starting from a huge value, which the first
+        # microbatch must overwrite and later microbatches accumulate onto.
+        for x in xs:
+            x.grad = None
+        for param in model.parameters():
+            param.grad = None
+            if opts.fuse_wgrad_accumulation:
+                param.main_grad = torch.full(
+                    param.shape, 1e30, dtype=torch.float32, device=param.device
+                )
+                param.overwrite_main_grad = opts.overwrite_main_grad
+        outs = []
+        for i, x in enumerate(xs):
+            kwargs = {"is_first_microbatch": i == 0} if opts.microbatches > 1 else {}
+            outs.append(run_fwd_bwd(model, x, truth=truth, **kwargs))
+        if opts.delay_wgrad_compute:
+            for module in model.modules():
+                if isinstance(module, te.module.base.TransformerEngineBaseModule):
+                    module.backward_dw()
+        return outs
+
+    def collect(model, outs, xs):
+        tensors = list(outs) + [x.grad for x in xs]
+        names = [f"output{i}" for i in range(len(outs))]
+        names += [f"input{i}.grad" for i in range(len(xs))]
+        if len(outs) == 1:
+            names[:2] = ["output", "input.grad"]
+        for name, param in model.named_parameters():
+            if param.requires_grad and "layer_norm" not in name:
+                if opts.fuse_wgrad_accumulation and param.grad is None:
+                    tensors.append(param.main_grad)
+                    names.append(name + ".main_grad")
+                else:
+                    tensors.append(param.grad)
+                    names.append(name + ".grad")
+        return tensors, names
+
+    # Count the GEMMs the modules launch (by layout) and the fused dgrad+wgrad calls.
+    gemm_calls = {}
+    counting = [False]
+
+    def _counted(fn, key):
+        def wrapper(*args, **kwargs):
+            if counting[0]:
+                k = key(args, kwargs)
+                gemm_calls[k] = gemm_calls.get(k, 0) + 1
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    for mod in (
+        te.module.linear,
+        te.module.layernorm_linear,
+        te.module.layernorm_mlp,
+    ):
+        mod.general_gemm = _counted(mod.general_gemm, lambda a, k: k.get("layout", "TN"))
+        if hasattr(mod, "fused_ag_dgrad_wgrad"):
+            mod.fused_ag_dgrad_wgrad = _counted(
+                mod.fused_ag_dgrad_wgrad, lambda a, k: "FUSED_DGRAD_WGRAD"
+            )
+
     torch_rng_state = torch.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         test_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(test_graph):
-            test_out = run_fwd_bwd(test_model, test_x)
+            test_out = run_fwd_bwd(test_model, test_xs[0])
         test_graph.replay()
         if not opts.benchmark:
             del test_graph
+        test_grads, names = collect(test_model, [test_out], test_xs)
     else:
-        test_out = run_fwd_bwd(test_model, test_x)
+        repeat_digests = []
+        for r in range(opts.repeat):
+            torch.set_rng_state(torch_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
+            if opts.poison:
+                poison_userbuffers()
+            counting[0] = r == 0
+            test_outs = run_step(test_model, test_xs)
+            counting[0] = False
+            test_grads, names = collect(test_model, test_outs, test_xs)
+            repeat_digests.append(_digest(test_grads))
+        dist_print(
+            "GEMM CALLS: " + " ".join(f"{k}={v}" for k, v in sorted(gemm_calls.items()))
+        )
+        if opts.repeat > 1:
+            same = all(d == repeat_digests[0] for d in repeat_digests)
+            dist_print(
+                f"REPEAT {opts.repeat}: "
+                + ("identical" if same else "NUMERICAL CHECK FAILED: runs differ"),
+                src=WORLD_RANK,
+                error=not same,
+            )
+            if not same:
+                return 1
     dist_print(
         "UB BULK ELIGIBLE: "
         + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
     )
-    test_grads = [test_out, test_x.grad]
-    names = ["output", "input.grad"]
-    for test_name, test_param in test_model.named_parameters():
-        if test_param.requires_grad and "layer_norm" not in test_name:
-            test_grads.append(test_param.grad)
-            names.append(test_name + ".grad")
+    dist_print(
+        "UB FUSED DGRAD+WGRAD: "
+        + " ".join(
+            sorted(
+                n.removesuffix("_dgrad")
+                for n, ok in te.module.base._ub_fused_dgrad_wgrad_decisions.items()
+                if ok
+            )
+        )
+    )
 
     all_digests = [None] * opts.tp
     dist.all_gather_object(all_digests, _digest(test_grads), group=nccl_world)
@@ -604,16 +791,61 @@ def _train(opts):
     if opts.use_cuda_graphs:
         ref_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(ref_graph):
-            ref_out = run_fwd_bwd(ref_model, ref_x)
+            ref_out = run_fwd_bwd(ref_model, ref_xs[0])
         ref_graph.replay()
         del ref_graph
+        ref_grads, _ = collect(ref_model, [ref_out], ref_xs)
     else:
-        ref_out = run_fwd_bwd(ref_model, ref_x)
-    ref_grads = [ref_out, ref_x.grad]
-    for ref_name, ref_param in ref_model.named_parameters():
-        if ref_param.requires_grad and "layer_norm" not in ref_name:
-            ref_grads.append(ref_param.grad)
+        ref_grads, _ = collect(ref_model, run_step(ref_model, ref_xs), ref_xs)
 
+    # fp32 ground truth: the reference layer (no overlap) in fp32, unquantized, same weights and
+    # inputs. The overlapped run must be about as accurate as the non-overlapped one.
+    accuracy_failed = False
+    if opts.fp32_truth:
+        truth_args, truth_kwargs, _ = _get_layer_args(
+            opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True
+        )
+        truth_kwargs["params_dtype"] = torch.float32
+        truth_model = multi_module_model(
+            opts.layer_type, opts.num_layers, *truth_args, **truth_kwargs
+        )
+        for test_param, truth_param in zip(test_model.parameters(), truth_model.parameters()):
+            with torch.no_grad():
+                truth_param.copy_(test_param)
+        truth_xs = []
+        for x in test_xs:
+            truth_x = x.detach().clone().requires_grad_(True)
+            truth_x.retain_grad()
+            truth_xs.append(truth_x)
+        torch.set_rng_state(torch_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
+        truth_grads, _ = collect(truth_model, run_step(truth_model, truth_xs, truth=True), truth_xs)
+        for name, test_t, ref_t, truth_t in zip(names, test_grads, ref_grads, truth_grads):
+            if test_t is None or ref_t is None or truth_t is None:
+                continue
+            truth32 = truth_t.float()
+            scale = max(truth32.norm().item(), 1e-30)
+            amax = max(truth32.abs().max().item(), 1e-30)
+            test_l2 = (test_t.float() - truth32).norm().item() / scale
+            ref_l2 = (ref_t.float() - truth32).norm().item() / scale
+            test_max = (test_t.float() - truth32).abs().max().item() / amax
+            ref_max = (ref_t.float() - truth32).abs().max().item() / amax
+            ok = test_l2 <= 1.1 * ref_l2 + 1e-6
+            accuracy_failed = accuracy_failed or not ok
+            dist_print(
+                f"ACCURACY vs fp32 {'PASSED' if ok else 'FAILED'}: {name} | rel L2 overlap="
+                f"{test_l2:.3e} ref={ref_l2:.3e} | max abs/amax overlap={test_max:.3e} "
+                f"ref={ref_max:.3e}",
+                src=WORLD_RANK,
+                error=not ok,
+            )
+
+    accuracy = torch.tensor([int(accuracy_failed)], dtype=torch.uint8, device="cuda")
+    dist.all_reduce(accuracy, dist.ReduceOp.MAX, nccl_world)
+    if bool(accuracy.item()):
+        dist_print(
+            "NUMERICAL CHECK FAILED: overlap less accurate than the reference vs fp32", error=True
+        )
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
     if not opts.skip_verify:
         # Make sure we have the same number of gradients
@@ -645,6 +877,8 @@ def _train(opts):
                 dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
                 if bool(numerics_failed.item()) and not opts.debug:
                     break
+
+    numerics_failed[0] = max(int(numerics_failed.item()), int(accuracy.item()))
 
     if opts.benchmark:
         # Warmup to not profile CPU overhead
