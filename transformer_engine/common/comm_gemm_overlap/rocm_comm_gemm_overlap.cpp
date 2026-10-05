@@ -410,10 +410,10 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 }
 #endif
 
-enum KosmosOp { kKosmosAg = 0, kKosmosRs, kKosmosBulkAg, kKosmosBulkRs };
+enum KosmosOp { kKosmosAg = 0, kKosmosRs, kKosmosBulkAg, kKosmosBulkRs, kKosmosAgDgradWgrad };
 
 #ifdef NVTE_WITH_KOSMOS
-static const char *const kosmos_op_names[] = {"AG+GEMM", "GEMM+RS", "bulk AG", "bulk RS"};
+static const char *const kosmos_op_names[] = {"AG+GEMM", "GEMM+RS", "bulk AG", "bulk RS", "AG dgrad+wgrad"};
 
 // NVTE_KOSMOS_BULK=0 keeps the bulk (dgrad AG / wgrad RS) overlaps on HipKittens while the others use KOSMOS.
 static bool kosmos_bulk_enabled() {
@@ -430,19 +430,72 @@ static bool kosmos_launched(hipError_t err, KosmosComm *comm, KosmosOp op) {
              "): ", kosmos_comm_error(comm));
   return true;
 }
+
+static const char *const kKosmosUnavailable = "no KOSMOS communicator (NVTE_USE_KOSMOS=0 or TP peers off the node)";
+
+// MXFP8 has no HipKittens fallback, and the module eligibility checks only send calls KOSMOS covers.
+static void kosmos_mxfp8_launched(hipError_t err, KosmosComm *comm, KosmosOp op) {
+  NVTE_CHECK(err == hipSuccess, "KOSMOS MXFP8 ", kosmos_op_names[op], " failed (", hipGetErrorString(err),
+             "): ", kosmos_comm_error(comm));
+}
+
+// One usage of an MXFP8 E4M3 operand: its fp8 data and compact (unswizzled) E8M0 scales.
+struct KosmosMx {
+  const void *data{nullptr};
+  const void *scale{nullptr};
+};
+
+static size_t kosmos_rows(const NVTEShape &shape) {
+  size_t rows = 1;
+  for (size_t i = 0; i + 1 < shape.ndim; i++) {
+    rows *= shape.data[i];
+  }
+  return rows;
+}
+
+static bool kosmos_is_mxfp8(const TensorWrapper &t) {
+  return t.scaling_mode() == NVTE_MXFP8_1D_SCALING;
+}
+
+static bool kosmos_mxfp8_operand(const TensorWrapper &t, bool columnwise, KosmosMx *out) {
+  // The gfx950 quantizer writes compact scales even when the GEMM-swizzle flag is set (gfx1250 swizzles).
+  if (!kosmos_is_mxfp8(t) || (t.get_with_gemm_swizzled_scales() && cuda::sm_arch() != 95)) {
+    return false;
+  }
+  const NVTEBasicTensor data  = columnwise ? t.get_columnwise_data() : t.get_rowwise_data();
+  const NVTEBasicTensor scale = columnwise ? t.get_columnwise_scale_inv() : t.get_rowwise_scale_inv();
+  if (data.data_ptr == nullptr || scale.data_ptr == nullptr || data.shape.ndim < 1 || scale.shape.ndim < 1 ||
+      static_cast<DType>(data.dtype) != DType::kFloat8E4M3) {
+    return false;
+  }
+  const size_t rows   = kosmos_rows(data.shape);
+  const size_t cols   = data.shape.data[data.shape.ndim - 1];
+  const size_t s_rows = kosmos_rows(scale.shape);
+  const size_t s_cols = scale.shape.data[scale.shape.ndim - 1];
+  const bool compact  = columnwise ? (s_rows * 32 == rows && s_cols == cols) : (s_rows == rows && s_cols * 32 == cols);
+  if (!compact) {
+    return false;
+  }
+  out->data  = data.data_ptr;
+  out->scale = scale.data_ptr;
+  return true;
+}
 #endif
 
-// NVTE_KOSMOS_LOG=1 reports once per buffer, op and backend which backend served a fused overlap.
-void CommOverlapP2PBase::kosmos_log(int op, bool kosmos, const char *what) {
+// NVTE_KOSMOS_LOG=1 reports once per buffer and distinct message which backend served a fused overlap.
+void CommOverlapP2PBase::kosmos_log(int op, bool mxfp8, bool kosmos, const char *what) {
 #ifdef NVTE_WITH_KOSMOS
   static const bool log = getenv<bool>("NVTE_KOSMOS_LOG", false);
-  const unsigned bit = 1u << (2 * op + (kosmos ? 1 : 0));
-  if (!log || _tp_id != 0 || (_kosmos_logged & bit) != 0) {
+  if (!log || _tp_id != 0) {
     return;
   }
-  _kosmos_logged |= bit;
-  printf("[KOSMOS] ub %d %s: %s%s%s\n", _ub_reg, kosmos_op_names[op], kosmos ? "KOSMOS" : "HipKittens",
-         what[0] != '\0' ? " -- " : "", what);
+  const std::string line = "[KOSMOS] ub " + std::to_string(_ub_reg) + " " + kosmos_op_names[op] +
+                           (mxfp8 ? " mxfp8" : "") + ": " + (kosmos ? "KOSMOS" : "HipKittens") +
+                           (what[0] != '\0' ? " -- " : "") + what;
+  if (_kosmos_logged.insert(line).second) {
+    printf("%s\n", line.c_str());
+    fflush(stdout);
+  }
 #endif
 }
 
@@ -483,6 +536,62 @@ bool CommOverlapP2PBase::fused_bulk_rs_fp32() {
 #endif
 }
 
+// Whether KOSMOS serves MXFP8 operands on this buffer: an all-gather buffer needs its scale region, a
+// reduce-scatter buffer holds bf16 partials. There is no HipKittens MXFP8 fallback.
+bool CommOverlapP2PBase::fused_mxfp8(bool bulk) {
+#ifdef NVTE_WITH_KOSMOS
+  const int peer_first = (_ub_comm->myrank - _tp_id) % _ub_comm->nvsize;
+  return _fused && (!bulk || kosmos_bulk_enabled()) && getenv<bool>("NVTE_USE_KOSMOS", true) &&
+         peer_first + _tp_size <= _ub_comm->nvsize && _rs_backend != 2 &&
+         (_is_reduce_scatter ? _ubuf.dtype() == DType::kBFloat16 : has_scale_buffer());
+#else
+  return false;
+#endif
+}
+
+void CommOverlapP2PBase::fused_overlap_ag_dgrad_wgrad(const TensorWrapper &W, const TensorWrapper &X,
+                                                      TensorWrapper &dX, TensorWrapper &dW, bool accumulate,
+                                                      TensorWrapper &workspace, cudaStream_t stream_main) {
+#ifdef NVTE_WITH_KOSMOS
+  // dX[T][k] = dYg[T][H] W[H][k] and dW[H][k] (+)= dYg^T X[T][k], dYg gathered in place from the row-scaled
+  // and column-scaled copies of dY in _ubuf. W and X are column-scaled (quantized along H and T).
+  const size_t tokens  = _ubufs[0].size(0) * _tp_size;
+  const size_t hidden  = _ubuf.size(1);
+  const bool dw_fp32   = dW.dtype() == DType::kFloat32;
+  KosmosMx w, x;
+  const bool fits = has_dgrad_wgrad_buffer() && kosmos_mxfp8_operand(W, true, &w) &&
+      kosmos_mxfp8_operand(X, true, &x) && W.size(0) == hidden && kosmos_rows(X.shape()) == tokens &&
+      X.size(X.ndim() - 1) == W.size(1) && dX.dtype() == DType::kBFloat16 && dX.numel() == tokens * W.size(1) &&
+      (dw_fp32 || (dW.dtype() == DType::kBFloat16 && !accumulate)) && dW.numel() == hidden * W.size(1);
+  NVTE_CHECK(fits, "fused AG dgrad+wgrad: operands outside the KOSMOS MXFP8 contract");
+  const size_t k_local = W.size(1);
+  const size_t needed  = (tokens * hidden + hidden * k_local + tokens * k_local) / 16 + 4 * 256;
+  NVTE_CHECK(workspace.bytes() >= needed, "fused AG dgrad+wgrad: workspace of ", workspace.bytes(),
+             " bytes, KOSMOS needs ", needed);
+  KosmosComm *kc = kosmos_comm();
+  NVTE_CHECK(kc != nullptr, "fused AG dgrad+wgrad needs the KOSMOS backend (NVTE_USE_KOSMOS=1)");
+  KosmosAgDgradWgradArgs args{};
+  args.w              = w.data;
+  args.w_scale        = w.scale;
+  args.x              = x.data;
+  args.x_scale        = x.scale;
+  args.dx             = dX.dptr();
+  args.dw             = dW.dptr();
+  args.offset         = 0;
+  args.tokens         = static_cast<int>(tokens);
+  args.hidden         = static_cast<int>(hidden);
+  args.k_local        = static_cast<int>(k_local);
+  args.workspace      = workspace.dptr();
+  args.workspace_size = workspace.bytes();
+  args.dw_fp32        = dw_fp32 ? 1 : 0;
+  args.accumulate     = accumulate ? 1 : 0;
+  kosmos_mxfp8_launched(kosmos_ag_dgrad_wgrad(kc, &args, stream_main), kc, kKosmosAgDgradWgrad);
+  kosmos_log(kKosmosAgDgradWgrad, true, true, dw_fp32 ? (accumulate ? "fp32 dW +=" : "fp32 dW") : "bf16 dW");
+#else
+  NVTE_ERROR("fused AG dgrad+wgrad needs TransformerEngine built with KOSMOS (NVTE_KOSMOS_ROOT)");
+#endif
+}
+
 void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool transa,
                                 const TensorWrapper &B, bool transb, TensorWrapper &D,
                                 TensorWrapper &bias, TensorWrapper &pre_gelu_out,
@@ -491,6 +600,36 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
                                 cudaStream_t stream_main) {
   const bool d_fp32 = D.dtype() == DType::kFloat32;
 #ifdef NVTE_WITH_KOSMOS
+  if (kosmos_is_mxfp8(A) || kosmos_is_mxfp8(B)) {
+    // MXFP8: A = gathered X and B = dY, both column-scaled (quantized along k = tokens).
+    KosmosMx a, b;
+    const bool fits = kosmos_bulk_enabled() && !transa && transb && (d_fp32 || !accumulate) &&
+        bias.numel() == 0 && pre_gelu_out.numel() == 0 && rs_output.numel() == 0 &&
+        kosmos_mxfp8_operand(A, true, &a) && kosmos_mxfp8_operand(B, true, &b) &&
+        (D.dtype() == DType::kBFloat16 || d_fp32) && _ubuf.dtype() == DType::kBFloat16 &&
+        A.size(0) == _ubuf.size(0) && A.size(1) == _ubuf.size(1) && D.size(0) == B.size(1) &&
+        D.size(1) == A.size(1);
+    NVTE_CHECK(fits, "fused bulk RS: MXFP8 operands outside the KOSMOS contract");
+    KosmosComm *kc = kosmos_comm();
+    NVTE_CHECK(kc != nullptr, "fused bulk RS: MXFP8 needs the KOSMOS backend (NVTE_USE_KOSMOS=1)");
+    KosmosRsGemmArgs args{};
+    args.A              = a.data;
+    args.B              = b.data;
+    args.scale_a        = a.scale;
+    args.scale_b        = b.scale;
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(1));
+    args.n              = static_cast<int>(B.size(1));
+    args.k              = static_cast<int>(A.size(0));
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    args.d_fp32         = d_fp32 ? 1 : 0;
+    args.accumulate     = accumulate ? 1 : 0;
+    kosmos_mxfp8_launched(kosmos_bulk_rs_gemm(kc, &args, stream_main), kc, kKosmosBulkRs);
+    kosmos_log(kKosmosBulkRs, true, true, d_fp32 ? (accumulate ? "fp32 D +=" : "fp32 D") : "");
+    return;
+  }
   // D[n][m] = B[k][n]^T A[k][m] (D += with accumulate, fp32 D only), reduce-scattering _ubuf ([k][m]) in place
   // into its local chunk.
   const bool fits = kosmos_bulk_enabled() && !transa && transb && (d_fp32 || !accumulate) && bias.numel() == 0 &&
@@ -499,7 +638,7 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
       _ubuf.dtype() == DType::kBFloat16 && A.size(0) == _ubuf.size(0) && A.size(1) == _ubuf.size(1) &&
       D.size(0) == B.size(1) && D.size(1) == A.size(1);
   if (!fits) {
-    kosmos_log(kKosmosBulkRs, false, "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosBulkRs, false, false, "operands outside the KOSMOS contract");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosRsGemmArgs args{};
     args.A              = A.dptr();
@@ -514,10 +653,12 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
     args.d_fp32         = d_fp32 ? 1 : 0;
     args.accumulate     = accumulate ? 1 : 0;
     if (kosmos_launched(kosmos_bulk_rs_gemm(kc, &args, stream_main), kc, kKosmosBulkRs)) {
-      kosmos_log(kKosmosBulkRs, true, "");
+      kosmos_log(kKosmosBulkRs, false, true, "");
       return;
     }
-    kosmos_log(kKosmosBulkRs, false, kosmos_comm_error(kc));
+    kosmos_log(kKosmosBulkRs, false, false, kosmos_comm_error(kc));
+  } else {
+    kosmos_log(kKosmosBulkRs, false, false, kKosmosUnavailable);
   }
 #endif
   NVTE_CHECK(!accumulate && !d_fp32,
@@ -542,12 +683,38 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
 #ifdef NVTE_WITH_KOSMOS
+  if (kosmos_is_mxfp8(A) || kosmos_is_mxfp8(B)) {
+    // MXFP8 TN only (the NN dgrad runs as fused_overlap_ag_dgrad_wgrad): A = W row-scaled, B = the row-scaled
+    // view of _ubuf, whose scales follow the data.
+    KosmosMx a, b;
+    const bool fits = transa && !transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
+        B_copy.numel() == 0 && D.dtype() == DType::kBFloat16 && has_scale_buffer() &&
+        kosmos_mxfp8_operand(A, false, &a) && kosmos_mxfp8_operand(B, false, &b) && b.data == _ubuf.dptr() &&
+        b.scale == static_cast<char *>(_ubuf.dptr()) + _scale_base_offset && A.size(1) == _ubuf.size(1);
+    NVTE_CHECK(fits, "fused AG+GEMM: MXFP8 operands outside the KOSMOS contract");
+    KosmosComm *kc = kosmos_comm();
+    NVTE_CHECK(kc != nullptr, "fused AG+GEMM: MXFP8 needs the KOSMOS backend (NVTE_USE_KOSMOS=1)");
+    KosmosAgGemmArgs args{};
+    args.A              = a.data;
+    args.scale_a        = a.scale;
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(0));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(_ubuf.size(1));
+    args.transa         = 1;
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    kosmos_mxfp8_launched(kosmos_ag_gemm(kc, &args, stream_main), kc, kKosmosAg);
+    kosmos_log(kKosmosAg, true, true, "");
+    return;
+  }
   // D[n][m] = Xg[n][k] op(A), Xg = _ubuf gathered in place; TN (transa) or NN.
   const bool fits = !transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
       B_copy.numel() == 0 && A.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16 &&
       _ubuf.dtype() == DType::kBFloat16 && ((transa) ? A.size(1) : A.size(0)) == _ubuf.size(1);
   if (!fits) {
-    kosmos_log(kKosmosAg, false, "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosAg, false, false, "operands outside the KOSMOS contract");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosAgGemmArgs args{};
     args.A              = A.dptr();
@@ -560,10 +727,12 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
     args.workspace      = workspace.dptr();
     args.workspace_size = workspace.bytes();
     if (kosmos_launched(kosmos_ag_gemm(kc, &args, stream_main), kc, kKosmosAg)) {
-      kosmos_log(kKosmosAg, true, "");
+      kosmos_log(kKosmosAg, false, true, "");
       return;
     }
-    kosmos_log(kKosmosAg, false, kosmos_comm_error(kc));
+    kosmos_log(kKosmosAg, false, false, kosmos_comm_error(kc));
+  } else {
+    kosmos_log(kKosmosAg, false, false, kKosmosUnavailable);
   }
 #endif
 #ifdef USE_HIPKITTENS_GEMM
@@ -586,13 +755,41 @@ void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool tran
                                 TensorWrapper &workspace, bool grad, bool accumulate,
                                 bool use_split_accumulator, cudaStream_t stream_main) {
 #ifdef NVTE_WITH_KOSMOS
+  if (kosmos_is_mxfp8(A) || kosmos_is_mxfp8(B)) {
+    // MXFP8: A = W column-scaled, B = dY row-scaled; _ubuf gathers the column-scaled X and its scales for the
+    // wgrad.
+    KosmosMx a, b;
+    const bool fits = kosmos_bulk_enabled() && !transa && !transb && !accumulate && bias.numel() == 0 &&
+        pre_gelu_out.numel() == 0 && D.dtype() == DType::kBFloat16 && has_scale_buffer() &&
+        kosmos_mxfp8_operand(A, true, &a) && kosmos_mxfp8_operand(B, false, &b) &&
+        A.size(1) == _ubuf.size(1) && D.size(0) == _ubufs[0].size(0) * _tp_size;
+    NVTE_CHECK(fits, "fused bulk AG: MXFP8 operands outside the KOSMOS contract");
+    KosmosComm *kc = kosmos_comm();
+    NVTE_CHECK(kc != nullptr, "fused bulk AG: MXFP8 needs the KOSMOS backend (NVTE_USE_KOSMOS=1)");
+    KosmosAgGemmArgs args{};
+    args.A              = a.data;
+    args.B              = b.data;
+    args.scale_a        = a.scale;
+    args.scale_b        = b.scale;
+    args.D              = D.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(1));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(A.size(0));
+    args.transa         = 0;
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    kosmos_mxfp8_launched(kosmos_bulk_ag_gemm(kc, &args, stream_main), kc, kKosmosBulkAg);
+    kosmos_log(kKosmosBulkAg, true, true, "");
+    return;
+  }
   // D[n][m] = B[n][k] A[k][m], all-gathering _ubuf ([n][m]) in place alongside.
   const bool fits = kosmos_bulk_enabled() && !transa && !transb && !accumulate && bias.numel() == 0 &&
       pre_gelu_out.numel() == 0 && A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
       D.dtype() == DType::kBFloat16 && _ubuf.dtype() == DType::kBFloat16 && A.size(1) == _ubuf.size(1) &&
       D.size(0) == _ubufs[0].size(0) * _tp_size;
   if (!fits) {
-    kosmos_log(kKosmosBulkAg, false, "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosBulkAg, false, false, "operands outside the KOSMOS contract");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosAgGemmArgs args{};
     args.A              = A.dptr();
@@ -606,10 +803,12 @@ void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool tran
     args.workspace      = workspace.dptr();
     args.workspace_size = workspace.bytes();
     if (kosmos_launched(kosmos_bulk_ag_gemm(kc, &args, stream_main), kc, kKosmosBulkAg)) {
-      kosmos_log(kKosmosBulkAg, true, "");
+      kosmos_log(kKosmosBulkAg, false, true, "");
       return;
     }
-    kosmos_log(kKosmosBulkAg, false, kosmos_comm_error(kc));
+    kosmos_log(kKosmosBulkAg, false, false, kosmos_comm_error(kc));
+  } else {
+    kosmos_log(kKosmosBulkAg, false, false, kKosmosUnavailable);
   }
 #endif
 #ifdef USE_HIPKITTENS_GEMM
@@ -631,13 +830,39 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                 bool accumulate, bool use_split_accumulator,
                                 TensorWrapper &rs_output, cudaStream_t stream_main) {
 #ifdef NVTE_WITH_KOSMOS
+  if (kosmos_is_mxfp8(A) || kosmos_is_mxfp8(B)) {
+    // MXFP8: A = W and B = X, both row-scaled; the partials and the reduce-scattered output stay bf16.
+    KosmosMx a, b;
+    const bool fits = transa && !transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
+        rs_output.dtype() == DType::kBFloat16 && kosmos_mxfp8_operand(A, false, &a) &&
+        kosmos_mxfp8_operand(B, false, &b) && A.size(0) == _ubuf.size(1) && _rs_backend != 2;
+    NVTE_CHECK(fits, "fused GEMM+RS: MXFP8 operands outside the KOSMOS contract");
+    KosmosComm *kc = kosmos_comm();
+    NVTE_CHECK(kc != nullptr, "fused GEMM+RS: MXFP8 needs the KOSMOS backend (NVTE_USE_KOSMOS=1)");
+    KosmosRsGemmArgs args{};
+    args.A              = b.data;
+    args.B              = a.data;
+    args.scale_a        = b.scale;
+    args.scale_b        = a.scale;
+    args.D              = rs_output.dptr();
+    args.offset         = 0;
+    args.m              = static_cast<int>(A.size(0));
+    args.n              = static_cast<int>(_ubufs[0].size(0) * _tp_size);
+    args.k              = static_cast<int>(A.size(1));
+    args.workspace      = workspace.dptr();
+    args.workspace_size = workspace.bytes();
+    kosmos_mxfp8_launched(kosmos_gemm_rs(kc, &args, stream_main), kc, kKosmosRs);
+    _rs_backend = 1;
+    kosmos_log(kKosmosRs, true, true, "");
+    return;
+  }
   // rs_output = this rank's band of B[n][k] A[m][k]^T; _ubuf holds the two sentinel-armed stage halves,
   // so a buffer stays with the backend that served its first call.
   const bool fits = transa && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 &&
       A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 &&
       rs_output.dtype() == DType::kBFloat16 && A.size(0) == _ubuf.size(1);
   if (!fits || _rs_backend == 2) {
-    kosmos_log(kKosmosRs, false, fits ? "buffer armed by HipKittens" : "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosRs, false, false, fits ? "buffer armed by HipKittens" : "operands outside the KOSMOS contract");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosRsGemmArgs args{};
     args.A              = B.dptr();
@@ -651,10 +876,12 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
     args.workspace_size = workspace.bytes();
     if (kosmos_launched(kosmos_gemm_rs(kc, &args, stream_main), kc, kKosmosRs)) {
       _rs_backend = 1;
-      kosmos_log(kKosmosRs, true, "");
+      kosmos_log(kKosmosRs, false, true, "");
       return;
     }
-    kosmos_log(kKosmosRs, false, kosmos_comm_error(kc));
+    kosmos_log(kKosmosRs, false, false, kosmos_comm_error(kc));
+  } else {
+    kosmos_log(kKosmosRs, false, false, kKosmosUnavailable);
   }
   NVTE_CHECK(_rs_backend != 1, "fused GEMM+RS: KOSMOS refused a call on a buffer it already serves (",
              _kosmos_comm != nullptr ? kosmos_comm_error(_kosmos_comm) : "", ")");
