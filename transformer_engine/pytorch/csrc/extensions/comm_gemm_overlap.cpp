@@ -413,14 +413,14 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
                                te::CommOverlapType comm_type, int num_max_streams,
                                int comm_cga_size, int gemm_priority, int comm_priority,
                                int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
-                               bool aggregate, bool fused)
+                               bool aggregate, bool fused, bool dgrad_wgrad)
     : te::CommOverlapP2PBase(
           buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
           helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
           tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
           comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-          atomic_gemm, aggregate, fused) {}
+          atomic_gemm, aggregate, fused, dgrad_wgrad) {}
 
 CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
                                te::CommOverlapType comm_type,
@@ -505,6 +505,94 @@ std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
   return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),
           at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};
 }
+
+#ifdef USE_ROCM
+namespace {
+
+void copy_bytes_into_buffer(const at::Tensor &input, char *dst, size_t bytes, const char *what) {
+  const auto &input_ = input.contiguous();
+  const size_t input_bytes = input_.numel() * input_.element_size();
+  NVTE_CHECK(input_bytes == bytes, "Tried to copy an invalid tensor into the ", what,
+             " of a Userbuffers buffer (input_bytes=", input_bytes, ", region_bytes=", bytes, ")");
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst, input_.data_ptr(), bytes, cudaMemcpyDeviceToDevice,
+                                  (cudaStream_t)at::cuda::getCurrentCUDAStream()));
+}
+
+at::Tensor byte_view(char *ptr, size_t bytes, const std::vector<int64_t> &shape, const char *what) {
+  NVTE_CHECK(static_cast<size_t>(transformer_engine::pytorch::product(shape)) == bytes,
+             "Invalid shape for the ", what, " of a Userbuffers buffer (requested shape=", shape,
+             ", region_bytes=", bytes, ")");
+  return torch::from_blob(ptr, shape, at::dtype(torch::kUInt8).device(torch::kCUDA));
+}
+
+}  // namespace
+
+/*
+** MXFP8 scales of the row-scaled (or single-usage) data, stored after the data in the same buffer
+*/
+void CommOverlapP2P::copy_scales_into_buffer(const at::Tensor &input, bool local_chunk) {
+  NVTE_CHECK(has_scale_buffer(), "Userbuffers buffer was not allocated with an MXFP8 scale region");
+  char *dst = reinterpret_cast<char *>(_ubuf.dptr()) + _scale_base_offset;
+  if (local_chunk) {
+    dst += _tp_id * _scale_chunk_bytes;
+  }
+  const size_t bytes = local_chunk ? _scale_chunk_bytes : _scale_chunk_bytes * _tp_size;
+  copy_bytes_into_buffer(input, dst, bytes, "scale region");
+}
+
+at::Tensor CommOverlapP2P::get_scale_buffer(bool local_chunk,
+                                            std::optional<std::vector<int64_t>> shape) {
+  NVTE_CHECK(has_scale_buffer(), "Userbuffers buffer was not allocated with an MXFP8 scale region");
+  NVTE_CHECK(shape.has_value(), "get_scale_buffer requires an explicit shape");
+  char *ptr = reinterpret_cast<char *>(_ubuf.dptr()) + _scale_base_offset;
+  if (local_chunk) {
+    ptr += _tp_id * _scale_chunk_bytes;
+  }
+  return byte_view(ptr, local_chunk ? _scale_chunk_bytes : _scale_chunk_bytes * _tp_size, *shape,
+                   "scale region");
+}
+
+/*
+** Local shard of the column-scaled copy of a dgrad+wgrad buffer: data, then scales
+*/
+void CommOverlapP2P::copy_columnwise_into_buffer(const at::Tensor &data,
+                                                 const at::Tensor &scale_inv) {
+  NVTE_CHECK(has_dgrad_wgrad_buffer(),
+             "Userbuffers buffer was not allocated for the fused dgrad+wgrad");
+  const size_t chunk_bytes = _ubufs[_tp_id].bytes();
+  char *base = reinterpret_cast<char *>(_ubuf.dptr()) + _colwise_offset;
+  copy_bytes_into_buffer(data, base + _tp_id * chunk_bytes, chunk_bytes, "column-scaled data");
+  copy_bytes_into_buffer(scale_inv, base + _scale_base_offset + _tp_id * _scale_chunk_bytes,
+                         _scale_chunk_bytes, "column-scaled scales");
+}
+
+at::Tensor CommOverlapP2P::get_columnwise_buffer(bool scales, std::vector<int64_t> shape) {
+  NVTE_CHECK(has_dgrad_wgrad_buffer(),
+             "Userbuffers buffer was not allocated for the fused dgrad+wgrad");
+  char *base = reinterpret_cast<char *>(_ubuf.dptr()) + _colwise_offset;
+  if (scales) {
+    return byte_view(base + _scale_base_offset, _scale_chunk_bytes * _tp_size, shape,
+                     "column-scaled scales");
+  }
+  return byte_view(base, _ubuf.bytes(), shape, "column-scaled data");
+}
+
+void CommOverlapP2P::fused_ag_dgrad_wgrad(py::handle weight, py::handle input, at::Tensor dgrad,
+                                          at::Tensor wgrad, bool accumulate, at::Tensor workspace) {
+  auto none = py::none();
+  te::TensorWrapper weight_tensor = te::pytorch::makeTransformerEngineTensor(weight, none);
+  te::TensorWrapper input_tensor = te::pytorch::makeTransformerEngineTensor(input, none);
+  te::TensorWrapper dgrad_tensor = te::pytorch::makeTransformerEngineTensor(dgrad);
+  te::TensorWrapper wgrad_tensor = te::pytorch::makeTransformerEngineTensor(wgrad);
+  te::TensorWrapper workspace_tensor = te::pytorch::makeTransformerEngineTensor(
+      workspace.data_ptr(), std::vector<size_t>{static_cast<size_t>(workspace.numel())},
+      te::DType::kByte);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  py::gil_scoped_release release;
+  fused_overlap_ag_dgrad_wgrad(weight_tensor, input_tensor, dgrad_tensor, wgrad_tensor, accumulate,
+                               workspace_tensor, stream);
+}
+#endif
 
 #ifndef USE_ROCM
 void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(

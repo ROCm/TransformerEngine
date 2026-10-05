@@ -856,7 +856,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        transformer_engine::CommOverlapType comm_type, int num_max_streams,
                        int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
                        bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
-                       bool use_cublasmp, bool fused) {
+                       bool use_cublasmp, bool fused, bool dgrad_wgrad) {
              // Release the GIL only around the native construction (blocking collectives) to avoid
              // tripping pybind11's inc_ref/dec_ref GIL assertions.
              py::gil_scoped_release nogil;
@@ -869,14 +869,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                      comm_type, num_max_streams, comm_cga_size,
                                                      gemm_priority, comm_priority, num_comm_sm,
                                                      set_sm_margin, atomic_gemm, use_ce, aggregate,
-                                                     fused);
+                                                     fused, dgrad_wgrad);
            }),
            py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("comm_type"), py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
            py::arg("comm_cga_size") = 1, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
            py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false,
-           py::arg("use_cublasmp") = false, py::arg("fused") = false)
+           py::arg("use_cublasmp") = false, py::arg("fused") = false,
+           py::arg("dgrad_wgrad") = false)
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
                &CommOverlapP2P::copy_into_buffer),
@@ -884,5 +885,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream)
+#ifdef USE_ROCM
+      .def("fused_mxfp8", &CommOverlapP2P::fused_mxfp8, py::arg("bulk"))
+      .def("has_scale_buffer", &CommOverlapP2P::has_scale_buffer)
+      .def("has_dgrad_wgrad_buffer", &CommOverlapP2P::has_dgrad_wgrad_buffer)
+      .def("copy_scales_into_buffer", &CommOverlapP2P::copy_scales_into_buffer, py::arg("input"),
+           py::arg("local_chunk") = false)
+      .def("get_scale_buffer", &CommOverlapP2P::get_scale_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt)
+      .def("copy_columnwise_into_buffer", &CommOverlapP2P::copy_columnwise_into_buffer,
+           py::arg("data"), py::arg("scale_inv"))
+      .def("get_columnwise_buffer", &CommOverlapP2P::get_columnwise_buffer, py::arg("scales"),
+           py::arg("shape"))
+      .def("fused_ag_dgrad_wgrad", &CommOverlapP2P::fused_ag_dgrad_wgrad, py::arg("weight"),
+           py::arg("input"), py::arg("dgrad"), py::arg("wgrad"), py::arg("accumulate"),
+           py::arg("workspace"))
+#endif
       .def("fused_bulk_rs_fp32", &CommOverlapP2P::fused_bulk_rs_fp32);
 }  // NOLINT(readability/fn_size)

@@ -16,6 +16,8 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
+#include <set>
+#include <string>
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
@@ -358,15 +360,20 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ::KosmosComm_ *_kosmos_comm{nullptr};
   bool _kosmos_tried{false};
   int _rs_backend{0};
-  unsigned _kosmos_logged{0};
+  std::set<std::string> _kosmos_logged;
+  // MXFP8 all-gather buffers: compact E8M0 scales follow the fp8 data, one _scale_chunk_bytes slice per rank.
+  // A row-parallel dgrad+wgrad buffer repeats both for the column-scaled copy, starting at _colwise_offset.
+  size_t _scale_chunk_bytes{0};
+  size_t _scale_base_offset{0};
+  size_t _colwise_offset{0};
 #endif
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                  CommOverlapType comm_type, bool aggregate);
+                  CommOverlapType comm_type, bool aggregate, bool dgrad_wgrad);
 #ifdef __HIP_PLATFORM_AMD__
   ::KosmosComm_ *kosmos_comm();
-  void kosmos_log(int op, bool kosmos, const char *what);
+  void kosmos_log(int op, bool mxfp8, bool kosmos, const char *what);
 #endif
 
  public:
@@ -379,7 +386,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false, bool fused = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool fused = false,
+                     bool dgrad_wgrad = false);
 
   // Constructor for cuBLASMp backend
   CommOverlapP2PBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
@@ -498,6 +506,21 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
 #ifdef __HIP_PLATFORM_AMD__
   bool fused_bulk_rs_fp32();
+
+  // Whether the KOSMOS backend serves MXFP8 operands on this buffer (bulk: the bulk AG / RS overlaps).
+  bool fused_mxfp8(bool bulk);
+
+  bool has_scale_buffer() const { return _scale_chunk_bytes != 0; }
+
+  bool has_dgrad_wgrad_buffer() const { return _colwise_offset != 0; }
+
+  /*
+  ** ROCm fused row-parallel backward (MXFP8, KOSMOS): all-gathers dY, staged in both scalings, and computes
+  ** dX = dYg W and dW = dYg^T X (dW += with accumulate, fp32 dW only) in one kernel.
+  */
+  void fused_overlap_ag_dgrad_wgrad(const TensorWrapper &W, const TensorWrapper &X, TensorWrapper &dX,
+                                    TensorWrapper &dW, bool accumulate, TensorWrapper &workspace,
+                                    cudaStream_t stream_main);
 #else
   bool fused_bulk_rs_fp32() { return false; }
 #endif

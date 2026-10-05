@@ -11,6 +11,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
 #include <cassert>
 #include <numeric>
 
@@ -811,17 +812,18 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool fused)
+                                       bool atomic_gemm, bool aggregate, bool fused,
+                                       bool dgrad_wgrad)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm),
       _fused(fused) {
-  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
+  initialize(buffer_shape, buffer_dtype, comm_type, aggregate, dgrad_wgrad);
 }
 
 void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                    CommOverlapType comm_type, bool aggregate) {
+                                    CommOverlapType comm_type, bool aggregate, bool dgrad_wgrad) {
   _is_p2p = true;
   _is_reduce_scatter = comm_type == CommOverlapType::RS;
   _aggregate = aggregate;
@@ -850,6 +852,26 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   }
 
 #ifdef NVTE_WITH_KOSMOS
+  const int tokens = static_cast<int>(buffer_shape[0]);
+  const int hidden = static_cast<int>(buffer_shape[1]);
+  if (_fused && buffer_dtype == DType::kByte && !_is_reduce_scatter && hidden % 32 == 0 &&
+      (tokens / _tp_size) % 32 == 0) {
+    // MXFP8: the region holds the fp8 data, then its scales ([T][H/32] row-scaled or [T/32][H]
+    // column-scaled). A row-parallel dgrad+wgrad region holds dY twice: row-, then column-scaled.
+    _scale_base_offset = buffer_bytes;
+    _scale_chunk_bytes = buffer_bytes / 32 / _tp_size;
+    if (dgrad_wgrad) {
+      buffer_bytes = kosmos_ag_dgrad_wgrad_bytes(tokens, hidden, hidden);
+      _colwise_offset = buffer_bytes / 2;
+    } else {
+      buffer_bytes = std::max(kosmos_ag_gemm_bytes_mxfp8(hidden, tokens, hidden),
+                              kosmos_bulk_ag_gemm_bytes_mxfp8(hidden, tokens, hidden));
+    }
+    const size_t half = _scale_base_offset + _scale_chunk_bytes * _tp_size;
+    NVTE_CHECK(buffer_bytes == (dgrad_wgrad ? 2 * half : half), "KOSMOS MXFP8 region of ",
+               buffer_bytes, " bytes does not match the scale layout (", half,
+               " bytes per scaling)");
+  }
   if (_fused) {
     // KOSMOS keeps its cross-rank flags in the buffer tail, zeroed by the allocation below.
     buffer_bytes += kosmos_comm_flag_bytes(_tp_size) + 256;

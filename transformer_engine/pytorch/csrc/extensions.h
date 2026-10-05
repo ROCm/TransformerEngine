@@ -923,7 +923,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
                  bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false, bool fused = false);
+                 bool aggregate = false, bool fused = false, bool dgrad_wgrad = false);
 
   // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
   CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
@@ -940,6 +940,20 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
   std::pair<at::Stream, at::Stream> get_communication_stream();
+
+#ifdef USE_ROCM
+  void copy_scales_into_buffer(const at::Tensor &input, bool local_chunk = false);
+
+  at::Tensor get_scale_buffer(bool local_chunk = false,
+                              std::optional<std::vector<int64_t>> shape = std::nullopt);
+
+  void copy_columnwise_into_buffer(const at::Tensor &data, const at::Tensor &scale_inv);
+
+  at::Tensor get_columnwise_buffer(bool scales, std::vector<int64_t> shape);
+
+  void fused_ag_dgrad_wgrad(py::handle weight, py::handle input, at::Tensor dgrad, at::Tensor wgrad,
+                            bool accumulate, at::Tensor workspace);
+#endif
 
 };  // CommOverlapP2P
 
