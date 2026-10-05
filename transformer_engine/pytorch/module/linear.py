@@ -22,6 +22,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     fused_ag_gemm_eligible,
+    fused_ag_dgrad_wgrad_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
@@ -76,6 +77,7 @@ from ..distributed_weight import (
     finalize_weight_grads,
 )
 from ..cpp_extensions import (
+    fused_ag_dgrad_wgrad,
     general_gemm,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
@@ -168,6 +170,7 @@ class LinearFwdArgs:
     ub_overlap_rs_dgrad: bool
     ub_bulk_dgrad: bool
     ub_bulk_wgrad: bool
+    ub_fused_dgrad_wgrad: bool
 
     # --- FSDP ---
     fsdp_group: Optional[Any]
@@ -234,6 +237,7 @@ class LinearBwdArgs:
     ub_overlap_rs_dgrad: bool = False
     ub_bulk_dgrad: bool = False
     ub_bulk_wgrad: bool = False
+    ub_fused_dgrad_wgrad: bool = False
 
     # --- FSDP ---
     fsdp_group: Optional[Any] = None
@@ -785,6 +789,7 @@ def _linear_setup_ctx(
     bwd_args.ub_overlap_rs_dgrad = fwd_args.ub_overlap_rs_dgrad
     bwd_args.ub_bulk_dgrad = fwd_args.ub_bulk_dgrad
     bwd_args.ub_bulk_wgrad = fwd_args.ub_bulk_wgrad
+    bwd_args.ub_fused_dgrad_wgrad = fwd_args.ub_fused_dgrad_wgrad
 
     # FSDP
     bwd_args.fsdp_group = fwd_args.fsdp_group
@@ -815,6 +820,7 @@ def _linear_setup_ctx(
         bwd_args.ub_overlap_rs_dgrad = False
         bwd_args.ub_bulk_dgrad = False
         bwd_args.ub_bulk_wgrad = False
+        bwd_args.ub_fused_dgrad_wgrad = False
         bwd_args.grad_input_quantizer = None
         bwd_args.grad_weight_quantizer = None
         bwd_args.grad_output_quantizer = None
@@ -952,10 +958,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         if grad_output_quantizer is not None:
             quantizer = grad_output_quantizer
             quantizer.set_usage(rowwise=True, columnwise=True)
-            if bwd_args.ub_overlap_ag:
+            if bwd_args.ub_overlap_ag and not bwd_args.ub_fused_dgrad_wgrad:
                 # Userbuffers only supports communication for one
                 # tensor usage at a time. Configure quantizer with
-                # usage for only dgrad GEMM.
+                # usage for only dgrad GEMM. The fused MXFP8
+                # dgrad+wgrad gathers both usages.
                 quantizer.set_usage(columnwise=False)
 
         # Adjust the quantization direction approach depending
@@ -1059,6 +1066,24 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         dgrad = None
         dgrad_work = None
 
+        # MXFP8 row-parallel backward on KOSMOS: one call gathers dY and computes dgrad and wgrad,
+        # writing wgrad as the wgrad GEMM below would (into main_grad, accumulating as configured).
+        fused_wgrad = None
+        fused_wgrad_accumulate = False
+        if bwd_args.ub_fused_dgrad_wgrad:
+            inputmat_total.update_usage(columnwise_usage=True)
+            if bwd_args.fuse_wgrad_accumulation:
+                if main_grad.dtype != torch.float32:
+                    raise RuntimeError("The fused MXFP8 dgrad+wgrad accumulates into an fp32 main_grad only")
+                fused_wgrad = main_grad
+                if bwd_args.is_first_microbatch is not None:
+                    fused_wgrad_accumulate = not bwd_args.is_first_microbatch
+                else:
+                    fused_wgrad_accumulate = True
+                fused_wgrad_accumulate = (
+                    fused_wgrad_accumulate and not origin_weight_overwrites_main_grad
+                )
+
         # Distributed weight (e.g. GTP): re-gather the sharded weight; runs even when
         # requires_dgrad=False so the prev_w prefetch is issued for the next layer's bwd.
         if is_dist_weight:
@@ -1132,20 +1157,39 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 weight_for_dgrad = saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-            gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_for_dgrad,
-                grad_output,
-                layout="NN",
-                grad=True,
-                quantization_params=grad_input_quantizer,
-                out=gemm_out,
-                out_dtype=bwd_args.activation_dtype,
-                use_split_accumulator=use_split_accumulator,
-                ub=ub_obj_dgrad,
-                ub_type=ub_type_dgrad,
-                extra_output=reduce_scatter_out,
-                bulk_overlap=bwd_args.ub_bulk_dgrad,
-            )
+            if bwd_args.ub_fused_dgrad_wgrad:
+                gemm_out = torch.empty(
+                    dgrad_shape, dtype=bwd_args.activation_dtype, device=grad_output_arg.device
+                )
+                if fused_wgrad is None:
+                    fused_wgrad = torch.empty(
+                        list(weight_for_dgrad.size()),
+                        dtype=bwd_args.activation_dtype,
+                        device=grad_output_arg.device,
+                    )
+                fused_ag_dgrad_wgrad(
+                    weight_for_dgrad,
+                    inputmat_total,
+                    ub_obj_dgrad,
+                    gemm_out,
+                    fused_wgrad,
+                    accumulate=fused_wgrad_accumulate,
+                )
+            else:
+                gemm_out, *_, reduce_scatter_out = general_gemm(
+                    weight_for_dgrad,
+                    grad_output,
+                    layout="NN",
+                    grad=True,
+                    quantization_params=grad_input_quantizer,
+                    out=gemm_out,
+                    out_dtype=bwd_args.activation_dtype,
+                    use_split_accumulator=use_split_accumulator,
+                    ub=ub_obj_dgrad,
+                    ub_type=ub_type_dgrad,
+                    extra_output=reduce_scatter_out,
+                    bulk_overlap=bwd_args.ub_bulk_dgrad,
+                )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if bwd_args.fp8 and not bwd_args.keep_fp8_weight_transpose_cache:
@@ -1215,7 +1259,12 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # --------------------------------------------------
 
         wgrad = None
-        if bwd_args.requires_wgrad:
+        if bwd_args.ub_fused_dgrad_wgrad:
+            # The fused call above computed wgrad; grad_bias came from grad_output_preprocess.
+            wgrad = fused_wgrad
+            if bwd_args.owns_input:
+                clear_tensor_data(inputmat_total)
+        elif bwd_args.requires_wgrad:
 
             # Prepare input tensor
             # Note: Synchronize tensor-parallel communication and
@@ -2097,16 +2146,33 @@ class Linear(TransformerEngineBaseModule):
             if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
                 self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
                 self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_fprop = False
-            if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
+            mxfp8 = self.fp8 and self.fp8_meta["recipe"].mxfp8()
+            ub_fused_dgrad_wgrad = False
+            if ub_overlap_ag_dgrad and mxfp8:
+                # MXFP8 has no standalone NN AG+GEMM: the row-parallel backward overlaps only as the
+                # fused dY all-gather + dgrad + wgrad.
+                ub_fused_dgrad_wgrad = fused_ag_dgrad_wgrad_eligible(
+                    self.ub_name + "_dgrad", inp.numel() // inp.shape[-1], weight_tensor,
+                    self.activation_dtype, self.tp_size, inp.requires_grad,
+                    self.fuse_wgrad_accumulation, self.wgrad_store.delay_wgrad_compute(),
+                    quantizers_ok=(
+                        isinstance(grad_output_quantizer, MXFP8Quantizer)
+                        and grad_weight_quantizer is None
+                    ),
+                    distributed_weight=is_distributed_weight(weight_tensor),
+                )
+                ub_overlap_ag_dgrad = ub_fused_dgrad_wgrad
+            elif ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor, None,
                 self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
             ):
                 ub_overlap_ag_dgrad = False
             if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
                 self.ub_name + "_fprop", weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=mxfp8,
             ):
                 ub_overlap_rs_fprop = False
             if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
@@ -2116,13 +2182,13 @@ class Linear(TransformerEngineBaseModule):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=mxfp8,
             ):
                 ub_bulk_dgrad = False
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 self.ub_name + "_wgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
-                self.fuse_wgrad_accumulation,
+                self.fuse_wgrad_accumulation, mxfp8=mxfp8,
             ):
                 ub_bulk_wgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
@@ -2176,6 +2242,7 @@ class Linear(TransformerEngineBaseModule):
                 ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
                 ub_bulk_dgrad=ub_bulk_dgrad,
                 ub_bulk_wgrad=ub_bulk_wgrad,
+                ub_fused_dgrad_wgrad=ub_fused_dgrad_wgrad,
                 # FSDP
                 fsdp_group=self.fsdp_group,
                 is_fsdp2=self.is_fsdp2,

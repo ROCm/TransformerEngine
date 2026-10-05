@@ -39,6 +39,7 @@ _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
 
 __all__ = [
     "general_gemm",
+    "fused_ag_dgrad_wgrad",
     "general_grouped_gemm",
     "general_grouped_gemm_for_grouped_tensor",
 ]
@@ -754,6 +755,31 @@ def general_gemm(
         out = debug_quantizer.process_gemm_output(out)
 
     return out, bias_grad, gelu_input, extra_output
+
+
+def fused_ag_dgrad_wgrad(
+    weight: QuantizedTensorStorage,
+    inp: QuantizedTensorStorage,
+    ub: tex.CommOverlapP2P,
+    dgrad: torch.Tensor,
+    wgrad: torch.Tensor,
+    accumulate: bool = False,
+) -> None:
+    """MXFP8 row-parallel backward in one KOSMOS call (ROCm).
+
+    Gathers dY, staged in `ub` by fill_userbuffers_buffer_for_dgrad_wgrad, and computes
+    dgrad = dY W (bf16) and wgrad = dY^T inp (wgrad += with accumulate, fp32 wgrad only).
+    `weight` and `inp` are MXFP8 with column-wise usage.
+    """
+    workspace = get_cublas_workspace(dgrad.device.index, True, False)
+    ub.fused_ag_dgrad_wgrad(
+        _unwrap_tensor(weight, "columnwise"),
+        _unwrap_tensor(inp, "columnwise"),
+        dgrad,
+        wgrad,
+        accumulate,
+        workspace,
+    )
 
 
 def general_grouped_gemm(
