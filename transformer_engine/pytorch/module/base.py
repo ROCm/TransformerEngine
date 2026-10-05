@@ -380,14 +380,20 @@ def initialize_ub(
             "qkv_wgrad",
             "fc1_wgrad",
         ]
-        # gfx950 runs the fused backend by default.
+        # gfx950 runs the fused backend by default. proj_wgrad and fc2_wgrad only serve
+        # upstream's external grad-output all-gather for the wgrad, which the fused backend does
+        # not use (bf16 reuses the dgrad all-gather; MXFP8 runs the fused dgrad+wgrad).
         _fused_default = get_device_compute_capability() == (9, 5)
         methods = {
             "ring_exchange": [] if _fused_default else list(_rocm_layers),
             "pipeline": [],
             # Bulk regions are rejected on ROCm.
             "bulk": [],
-            "fused": list(_rocm_layers) if _fused_default else [],
+            "fused": (
+                [n for n in _rocm_layers if n not in ("proj_wgrad", "fc2_wgrad")]
+                if _fused_default
+                else []
+            ),
         }
     else:
         methods = {
