@@ -638,7 +638,8 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
       _ubuf.dtype() == DType::kBFloat16 && A.size(0) == _ubuf.size(0) && A.size(1) == _ubuf.size(1) &&
       D.size(0) == B.size(1) && D.size(1) == A.size(1);
   if (!fits) {
-    kosmos_log(kKosmosBulkRs, false, false, "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosBulkRs, false, false,
+               kosmos_bulk_enabled() ? "operands outside the KOSMOS contract" : "NVTE_KOSMOS_BULK=0");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosRsGemmArgs args{};
     args.A              = A.dptr();
@@ -653,7 +654,7 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
     args.d_fp32         = d_fp32 ? 1 : 0;
     args.accumulate     = accumulate ? 1 : 0;
     if (kosmos_launched(kosmos_bulk_rs_gemm(kc, &args, stream_main), kc, kKosmosBulkRs)) {
-      kosmos_log(kKosmosBulkRs, false, true, "");
+      kosmos_log(kKosmosBulkRs, false, true, d_fp32 ? (accumulate ? "fp32 D +=" : "fp32 D") : "");
       return;
     }
     kosmos_log(kKosmosBulkRs, false, false, kosmos_comm_error(kc));
@@ -789,7 +790,8 @@ void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool tran
       D.dtype() == DType::kBFloat16 && _ubuf.dtype() == DType::kBFloat16 && A.size(1) == _ubuf.size(1) &&
       D.size(0) == _ubufs[0].size(0) * _tp_size;
   if (!fits) {
-    kosmos_log(kKosmosBulkAg, false, false, "operands outside the KOSMOS contract");
+    kosmos_log(kKosmosBulkAg, false, false,
+               kosmos_bulk_enabled() ? "operands outside the KOSMOS contract" : "NVTE_KOSMOS_BULK=0");
   } else if (KosmosComm *kc = kosmos_comm()) {
     KosmosAgGemmArgs args{};
     args.A              = A.dptr();

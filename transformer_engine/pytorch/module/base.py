@@ -471,9 +471,11 @@ def initialize_ub(
         if method == "fused" and is_reduce_scatter:
             if not _fused_rs_ub_supported(shape, tp_size, dtype):
                 _ub_disabled_names.add(name)
+                _ub_gate(name, "setup", "any", f"region {list(shape)} {dtype} tp={tp_size}")
                 return
         elif method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
             _ub_disabled_names.add(name)
+            _ub_gate(name, "setup", "any", f"region {list(shape)} {dtype} tp={tp_size}")
             return
         if with_cublasmp and method in ("bulk", "external", "fused"):
             raise ValueError(
@@ -734,6 +736,13 @@ def _ub_gate(name: str, op: str, precision: str, reason: Optional[str]) -> bool:
             outcome = "fused" if eligible else f"declined -- {reason}"
             print(f"[KOSMOS] py {name} {op} {precision}: {outcome}", flush=True)
     return eligible
+
+
+def ub_gate_declined(names: List[str], op: str, precision: str, reason: str) -> None:
+    """Record overlaps a module turns off outside the eligibility checks (e.g. no autograd)."""
+    for name in names:
+        if _ub_is_fused(name):
+            _ub_gate(name, op, precision, reason)
 
 
 def _gate_precision(fp8: bool, mxfp8: bool) -> str:

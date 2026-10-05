@@ -34,6 +34,8 @@ from .base import (
     get_ub_is_fp8,
     is_ub_initialized,
     _ub_is_fused,
+    _ub_gate,
+    ub_gate_declined,
     ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
@@ -400,12 +402,20 @@ class _LayerNormMLP(torch.autograd.Function):
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        _fc_names = ["fc1_fprop", "fc1_dgrad", "fc1_wgrad", "fc2_fprop", "fc2_dgrad"]
         if debug:  # turn off userbuffers in debug mode
+            ub_gate_declined(_fc_names, "any", "any", "debug iteration")
             ub_overlap_ag = False
             ub_overlap_rs = False
             ub_overlap_rs_dgrad = False
             ub_bulk_wgrad = False
             ub_bulk_dgrad = False
+        if (ub_overlap_ag or ub_overlap_rs) and not is_grad_enabled:
+            ub_gate_declined(
+                ["fc1_fprop", "fc2_fprop"], "any", "any", "no autograd (no_grad forward)"
+            )
+        elif ub_overlap_ag and return_layernorm_output_gathered:
+            ub_gate_declined(["fc1_fprop"], "AG+GEMM", "any", "return_layernorm_output_gathered")
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
         # ub_overlap_ag covers the FC1 fprop and the FC2 dgrad all-gathers, decided separately.
@@ -2221,6 +2231,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if ub_overlap_disabled("fc1_wgrad") or (
                 IS_HIP_EXTENSION and not _ub_is_fused("fc1_wgrad")
             ):
+                if IS_HIP_EXTENSION and self.ub_bulk_wgrad:
+                    _ub_gate("fc1_wgrad", "bulk RS", "any", "not a fused buffer")
                 self.ub_bulk_wgrad = False
 
         if any(

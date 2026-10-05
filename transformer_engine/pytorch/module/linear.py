@@ -27,6 +27,8 @@ from .base import (
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
     _ub_is_fused,
+    _ub_gate,
+    ub_gate_declined,
     ub_overlap_disabled,
     get_dummy_wgrad,
     get_ub,
@@ -814,6 +816,18 @@ def _linear_setup_ctx(
     bwd_args.cpu_offloading = fwd_args.cpu_offloading
 
     if backward_override is not None:
+        if bwd_args.ub_name is not None and (
+            bwd_args.ub_overlap_ag
+            or bwd_args.ub_overlap_rs_dgrad
+            or bwd_args.ub_bulk_dgrad
+            or bwd_args.ub_bulk_wgrad
+        ):
+            ub_gate_declined(
+                [bwd_args.ub_name + "_dgrad", bwd_args.ub_name + "_wgrad"],
+                "any",
+                "any",
+                f"backward_override={backward_override}",
+            )
         bwd_args.fp8 = False
         bwd_args.debug = False
         bwd_args.ub_overlap_ag = False
@@ -1795,6 +1809,8 @@ class Linear(TransformerEngineBaseModule):
             if ub_overlap_disabled(ub_name + "_wgrad") or (
                 IS_HIP_EXTENSION and not _ub_is_fused(ub_name + "_wgrad")
             ):
+                if IS_HIP_EXTENSION and self.ub_bulk_wgrad:
+                    _ub_gate(ub_name + "_wgrad", "bulk RS", "any", "not a fused buffer")
                 self.ub_bulk_wgrad = False
 
         if any(
@@ -2125,6 +2141,13 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if debug:
+                if self.ub_name is not None:
+                    ub_gate_declined(
+                        [self.ub_name + "_fprop", self.ub_name + "_dgrad", self.ub_name + "_wgrad"],
+                        "any",
+                        "any",
+                        "debug iteration",
+                    )
                 ub_overlap_rs_fprop = False
                 ub_overlap_ag_dgrad = False
                 ub_overlap_ag_fprop = False

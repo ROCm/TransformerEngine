@@ -32,6 +32,8 @@ from .base import (
     get_ub_is_fp8,
     is_ub_initialized,
     _ub_is_fused,
+    _ub_gate,
+    ub_gate_declined,
     ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
@@ -218,6 +220,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         if debug:  # turn off userbuffers in debug mode
+            if ub_name is not None:
+                ub_gate_declined(
+                    [ub_name + "_fprop", ub_name + "_dgrad", ub_name + "_wgrad"],
+                    "any",
+                    "any",
+                    "debug iteration",
+                )
             ub_overlap_ag_fprop = False
             ub_overlap_rs_fprop = False
             ub_overlap_ag_dgrad = False
@@ -226,6 +235,10 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_bulk_dgrad = False
         ub_obj = None
         ub_type = None
+        if ub_overlap_ag_fprop and not is_grad_enabled:
+            ub_gate_declined([ub_name + "_fprop"], "AG+GEMM", "any", "no autograd (no_grad forward)")
+        elif ub_overlap_ag_fprop and return_layernorm_output:
+            ub_gate_declined([ub_name + "_fprop"], "AG+GEMM", "any", "return_layernorm_output")
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
@@ -1525,6 +1538,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if ub_overlap_disabled(ub_name + "_wgrad") or (
                 IS_HIP_EXTENSION and not _ub_is_fused(ub_name + "_wgrad")
             ):
+                if IS_HIP_EXTENSION and self.ub_bulk_wgrad:
+                    _ub_gate(ub_name + "_wgrad", "bulk RS", "any", "not a fused buffer")
                 self.ub_bulk_wgrad = False
 
         if any(
