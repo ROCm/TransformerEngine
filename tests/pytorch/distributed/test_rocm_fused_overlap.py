@@ -428,6 +428,14 @@ def _gemm_calls(result):
     raise AssertionError(f"harness printed no GEMM call counts\n{result.stdout.decode()}")
 
 
+def _assert_accuracy_passed(result):
+    """The fp32 ground-truth check (--fp32-truth): the overlap is as accurate as the reference."""
+    stdout, stderr = result.stdout.decode(), result.stderr.decode()
+    assert result.returncode == 0, f"non-zero exit\n{stderr}"
+    assert "NUMERICAL CHECK FAILED" not in stderr, stderr
+    assert "ACCURACY CHECK PASSED" in stdout, stdout
+
+
 def _assert_repeat_identical(result):
     assert "REPEAT 2: identical" in result.stdout.decode(), result.stdout.decode()
 
@@ -665,9 +673,11 @@ def test_mxfp8_transformer_layer(fuse_wgrad_accumulation, nprocs):
         extra += ["--fuse-wgrad-accumulation", "--microbatches=2"]
     else:
         extra += ["--repeat=2"]
-    # head_dim 128 makes the per-rank qkv width a multiple of 256.
-    result = _run_mxfp8_layer(nprocs, extra, head_dim=128)
-    _assert_numerics_passed(result)
+    # head_dim 128 makes the per-rank qkv width a multiple of 256. Through attention, two MXFP8 runs
+    # that round differently differ elementwise by more than the harness tolerance, so the gate is
+    # the fp32 ground truth: the overlapped run must be as accurate as the non-overlapped one.
+    result = _run_mxfp8_layer(nprocs, extra + ["--skip-verify"], head_dim=128)
+    _assert_accuracy_passed(result)
     for name, op in (
         ("qkv_fprop", "AG+GEMM"),
         ("qkv_dgrad", "bulk AG"),

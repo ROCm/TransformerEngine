@@ -846,6 +846,8 @@ def _train(opts):
         dist_print(
             "NUMERICAL CHECK FAILED: overlap less accurate than the reference vs fp32", error=True
         )
+    elif opts.fp32_truth:
+        dist_print("ACCURACY CHECK PASSED: overlap as accurate as the reference vs fp32")
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
     if not opts.skip_verify:
         # Make sure we have the same number of gradients
