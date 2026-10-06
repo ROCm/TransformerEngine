@@ -354,6 +354,16 @@ def test_grouped_linear_accuracy(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
             )
 
+    if IS_HIP_EXTENSION and fp8 and recipe.mxfp8() and bias:
+        # Dense HipKittens handles MXFP8 bias only for 256-aligned token counts; else hipBLASLt.
+        hipkittens_takes_all = (
+            get_device_compute_capability() == (9, 5)
+            and os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
+            and get_align_size_for_quantization(recipe) * bs % 256 == 0
+        )
+        if not hipkittens_takes_all:
+            pytest.skip("hipBLASLt MXFP8 GEMM does not support bias.")
+
     if use_triton:
         if recipe is not None and recipe.float8_block_scaling():
             os.environ["NVTE_USE_BLOCKWISE_GMM_TRITON"] = "1"
@@ -670,6 +680,61 @@ def test_grouped_linear_accuracy_rocm_backends(
             f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
             f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
         )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backend")
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_cuda_graph_hipkittens_mxfp8(monkeypatch, capfd):
+    """HipKittens grouped MXFP8 fwd/dgrad/wgrad GEMMs must replay correctly from a CUDA graph."""
+    if get_device_compute_capability() != (9, 5):
+        pytest.skip("HipKittens grouped MXFP8 GEMM is only built for gfx950.")
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
+    monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
+    monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
+
+    # All dims 256-aligned so that every GEMM qualifies for HipKittens.
+    num_gemms, tokens_per_gemm, in_features, out_features = 4, 256, 512, 512
+    m_splits = [tokens_per_gemm] * num_gemms
+    fp8_recipe = recipe.MXFP8BlockScaling()
+    model = GroupedLinear(
+        num_gemms, in_features, out_features, bias=False, params_dtype=torch.bfloat16, device="cuda"
+    )
+    x = torch.randn(
+        sum(m_splits), in_features, dtype=torch.bfloat16, device="cuda", requires_grad=True
+    )
+    dy = torch.randn(sum(m_splits), out_features, dtype=torch.bfloat16, device="cuda")
+
+    def step():
+        x.grad = None
+        for param in model.parameters():
+            param.grad = None
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = model(x, m_splits)
+        out.backward(dy)
+        return [out, x.grad] + [param.grad for param in model.parameters()]
+
+    # torch.cuda.graph requires warmup on a side stream.
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        for _ in range(3):
+            step()
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_outputs = step()
+
+    with torch.no_grad():
+        x.copy_(torch.randn_like(x))
+        dy.copy_(torch.randn_like(dy))
+    graph.replay()
+    expected_outputs = step()
+    for graph_out, expected in zip(graph_outputs, expected_outputs):
+        torch.testing.assert_close(graph_out, expected, rtol=0, atol=0)
+
+    assert "Fallback to cuBLAS grouped GEMM" not in capfd.readouterr().err
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
