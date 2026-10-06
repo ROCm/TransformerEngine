@@ -19,6 +19,7 @@ ARG TRITON_LOCAL=git4cff872c
 ARG JAX_VERSION=0.11.1
 ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
+ARG FLYDSL_VERSION=0.3.4.1
 ARG GPU_ARCH=gfx950;gfx942
 
 # Package sources. Noble has no Python ${PYTHON_VERSION}, so add deadsnakes.
@@ -70,6 +71,9 @@ RUN pip install --no-cache-dir \
         "jax==${JAX_VERSION}" \
         "jax-rocm7-pjrt==${JAX_VERSION}" \
         "jax-rocm7-plugin==${JAX_VERSION}"
+
+# Install FlyDSL to enable running FlyDSL GEMM tests.
+RUN pip install --no-cache-dir "flydsl==${FLYDSL_VERSION}"
 
 # Install Flash Attention
 RUN export ROCM_PATH="$(rocm-sdk path --root)" \
