@@ -1226,7 +1226,9 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+@partial(
+    jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
+)
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1247,6 +1249,9 @@ def _fused_attn(
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1268,6 +1273,9 @@ def _fused_attn(
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
     )
     return output
 
@@ -1292,6 +1300,9 @@ def _fused_attn_fwd_rule(
     context_parallel_axis,
     context_checkpoint_name,
     stripe_size,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -1312,6 +1323,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1342,9 +1356,13 @@ def _fused_attn_bwd_rule(
     context_parallel_axis,
     context_checkpoint_name,
     stripe_size,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
     ctx,
     dz,
 ):
+    del q_scale_inv, k_scale_inv, v_scale_inv
     del context_checkpoint_name
     (
         qkv,
@@ -1471,6 +1489,9 @@ def fused_attn(
     score_mod_bprop: Optional[Callable] = None,
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1667,5 +1688,8 @@ def fused_attn(
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
     )
     return output

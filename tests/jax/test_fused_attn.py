@@ -113,13 +113,20 @@ def test_aiter_fp8_fwd_asm(head_dim):
     """
     shape = (1, 128, 8, head_dim)
     key = jax.random.PRNGKey(7)
-    q = (jax.random.normal(key, shape) * 0.2).astype(jnp.float8_e4m3fn)
-    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2).astype(
+    # Distinct inverse scales, so a missing or unit descale cannot match the reference.
+    q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+    k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+    v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+    q = (jax.random.normal(key, shape) * 0.2 / q_scale_inv).astype(jnp.float8_e4m3fn)
+    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2 / k_scale_inv).astype(
         jnp.float8_e4m3fn
     )
-    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2).astype(
+    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2 / v_scale_inv).astype(
         jnp.float8_e4m3fn
     )
+    q_dq = q.astype(jnp.float32) * q_scale_inv
+    k_dq = k.astype(jnp.float32) * k_scale_inv
+    v_dq = v.astype(jnp.float32) * v_scale_inv
     sequence_descriptor = SequenceDescriptor.from_seqlens(jnp.array([128], dtype=jnp.int32))
     scale = head_dim**-0.5
 
@@ -137,13 +144,12 @@ def test_aiter_fp8_fwd_asm(head_dim):
         0.0,
         False,
         1,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
     )
-    scores = jnp.einsum(
-        "bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)
-    ) * scale
-    reference = jnp.einsum(
-        "bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v.astype(jnp.float32)
-    )
+    scores = jnp.einsum("bqhd,bkhd->bhqk", q_dq, k_dq) * scale
+    reference = jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v_dq)
 
     assert output.dtype == jnp.bfloat16
     assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
@@ -2614,16 +2620,19 @@ class TestFusedAttnFP8ASM:
         )
         runner._setup_inputs()
 
-        q_fp8 = runner.q.astype(jnp.float8_e4m3fn)
-        k_fp8 = runner.k.astype(jnp.float8_e4m3fn)
-        v_fp8 = runner.v.astype(jnp.float8_e4m3fn)
-        # Dequantized values are the exact numbers the FP8 kernel sees (unit scale).
-        q_dq = q_fp8.astype(jnp.float32)
-        k_dq = k_fp8.astype(jnp.float32)
-        v_dq = v_fp8.astype(jnp.float32)
-        q_bf16 = q_fp8.astype(jnp.bfloat16)
-        k_bf16 = k_fp8.astype(jnp.bfloat16)
-        v_bf16 = v_fp8.astype(jnp.bfloat16)
+        # Distinct inverse scales, so a missing or unit descale cannot match the reference.
+        q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+        k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+        v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+        q_fp8 = (runner.q.astype(jnp.float32) / q_scale_inv).astype(jnp.float8_e4m3fn)
+        k_fp8 = (runner.k.astype(jnp.float32) / k_scale_inv).astype(jnp.float8_e4m3fn)
+        v_fp8 = (runner.v.astype(jnp.float32) / v_scale_inv).astype(jnp.float8_e4m3fn)
+        q_dq = q_fp8.astype(jnp.float32) * q_scale_inv
+        k_dq = k_fp8.astype(jnp.float32) * k_scale_inv
+        v_dq = v_fp8.astype(jnp.float32) * v_scale_inv
+        q_bf16 = q_dq.astype(jnp.bfloat16)
+        k_bf16 = k_dq.astype(jnp.bfloat16)
+        v_bf16 = v_dq.astype(jnp.bfloat16)
 
         fp8_backend = FusedAttnHelper(
             False,
@@ -2658,8 +2667,14 @@ class TestFusedAttnFP8ASM:
             window_size=None,
         )
 
+        fp8_kwargs = dict(
+            kwargs,
+            q_scale_inv=q_scale_inv,
+            k_scale_inv=k_scale_inv,
+            v_scale_inv=v_scale_inv,
+        )
         fp8_out = jit(
-            partial(_fused_attn_keep_output_dtype, **kwargs),
+            partial(_fused_attn_keep_output_dtype, **fp8_kwargs),
             static_argnames=kwargs.keys(),
         )(q_fp8, k_fp8, v_fp8, runner.sequence_desciptor)
         bf16_out = jit(
