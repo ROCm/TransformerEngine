@@ -20,7 +20,6 @@
 #ifndef USE_ROCM
 #define NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                    \
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
-      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)            \
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
