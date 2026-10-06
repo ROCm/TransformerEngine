@@ -263,12 +263,6 @@ class WorkspacePlanner {
   bool is_sizing_;
 };
 
-__global__ void set_unit_descale(float* ptr) {
-  if(blockIdx.x == 0 && threadIdx.x == 0) {
-    *ptr = 1.f;
-  }
-}
-
 // nullptr-safe byte arithmetic for carving sub-buffers out of a planner allocation.
 inline void* byte_offset(void* ptr, ptrdiff_t n) {
   return ptr ? static_cast<void*>(static_cast<int8_t*>(ptr) + n) : nullptr;
@@ -555,15 +549,12 @@ void fused_attn_ck_fwd_impl(
   // Reserve workspace chunks. Same allocation sequence runs in sizing mode
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
-  void* unit_descale_ptr = nullptr;
-  if(dtype == DType::kFloat8E4M3 &&
-     devPtrDescaleQ == nullptr && devPtrDescaleK == nullptr && devPtrDescaleV == nullptr){
-    // Raw FP8 tensors (not TE quantized tensors) represent unscaled FP8 values.
-    // Materialize a shared unit descale so JAX/raw C API callers can use them.
-    unit_descale_ptr = planner.allocate(sizeof(float));
-    devPtrDescaleQ = unit_descale_ptr;
-    devPtrDescaleK = unit_descale_ptr;
-    devPtrDescaleV = unit_descale_ptr;
+  // A real FP8 launch must carry the inverse scale with each input. Workspace
+  // sizing passes null tensors, so that pass does not require scales.
+  if(dtype == DType::kFloat8E4M3 && !planner.is_sizing()){
+    NVTE_CHECK(devPtrDescaleQ != nullptr && devPtrDescaleK != nullptr &&
+                   devPtrDescaleV != nullptr,
+               "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, and V.");
   }
 
   if(ck_small_seq_env_enabled) {
@@ -674,9 +665,6 @@ void fused_attn_ck_fwd_impl(
       std::cout<<std::endl<<"attn_fwd(ck) requested workspace of size "<<*workspace_size<<std::endl;
     }
     return;
-  }
-  if(unit_descale_ptr != nullptr){
-    set_unit_descale<<<1, 1, 0, stream>>>(static_cast<float*>(unit_descale_ptr));
   }
 
   NVTE_CHECK(!has_sink || devPtrSoftmaxOffset != nullptr,
@@ -1422,12 +1410,11 @@ void fused_attn_ck_fwd(
     };
     const bool all_descales_present =
         valid_descale(input_Q) && valid_descale(input_K) && valid_descale(input_V);
-    const bool all_descales_absent =
-        input_Q->scale_inv.dptr == nullptr && input_K->scale_inv.dptr == nullptr &&
-        input_V->scale_inv.dptr == nullptr;
-    NVTE_CHECK(all_descales_present || all_descales_absent,
-               "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, V, "
-               "or no scale metadata for raw unit-scaled FP8 tensors.");
+    // Workspace sizing uses null tensors. A real launch must carry the scales.
+    if(input_Q->data.dptr != nullptr){
+      NVTE_CHECK(all_descales_present,
+                 "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, and V.");
+    }
   }
 
   void *devPtrQ = input_Q->data.dptr;
