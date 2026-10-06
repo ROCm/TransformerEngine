@@ -15,6 +15,12 @@ import mmap
 import os
 from pathlib import Path
 from types import SimpleNamespace
+
+# MXFP8 is gated off by default on ROCm (NVTE_ROCM_ENABLE_MXFP8=0). Enable it here, before any
+# build_recipes() call caches check_mxfp8_support(): a directly run `python benchmark_*.py` builds
+# its RECIPES at import time, before pytest loads conftest.py.
+os.environ.setdefault("NVTE_ROCM_ENABLE_MXFP8", "1")
+
 import torch
 import torch.utils.benchmark as benchmark
 

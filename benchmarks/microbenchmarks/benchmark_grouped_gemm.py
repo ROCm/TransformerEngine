@@ -39,19 +39,21 @@ BENCHMARK_LABEL = "Grouped GEMM"
 RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8", "nvfp4"))
 
 # Env recipes to force a grouped-GEMM kernel backend (None unsets the var). Per the
-# C++ dispatch (cublaslt_gemm.cu / rocm_gemm.cu): all-unset -> multi-stream hipBLASLt;
-# CUTLASS+CK -> CK; CUTLASS+HK -> HipKittens; NVTE_USE_GROUPED_GEMM_TRITON routes bf16
-# to the Triton grouped GEMM.
+# C++ dispatch (cublaslt_gemm.cu / rocm_gemm.cu): all-unset -> one GEMM per expert on
+# the compute streams; CUTLASS+CK -> CK; CUTLASS+HK -> HipKittens; NVTE_USE_GROUPED_GEMM_TRITON
+# routes bf16 to the Triton grouped GEMM. Per-expert MXFP8 GEMMs default to dense HipKittens
+# on gfx950, so "hipblaslt" forces hipBLASLt via NVTE_ROCM_USE_HIPBLASLT_MXFP8.
 _CUTLASS = "NVTE_USE_CUTLASS_GROUPED_GEMM"
 _CK = "NVTE_USE_CK_GROUPED_GEMM"
 _HK = "NVTE_USE_HIPKITTENS_GROUPED_GEMM"
 _TRITON = "NVTE_USE_GROUPED_GEMM_TRITON"
+_HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 
 GROUPED_BACKENDS = {
-    "hipblaslt":  {_CUTLASS: None, _CK: None, _HK: None, _TRITON: None},
-    "ck_tile":    {_CUTLASS: "1", _CK: "1", _HK: None, _TRITON: None},
-    "hipkittens": {_CUTLASS: "1", _CK: None, _HK: "1", _TRITON: None},
-    "triton":     {_CUTLASS: None, _CK: None, _HK: None, _TRITON: "1"},
+    "hipblaslt":  {_CUTLASS: None, _CK: None, _HK: None, _TRITON: None, _HIPBLASLT_MXFP8: "1"},
+    "ck_tile":    {_CUTLASS: "1", _CK: "1", _HK: None, _TRITON: None, _HIPBLASLT_MXFP8: None},
+    "hipkittens": {_CUTLASS: "1", _CK: None, _HK: "1", _TRITON: None, _HIPBLASLT_MXFP8: None},
+    "triton":     {_CUTLASS: None, _CK: None, _HK: None, _TRITON: "1", _HIPBLASLT_MXFP8: None},
 }
 
 _BACKENDS_BY_PRECISION = {
@@ -145,9 +147,9 @@ def _backends_for(recipe):
 
 def _grouped_fallback_count(fn):
     """Run *fn* once with grouped-GEMM fallback warnings on; return how many of its
-    grouped GEMMs fell back to hipBLASLt. Counts the dispatcher's per-call NVTE_WARN
-    (HipKittens' own messages are latched once per process in C++); it is C++ stderr,
-    so capture at the fd level rather than via ``warnings``."""
+    grouped GEMMs fell back to the per-expert path. Counts the dispatcher's per-call
+    NVTE_WARN (HipKittens' own messages are latched once per process in C++); it is C++
+    stderr, so capture at the fd level rather than via ``warnings``."""
     prev = os.environ.get("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK")
     os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
     saved = os.dup(2)
@@ -292,10 +294,10 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
                      else _grouped_fallback_count(fwd_bwd_func) > fwd_fallbacks)
         if fell_back:
             name = "HipKittens" if os.environ.get(_HK) == "1" else "CK"
-            pytest.skip(f"{name} grouped GEMM fell back to hipBLASLt for this config")
+            pytest.skip(f"{name} grouped GEMM fell back to per-expert GEMMs for this config")
 
     fwd_total_flops = 2 * sum_M * N * K
-    # hipBLASLt grouped GEMM runs the experts across compute streams; the profiler
+    # The per-expert path runs the experts across compute streams; the profiler
     # under-counts concurrent kernels, so measure elapsed device time by makespan.
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
@@ -347,8 +349,10 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
     if backend == "ck_tile" and case["recipe"] == "mxfp8" and get_device_compute_capability() != (12, 5):
         pytest.skip("CK MXFP8 grouped GEMM is gfx1250-only")
     # Skip a forced backend when the build doesn't honor the toggles it enables,
-    # so old builds show no data instead of silently measuring hipBLASLt.
-    required = [k for k, v in GROUPED_BACKENDS[backend].items() if v is not None]
+    # so old builds show no data instead of silently measuring hipBLASLt. Builds that
+    # don't read NVTE_ROCM_USE_HIPBLASLT_MXFP8 already run hipBLASLt per expert.
+    required = [k for k, v in GROUPED_BACKENDS[backend].items()
+                if v is not None and k != _HIPBLASLT_MXFP8]
     if required and not all(te_honors_env(k) for k in required):
         pytest.skip(f"{backend} grouped GEMM backend not available in this TE build")
     apply_backend_env(monkeypatch, GROUPED_BACKENDS[backend])

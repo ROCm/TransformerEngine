@@ -16,12 +16,9 @@ forwards to pytest), e.g.::
     python benchmark_gemm.py -k triton             # select the triton backend
 """
 
+import ctypes
 import os
-
-# MXFP8 is gated off by default on ROCm (NVTE_ROCM_ENABLE_MXFP8=0). Enable it here,
-# before any benchmark module imports Transformer Engine, because check_mxfp8_support()
-# caches its result on the first call (at build_recipes() import time).
-os.environ.setdefault("NVTE_ROCM_ENABLE_MXFP8", "1")
+import sys
 
 # Snapshot GPU neighbors BEFORE importing torch: on ROCm the first CUDA call (which
 # `from utils import` can trigger via `import torch.utils.benchmark`) registers this
@@ -230,3 +227,16 @@ def pytest_sessionfinish(session, exitstatus):
     )
     for path in written:
         print(f"microbench: wrote {path}")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    # Armed by benchmarks that trigger ROCm 7.14's segfault in HIP's exit-time hsa_shut_down (as in
+    # tests/pytorch/triton_kernels/conftest.py). Not under rocprofv3, which writes its trace there.
+    session = getattr(config, "_skip_hip_teardown_session", None)
+    if session is None or "ROCP_TOOL_LIBRARIES" in os.environ:
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    ctypes.CDLL(None).fflush(None)
+    os._exit(int(session.exitstatus))

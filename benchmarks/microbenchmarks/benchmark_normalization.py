@@ -28,9 +28,6 @@ These are memory-bound; we report GB/s (input read + output write).
 Output: benchmark_normalization.csv (written to cwd)
 """
 
-import atexit
-import ctypes
-import os
 import sys
 
 import pytest
@@ -147,28 +144,6 @@ def pytest_generate_tests(metafunc):
         metafunc.parametrize("case", cases, ids=[_case_id(c) for c in cases])
 
 
-_EXIT_SESSION = None
-
-
-def _exit_skipping_hip_teardown():
-    # Registered late, so run the earlier Python exit handlers ourselves before os._exit.
-    atexit.unregister(_exit_skipping_hip_teardown)
-    atexit._run_exitfuncs()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    ctypes.CDLL(None).fflush(None)
-    os._exit(int(_EXIT_SESSION.exitstatus))
-
-
-def _skip_hip_teardown_at_exit(session):
-    """Work around a ROCm 7.14 bug: after a cooperative launch in a torch process, HIP's
-    exit-time hsa_shut_down segfaults. Not under rocprofv3, which writes traces in it."""
-    global _EXIT_SESSION
-    if _EXIT_SESSION is None and "ROCP_TOOL_LIBRARIES" not in os.environ:
-        _EXIT_SESSION = session
-        atexit.register(_exit_skipping_hip_teardown)
-
-
 @pytest.mark.benchmark
 def test_norm(request, microbench, case, monkeypatch):
     if case["Backend"] == "triton":
@@ -180,8 +155,9 @@ def test_norm(request, microbench, case, monkeypatch):
             # Imperative xfail (not run): the GPU memory fault would abort the whole session.
             pytest.xfail("Triton norm lacks MXFP4Quantizer handling: GPU memory fault")
     if case["Backend"] == "hip" and case["hidden_size"] == 16384:
-        # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch.
-        _skip_hip_teardown_at_exit(request.session)
+        # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch, which
+        # makes HIP's exit-time teardown segfault (see pytest_unconfigure in conftest.py).
+        request.config._skip_hip_teardown_session = request.session
     apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
     microbench.run(
         case,
