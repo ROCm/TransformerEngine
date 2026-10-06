@@ -508,6 +508,10 @@ def general_gemm(
         )
 
     if ub is not None:
+        from ..module.base import ub_log_use
+
+        comm = "AG" if ub_type == tex.CommOverlapType.AG else "RS"
+        ub_log_use(ub, f"{'bulk ' if bulk_overlap else ''}{comm} {layout} GEMM")
         assert ub_type is not None, "Comm+GEMM overlap requires a valid `comm_type` argument."
         if ub_type == tex.CommOverlapType.RS:
             if not (bulk_overlap and not ub.is_fp8_ubuf()):
@@ -771,6 +775,9 @@ def fused_ag_dgrad_wgrad(
     dgrad = dY W (bf16) and wgrad = dY^T inp (wgrad += with accumulate, fp32 wgrad only).
     `weight` and `inp` are MXFP8 with column-wise usage.
     """
+    from ..module.base import ub_log_use
+
+    ub_log_use(ub, "fused dgrad+wgrad")
     workspace = get_cublas_workspace(dgrad.device.index, True, False)
     ub.fused_ag_dgrad_wgrad(
         _unwrap_tensor(weight, "columnwise"),

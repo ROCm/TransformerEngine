@@ -745,6 +745,20 @@ def ub_gate_declined(names: List[str], op: str, precision: str, reason: str) -> 
             _ub_gate(name, op, precision, reason)
 
 
+def ub_log_use(comm, what: str) -> None:
+    """With NVTE_KOSMOS_LOG=1, report (once per buffer and use, from global rank 0) that a
+    Userbuffers buffer was touched, so a declined overlap can be checked to leave its buffer alone."""
+    if not _KOSMOS_LOG or comm is None:
+        return
+    name = next((n for (n, _), ub in (_ub_communicators or {}).items() if ub is comm), "?")
+    key = (name, what)
+    if key in _ub_gate_logged:
+        return
+    _ub_gate_logged.add(key)
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        print(f"[KOSMOS] py {name} uses its buffer: {what}", flush=True)
+
+
 def _gate_precision(fp8: bool, mxfp8: bool) -> str:
     return "mxfp8" if mxfp8 else ("fp8" if fp8 else "bf16")
 
@@ -1021,6 +1035,7 @@ def fill_userbuffers_buffer_for_dgrad_wgrad(
     Returns the gathered row-scaled dY (valid after the fused call) and the local shard.
 
     """
+    ub_log_use(comm, "dgrad+wgrad fill")
     if not isinstance(local_tensor, MXFP8TensorStorage):
         quantizer.set_usage(rowwise=True, columnwise=True)
         local_tensor = quantizer(local_tensor)
@@ -1074,6 +1089,7 @@ def fill_userbuffers_buffer_for_all_gather(
     # pre-quantize before this call and the quantized-norm path produces an already-quantized
     # tensor, but custom-recipe paths pass an unquantized tensor and rely on this helper to
     # quantize it. The callers configure the quantizer usage (rowwise) expected by cuBLASMp.
+    ub_log_use(comm, "all-gather fill")
     if comm.with_cublasmp():
         if quantizer is not None and not isinstance(local_tensor, QuantizedTensorStorage):
             local_tensor = quantizer(local_tensor)
