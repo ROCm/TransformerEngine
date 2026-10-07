@@ -343,8 +343,10 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
 
-  // FP8 is supported only by AITER's v3 ASM kernels in this integration. Probe
-  // first and fail closed instead of silently falling through to a CK kernel.
+  // This PR wires AITER gfx950 FP8 FMHA through the v3 ASM kernels only.
+  // Upstream CK has an FP8 tile path, but it is not enabled here, so a failed
+  // ASM probe must not fall through to an unvalidated CK launch. Enabling CK
+  // tile FP8 is a separate change. 
   if(args.dtype == DType::kFloat8E4M3){
     aiter::mha_fwd_args probe_args = fmha_args;
     probe_args.v3_api_check = true;
