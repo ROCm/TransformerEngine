@@ -482,6 +482,7 @@ def test_dot_product_attention(
                     qkv_layout,
                     pad_between_seqs,
                     is_training,
+                    declarative_packed=declarative_packed,
                 )
             if len(fused_attn_backends) == 2:
                 os.environ["NVTE_FUSED_ATTN_CK"] = "0"
@@ -494,6 +495,7 @@ def test_dot_product_attention(
                     qkv_layout,
                     pad_between_seqs,
                     is_training,
+                    declarative_packed=declarative_packed,
                 )
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
                 os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
@@ -507,6 +509,7 @@ def test_dot_product_attention(
                     qkv_layout,
                     pad_between_seqs,
                     is_training,
+                    declarative_packed=declarative_packed,
                 )
             if has_ck_backend:
                 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
@@ -521,6 +524,7 @@ def test_dot_product_attention(
                     qkv_layout,
                     pad_between_seqs,
                     is_training,
+                    declarative_packed=declarative_packed,
                 )
         else:
             fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
