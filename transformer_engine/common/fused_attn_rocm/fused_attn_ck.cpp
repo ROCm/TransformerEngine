@@ -50,11 +50,10 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // FP16/BF16 use CK or v3 ASM. FP8 E4M3 uses gfx950 fp8bf16 v3 ASM
-  // exclusively; its output is validated as BF16 at launch time.
   const bool is_fp8 = q_dtype == NVTEDType::kNVTEFloat8E4M3;
   const bool is_16bit =
       q_dtype == NVTEDType::kNVTEFloat16 || q_dtype == NVTEDType::kNVTEBFloat16;
+  //  q and kv have to have same dtype: FP16/BF16  or FP8 E4M3 
   if(q_dtype != kv_dtype || (!is_16bit && !is_fp8)){
     if(nvte_log_ck_config){
       std::cout<<"q, k, v data type has to be fp16, bf16, or fp8 e4m3"<<std::endl;
