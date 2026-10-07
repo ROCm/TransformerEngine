@@ -28,6 +28,7 @@
 namespace transformer_engine {
 namespace jax {
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
@@ -40,6 +41,70 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
       return_max_logit, false, deterministic);
   return backend;
+=======
+static std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackendImpl(
+    const FusedAttnConfigWrapper &cfg) {
+  const char *message = nullptr;
+  auto backend = nvte_get_fused_attn_backend_v2(cfg, &message);
+  return {backend, std::string(message)};
+}
+
+std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
+    const pybind11::object &params) {
+  const auto qkv_layout = params.attr("qkv_layout").cast<NVTE_QKV_Layout>();
+  auto o_format = params.attr("o_format").cast<NVTE_QKV_Format>();
+  auto do_format = params.attr("do_format").cast<NVTE_QKV_Format>();
+  auto dqkv_layout = params.attr("dqkv_layout").cast<NVTE_QKV_Layout>();
+  if (o_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    o_format = nvte_get_q_format(qkv_layout);
+  }
+  if (do_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    do_format = o_format;
+  }
+  if (dqkv_layout == NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET) {
+    dqkv_layout = qkv_layout;
+  }
+
+  FusedAttnConfigWrapper cfg;
+  cfg.set_is_training(params.attr("is_training").cast<bool>())
+      .set_deterministic(params.attr("deterministic").cast<bool>())
+      .set_cuda_graph(params.attr("cuda_graph").cast<bool>())
+      .set_return_max_logit(params.attr("return_max_logit").cast<bool>())
+      .set_attn_mask_type(params.attr("attn_mask_type").cast<NVTE_Mask_Type>())
+      .set_bias_type(params.attr("bias_type").cast<NVTE_Bias_Type>())
+      .set_window_size_left(params.attr("window_size_left").cast<int64_t>())
+      .set_window_size_right(params.attr("window_size_right").cast<int64_t>())
+      .set_bottom_right_diagonal(params.attr("bottom_right_diagonal").cast<bool>())
+      .set_softmax_type(params.attr("softmax_type").cast<NVTE_Softmax_Type>())
+      .set_scaling_mode(
+          get_nvte_scaling_mode(params.attr("scaling_mode").cast<JAXX_Scaling_Mode>()))
+      .set_dropout(params.attr("dropout").cast<float>())
+      .set_attn_scale(params.attr("attn_scale").cast<float>())
+      .set_qkv_dtype(static_cast<NVTEDType>(params.attr("qkv_dtype").cast<DType>()))
+      .set_o_dtype(static_cast<NVTEDType>(params.attr("o_dtype").cast<DType>()))
+      .set_do_dtype(static_cast<NVTEDType>(params.attr("do_dtype").cast<DType>()))
+      .set_dqkv_dtype(static_cast<NVTEDType>(params.attr("dqkv_dtype").cast<DType>()))
+      .set_qkv_layout(qkv_layout)
+      .set_o_format(o_format)
+      .set_do_format(do_format)
+      .set_dqkv_layout(dqkv_layout)
+      .set_qkv_scale_inv_format(params.attr("qkv_scale_inv_format").cast<NVTE_QKV_Format>())
+      .set_do_scale_inv_format(params.attr("do_scale_inv_format").cast<NVTE_QKV_Format>())
+      .set_batch_size(params.attr("batch_size").cast<size_t>())
+      .set_num_attn_heads(params.attr("num_attn_heads").cast<size_t>())
+      .set_num_gqa_groups(params.attr("num_gqa_groups").cast<size_t>())
+      .set_head_dim_qk(params.attr("head_dim_qk").cast<size_t>())
+      .set_head_dim_v(params.attr("head_dim_v").cast<size_t>())
+      .set_max_seqlen_q(params.attr("max_seqlen_q").cast<size_t>())
+      .set_max_seqlen_kv(params.attr("max_seqlen_kv").cast<size_t>())
+      .set_num_tokens_q(params.attr("num_tokens_q").cast<size_t>())
+      .set_num_tokens_kv(params.attr("num_tokens_kv").cast<size_t>())
+      .set_bias_batch_size(params.attr("bias_batch_size").cast<size_t>())
+      .set_bias_num_heads(params.attr("bias_num_heads").cast<size_t>())
+      .set_bias_seqlen_q(params.attr("bias_seqlen_q").cast<size_t>())
+      .set_bias_seqlen_kv(params.attr("bias_seqlen_kv").cast<size_t>());
+  return GetFusedAttnBackendImpl(cfg);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 }
 
 /*
@@ -51,9 +116,14 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        const size_t bias_batch, const size_t attn_heads,
                                        const size_t bias_heads, const size_t q_max_seqlen,
                                        const size_t kv_max_seqlen, DType dtype,
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
                                        NVTE_Bias_Type bias_type, NVTE_Softmax_Type softmax_type,
                                        NVTE_Fused_Attn_Backend backend, void *softmax_buf,
                                        void *max_logits_buf = nullptr,
+=======
+                                       NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
+                                       void *softmax_buf, void *max_logits_buf = nullptr,
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                                        void *rng_state_buf = nullptr, void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
@@ -71,12 +141,15 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
 #ifndef USE_ROCM
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 #else
   // ROCm fused attn has two backends (aotriton and ck); they share the same
   // softmax/rng aux tensor shapes and strides, and CK also supports bias, so
   // always populate the aux pack for ROCm regardless of backend.
   {
 #endif
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     int size = 1;  // Start after softmax.
     auto next_aux_tensor = [&]() -> NVTETensor & {
       NVTE_CHECK(size < NVTETensorPack::MAX_SIZE,
@@ -84,7 +157,10 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       return tensor_pack->tensors[size++];
     };
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 #ifndef USE_ROCM
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     if (max_logits_buf != nullptr) {
       NVTETensor &max_aux = next_aux_tensor();
       NVTEBasicTensor max_aux_data;
@@ -98,7 +174,10 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       max_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
       nvte_set_tensor_param(&max_aux, kNVTERowwiseData, &max_aux_data);
     }
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 #endif
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     NVTETensor &rng_state_aux = next_aux_tensor();
     NVTEBasicTensor rng_state_aux_data;
@@ -124,8 +203,14 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       bias_aux_data.dtype = static_cast<NVTEDType>(dtype);
       nvte_set_tensor_param(&bias_aux, kNVTERowwiseData, &bias_aux_data);
     }
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
     // include softmax_offset if the softmax variant carries one
     if (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) {
+=======
+
+    // include softmax_offset if provided
+    if (softmax_offset_buf != nullptr) {
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
       NVTETensor &softmax_offset_aux = next_aux_tensor();
       NVTEBasicTensor softmax_offset_aux_data;
       softmax_offset_aux_data.data_ptr = softmax_offset_buf;
@@ -168,12 +253,16 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
                                     softmax_type, dummy_backend, softmax_buf, nullptr, rng_state_buf,
                                     bias_buf, softmax_offset_buf);
 #else
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, bias_type, softmax_type,
                                     backend, softmax_buf, nullptr, rng_state_buf, bias_buf,
+=======
+                                    dummy_backend, softmax_buf, nullptr, rng_state_buf, bias_buf,
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                                     softmax_offset_buf);
 #endif
 }
@@ -233,6 +322,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
     auto ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
     nvte_fused_attn_fwd(
         q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
         dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
@@ -242,6 +332,43 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         false, scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
         NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
         window_size_right, bottom_right_diagonal, query_workspace_tensor.data(), nullptr);
+=======
+    FusedAttnFwdParamsWrapper params;
+    params.set_Q(q_tensor.data())
+        .set_K(k_tensor.data())
+        .set_V(v_tensor.data())
+        .set_Bias(bias_tensor.data())
+        .set_SoftmaxOffset(dummy_softmax_offset_tensor.data())
+        .set_S(s_tensor.data())
+        .set_O(o_tensor.data())
+        .set_Aux_CTX_Tensors(&aux_output_tensors)
+        .set_cu_seqlens_q(q_cu_seqlens_tensor.data())
+        .set_cu_seqlens_kv(kv_cu_seqlens_tensor.data())
+        .set_cu_seqlens_q_padded(ragged_offset_tensor.data())
+        .set_cu_seqlens_kv_padded(ragged_offset_tensor.data())
+        .set_page_table_k(dummy_page_table_tensor.data())
+        .set_page_table_v(dummy_page_table_tensor.data())
+        .set_rng_state(dummy_rng_state_tensor.data())
+        .set_is_training(is_training)
+        .set_cuda_graph(false)
+        .set_return_max_logit(return_max_logit)
+        .set_attn_mask_type(mask_type)
+        .set_bias_type(bias_type)
+        .set_window_size_left(window_size_left)
+        .set_window_size_right(window_size_right)
+        .set_bottom_right_diagonal(bottom_right_diagonal)
+        .set_softmax_type(softmax_type)
+        .set_dropout(dropout_probability)
+        .set_attn_scale(scaling_factor)
+        .set_qkv_layout(qkv_layout)
+        .set_o_format(nvte_get_q_format(qkv_layout))
+        .set_qkv_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+        .set_max_seqlen_q(q_max_seqlen)
+        .set_max_seqlen_kv(kv_max_seqlen)
+        .set_workspace(query_workspace_tensor.data())
+        .set_stream(nullptr);
+    nvte_fused_attn_fwd_v2(params);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -253,6 +380,10 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
 #define FUSED_ATTN_IMPL_COMMON_BLOCK                                                          \
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
+  const bool has_bias_tensor =                                                                \
+      bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI;   \
+  const size_t bias_seqlen_q = has_bias_tensor ? q_max_seqlen : 0;                            \
+  const size_t bias_seqlen_kv = has_bias_tensor ? kv_max_seqlen : 0;                          \
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
@@ -278,7 +409,44 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto k_seq_offsets_tensor = TensorWrapper(k_seq_offsets, seq_shape, DType::kInt32);         \
   auto workspace_tensor =                                                                     \
       TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);             \
-  auto layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  auto layout_group = nvte_get_qkv_layout_group(qkv_layout);                                  \
+  FusedAttnConfigWrapper cfg;                                                                 \
+  cfg.set_is_training(is_training)                                                            \
+      .set_deterministic(deterministic)                                                       \
+      .set_cuda_graph(false)                                                                  \
+      .set_return_max_logit(false)                                                            \
+      .set_attn_mask_type(mask_type)                                                          \
+      .set_bias_type(bias_type)                                                               \
+      .set_window_size_left(window_size_left)                                                 \
+      .set_window_size_right(window_size_right)                                               \
+      .set_bottom_right_diagonal(bottom_right_diagonal)                                       \
+      .set_softmax_type(softmax_type)                                                         \
+      .set_scaling_mode(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING))                 \
+      .set_dropout(dropout_probability)                                                       \
+      .set_attn_scale(scaling_factor)                                                         \
+      .set_qkv_dtype(static_cast<NVTEDType>(dtype))                                           \
+      .set_o_dtype(static_cast<NVTEDType>(dtype))                                             \
+      .set_do_dtype(static_cast<NVTEDType>(dtype))                                            \
+      .set_dqkv_dtype(static_cast<NVTEDType>(dtype))                                          \
+      .set_qkv_layout(qkv_layout)                                                             \
+      .set_o_format(nvte_get_q_format(qkv_layout))                                            \
+      .set_do_format(nvte_get_q_format(qkv_layout))                                           \
+      .set_dqkv_layout(qkv_layout)                                                            \
+      .set_qkv_scale_inv_format(NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET)                     \
+      .set_do_scale_inv_format(NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET)                      \
+      .set_batch_size(num_segments)                                                           \
+      .set_num_attn_heads(attn_heads)                                                         \
+      .set_num_gqa_groups(num_gqa_groups)                                                     \
+      .set_head_dim_qk(qk_head_dim)                                                           \
+      .set_head_dim_v(v_head_dim)                                                             \
+      .set_max_seqlen_q(q_max_seqlen)                                                         \
+      .set_max_seqlen_kv(kv_max_seqlen)                                                       \
+      .set_num_tokens_q(is_ragged ? input_batch *q_max_seqlen : 0)                            \
+      .set_num_tokens_kv(is_ragged ? input_batch *kv_max_seqlen : 0)                          \
+      .set_bias_batch_size(bias_batch)                                                        \
+      .set_bias_num_heads(bias_heads)                                                         \
+      .set_bias_seqlen_q(bias_seqlen_q)                                                       \
+      .set_bias_seqlen_kv(bias_seqlen_kv);
 
 static void FusedAttnForwardImpl(
     cudaStream_t stream, void *q, void *k, void *v, void *bias, void *softmax_offset, void *seed,
@@ -304,9 +472,15 @@ static void FusedAttnForwardImpl(
 
     // Memset to 0xF0 for filling large negative numbers
     auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
     (void)cudaMemsetAsync(softmax_aux, 0xF0, softmax_aux_size * sizeof(float), stream);
     if (return_max_logit) {
       (void)cudaMemsetAsync(max_tensor, 0xF0, softmax_aux_size * sizeof(float), stream);
+=======
+    cudaMemsetAsync(softmax_aux, 0xF0, softmax_aux_size * sizeof(float), stream);
+    if (return_max_logit) {
+      cudaMemsetAsync(max_tensor, 0xF0, softmax_aux_size * sizeof(float), stream);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     }
   }
 
@@ -319,11 +493,18 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
       bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
       return_max_logit, false, deterministic);
+=======
+  cfg.set_return_max_logit(return_max_logit);
+  auto [backend, fwd_msg] = GetFusedAttnBackendImpl(cfg);
+  NVTE_CHECK(backend != NVTE_Fused_Attn_Backend::NVTE_No_Backend,
+             "Fused attention is not supported for this configuration: ", fwd_msg);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -331,9 +512,14 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_create(&aux_output_tensors);
   PrepareFusedAttnForwardAuxTensors(&aux_output_tensors, input_batch, bias_batch, attn_heads,
                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type,
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
                                     softmax_type, backend, softmax_aux,
                                     return_max_logit ? max_tensor : nullptr, rng_state, bias,
                                     softmax_offset);
+=======
+                                    backend, softmax_aux, return_max_logit ? max_tensor : nullptr,
+                                    rng_state, bias, softmax_offset);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
   /* Call the underlying NVTE API */
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -386,6 +572,7 @@ static void FusedAttnForwardImpl(
   auto k_tensor = TensorWrapper(k_ptr, k_shape, dtype);
   auto v_tensor = TensorWrapper(v_ptr, v_shape, dtype);
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
   nvte_fused_attn_fwd(
       q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
       softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
@@ -395,6 +582,43 @@ static void FusedAttnForwardImpl(
       scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
       NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
       window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
+=======
+  FusedAttnFwdParamsWrapper params;
+  params.set_Q(q_tensor.data())
+      .set_K(k_tensor.data())
+      .set_V(v_tensor.data())
+      .set_Bias(bias_tensor.data())
+      .set_SoftmaxOffset(softmax_offset_tensor.data())
+      .set_S(s_tensor.data())
+      .set_O(o_tensor.data())
+      .set_Aux_CTX_Tensors(&aux_output_tensors)
+      .set_cu_seqlens_q(q_cu_seqlens_tensor.data())
+      .set_cu_seqlens_kv(kv_cu_seqlens_tensor.data())
+      .set_cu_seqlens_q_padded(q_seq_offsets_tensor.data())
+      .set_cu_seqlens_kv_padded(k_seq_offsets_tensor.data())
+      .set_page_table_k(dummy_page_table_tensor.data())
+      .set_page_table_v(dummy_page_table_tensor.data())
+      .set_rng_state(rng_state_tensor.data())
+      .set_is_training(is_training)
+      .set_cuda_graph(false)
+      .set_return_max_logit(return_max_logit)
+      .set_attn_mask_type(mask_type)
+      .set_bias_type(bias_type)
+      .set_window_size_left(window_size_left)
+      .set_window_size_right(window_size_right)
+      .set_bottom_right_diagonal(bottom_right_diagonal)
+      .set_softmax_type(softmax_type)
+      .set_dropout(dropout_probability)
+      .set_attn_scale(scaling_factor)
+      .set_qkv_layout(qkv_layout)
+      .set_o_format(nvte_get_q_format(qkv_layout))
+      .set_qkv_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+      .set_max_seqlen_q(q_max_seqlen)
+      .set_max_seqlen_kv(kv_max_seqlen)
+      .set_workspace(workspace_tensor.data())
+      .set_stream(stream);
+  nvte_fused_attn_fwd_v2(params);
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
@@ -442,6 +666,7 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Result_Type rng_state_buf, Result_Type workspace_buf,
                                Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
+  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);
 
   FusedAttnForwardImpl(
       stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
@@ -561,19 +786,45 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     auto dummy_ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
 
-    nvte_fused_attn_bwd(
-        q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-        doutput_tensor.data(),
-        s_tensor.data(),  // not used for F16
-        s_tensor.data(),  // not used for F16
-        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-        dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(), q_cu_seqlens_tensor.data(),
-        kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
-        dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
-        dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
-        nvte_get_q_format(qkv_layout), qkv_layout, NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format_NOT_SET,
-        bias_type, mask_type, softmax_type, window_size_left, window_size_right,
-        bottom_right_diagonal, deterministic, false, query_workspace_tensor.data(), nullptr);
+    FusedAttnBwdParamsWrapper params;
+    params.set_Q(q_tensor.data())
+        .set_K(k_tensor.data())
+        .set_V(v_tensor.data())
+        .set_O(output_tensor.data())
+        .set_dO(doutput_tensor.data())
+        .set_S(s_tensor.data())   // not used for F16
+        .set_dP(s_tensor.data())  // not used for F16
+        .set_Aux_CTX_Tensors(&aux_input_tensors)
+        .set_dQ(dq_tensor.data())
+        .set_dK(dk_tensor.data())
+        .set_dV(dv_tensor.data())
+        .set_dBias(dbias_tensor.data())
+        .set_dSoftmaxOffset(dummy_d_softmax_offset_tensor.data())
+        .set_cu_seqlens_q(q_cu_seqlens_tensor.data())
+        .set_cu_seqlens_kv(kv_cu_seqlens_tensor.data())
+        .set_cu_seqlens_q_padded(dummy_ragged_offset_tensor.data())
+        .set_cu_seqlens_kv_padded(dummy_ragged_offset_tensor.data())
+        .set_deterministic(deterministic)
+        .set_cuda_graph(false)
+        .set_attn_mask_type(mask_type)
+        .set_bias_type(bias_type)
+        .set_window_size_left(window_size_left)
+        .set_window_size_right(window_size_right)
+        .set_bottom_right_diagonal(bottom_right_diagonal)
+        .set_softmax_type(softmax_type)
+        .set_dropout(dropout_probability)
+        .set_attn_scale(scaling_factor)
+        .set_qkv_layout(qkv_layout)
+        .set_o_format(nvte_get_q_format(qkv_layout))
+        .set_do_format(nvte_get_q_format(qkv_layout))
+        .set_dqkv_layout(qkv_layout)
+        .set_qkv_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+        .set_do_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+        .set_max_seqlen_q(q_max_seqlen)
+        .set_max_seqlen_kv(kv_max_seqlen)
+        .set_workspace(query_workspace_tensor.data())
+        .set_stream(nullptr);
+    nvte_fused_attn_bwd_v2(params);
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
@@ -616,11 +867,9 @@ static void FusedAttnBackwardImpl(
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
-  auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
-      bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
-      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
+  auto [backend, bwd_msg] = GetFusedAttnBackendImpl(cfg);
+  NVTE_CHECK(backend != NVTE_Fused_Attn_Backend::NVTE_No_Backend,
+             "Fused attention is not supported for this configuration: ", bwd_msg);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type,
                                      softmax_type, backend, softmax_aux, rng_state, bias,
@@ -698,18 +947,45 @@ static void FusedAttnBackwardImpl(
     }
   }
 
-  nvte_fused_attn_bwd(
-      q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-      doutput_tensor.data(),
-      s_tensor.data(),  // not used for F16
-      s_tensor.data(),  // not used for F16
-      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(), dbias_tensor.data(),
-      dsoftmax_offset_tensor.data(), q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen,
-      scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
-      nvte_get_q_format(qkv_layout), qkv_layout, NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format_NOT_SET,
-      bias_type, mask_type, softmax_type, window_size_left, window_size_right,
-      bottom_right_diagonal, deterministic, false, workspace_tensor.data(), stream);
+  FusedAttnBwdParamsWrapper params;
+  params.set_Q(q_tensor.data())
+      .set_K(k_tensor.data())
+      .set_V(v_tensor.data())
+      .set_O(output_tensor.data())
+      .set_dO(doutput_tensor.data())
+      .set_S(s_tensor.data())   // not used for F16
+      .set_dP(s_tensor.data())  // not used for F16
+      .set_Aux_CTX_Tensors(&aux_input_tensors)
+      .set_dQ(dq_tensor.data())
+      .set_dK(dk_tensor.data())
+      .set_dV(dv_tensor.data())
+      .set_dBias(dbias_tensor.data())
+      .set_dSoftmaxOffset(dsoftmax_offset_tensor.data())
+      .set_cu_seqlens_q(q_cu_seqlens_tensor.data())
+      .set_cu_seqlens_kv(kv_cu_seqlens_tensor.data())
+      .set_cu_seqlens_q_padded(q_seq_offsets_tensor.data())
+      .set_cu_seqlens_kv_padded(k_seq_offsets_tensor.data())
+      .set_deterministic(deterministic)
+      .set_cuda_graph(false)
+      .set_attn_mask_type(mask_type)
+      .set_bias_type(bias_type)
+      .set_window_size_left(window_size_left)
+      .set_window_size_right(window_size_right)
+      .set_bottom_right_diagonal(bottom_right_diagonal)
+      .set_softmax_type(softmax_type)
+      .set_dropout(dropout_probability)
+      .set_attn_scale(scaling_factor)
+      .set_qkv_layout(qkv_layout)
+      .set_o_format(nvte_get_q_format(qkv_layout))
+      .set_do_format(nvte_get_q_format(qkv_layout))
+      .set_dqkv_layout(qkv_layout)
+      .set_qkv_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+      .set_do_scale_inv_format(NVTE_QKV_Format_NOT_SET)
+      .set_max_seqlen_q(q_max_seqlen)
+      .set_max_seqlen_kv(kv_max_seqlen)
+      .set_workspace(workspace_tensor.data())
+      .set_stream(stream);
+  nvte_fused_attn_bwd_v2(params);
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }

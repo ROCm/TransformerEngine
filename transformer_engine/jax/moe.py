@@ -55,6 +55,7 @@ from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
 
 __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 
 # Triton-backed primitives are imported lazily: callers on the PURE_JAX
 # permutation backend should not need ``triton`` installed. The TRITON
@@ -101,6 +102,8 @@ def _require_triton():
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
@@ -180,7 +183,7 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
         ``d_logits_2d`` is produced by
         ``fused_topk_with_score_function_bwd``. That primitive runs at
         fp32 because the fwd promoted ``logits_2d`` to fp32 (the fused
-        topk/softmax/sigmoid kernels are only validated at fp32).
+        topk/softmax/sigmoid/sqrtsoftplus kernels are only validated at fp32).
 
     JAX's type promotion then makes ``d_x_from_gate + d_x_from_dispatch``
     fp32, so the user-visible ``d_x`` ends up wider than ``x``. That
@@ -1297,7 +1300,7 @@ def moe(
     ----------
     expert_bias : Optional[jnp.ndarray]
         ``[num_experts]`` learnable router bias added before the top-k
-        when ``score_function='sigmoid'``. Pass ``None`` to disable.
+        when ``score_function='sigmoid'`` or ``'sqrtsoftplus'``. Pass ``None`` to disable.
         The bias has no gradient through the top-k primitive itself (it
         only steers expert selection); a zero cotangent is returned for
         it.

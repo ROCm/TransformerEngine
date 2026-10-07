@@ -7,6 +7,7 @@
 """JAX related extensions."""
 
 import os
+import warnings
 from pathlib import Path
 
 import setuptools
@@ -18,6 +19,8 @@ from .utils import (
     all_files_in_dir,
     debug_build_enabled,
     setup_mpi_flags,
+    nccl_include_path,
+    nccl_lib_path,
     nccl_ep_enabled,
 )
 from typing import List
@@ -93,6 +96,7 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
     if rocm_build():
         hip_root, _ = rocm_path()
         include_dirs = [hip_root / "include"]
@@ -101,22 +105,38 @@ def setup_jax_extension(
         # Upstream v2.18 removed the 3rdparty/cudnn-frontend submodule in favor of
         # the nvidia-cudnn-frontend pip package. Source the include dir from it.
         include_dirs.append(cudnn_frontend_include_path())
+=======
+    include_dirs = get_cuda_include_dirs()
+    if (discovered_nccl_include_path := nccl_include_path()) is not None:
+        include_dirs.append(discovered_nccl_include_path)
+    include_dirs.append(cudnn_frontend_include_path())
+    xla_include_path = xla_path()
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     include_dirs.extend(
         [
             common_header_files,
             common_header_files / "common",
             common_header_files / "common" / "include",
             csrc_header_files,
-            xla_path(),
+            xla_include_path,
         ]
     )
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     # and we do not hipify the sources
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         from .hipify.hipify import hipify_sources as hipify
         base_dir = Path(__file__).parent.parent.resolve()
         sources = hipify(base_dir, csrc_source_files, common_header_files, sources, base_dir)
+=======
+    # Match the borrowed-comm path's compile-time header check.
+    if not (Path(xla_include_path) / "xla/ffi/api/collectives_c_api.h").is_file():
+        warnings.warn(
+            f"XLA headers in {xla_include_path} do not include "
+            "xla/ffi/api/collectives_c_api.h; the EP borrowed-comm path will not be built."
+        )
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     # Compile flags
     cxx_flags = ["-O3"]
@@ -141,6 +161,12 @@ def setup_jax_extension(
     if not rocm_build() and nccl_ep_enabled():
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
+    kwargs = {}
+    if (discovered_nccl_lib_path := nccl_lib_path()) is not None:
+        kwargs["extra_objects"] = [str(discovered_nccl_lib_path)]
+    else:
+        kwargs["libraries"] = ["nccl"]
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
@@ -149,5 +175,9 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
         libraries=["nccl"] if not rocm_build() else [],
+=======
+        **kwargs,
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     )

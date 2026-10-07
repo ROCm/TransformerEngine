@@ -91,25 +91,6 @@ class TestDistributedSelfAttn:
         is_training = True
         batch, seqlen, num_head, hidden = data_shape
 
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BS3HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
             mesh_axes,
@@ -257,6 +238,7 @@ class TestDistributedCrossAttn:
 
         batch, seqlen, num_head, hidden = data_shape
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
         if not is_fused_attn_kernel_available(
             is_training,
             dtype,
@@ -283,6 +265,9 @@ class TestDistributedCrossAttn:
             data_shape,
             softmax_type,
         )
+=======
+        col_ref = self.generate_collectives_count_ref()
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         runner = FusedAttnRunner(
             batch,
             seqlen,
@@ -322,6 +307,10 @@ class TestDistributedScoreModSelfAttn:
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SCORE_MOD_DATA_SHAPES)
     @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.skipif(
+        get_device_compute_capability(0) < 90,
+        reason="Softcap score_mod tests require sm90+",
+    )
     def test_softcap_score_mod_with_aux_params_backward(
         self,
         device_count,
@@ -513,9 +502,17 @@ class TestDistributedContextParallelSelfAttn:
             cp_load_balanced=load_balanced,
         )
 
+        # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
+        runner_segments = runner._get_max_segments_per_sequence()
+        if stripe_size and cp_strategy in (CPStrategy.DEFAULT, CPStrategy.ALL_GATHER):
+            max_segments_per_seq = runner_segments + seqlen // (stripe_size * cp_size)
+        else:
+            max_segments_per_seq = runner_segments
+
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
+                batch,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -529,8 +526,9 @@ class TestDistributedContextParallelSelfAttn:
                 seqlen,
                 hidden,
                 hidden,
-                None,
-            )  # no SWA for CP
+                None,  # no SWA for CP
+                max_segments_per_seq=max_segments_per_seq,
+            )
 
         # For causal masking we depend on having bottom right support also.
         # The API does not check this and instead we rely on lower level checks to raise
@@ -550,6 +548,7 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
         # skip unsupported AOTriton configurations
         if is_hip_extension() and int(os.getenv("NVTE_FUSED_ATTN_CK", "1")) == 0:
             if kv_groups != 1:
@@ -557,6 +556,8 @@ class TestDistributedContextParallelSelfAttn:
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and mesh_shape[1] != 1: #CP
                 pytest.skip(f"Skipping CAUSAL_MASK and CP={mesh_shape[1]} for AOTriton")
 
+=======
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         if return_max_logit:
             runner.test_forward(
                 return_max_logit=True,

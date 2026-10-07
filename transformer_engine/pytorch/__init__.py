@@ -19,7 +19,7 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
-from transformer_engine.pytorch.constants import DType
+from transformer_engine.pytorch.constants import CPLoadBalancingStrategy, DType
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -31,7 +31,8 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
+from transformer_engine.pytorch.attention import GatedDeltaNetAttention
+from transformer_engine.pytorch.attention import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -74,6 +75,7 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+<<<<<<< 27ccad5ed300521e7026f904a7d9def68d520ce3
 from torch.utils.cpp_extension import IS_HIP_EXTENSION as _IS_HIP_EXTENSION
 if not _IS_HIP_EXTENSION:
     from transformer_engine.pytorch.optimizers.newton_schulz import (
@@ -81,6 +83,13 @@ if not _IS_HIP_EXTENSION:
         newton_schulz,
         newton_schulz_tp,
     )
+=======
+from transformer_engine.pytorch.optimizers.newton_schulz import (
+    CusolverMpCtx,
+    newton_schulz,
+    newton_schulz_tp,
+)
+>>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
