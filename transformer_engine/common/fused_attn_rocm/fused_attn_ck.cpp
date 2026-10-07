@@ -184,14 +184,20 @@ bool is_small_seq_possible(DType dtype,
                            size_t num_attn_heads,
                            size_t num_gqa_groups,
                            NVTE_Softmax_Type softmax_type) {
-  if(getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") != "1") return false;
-  if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95) return false;
+  if(getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") != "1") {
+    return false;
+  }
+  if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95) {
+    return false;
+  }
   if(!is_small_seq_supported_static(dtype, bias_type, mask_type, dropout, head_dim_qk, head_dim_v,
                                     num_attn_heads, num_gqa_groups, softmax_type)) {
     return false;
   }
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if(qkv_format == NVTE_QKV_Format::NVTE_THD) return true;
+  if(qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    return true;
+  }
   return qkv_format == NVTE_QKV_Format::NVTE_BSHD && max_seqlen_q == max_seqlen_kv &&
          max_seqlen_q >= 2 && max_seqlen_q <= kSmallSeqMaxSeqlen;
 }

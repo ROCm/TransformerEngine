@@ -410,7 +410,7 @@ def fused_attn_fwd(
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
-        # thd (newer cuDNN runtimes, non-sm120, CK): output_tensors: out [tq, h, d], Stats [tq, h, 1], Max [tq, h, 1]
+        # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
         # thd (older cuDNN runtimes or sm120):   output_tensors: out [tq, h, d],    Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # bshd:                                  output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # sbhd:                                  output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]

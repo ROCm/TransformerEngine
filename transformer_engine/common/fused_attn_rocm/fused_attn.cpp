@@ -298,7 +298,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // that the forward skipped them, so configs that may use them go elsewhere.
   const char* ck_max_logit_unsupported = nullptr;
   if(return_max_logit){
-    if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95){
+    if(!nvte_fused_attn_ck){
+      ck_max_logit_unsupported = "when it is disabled (NVTE_FUSED_ATTN=0 or NVTE_FUSED_ATTN_CK=0)";
+    }else if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95){
       ck_max_logit_unsupported = "on this arch";
     }else if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS){
       ck_max_logit_unsupported = "with bias";

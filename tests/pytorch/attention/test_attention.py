@@ -50,7 +50,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
+from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized_tensor import (
@@ -525,13 +525,14 @@ model_configs_max_logit_extra = {
     "max_logit_extra_5": ModelConfig(
         2, 512, 16, 256, max_seqlen_kv=1024, attn_mask_type="causal_bottom_right"
     ),
+    "max_logit_extra_6": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
 }
 if IS_HIP_EXTENSION:
     # CK also returns the max logit with a softmax offset, which is not a logit
     model_configs_max_logit_extra.update(
         {
-            "max_logit_extra_6": ModelConfig(2, 1024, 16, 64, softmax_type="learnable"),
-            "max_logit_extra_7": ModelConfig(
+            "max_logit_extra_7": ModelConfig(2, 1024, 16, 64, softmax_type="learnable"),
+            "max_logit_extra_8": ModelConfig(
                 2, 1024, 16, 64, attn_mask_type="causal", softmax_type="off-by-one"
             ),
         }
@@ -544,7 +545,7 @@ if IS_HIP_EXTENSION:
 @pytest.mark.parametrize("model", model_configs_max_logit_extra.keys())
 @pytest.mark.parametrize("qkv_layout", ["bshd_bshd_bshd", "sbhd_sbhd_sbhd", "thd_thd_thd"])
 def test_dpa_max_logit_extra(dtype, model_configs, model, qkv_layout):
-    """Test max_logit with padded rows, decode-size queries, head dims 64/256 and sinks"""
+    """Test max_logit with padded rows, decode-size queries, head dims 64/256, MLA and sinks"""
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
@@ -560,6 +561,8 @@ def _run_dpa_max_logit_exact(
     dtype=torch.bfloat16,
     softmax_type="vanilla",
     window_size=None,
+    head_dim_v=None,
+    softmax_scale=None,
 ):
     """Check the fused max_logit against the exact max over the unmasked scores.
 
@@ -568,7 +571,7 @@ def _run_dpa_max_logit_exact(
     kernels, so a kernel that reports its running max misses the head max by up to about 1 (0.3
     median). Padding and the gaps between thd sequences hold values of the opposite sign, so any
     of them that leaks into the max, like a fully masked row left at 0 or a sink folded in (0 for
-    off-by-one, 10 for learnable), makes it positive. The comparison tests use logits too small
+    off-by-one, 10 for learnable), makes it non-negative. The comparison tests use logits too small
     to tell these apart.
     """
     if qkv_format == "thd" and "padding" not in attn_mask_type:
@@ -580,6 +583,7 @@ def _run_dpa_max_logit_exact(
         num_heads,
         head_dim,
         num_gqa_groups=num_gqa_groups,
+        head_dim_v=head_dim_v,
         max_seqlen_kv=seqlen_kv,
         attn_mask_type=attn_mask_type,
         softmax_type=softmax_type,
@@ -632,10 +636,10 @@ def _run_dpa_max_logit_exact(
         return torch.nn.functional.pad(cumsum, (1, 0))
 
     # valid q >= 0 and valid k <= 0, so every valid score is negative
-    scale = head_dim**-0.5
+    scale = head_dim**-0.5 if softmax_scale is None else softmax_scale
     q = make(seqlens_q, seqlen_q, num_heads, 1)
     k = make(seqlens_kv, seqlen_kv, num_gqa_groups, -1)
-    v = torch.randn_like(k)
+    v = torch.randn(*k.shape[:-1], config.head_dim_v, dtype=k.dtype, device=k.device)
     kwargs = {}
     if padding:
         kwargs = dict(cu_seqlens_q=cu_seqlens(seqlens_q), cu_seqlens_kv=cu_seqlens(seqlens_kv))
@@ -648,7 +652,7 @@ def _run_dpa_max_logit_exact(
         )
     block = DotProductAttention(
         num_heads,
-        head_dim,
+        config.kv_channels,
         num_gqa_groups=num_gqa_groups,
         attention_dropout=0.0,
         qkv_format=qkv_format,
@@ -722,6 +726,9 @@ def test_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num
         ("bshd", "causal_bottom_right", 128, 3072, 8, {}),
         ("sbhd", "causal_bottom_right", 64, 3072, 2, {}),
         ("thd", "padding_causal_bottom_right", 128, 3072, 8, {}),
+        ("bshd", "causal", 192, 1024, 8, dict(head_dim_v=128)),
+        ("thd", "padding_causal", 192, 1024, 8, dict(head_dim_v=128)),
+        ("sbhd", "no_mask", 192, 1024, 8, dict(head_dim_v=128, softmax_scale=1.8 * 192**-0.5)),
     ],
     ids=[
         "fp16-bshd",
@@ -740,12 +747,15 @@ def test_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num
         "fully_masked_rows-bshd",
         "fully_masked_rows-sbhd",
         "fully_masked_rows-thd",
+        "mla-bshd",
+        "mla-thd",
+        "mla-sbhd-no_mask-softmax_scale",
     ],
 )
 def test_dpa_max_logit_exact_variants(
     qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, kwargs
 ):
-    """Test the exact max_logit with fp16, sinks, sliding windows and rows with no visible key"""
+    """Test the exact max_logit with fp16, sinks, sliding windows, fully masked rows and MLA"""
     if kwargs.get("softmax_type", "vanilla") != "vanilla" and not IS_HIP_EXTENSION:
         pytest.skip("Checks that the softmax offset is left out of the max, as CK does.")
     _run_dpa_max_logit_exact(

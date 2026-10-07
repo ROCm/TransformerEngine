@@ -499,6 +499,9 @@ if IS_HIP_EXTENSION:
                 2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True
             ),  # MHA
             "cp_1_7": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
+            "cp_3_5": ModelConfig(
+                2, 4096, 64, 192, head_dim_v=128, attn_mask_type="causal", return_max_logit=True
+            ),  # MLA
             "cp_4_4": ModelConfig(
                 2,
                 4096,
@@ -532,7 +535,7 @@ if test_essential:
         "cp_5_1",
     ]
     if IS_HIP_EXTENSION:
-        configs.append("cp_1_6")
+        configs += ["cp_1_6", "cp_3_5"]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]

@@ -1497,6 +1497,7 @@ def get_attention_backend(
             if (
                 IS_HIP_EXTENSION
                 and return_max_logit
+                and not torch.compiler.is_compiling()
                 and _get_fused_attn_backend(
                     is_training,
                     q_type,
@@ -1522,7 +1523,8 @@ def get_attention_backend(
             ):
                 warnings.warn(
                     "return_max_logit=True disables FusedAttention for this configuration on ROCm:"
-                    " CK returns the max logit only without bias or dropout, and not from the"
+                    " only the CK backend returns the max logit, on gfx942/gfx950 without bias or"
+                    " dropout, not with NVTE_FUSED_ATTN_CK=0 and not from the"
                     " NVTE_FUSED_ATTN_CK_SMALLSEQ kernels. Set NVTE_LOG_FUSED_ATTN_CONFIG=1 for"
                     " the reason."
                 )
