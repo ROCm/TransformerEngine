@@ -23,6 +23,14 @@ Examples::
 Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """
 
+if __name__ == "__main__":
+    # Enter pytest before torch touches the GPU, so conftest's neighbor snapshot excludes us.
+    import sys
+
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
 import functools
 import os
 import warnings
@@ -270,9 +278,3 @@ def test_gemm(microbench, case, monkeypatch):
             case["M"], case["N"], case["K"], case["dtype"],
         ),
     )
-
-
-if __name__ == "__main__":
-    import sys
-    # Make the file runnable directly: python benchmark_gemm.py [--csv -k ...].
-    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

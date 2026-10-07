@@ -28,6 +28,14 @@ These casts are memory-bound; we report GB/s (input + output bytes).
 Output: benchmark_casting.csv (written to cwd)
 """
 
+if __name__ == "__main__":
+    # Enter pytest before torch touches the GPU, so conftest's neighbor snapshot excludes us.
+    import sys
+
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
 import pytest
 import torch
 import transformer_engine
@@ -230,9 +238,3 @@ def test_cast(microbench, case, monkeypatch):
         case,
         lambda: bench_cast(case["Format"], case["Direction"], case["M"], case["hidden_size"]),
     )
-
-
-if __name__ == "__main__":
-    import sys
-    # Make the file runnable directly: python benchmark_casting.py [--csv -k ...].
-    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

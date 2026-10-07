@@ -28,6 +28,14 @@ These are memory-bound; we report GB/s (input read + output write).
 Output: benchmark_normalization.csv (written to cwd)
 """
 
+if __name__ == "__main__":
+    # Enter pytest before torch touches the GPU, so conftest's neighbor snapshot excludes us.
+    import sys
+
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
 import sys
 
 import pytest
@@ -163,8 +171,3 @@ def test_norm(request, microbench, case, monkeypatch):
         case,
         lambda: bench_norm(case["NormType"], case["Precision"], case["M"], case["hidden_size"]),
     )
-
-
-if __name__ == "__main__":
-    # Make the file runnable directly: python benchmark_normalization.py [--csv -k ...].
-    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

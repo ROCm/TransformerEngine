@@ -15,6 +15,14 @@ CK_Tile / Triton / HipKittens) and forward/backward direction.
     python benchmark_grouped_gemm.py -k "mxfp8 and hipkittens"
 """
 
+if __name__ == "__main__":
+    # Enter pytest before torch touches the GPU, so conftest's neighbor snapshot excludes us.
+    import sys
+
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
 import os
 import sys
 import tempfile
@@ -346,6 +354,9 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
         pytest.skip(f"{backend} grouped GEMM needs num_groups > 1")
     if backend == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
         pytest.skip("HipKittens grouped GEMM needs 256-aligned expert dims")
+    # HK-vs-CK grouped MXFP8 is latched per process (rocm_gemm.cu); arch gates keep them apart.
+    if backend == "hipkittens" and get_device_compute_capability() != (9, 5):
+        pytest.skip("HipKittens grouped GEMM is gfx950-only")
     if backend == "ck_tile" and case["recipe"] == "mxfp8" and get_device_compute_capability() != (12, 5):
         pytest.skip("CK MXFP8 grouped GEMM is gfx1250-only")
     # Skip a forced backend when the build doesn't honor the toggles it enables,
@@ -363,9 +374,3 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
             case["dtype"], case["recipe"], case["Direction"],
         ),
     )
-
-
-if __name__ == "__main__":
-    import sys
-    # Make the file runnable directly: python benchmark_grouped_gemm.py [--csv -k ...].
-    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

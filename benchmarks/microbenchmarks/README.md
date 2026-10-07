@@ -68,8 +68,8 @@ python benchmark_gemm.py -k triton           # select the Triton backend
 ### Kernel profiling
 
 Pass `--kernel-profile` to report GPU kernel (device) time alongside the default
-host wall-clock time. It adds `Kernel Time (ms)` / `Kernel <unit>` columns to the
-console table and the CSV:
+host wall-clock time. It adds `<label> Kernel Time (ms)` / `<label> Kernel <unit>`
+columns to the console table and the CSV:
 
 ```bash
 python benchmark_gemm.py --kernel-profile --csv
@@ -153,11 +153,16 @@ Each benchmark is a pytest module with three pieces:
        microbench.run(case, lambda: bench_gemm(**case))
    ```
 
-Finish the file with the direct-run shim so `python benchmark_x.py` works:
+Start the file, right after the module docstring and before importing torch, with
+the direct-run shim so `python benchmark_x.py` works. Entering pytest before torch
+touches the GPU keeps this process out of the GPU-interference snapshot:
 
 ```python
 if __name__ == "__main__":
     import sys
+
+    import pytest
+
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
 ```
 
@@ -165,12 +170,12 @@ if __name__ == "__main__":
 `conftest.py` collects them per family and writes the CSV. Each metric record
 represents one line such as `GEMM Forward` and expands into two CSV columns:
 
-- `<label> Time (ms)`
-- `<label> <unit>`
+- `<label> Wall Time (ms)`
+- `<label> Wall <unit>`
 
 For example, a `GEMM Forward` metric with unit `TFLOPS` becomes
-`GEMM Forward Time (ms)` and `GEMM Forward TFLOPS`. Passing `--kernel-profile`
-adds matching `Kernel Time (ms)` / `Kernel <unit>` columns.
+`GEMM Forward Wall Time (ms)` and `GEMM Forward Wall TFLOPS`. Passing `--kernel-profile`
+adds matching `<label> Kernel Time (ms)` / `<label> Kernel <unit>` columns.
 
 ## Comparing results
 
