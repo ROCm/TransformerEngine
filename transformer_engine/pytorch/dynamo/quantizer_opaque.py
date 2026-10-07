@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -114,7 +116,7 @@ def register_value_opaque_quantizer(cls: type) -> None:
         cls.__fx_repr__ = _quantizer_fx_repr
 
     try:
-        from torch._library.opaque_object import (  # pylint: disable=import-outside-toplevel
+        from .opaque_compat import (  # pylint: disable=import-outside-toplevel
             register_custom_class,
             is_opaque_constant_type,
         )

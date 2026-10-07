@@ -25,9 +25,9 @@ try:
     from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
-        register_custom_class,
         MemberType,
     )
+    from transformer_engine.pytorch.dynamo.opaque_compat import register_custom_class
 
     _opaque_available = True
 except ImportError:
@@ -1944,6 +1944,28 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
             _assert_close_eager_compiled(fn, compiled, model, base)
 
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only te.Linear option")
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=lambda r: type(r).__name__)
+def test_te_linear_compiles_without_transpose_cache(fp8_recipe):
+    """torch.compile(fullgraph=True) of ``te.Linear(keep_fp8_weight_transpose_cache=False)``,
+    which drops the weight's columnwise usage that the fake forward must mirror."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    model = te.Linear(
+        64, 32, params_dtype=dtype, device=device, keep_fp8_weight_transpose_cache=False
+    )
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(32, 64, dtype=dtype, device=device)
+    _assert_close_eager_compiled(fn, compiled, model, base)
+
+
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("compile_mode", _compile_modes)
@@ -2082,6 +2104,8 @@ def test_te_linear_compile_eager_fallback(case):
     """Configs unsupported on the compiled custom-op path must fall back to
     eager under ``torch.compile`` -- warning + numerics identical to eager --
     and graph-break with the explicit reason under ``fullgraph=True``."""
+    if IS_HIP_EXTENSION and case == "fuse_wgrad_accumulation":
+        pytest.skip("ROCm does not support fused wgrad accumulation for torch.bfloat16.")
     dtype, device = torch.bfloat16, "cuda"
     torch.manual_seed(0)
     model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -295,8 +297,8 @@ class OpaqueValueBundle:
 
 
 try:
-    from torch._library.opaque_object import (
-        get_opaque_type_name,
+    from torch._library.opaque_object import get_opaque_type_name
+    from .opaque_compat import (
         is_opaque_constant_type as _is_opaque_constant_type,
         register_custom_class,
     )

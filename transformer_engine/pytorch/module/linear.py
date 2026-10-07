@@ -202,8 +202,6 @@ class LinearFwdArgs:
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
         if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
             return "a quantized input tensor"
-        if not self.keep_fp8_weight_transpose_cache:
-            return "keep_fp8_weight_transpose_cache=False (ROCm)"
         if self.use_fsdp2:
             return "use_fsdp2=True (ROCm)"
         if self.fsdp_group is not None:
@@ -907,14 +905,25 @@ def _linear_forward_fake(
     weightmat_aliases_weight = False
     if fp8_or_debug:
         if weight_quantizer is not None and (not weight.is_quantized or debug):
-            columnwise_usage = is_grad_enabled and args.input_requires_grad and not args.is_fsdp2
+            columnwise_usage = (
+                is_grad_enabled
+                and args.input_requires_grad
+                and not args.is_fsdp2
+                and args.keep_fp8_weight_transpose_cache
+            )
             if args.backward_override is not None:
                 columnwise_usage = False
-            if not columnwise_usage:
+            if not columnwise_usage and args.keep_fp8_weight_transpose_cache:
                 columnwise_usage = (
                     is_fp8_activation_recompute_enabled()
                     and not in_fp8_activation_recompute_phase()
                 )
+            if (
+                not columnwise_usage
+                and args.backward_override is None
+                and isinstance(weight_quantizer, NVFP4Quantizer)
+            ):
+                columnwise_usage = is_grad_enabled and args.input_requires_grad
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif weight.is_quantized:
             weight_quantizer = weight.quantizer
@@ -1006,6 +1015,17 @@ def _linear_forward_fake(
                 saved_inputmat = TensorSpec(
                     shape=tuple(inp.shape), dtype=activation_dtype, device=inp.device
                 )
+
+        # Mirror the impl's save-time columnwise usage for the dgrad GEMM.
+        if (
+            args.backward_override is None
+            and args.input_requires_grad
+            and args.keep_fp8_weight_transpose_cache
+            and not args.use_fsdp2
+            and weightmat_is_storage
+            and not weightmat_aliases_weight
+        ):
+            weightmat.update_usage(columnwise_usage=True)
 
         # Slot 1 -- ``wt_save``, with the impl's alias dedup (rebuilt in
         # ``_linear_setup_ctx`` instead of being saved twice).
