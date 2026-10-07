@@ -432,6 +432,8 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Buffer_Type softmax_offset_buf, Buffer_Type seed_buf,
                                Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                               Buffer_Type /*q_segment_ids*/, Buffer_Type /*kv_segment_ids*/,
+                               Buffer_Type /*q_segment_pos*/, Buffer_Type /*kv_segment_pos*/,
                                Buffer_Type q_scale_inv_buf, Buffer_Type k_scale_inv_buf,
                                Buffer_Type v_scale_inv_buf, Variadic_Buffer_Type _unused_args,
                                Result_Type output_buf, Result_Type softmax_aux_buf,
@@ -486,6 +488,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Arg<Buffer_Type>()      // kv_cu_seqlens
                                   .Arg<Buffer_Type>()      // q_seq_offsets
                                   .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .Arg<Buffer_Type>()      // q_segment_ids
+                                  .Arg<Buffer_Type>()      // kv_segment_ids
+                                  .Arg<Buffer_Type>()      // q_segment_pos
+                                  .Arg<Buffer_Type>()      // kv_segment_pos
                                   .Arg<Buffer_Type>()      // q_scale_inv
                                   .Arg<Buffer_Type>()      // k_scale_inv
                                   .Arg<Buffer_Type>()      // v_scale_inv
