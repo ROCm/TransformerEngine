@@ -514,6 +514,174 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
+model_configs_max_logit_extra = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "max_logit_extra_1": ModelConfig(
+        2, 1024, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding"
+    ),
+    "max_logit_extra_2": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding_causal"),
+    "max_logit_extra_3": ModelConfig(2, 16, 16, 128, max_seqlen_kv=2048),
+    "max_logit_extra_4": ModelConfig(2, 1024, 16, 64, attn_mask_type="causal"),
+    "max_logit_extra_5": ModelConfig(
+        2, 512, 16, 256, max_seqlen_kv=1024, attn_mask_type="causal_bottom_right"
+    ),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_max_logit_extra])
+@pytest.mark.parametrize("model", model_configs_max_logit_extra.keys())
+@pytest.mark.parametrize("qkv_layout", ["bshd_bshd_bshd", "sbhd_sbhd_sbhd", "thd_thd_thd"])
+def test_dpa_max_logit_extra(dtype, model_configs, model, qkv_layout):
+    """Test max_logit with padded rows, decode-size queries and head dims 64/256"""
+    config = model_configs[model]
+    config.return_max_logit = True
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
+@pytest.mark.parametrize(
+    "attn_mask_type", ["no_mask", "causal", "causal_bottom_right", "padding", "padding_causal"]
+)
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("seqlen_q", [16, 1024])
+@pytest.mark.parametrize("num_gqa_groups", [8, 2])
+def test_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups):
+    """Test that the fused max_logit is the exact max over the unmasked scores.
+
+    The scores are negative with a unit-scale spread. The max of most rows then keeps growing after
+    the first KV tile by less than the rescale threshold of online-softmax kernels, so a kernel that
+    reports its running max is off by about 0.3-1. Padded rows left at 0 would raise the result.
+    The comparison tests use logits too small to tell these apart.
+    """
+    if qkv_format == "thd" and "padding" not in attn_mask_type:
+        pytest.skip("thd requires a padding mask.")
+    dtype = torch.bfloat16
+    batch, num_heads, seqlen_kv = 2, 8, 2048
+    config = ModelConfig(
+        batch,
+        seqlen_q,
+        num_heads,
+        head_dim,
+        num_gqa_groups=num_gqa_groups,
+        max_seqlen_kv=seqlen_kv,
+        attn_mask_type=attn_mask_type,
+        return_max_logit=True,
+    )
+    qkv_layout = "_".join([qkv_format] * 3)
+    available_backends, _, _ = get_available_attention_backends(
+        config, qkv_dtype=dtype, qkv_layout=qkv_layout, pad_between_seqs=qkv_format == "thd"
+    )
+    if not available_backends[1]:
+        pytest.skip("No fused attention backend supports this configuration.")
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    if IS_HIP_EXTENSION:
+        os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    # Actual lengths. Padded rows and the gaps between thd sequences hold data that must not count.
+    padding = "padding" in attn_mask_type
+    seqlens_q = [seqlen_q, seqlen_q // 2 + 3] if padding else [seqlen_q] * batch
+    seqlens_kv = [seqlen_kv - 5, seqlen_kv // 3] if padding else [seqlen_kv] * batch
+    gap = 7 if qkv_format == "thd" else 0
+
+    def make(seqlens, max_seqlen, heads, sign):
+        if qkv_format == "thd":
+            shape = [sum(seqlens) + gap * batch, heads, head_dim]
+        elif qkv_format == "bshd":
+            shape = [batch, max_seqlen, heads, head_dim]
+        else:
+            shape = [max_seqlen, batch, heads, head_dim]
+        return (sign * torch.randn(shape, device="cuda").abs()).to(dtype)
+
+    def cu_seqlens(lengths):
+        lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+        cumsum = lengths.cumsum(0, dtype=torch.int32)
+        return torch.nn.functional.pad(cumsum, (1, 0))
+
+    # q >= 0 and k <= 0, so every score is negative
+    scale = head_dim**-0.5
+    q = make(seqlens_q, seqlen_q, num_heads, 1)
+    k = make(seqlens_kv, seqlen_kv, num_gqa_groups, -1)
+    v = torch.randn_like(k)
+    kwargs = {}
+    if padding:
+        kwargs = dict(cu_seqlens_q=cu_seqlens(seqlens_q), cu_seqlens_kv=cu_seqlens(seqlens_kv))
+    if qkv_format == "thd":
+        kwargs.update(
+            cu_seqlens_q_padded=cu_seqlens([s + gap for s in seqlens_q]),
+            cu_seqlens_kv_padded=cu_seqlens([s + gap for s in seqlens_kv]),
+            max_seqlen_q=seqlen_q,
+            max_seqlen_kv=seqlen_kv,
+        )
+    block = DotProductAttention(
+        num_heads,
+        head_dim,
+        num_gqa_groups=num_gqa_groups,
+        attention_dropout=0.0,
+        qkv_format=qkv_format,
+        attn_mask_type=attn_mask_type,
+        softmax_scale=scale,
+        return_max_logit=True,
+    )
+    with torch.no_grad():
+        _, max_logit = block(q, k, v, **kwargs)
+
+    reference = torch.full((num_heads,), float("-inf"), device="cuda")
+    q_start, kv_start = 0, 0
+    for b in range(batch):
+        sq, skv = seqlens_q[b], seqlens_kv[b]
+        if qkv_format == "thd":
+            qb, kb = q[q_start : q_start + sq], k[kv_start : kv_start + skv]
+            q_start, kv_start = q_start + sq + gap, kv_start + skv + gap
+        elif qkv_format == "bshd":
+            qb, kb = q[b, :sq], k[b, :skv]
+        else:
+            qb, kb = q[:sq, b], k[:skv, b]
+        kb = kb.repeat_interleave(num_heads // num_gqa_groups, dim=1)
+        scores = torch.einsum("ihd,jhd->hij", qb.float(), kb.float()) * scale
+        if "causal" in attn_mask_type:
+            shift = skv - sq if "bottom_right" in attn_mask_type else 0
+            i = torch.arange(sq, device="cuda")[:, None]
+            j = torch.arange(skv, device="cuda")[None, :]
+            scores = scores.masked_fill(j > i + shift, float("-inf"))
+        reference = torch.maximum(reference, scores.amax(dim=(1, 2)))
+    torch.testing.assert_close(max_logit.float(), reference, atol=0.05, rtol=1e-2)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm backend selection.")
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {"attn_bias_type": "post_scale_bias"},
+        {"attn_bias_type": "alibi", "attn_mask_type": "causal"},
+        {"dropout_p": 0.1},
+        {"softmax_type": "off-by-one"},
+        {"softmax_type": "learnable"},
+    ],
+    ids=["post_scale_bias", "alibi", "dropout", "off-by-one", "learnable"],
+)
+def test_dpa_max_logit_ck_fallback(unsupported):
+    """CK returns max_logit only without bias, dropout or softmax offset; others use unfused"""
+    config = ModelConfig(2, 1024, 16, 128, **unsupported)
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config, qkv_dtype=torch.bfloat16, qkv_layout="bshd_bshd_bshd"
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("CK does not support this configuration.")
+    config.return_max_logit = True
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config, qkv_dtype=torch.bfloat16, qkv_layout="bshd_bshd_bshd"
+    )
+    assert not fused_attn_backends and available_backends[2]
+
+
 model_configs_num_splits = {
     # test: ModelConfig(b, sq, hq, dqk)
     "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),

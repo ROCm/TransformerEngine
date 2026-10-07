@@ -655,8 +655,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         return_max_logit: Optional[bool] = False,
         name: Optional[str] = None,
     ) -> None:
-        if IS_HIP_EXTENSION:
-            assert not return_max_logit, "ROCm does not support return_max_logit yet."
         super().__init__(name=name)
 
         # Cache the native recipe labels inferred from custom DPA quantizers.

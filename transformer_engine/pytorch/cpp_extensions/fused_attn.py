@@ -320,14 +320,13 @@ def fused_attn_fwd(
                        softmaxStats: torch.Tensor
                            log(sum(e^(x - max(x)))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
+                    3. if fused_attention_backend == FusedAttnBackend["CK"] (ROCm)
+                       softmaxStats and Max as in 1.; for thd both are [tokens_q, num_heads, 1]
                 rng_state: torch.Tensor
                     state of the random number generator;
                     [seed, offset], dtype uint64
     max_logit : if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
-
-    if IS_HIP_EXTENSION:
-        assert not return_max_logit, "ROCm does not support return_max_logit yet."
 
     if bottom_right_diagonal is None:
         bottom_right_diagonal = attn_mask_type in {
@@ -411,7 +410,7 @@ def fused_attn_fwd(
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
-        # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
+        # thd (newer cuDNN runtimes, non-sm120, CK): output_tensors: out [tq, h, d], Stats [tq, h, 1], Max [tq, h, 1]
         # thd (older cuDNN runtimes or sm120):   output_tensors: out [tq, h, d],    Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # bshd:                                  output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # sbhd:                                  output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]

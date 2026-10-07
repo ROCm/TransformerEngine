@@ -128,6 +128,7 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
   log_value(log_file, "bias_ptr", fmha_args.bias_ptr);
   log_value(log_file, "rand_val_ptr", fmha_args.rand_val_ptr);
   log_value(log_file, "lse_ptr", fmha_args.lse_ptr);
+  log_value(log_file, "max_ptr", fmha_args.max_ptr);
   log_value(log_file, "o_ptr", fmha_args.o_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
@@ -242,6 +243,7 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   fmha_args.bias_ptr = bias_type==bias_enum::alibi? args.alibi_slope_ptr : args.bias_ptr;
   fmha_args.lse_ptr  = args.lse_ptr;
+  fmha_args.max_ptr  = args.max_ptr;
   fmha_args.o_ptr    = args.o_ptr;
 
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
@@ -332,6 +334,11 @@ bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
+
+  // Only the CK kernels that store the LSE write the max logit; the v3 and split-KV paths do not.
+  if(args.max_ptr != nullptr && (args.lse_ptr == nullptr || args.uses_fwd_v3 || args.num_splits > 0)){
+    throw std::runtime_error("ck_fused_attn fwd: max logit requires lse_ptr and the CK path (no v3, no split-KV).");
+  }
 
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   auto* log_file = get_ck_log_stream();
