@@ -380,6 +380,12 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
+#ifdef USE_ROCM
+  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
+  if (transformer_engine::cuda::sm_arch() != 125) {
+    return std::nullopt;
+  }
+#endif
   if (input.get_with_gemm_swizzled_scales()) {
     return std::nullopt;
   }

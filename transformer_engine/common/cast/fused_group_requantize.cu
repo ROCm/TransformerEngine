@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -20,6 +22,9 @@
 #include "../util/ptx_arch_spec.cuh"
 #include "../utils.cuh"
 #include "mxfp8/swizzle.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_fused_group_requantize.cuh"
+#endif
 
 namespace transformer_engine {
 namespace requantize {
@@ -38,6 +43,7 @@ static_assert(kRowsPerGatherIteration == 16);
 static_assert(kGatherIterations == 2);
 static_assert(kThreads == kTileCols);
 
+#ifndef __HIP_PLATFORM_AMD__  // ROCm kernel in rocm_fused_group_requantize.cuh
 __device__ __forceinline__ uint16_t e8m0_to_bf16_bits(const e8m0_t biased_exp) {
   // E8M0 encodes the exponent bits directly. Codes 0 and 255 need explicit handling because
   // 2^-127 is BF16-subnormal and 255 represents NaN.
@@ -412,14 +418,17 @@ void launch_fused_group_requantize(const Tensor &input, Tensor *output,
           reinterpret_cast<const int64_t *>(tensor_offsets.data.dptr), num_groups, num_cols,
           input_scale_stride);
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &tensor_offsets,
                             Tensor *dequantized, const QuantizationConfig *quant_config,
                             cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
 
   NVTE_CHECK(is_supported_by_CC_100(),
              "Fused grouped requantization requires Blackwell (SM100+) hardware.");
+#endif
   NVTE_CHECK(input.scaling_mode == NVTE_MXFP8_1D_SCALING, "Input must use MXFP8 1D scaling.");
   NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING, "Output must use MXFP8 1D scaling.");
   NVTE_CHECK(input.has_data(), "Input must have rowwise MXFP8 data.");
@@ -504,16 +513,39 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
   }
 
   NVTE_CHECK(is_aligned_ptr(input.data.dptr, 16), "Input data pointer must be 16B aligned.");
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(is_aligned_ptr(output->columnwise_data.dptr, ROCM_VEC_BYTES),
+             "Output data pointer must be 16B aligned.");
+#else
   NVTE_CHECK(is_aligned_ptr(output->columnwise_data.dptr, TMA_GMEM_ALIGNMENT),
              "Output data pointer must be 16B aligned.");
+#endif
 
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm GEMMs read compact scales, so both directions stay compact.
+  output->with_gemm_swizzled_scales = false;
+#else
   // Both scale directions come out GEMM-swizzled; make the metadata say so for
   // every caller, not just the PyTorch integration.
   output->with_gemm_swizzled_scales = true;
+#endif
 
   if (num_rows == 0) {
     return;
   }
+
+#ifdef __HIP_PLATFORM_AMD__
+  const bool use_fast_math = quant_config != nullptr && quant_config->use_fast_math;
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_fast_math, USE_FAST_MATH,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          input.data.dtype, IType,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              return_dequantized, RETURN_DEQUANTIZED,
+              rocm_launch_fused_group_requantize<IType, USE_FAST_MATH, RETURN_DEQUANTIZED>(
+                  input, output, tensor_offsets, dequantized, num_groups, num_rows, num_cols,
+                  input_scale_stride, stream););););  // NOLINT(*)
+#else
 
   alignas(64) CUtensorMap output_tensor_map{};
   create_2D_tensor_map(output_tensor_map, output->columnwise_data, num_rows, num_cols, kTileRows,
@@ -529,6 +561,7 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
               launch_fused_group_requantize<IType, USE_FAST_MATH, RETURN_DEQUANTIZED>(
                   input, output, tensor_offsets, dequantized, num_groups, num_rows, num_cols,
                   input_scale_stride, output_tensor_map, stream););););  // NOLINT(*)
+#endif  // __HIP_PLATFORM_AMD__
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

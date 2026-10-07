@@ -39,11 +39,14 @@
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "swizzle.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_group_scaled_swiglu_mxfp8.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
-#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
+#ifndef __HIP_PLATFORM_AMD__  // ROCm kernel in rocm_group_scaled_swiglu_mxfp8.cuh
 namespace group_scaled_swiglu_kernel {
 
 using namespace dispatch::common;
@@ -399,12 +402,11 @@ template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
                          GroupedTensor *output, const ParamOP &p,
                          const QuantizationConfig *quant_config, cudaStream_t stream) {
-#ifdef __HIP_PLATFORM_AMD__  // Disabled on ROCm
-  NVTE_ERROR("group_scaled_swiglu is not supported on ROCm.");
-#else
   using namespace group_scaled_swiglu_kernel;
 
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
   CheckNoopTensor(*noop, "cast_noop");
 
   NVTE_CHECK(output->has_columnwise_data(),
@@ -456,6 +458,27 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
   const size_t work_blocks_X = DIVUP(H, static_cast<size_t>(CHUNK_DIM_X));
 
   NVTE_CHECK(N % 128 == 0, "group_scaled_swiglu requires N divisible by 128.");
+
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm GEMMs read compact scales, so, as in group_quantize, the swizzle request is not
+  // honored and the scales come out compact.
+  (void)with_gemm_swizzled_scales;
+  (void)work_blocks_X;
+  (void)work_blocks_Y;
+  e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
+  NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input->dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+          rocm_group_scaled_swiglu<ParamOP, OP>(
+              reinterpret_cast<const IType *>(input->data.dptr),
+              reinterpret_cast<const IType *>(prob->data.dptr),
+              reinterpret_cast<OType *>(output->columnwise_data.dptr), scales_colwise_ptr,
+              reinterpret_cast<const float *>(noop->data.dptr),
+              reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr), num_tensors, N, H,
+              p, stream);););  // NOLINT(*)
+#else
 
   const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
   const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;

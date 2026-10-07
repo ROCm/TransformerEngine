@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -55,9 +57,11 @@ class FusedGroupRequantizeTestSuite
           std::tuple<FusedGroupRequantizeCase, DType, bool, bool>> {};
 
 TEST_P(FusedGroupRequantizeTestSuite, MatchesUnfusedChainReference) {
+#ifndef __HIP_PLATFORM_AMD__
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP() << "Fused grouped MXFP8 requantization requires Blackwell or newer";
   }
+#endif
 
   const auto test_case = std::get<0>(GetParam());
   const DType input_type = std::get<1>(GetParam());
@@ -166,7 +170,16 @@ TEST_P(FusedGroupRequantizeTestSuite, MatchesUnfusedChainReference) {
   ASSERT_EQ(cudaMemcpy(rowwise_swizzled_ref.rowwise_dptr(), input_mxfp8.rowwise_dptr(),
                        num_rows * hidden_size, cudaMemcpyDeviceToDevice),
             cudaSuccess);
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm GEMMs read compact scales, so the kernel copies the rowwise scales verbatim.
+  ASSERT_EQ(
+      cudaMemcpy(nvte_get_tensor_param(rowwise_swizzled_ref.data(), kNVTERowwiseScaleInv).data_ptr,
+                 nvte_get_tensor_param(input_mxfp8.data(), kNVTERowwiseScaleInv).data_ptr,
+                 num_rows * hidden_size / MXFP8_SCALE_DIM, cudaMemcpyDeviceToDevice),
+      cudaSuccess);
+#else
   nvte_swizzle_scaling_factors(input_mxfp8.data(), rowwise_swizzled_ref.data(), 0);
+#endif
 
   // Columnwise reference, one group at a time through the production single-tensor
   // kernels: slice the intermediate, quantize columnwise, swizzle. Group blocks
@@ -210,7 +223,16 @@ TEST_P(FusedGroupRequantizeTestSuite, MatchesUnfusedChainReference) {
     ASSERT_EQ(cudaMemcpy(group_swizzled.columnwise_dptr(), group_quantized.columnwise_dptr(),
                          group_rows * hidden_size, cudaMemcpyDeviceToDevice),
               cudaSuccess);
+#ifdef __HIP_PLATFORM_AMD__
+    // ROCm keeps the columnwise scales compact as well.
+    ASSERT_EQ(cudaMemcpy(
+                  nvte_get_tensor_param(group_swizzled.data(), kNVTEColumnwiseScaleInv).data_ptr,
+                  nvte_get_tensor_param(group_quantized.data(), kNVTEColumnwiseScaleInv).data_ptr,
+                  group_rows / MXFP8_SCALE_DIM * hidden_size, cudaMemcpyDeviceToDevice),
+              cudaSuccess);
+#else
     nvte_swizzle_scaling_factors(group_quantized.data(), group_swizzled.data(), 0);
+#endif
 
     group_swizzled.to_cpu();
     const auto *group_data =
