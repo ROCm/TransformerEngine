@@ -1397,6 +1397,7 @@ void fused_attn_ck_fwd(
              "ROCm fused attention requires Q, K, and V to have the same dtype.");
   if(is_fp8){
     NVTE_CHECK(!is_training, "AITER FP8 ASM fused attention is forward-inference only.");
+    // FP8 E4M3 input is accepted only with BF16 output for AITER fp8bf16 kernels.
     NVTE_CHECK(O_type == DType::kBFloat16,
                "AITER fp8bf16 fused attention requires BF16 output.");
     NVTE_CHECK(input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
