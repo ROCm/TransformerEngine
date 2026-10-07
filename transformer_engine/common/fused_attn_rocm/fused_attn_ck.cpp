@@ -569,8 +569,7 @@ void fused_attn_ck_fwd_impl(
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
 
-  // the small-seq kernels do not write the max logit
-  if(ck_small_seq_env_enabled && !return_max_logit) {
+  if(ck_small_seq_env_enabled) {
     if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
       if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
                                      h, hg, softmax_type)) {
@@ -585,6 +584,10 @@ void fused_attn_ck_fwd_impl(
       }
     }
   }
+  // The small-seq kernels do not write the max logit, and the backward picks them on its own, so
+  // the backend selection (is_small_seq_possible) keeps such configs away from ck.
+  NVTE_CHECK(!(return_max_logit && ck_small_seq_enabled),
+             "The CK small-seq kernels do not return the max logit.");
 
   void* devPtrAlibiSlope = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
@@ -723,11 +726,13 @@ void fused_attn_ck_fwd_impl(
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrSoftmaxLSEWithoutPadding, 0xF0, h*max_tokens_q*sizeof(float), stream));
   }
   if(return_max_logit){
-    // Rows that ck does not write (padding) must not contribute to the max: use -inf. The remaps
-    // below do not cover every row of the output (e.g. SBHD+padding copies only the valid
-    // tokens), so prefill the output as well.
+    // Rows that ck does not write (padding) must not contribute to the max: use -inf. In batch
+    // mode ck writes every row and the BSHD->THD remap copies every row back, but the SBHD+padding
+    // remap copies only the valid tokens and THD leaves the rows past the last sequence.
     const float neg_inf = -std::numeric_limits<float>::infinity();
-    fill_float(devPtrMax, is_ragged ? max_tokens_q*h : b*h*s_q, neg_inf, stream);
+    if((is_SBHD && is_padding) || is_ragged){
+      fill_float(devPtrMax, is_ragged ? max_tokens_q*h : b*h*s_q, neg_inf, stream);
+    }
     if(devPtrMaxWithoutPadding){
       fill_float(devPtrMaxWithoutPadding, h*max_tokens_q, neg_inf, stream);
     }
@@ -1453,7 +1458,7 @@ void fused_attn_ck_fwd(
   size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
-  const bool has_bias = (bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI);
+  const bool has_bias           = (bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI);
   const bool has_softmax_offset = softmax_type != NVTE_VANILLA_SOFTMAX;
   void *devPtrMax = nullptr;
   size_t i = 0;

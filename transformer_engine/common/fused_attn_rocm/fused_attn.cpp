@@ -293,20 +293,30 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
-  // Only ck returns the max logit, from its tile kernels without bias, dropout or softmax offset on
-  // the archs whose pipelines write it. The opt-in small-seq kernels do not write it, and the
-  // backward cannot tell that the forward skipped them, so configs that may use them go elsewhere.
-  const bool ck_supports_max_logit = !return_max_logit ||
-      ((cuda::sm_arch() == 94 || cuda::sm_arch() == 95) &&
-       bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0f &&
-       softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX &&
-       !fused_attn_rocm::is_small_seq_possible(
-           static_cast<DType>(q_dtype), qkv_layout, bias_type, attn_mask_type, dropout,
-           max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, num_attn_heads, num_gqa_groups,
-           softmax_type));
+  // Only ck returns the max logit, from its tile kernels without bias or dropout on the archs whose
+  // pipelines write it. The opt-in small-seq kernels do not write it, and the backward cannot tell
+  // that the forward skipped them, so configs that may use them go elsewhere.
+  const char* ck_max_logit_unsupported = nullptr;
+  if(return_max_logit){
+    if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95){
+      ck_max_logit_unsupported = "on this arch";
+    }else if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS){
+      ck_max_logit_unsupported = "with bias";
+    }else if(dropout != 0.0f){
+      ck_max_logit_unsupported = "with dropout";
+    }else if(fused_attn_rocm::is_small_seq_possible(
+                 static_cast<DType>(q_dtype), qkv_layout, bias_type, attn_mask_type, dropout,
+                 max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, num_attn_heads,
+                 num_gqa_groups, softmax_type)){
+      ck_max_logit_unsupported = "when the small-seq kernels may run (NVTE_FUSED_ATTN_CK_SMALLSEQ=1)";
+    }
+  }
+  if(ck_max_logit_unsupported && getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG")){
+    std::cout<<"return_max_logit: ck does not return the max logit "<<ck_max_logit_unsupported<<std::endl;
+  }
 
   // first check whether ck can be used, then check aotriton
-  if(nvte_fused_attn_ck && ck_supports_max_logit && fused_attn_rocm::is_ck_backend_supported(
+  if(nvte_fused_attn_ck && !ck_max_logit_unsupported && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
         qkv_layout,

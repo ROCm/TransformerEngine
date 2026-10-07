@@ -420,7 +420,8 @@ def fused_attn_fwd(
         max_tensor = output_tensors[2]
         amax_dims = (0, 2) if max_tensor.ndim == 3 else (0, 2, 3)
 
-        if qkv_format == "thd":
+        # CK already writes -inf to the Max rows outside the sequences
+        if qkv_format == "thd" and fused_attention_backend != FusedAttnBackend["CK"]:
             if max_tensor.ndim == 4:
                 # For THD on cuDNN <= 9.6 or THD on sm120, Max tensor can be [b, h, sq, 1]
                 # with padded sequence positions. Exclude those padded positions when computing max_logit.
