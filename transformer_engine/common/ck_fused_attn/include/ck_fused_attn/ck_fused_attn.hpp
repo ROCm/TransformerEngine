@@ -103,8 +103,7 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
   // For FP8 E4M3 input, the AITER fp8bf16 kernels require BF16.  
   DType o_dtype = DType::kNumTypes;
 
-  // Per-tensor inverse scales for FP8 Q/K/V. AITER's fp8bf16 ASM kernels
-  // consume one fp32 value for each input tensor.
+  // Per-tensor inverse scales for FP8 Q/K/V: one FP32 value per tensor.
   const void* q_descale_ptr = nullptr;
   const void* k_descale_ptr = nullptr;
   const void* v_descale_ptr = nullptr;
