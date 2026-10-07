@@ -460,9 +460,10 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
   NVTE_CHECK(N % 128 == 0, "group_scaled_swiglu requires N divisible by 128.");
 
 #ifdef __HIP_PLATFORM_AMD__
-  // ROCm GEMMs read compact scales, so, as in group_quantize, the swizzle request is not
-  // honored and the scales come out compact.
+  // ROCm GEMMs read compact scales, so the swizzle request is not honored; record that the
+  // scales come out compact so a caller needing them swizzled (gfx1250) still swizzles them.
   (void)with_gemm_swizzled_scales;
+  output->with_gemm_swizzled_scales = false;
   (void)work_blocks_X;
   (void)work_blocks_Y;
   e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);

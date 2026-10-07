@@ -909,11 +909,6 @@ class TestGroupedTensor:
         or a mis-applied clamp all surface as codes differing far beyond the rounding budget
         that ``_assert_mxfp8_matches_reference`` allows.
         """
-        if optimize_for_gemm and IS_HIP_EXTENSION:
-            pytest.skip(
-                "ROCm writes compact scales under optimize_for_gemm but flags them swizzled,"
-                " and cannot dequantize swizzle-flagged MXFP8 outside gfx1250"
-            )
         limit, alpha, glu_linear_offset = (7.0, 1.702, 1.0) if clamped else (None, 1.0, 0.0)
 
         # Row counts are multiples of the kernel's 128-row chunk, and deliberately unequal so
@@ -950,6 +945,16 @@ class TestGroupedTensor:
             grouped_output = tex.group_scaled_swiglu(
                 input_2h, prob, quantizer, num_tensors, first_dims
             )
+
+        if IS_HIP_EXTENSION:
+            # ROCm GEMMs read compact scales, so the kernel writes them compact and says so.
+            assert not grouped_output._with_gemm_swizzled_scales
+            if optimize_for_gemm:
+                pytest.skip(
+                    "Per-expert tensors and the reference quantize take their scale layout from"
+                    " quantizer.optimize_for_gemm, so ROCm flags their compact scales swizzled"
+                    " and cannot dequantize them outside gfx1250"
+                )
 
         outputs = grouped_output.split_into_quantized_tensors()
         assert len(outputs) == num_tensors

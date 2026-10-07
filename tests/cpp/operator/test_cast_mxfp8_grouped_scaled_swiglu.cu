@@ -350,6 +350,13 @@ void performTest(const ShapeRepresentation shape_rep,
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+#ifdef __HIP_PLATFORM_AMD__
+    uint8_t out_swizzled = 1;
+    nvte_get_grouped_tensor_param(out_group_tensor,
+                                  NVTEGroupedTensorParam::kNVTEGroupedWithGEMMSwizzledScales,
+                                  &out_swizzled, sizeof(out_swizzled), nullptr);
+    EXPECT_EQ(out_swizzled, 0) << "ROCm writes compact scales and must flag them as such";
+#endif
 
     std::vector<OutputType> out_data_h(out_elts);
     std::vector<fp8e8m0> out_scales_h(sfs_num);

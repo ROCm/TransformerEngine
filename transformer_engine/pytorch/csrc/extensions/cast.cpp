@@ -547,6 +547,12 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
     }
   });
 
+#ifdef USE_ROCM
+  // The kernel records the scale layout it wrote (compact on ROCm).
+  grouped_output_py.attr("_with_gemm_swizzled_scales") =
+      py::cast(grouped_output_tensor_cpp.get_with_gemm_swizzled_scales());
+#endif
+
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
