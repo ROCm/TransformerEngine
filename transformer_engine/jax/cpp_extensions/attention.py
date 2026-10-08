@@ -741,7 +741,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def _uses_thd_ragged_max_tensor(config):
-        """Return whether cuDNN writes THD Max with BSH-like ragged-stats layout."""
+        """Return whether the backend writes THD Max with BSH-like ragged-stats layout."""
+        if is_hip_extension():
+            # CK writes THD softmax stats and Max token-major (see the CK shape in abstract).
+            return config.qkv_layout.is_thd()
         return (
             config.qkv_layout.is_thd()
             and get_cudnn_version() >= (9, 6, 0)

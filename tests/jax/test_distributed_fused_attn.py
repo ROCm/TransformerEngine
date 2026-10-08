@@ -611,6 +611,8 @@ class TestDistributedContextParallelSelfAttn:
         )
         if window_size != (-1, -1) and not supports_swa:
             pytest.skip("CP SWA requires THD All-Gather or unrolled THD Ring.")
+        if is_hip_extension() and is_thd and cp_strategy == CPStrategy.ALL_GATHER:
+            pytest.skip("THD + ALL_GATHER + Striped attention is not yet supported on ROCm")
         # TODO: Evaluate cuDNN Max mismatches observed for striped multi-segment THD Ring GQA.
         if is_thd and cp_strategy == CPStrategy.RING and kv_groups > 1:
             pytest.skip("THD Ring GQA Max mismatches require further evaluation.")

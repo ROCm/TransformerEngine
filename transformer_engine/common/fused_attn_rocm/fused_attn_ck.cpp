@@ -4,7 +4,9 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <algorithm>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
@@ -168,6 +170,36 @@ bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
                                     size_t runtime_max_seqlen_kv) {
   return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
          runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
+}
+
+bool is_small_seq_possible(DType dtype,
+                           NVTE_QKV_Layout qkv_layout,
+                           NVTE_Bias_Type bias_type,
+                           NVTE_Mask_Type mask_type,
+                           float dropout,
+                           size_t max_seqlen_q,
+                           size_t max_seqlen_kv,
+                           size_t head_dim_qk,
+                           size_t head_dim_v,
+                           size_t num_attn_heads,
+                           size_t num_gqa_groups,
+                           NVTE_Softmax_Type softmax_type) {
+  if(getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") != "1") {
+    return false;
+  }
+  if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95) {
+    return false;
+  }
+  if(!is_small_seq_supported_static(dtype, bias_type, mask_type, dropout, head_dim_qk, head_dim_v,
+                                    num_attn_heads, num_gqa_groups, softmax_type)) {
+    return false;
+  }
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if(qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    return true;
+  }
+  return qkv_format == NVTE_QKV_Format::NVTE_BSHD && max_seqlen_q == max_seqlen_kv &&
+         max_seqlen_q >= 2 && max_seqlen_q <= kSmallSeqMaxSeqlen;
 }
 
 
@@ -475,31 +507,48 @@ void pad_remap_lse(
   }
 }
 
+// fill n floats with value
+__global__ void fill_float_kernel(float* ptr, uint64_t n, float value){
+  for(uint64_t i = blockIdx.x * static_cast<uint64_t>(blockDim.x) + threadIdx.x; i < n;
+      i += static_cast<uint64_t>(gridDim.x) * blockDim.x){
+    ptr[i] = value;
+  }
+}
+
+void fill_float(void* ptr, uint64_t n, float value, cudaStream_t stream){
+  constexpr int THREADS_PER_BLOCK = 256;
+  const uint64_t blocks = std::min<uint64_t>((n + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, 4096);
+  if(blocks > 0){
+    fill_float_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(static_cast<float*>(ptr), n, value);
+  }
+}
+
 // actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
   size_t max_tokens_q, size_t max_tokens_kv,
-  bool is_training, float scaling_factor, float dropout_probability,
+  bool is_training, bool return_max_logit, float scaling_factor, float dropout_probability,
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
   void *devPtrQ, void *devPtrK, void *devPtrV, void* devPtrBias,
   void *devPtrSoftmaxOffset,
-  void *devPtrSoftmaxAux, void *devPtrO,
+  void *devPtrSoftmaxAux, void *devPtrMax, void *devPtrO,
   void* devPtrDropoutSeed, void* devPtrDropoutOffset,
   void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
   void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsKV,
   DType dtype,
-  void *workspace, 
+  void *workspace,
   size_t *workspace_size,
   cudaStream_t stream){
 
   const bool has_sink = softmax_type != NVTE_VANILLA_SOFTMAX;
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
-  // ASM v3 does not support sink; force CK tile path
-  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
+  // ASM v3 supports neither sink nor the max logit; force CK tile path.
+  // This also turns off the native split-KV path, which is only used together with v3.
+  bool nvte_ck_uses_fwd_v3 = !has_sink && !return_max_logit && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
@@ -541,6 +590,10 @@ void fused_attn_ck_fwd_impl(
       }
     }
   }
+  // The small-seq kernels do not write the max logit, and the backward picks them on its own, so
+  // the backend selection (is_small_seq_possible) keeps such configs away from ck.
+  NVTE_CHECK(!(return_max_logit && ck_small_seq_enabled),
+             "The CK small-seq kernels do not return the max logit.");
 
   void* devPtrAlibiSlope = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
@@ -551,6 +604,11 @@ void fused_attn_ck_fwd_impl(
   void* devPtrSoftmaxLSEWithoutPadding = nullptr;
   if((is_SBHD && is_padding) || bshd_to_thd || is_ragged || ck_small_seq_enabled){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
+  }
+  // the max logit has the lse layout, so the group mode paths need the same scratch and remap
+  void* devPtrMaxWithoutPadding = nullptr;
+  if(return_max_logit && ((is_SBHD && is_padding) || bshd_to_thd || is_ragged)){
+    devPtrMaxWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
   }
 
   void* devPtrQWithoutPadding = nullptr;
@@ -631,6 +689,7 @@ void fused_attn_ck_fwd_impl(
 
   NVTE_CHECK(!has_sink || devPtrSoftmaxOffset != nullptr,
            "softmax_offset is required for non-vanilla softmax");
+  NVTE_CHECK(!return_max_logit || devPtrMax != nullptr, "Max is required when return_max_logit is set");
 
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
@@ -672,6 +731,18 @@ void fused_attn_ck_fwd_impl(
     // correction, produce NaNs when they read that garbage.
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrSoftmaxLSEWithoutPadding, 0xF0, h*max_tokens_q*sizeof(float), stream));
   }
+  if(return_max_logit){
+    // Rows that ck does not write (padding) must not contribute to the max: use -inf. In batch
+    // mode ck writes every row and the BSHD->THD remap copies every row back, but the SBHD+padding
+    // remap copies only the valid tokens and THD leaves the rows past the last sequence.
+    const float neg_inf = -std::numeric_limits<float>::infinity();
+    if((is_SBHD && is_padding) || is_ragged){
+      fill_float(devPtrMax, is_ragged ? max_tokens_q*h : b*h*s_q, neg_inf, stream);
+    }
+    if(devPtrMaxWithoutPadding){
+      fill_float(devPtrMaxWithoutPadding, h*max_tokens_q, neg_inf, stream);
+    }
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";
@@ -709,7 +780,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
     std::cout<<"num_splits: "<<ck_args.num_splits<<", ";
     std::cout<<"has_sink: "<<has_sink<<", ";
-    std::cout<<"sink_ptr: "<<(has_sink ? devPtrSoftmaxOffset : nullptr)<<std::endl;
+    std::cout<<"sink_ptr: "<<(has_sink ? devPtrSoftmaxOffset : nullptr)<<", ";
+    std::cout<<"return_max_logit: "<<return_max_logit<<std::endl;
   }
 
   // ---------------------------------------------------------------------------
@@ -784,10 +856,15 @@ void fused_attn_ck_fwd_impl(
     ck_args.o_ptr = devPtrOWithoutPadding;
     ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[0];
     ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    ck_args.max_ptr = devPtrMaxWithoutPadding;
     NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
     // add padding for o and softmax_lse
     pad_remap<PadDirection::Add>(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrOWithoutPadding, stream);
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
+    if(return_max_logit){
+      pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrMax, devPtrCuSeqlensQ,
+                                       devPtrCuSeqlenPaddedQ, devPtrMaxWithoutPadding, stream);
+    }
   }else if(bshd_to_thd || is_ragged){
     ck_args.max_tokens_q = max_tokens_q;
     ck_args.q_ptr = devPtrQ;
@@ -803,9 +880,14 @@ void fused_attn_ck_fwd_impl(
     ck_args.o_ptr = devPtrO;
     ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
     ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    ck_args.max_ptr = devPtrMaxWithoutPadding;
     NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
     // aiter asm output softmax_lse with padding
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
+    if(return_max_logit){
+      pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, is_ragged, devPtrMax, devPtrCuSeqlenPaddedQ,
+                                       devPtrCuSeqlenPaddedQ, devPtrMaxWithoutPadding, stream);
+    }
   }else{
     ck_args.bias_b = bias_b; ck_args.bias_h = bias_h;
     ck_args.q_ptr = devPtrQ;
@@ -820,6 +902,7 @@ void fused_attn_ck_fwd_impl(
     ck_args.o_ptr = devPtrO;
     ck_args.stride_b_o = o_stride[0]; ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
     ck_args.lse_ptr = devPtrSoftmaxAux;
+    ck_args.max_ptr = return_max_logit ? devPtrMax : nullptr;
     NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
   }
 }
@@ -1335,7 +1418,7 @@ using namespace transformer_engine::fused_attn_rocm;
 
 void fused_attn_ck_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
-  bool is_training, float attn_scale, float dropout, 
+  bool is_training, bool return_max_logit, float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
@@ -1381,6 +1464,9 @@ void fused_attn_ck_fwd(
   size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
   bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+  const bool has_bias           = (bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI);
+  const bool has_softmax_offset = softmax_type != NVTE_VANILLA_SOFTMAX;
+  void *devPtrMax = nullptr;
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1392,19 +1478,27 @@ void fused_attn_ck_fwd(
     }
     output_S->data.dtype = DType::kFloat32;
 
+    // Max (per-row max logit) has the same shape and type as S and follows it in the pack
+    if (return_max_logit) {
+      Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_Max->data.dptr = nullptr;
+      output_Max->data.shape = output_S->data.shape;
+      output_Max->data.dtype = DType::kFloat32;
+    }
+
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
 
-    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+    if (has_bias) {
       Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     }
 
-    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    if (has_softmax_offset) {
       Tensor *output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_softmax_offset->data.dptr = nullptr;
       output_softmax_offset->data.shape = {1, h_q, 1, 1};
@@ -1415,13 +1509,24 @@ void fused_attn_ck_fwd(
   } else if (Aux_CTX_Tensors->size >= 2) {
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
+    if (return_max_logit) {
+      // a caller that sized the pack without Max would have rng_state in this slot
+      const size_t expected_size = 3 + has_bias + has_softmax_offset;
+      NVTE_CHECK(Aux_CTX_Tensors->size == expected_size, "Expected ", expected_size,
+                 " aux tensors with return_max_logit, got ", Aux_CTX_Tensors->size, ".");
+      Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      const size_t max_numel = is_ragged ? max_tokens_q * h_q : b * h_q * max_seqlen_q;
+      NVTE_CHECK(output_Max->data.dtype == DType::kFloat32 && output_Max->numel() == max_numel,
+                 "Max must be fp32 with ", max_numel, " elements.");
+      devPtrMax = output_Max->data.dptr;
+    }
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+    if (has_bias) {
       Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = devPtrBias;
     }
-    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    if (has_softmax_offset) {
       Tensor *output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_softmax_offset->data.dptr = devPtrSoftmaxOffset;
     }
@@ -1433,13 +1538,13 @@ void fused_attn_ck_fwd(
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,
-    is_training, attn_scale, dropout, 
+    is_training, return_max_logit, attn_scale, dropout,
     qkv_layout,
     bias_type, attn_mask_type, softmax_type,
     window_size_left, window_size_right,
     devPtrQ, devPtrK, devPtrV, devPtrBias,
     devPtrSoftmaxOffset,
-    devPtrS, devPtrO,
+    devPtrS, devPtrMax, devPtrO,
     rng_state->data.dptr, 
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,

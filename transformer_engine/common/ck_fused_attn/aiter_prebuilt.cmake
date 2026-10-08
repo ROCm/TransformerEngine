@@ -23,11 +23,23 @@ if(NOT DEFINED AITER_SHA OR "${AITER_SHA}" STREQUAL "")
   get_git_commit("${__AITER_SOURCE_DIR}" AITER_SHA)
 endif()
 
+# The QoLA patches change the libs without changing the AITER commit, so they are part of the key.
+# Keep in sync with .github/scripts/aiter_prebuild_upload.sh.
+file(GLOB __QOLA_PATCHES "${__QOLA_DIR}/patches/aiter/*.patch")
+list(SORT __QOLA_PATCHES)
+set(__QOLA_PATCH_DIGESTS "")
+foreach(__patch IN LISTS __QOLA_PATCHES)
+  file(SHA256 "${__patch}" __patch_digest)
+  string(APPEND __QOLA_PATCH_DIGESTS "${__patch_digest}")
+endforeach()
+string(SHA256 QOLA_PATCHES_HASH "${__QOLA_PATCH_DIGESTS}")
+string(SUBSTRING "${QOLA_PATCHES_HASH}" 0 8 QOLA_PATCHES_HASH)
+
 # Cache key & local paths
 set(AITER_CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")
 
 function(get_aiter_cache_key ROCM_VER_PARAM KEY_VAR CACHE_DIR_VAR)
-  set(_KEY "rocm-${ROCM_VER_PARAM}_aiter-${AITER_SHA}")
+  set(_KEY "rocm-${ROCM_VER_PARAM}_aiter-${AITER_SHA}_qola-${QOLA_PATCHES_HASH}")
   set(${KEY_VAR} ${_KEY} PARENT_SCOPE)
   set(${CACHE_DIR_VAR} "${AITER_CACHE_ROOT}/${_KEY}" PARENT_SCOPE)
 endfunction()

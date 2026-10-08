@@ -84,7 +84,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       return tensor_pack->tensors[size++];
     };
 
-#ifndef USE_ROCM
     if (max_logits_buf != nullptr) {
       NVTETensor &max_aux = next_aux_tensor();
       NVTEBasicTensor max_aux_data;
@@ -98,7 +97,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       max_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
       nvte_set_tensor_param(&max_aux, kNVTERowwiseData, &max_aux_data);
     }
-#endif
 
     NVTETensor &rng_state_aux = next_aux_tensor();
     NVTEBasicTensor rng_state_aux_data;

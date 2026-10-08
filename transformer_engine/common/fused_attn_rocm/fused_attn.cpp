@@ -282,9 +282,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right, bool return_max_logit, bool /*cuda_graph*/, bool deterministic) {
   using namespace transformer_engine;
 
-  // TODO: Add return_max_logit support
-  if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-
   // by default, fused attn is enabled
   const bool nvte_fused_attn = getenv<bool>("NVTE_FUSED_ATTN", true);
 
@@ -296,8 +293,32 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
+  // Only ck returns the max logit, from its tile kernels without bias or dropout on the archs whose
+  // pipelines write it. The opt-in small-seq kernels do not write it, and the backward cannot tell
+  // that the forward skipped them, so configs that may use them go elsewhere.
+  const char* ck_max_logit_unsupported = nullptr;
+  if(return_max_logit){
+    if(!nvte_fused_attn_ck){
+      ck_max_logit_unsupported = "when it is disabled (NVTE_FUSED_ATTN=0 or NVTE_FUSED_ATTN_CK=0)";
+    }else if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95){
+      ck_max_logit_unsupported = "on this arch";
+    }else if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS){
+      ck_max_logit_unsupported = "with bias";
+    }else if(dropout != 0.0f){
+      ck_max_logit_unsupported = "with dropout";
+    }else if(fused_attn_rocm::is_small_seq_possible(
+                 static_cast<DType>(q_dtype), qkv_layout, bias_type, attn_mask_type, dropout,
+                 max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, num_attn_heads,
+                 num_gqa_groups, softmax_type)){
+      ck_max_logit_unsupported = "when the small-seq kernels may run (NVTE_FUSED_ATTN_CK_SMALLSEQ=1)";
+    }
+  }
+  if(ck_max_logit_unsupported && getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG")){
+    std::cout<<"return_max_logit: ck does not return the max logit "<<ck_max_logit_unsupported<<std::endl;
+  }
+
   // first check whether ck can be used, then check aotriton
-  if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
+  if(nvte_fused_attn_ck && !ck_max_logit_unsupported && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
         qkv_layout,
@@ -311,7 +332,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         window_size_left,
         window_size_right)){
     return NVTE_Fused_Attn_Backend::NVTE_CK;
-  }else if(nvte_fused_attn_aotriton && fused_attn_rocm::is_aotriton_backend_supported(
+  }else if(!return_max_logit && nvte_fused_attn_aotriton && fused_attn_rocm::is_aotriton_backend_supported(
               q_dtype,
               kv_dtype,
               qkv_layout,
@@ -394,7 +415,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
-      is_training, attn_scale, dropout, 
+      is_training, return_max_logit, attn_scale, dropout,
       qkv_layout, bias_type, attn_mask_type, softmax_type,
       window_size_left, window_size_right,
       input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
@@ -407,6 +428,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       wkspace,
       stream);
   } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_AOTriton){
+    NVTE_CHECK(!return_max_logit, "AOTriton fused attention does not return the max logit.");
     fused_attn_aotriton_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
       is_training, attn_scale, dropout, 

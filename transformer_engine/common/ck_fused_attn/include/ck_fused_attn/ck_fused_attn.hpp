@@ -99,6 +99,9 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
   // Output (writable)
   void* o_ptr = nullptr;
   void* lse_ptr = nullptr;
+  // Optional fp32 per-row max logit, same layout and strides as lse_ptr. Needs lse_ptr, no bias or
+  // dropout, and the CK tile path (uses_fwd_v3 off, num_splits == 0).
+  void* max_ptr = nullptr;
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;

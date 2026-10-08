@@ -1494,6 +1494,40 @@ def get_attention_backend(
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            if (
+                IS_HIP_EXTENSION
+                and return_max_logit
+                and not torch.compiler.is_compiling()
+                and _get_fused_attn_backend(
+                    is_training,
+                    q_type,
+                    kv_type,
+                    qkv_layout,
+                    fu_core_attention_bias_type,
+                    attn_mask_type,
+                    softmax_type,
+                    attention_dropout,
+                    num_heads,
+                    num_gqa_groups,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    head_dim_qk,
+                    head_dim_v,
+                    window_size[0],
+                    window_size[1],
+                    False,
+                    cuda_graph,
+                    deterministic,
+                )
+                != FusedAttnBackend["No_Backend"]
+            ):
+                warnings.warn(
+                    "return_max_logit=True disables FusedAttention for this configuration on ROCm:"
+                    " only the CK backend returns the max logit, on gfx942/gfx950 without bias or"
+                    " dropout, not with NVTE_FUSED_ATTN_CK=0 and not from the"
+                    " NVTE_FUSED_ATTN_CK_SMALLSEQ kernels. Set NVTE_LOG_FUSED_ATTN_CONFIG=1 for"
+                    " the reason."
+                )
             use_fused_attention = False
             fused_attention_backend = None
         elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
