@@ -846,6 +846,14 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     }
   }
 
+#ifdef USE_HIPKITTENS_GEMM
+  if (_fused && buffer_dtype == DType::kByte && comm_type == CommOverlapType::AG) {
+    _scale_chunk_bytes = buffer_chunk_bytes / 32;
+    _scale_base_offset = buffer_bytes;
+    buffer_bytes += _scale_chunk_bytes * _tp_size;
+  }
+#endif
+
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
   if (_rank == 0) printf("!!! [UBP2P] UBuf %d\n", _ub_reg);
