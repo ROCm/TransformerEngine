@@ -573,6 +573,13 @@ def make_gemm_ready_tensor(x: torch.Tensor, split_section_tensor: torch.Tensor):
     return tensor
 
 
+def gemm_ready_scale(rows: int, cols: int, compact: torch.Tensor, columnwise: bool):
+    """GEMM-ready layout of compact scales: swizzled on CUDA; ROCm GEMMs read them compact."""
+    if IS_HIP_EXTENSION:
+        return compact
+    return swizzle_mxfp8_scale(rows, cols, compact, columnwise=columnwise)
+
+
 def check_prequantized_requantize_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -663,7 +670,9 @@ def check_prequantized_requantize_versus_reference(
     if valid_rows > 0:
         # A tensor whose groups are all empty has no scales to lay out, so the swizzle is a no-op
         # and leaves the flag unset; every other case must come back swizzled.
-        assert wire._with_gemm_swizzled_scales, "rowwise scales must be marked swizzled"
+        assert (
+            wire._with_gemm_swizzled_scales != IS_HIP_EXTENSION
+        ), "rowwise scales must be marked swizzled (compact on ROCm)"
 
     # Per-group comparison, same structure as check_grouped_tensor_mxfp8_versus_reference.
     outputs = wire.split_into_quantized_tensors()
@@ -685,7 +694,7 @@ def check_prequantized_requantize_versus_reference(
         # rowwise DATA is covered by the whole-buffer identity check above.
         torch.testing.assert_close(
             out._rowwise_scale_inv,
-            swizzle_mxfp8_scale(rows_i, N, scale_before, columnwise=False),
+            gemm_ready_scale(rows_i, N, scale_before, columnwise=False),
             atol=0.0,
             rtol=0.0,
         )
@@ -699,7 +708,7 @@ def check_prequantized_requantize_versus_reference(
         ), "The columnwise scale shape is not correctly aligned"
         torch.testing.assert_close(
             colwise_scale,
-            swizzle_mxfp8_scale(rows_i, N, colwise_scale_ref[i], columnwise=True),
+            gemm_ready_scale(rows_i, N, colwise_scale_ref[i], columnwise=True),
             atol=0.0,
             rtol=0.0,
         )
@@ -730,7 +739,6 @@ def check_prequantized_requantize_versus_reference(
         "imbalanced_avg_misaligned",
     ],
 )
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_prequantized_requantize_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -769,7 +777,6 @@ def test_prequantized_requantize_versus_reference(
         "imbalanced_avg_misaligned",
     ],
 )
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason=_ROCM_NO_GROUPED_SWIZZLE)
 def test_prequantized_requantize_with_paged_stashing(
     x_dtype: torch.dtype,
     M: int,

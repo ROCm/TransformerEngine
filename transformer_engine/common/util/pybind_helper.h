@@ -103,7 +103,15 @@
       .value("NVTE_Paged_KV_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD)        \
       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
       .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD)          \
-      .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);                         \
+      .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD)                          \
+      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);                 \
+  pybind11::enum_<NVTEScalingMode>(m, "NVTEScalingMode", pybind11::module_local())                 \
+      .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)          \
+      .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)                      \
+      .value("NVTE_BLOCK_SCALING_1D", NVTEScalingMode::NVTE_BLOCK_SCALING_1D)                      \
+      .value("NVTE_BLOCK_SCALING_2D", NVTEScalingMode::NVTE_BLOCK_SCALING_2D)                      \
+      .value("NVTE_NVFP4_1D_SCALING", NVTEScalingMode::NVTE_NVFP4_1D_SCALING)                      \
+      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING);                       \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \

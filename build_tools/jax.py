@@ -7,6 +7,7 @@
 """JAX related extensions."""
 
 import os
+import warnings
 from pathlib import Path
 
 import setuptools
@@ -18,6 +19,8 @@ from .utils import (
     all_files_in_dir,
     debug_build_enabled,
     setup_mpi_flags,
+    nccl_include_path,
+    nccl_lib_path,
     nccl_ep_enabled,
 )
 from typing import List
@@ -98,16 +101,19 @@ def setup_jax_extension(
         include_dirs = [hip_root / "include"]
     else:
         include_dirs = get_cuda_include_dirs()
+        if (discovered_nccl_include_path := nccl_include_path()) is not None:
+            include_dirs.append(discovered_nccl_include_path)
         # Upstream v2.18 removed the 3rdparty/cudnn-frontend submodule in favor of
         # the nvidia-cudnn-frontend pip package. Source the include dir from it.
         include_dirs.append(cudnn_frontend_include_path())
+    xla_include_path = xla_path()
     include_dirs.extend(
         [
             common_header_files,
             common_header_files / "common",
             common_header_files / "common" / "include",
             csrc_header_files,
-            xla_path(),
+            xla_include_path,
         ]
     )
 
@@ -117,6 +123,13 @@ def setup_jax_extension(
         from .hipify.hipify import hipify_sources as hipify
         base_dir = Path(__file__).parent.parent.resolve()
         sources = hipify(base_dir, csrc_source_files, common_header_files, sources, base_dir)
+
+    # Match the borrowed-comm path's compile-time header check.
+    if not (Path(xla_include_path) / "xla/ffi/api/collectives_c_api.h").is_file():
+        warnings.warn(
+            f"XLA headers in {xla_include_path} do not include "
+            "xla/ffi/api/collectives_c_api.h; the EP borrowed-comm path will not be built."
+        )
 
     # Compile flags
     cxx_flags = ["-O3"]
@@ -141,6 +154,12 @@ def setup_jax_extension(
     if not rocm_build() and nccl_ep_enabled():
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
+    kwargs = {}
+    if (discovered_nccl_lib_path := nccl_lib_path()) is not None:
+        kwargs["extra_objects"] = [str(discovered_nccl_lib_path)]
+    elif not rocm_build():
+        kwargs["libraries"] = ["nccl"]
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
@@ -149,5 +168,5 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"] if not rocm_build() else [],
+        **kwargs,
     )
