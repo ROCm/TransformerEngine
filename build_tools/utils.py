@@ -225,6 +225,7 @@ def _rocm_sdk_path_root() -> Optional[Path]:
     except (ImportError, ModuleNotFoundError, OSError):
         return None
 
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """

@@ -68,10 +68,15 @@ if(NOT DEFINED AOTRITON_PATH)
     function(aotriton_build_from_source)
         set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
         get_git_commit(${TE}/3rdparty/aotriton AOTRITON_SHA)
+        
+        te_rocm_rpath(__AOTRITON_RPATH)
+        list(INSERT __AOTRITON_RPATH 0 "$ORIGIN")
+        string(REPLACE ";" "," __AOTRITON_RPATH "${__AOTRITON_RPATH}")
         ExternalProject_Add(aotriton_external
             LIST_SEPARATOR ","
             SOURCE_DIR ${TE}/3rdparty/aotriton
             CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+            -DCMAKE_INSTALL_RPATH=${__AOTRITON_RPATH}
             -DCMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake
             -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
             -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}
