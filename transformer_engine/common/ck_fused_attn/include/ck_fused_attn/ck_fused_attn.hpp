@@ -18,6 +18,7 @@ namespace ck_fused_attn{
 enum class DType {
   kFloat16    = 0,  /*!< 16-bit float (E5M10) */
   kBFloat16   = 1,  /*!< 16-bit bfloat (E8M7) */
+  kFloat8E4M3 = 2,  /*!< 8-bit float(E4M3) input */
   kNumTypes         /*!< Number of supported types */
 };
 
@@ -99,6 +100,13 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
   // Output (writable)
   void* o_ptr = nullptr;
   void* lse_ptr = nullptr;
+  // For FP8 E4M3 input, the AITER fp8bf16 kernels require BF16.  
+  DType o_dtype = DType::kNumTypes;
+
+  // Per-tensor inverse scales for FP8 Q/K/V: one FP32 value per tensor.
+  const void* q_descale_ptr = nullptr;
+  const void* k_descale_ptr = nullptr;
+  const void* v_descale_ptr = nullptr;
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;

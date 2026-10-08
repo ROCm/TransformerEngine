@@ -7,6 +7,7 @@ import os
 import collections
 from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
@@ -912,10 +913,14 @@ class MultiheadAttention(torch.nn.Module):
         # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
         # 1. FP8DS/FP8CS recipe: produce FP8 output
         # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
+        # gfx950 AITER FP8 attention kernels are fp8bf16: Q/K/V are FP8 but O
+        # is BF16. CUDA fused attention may continue producing FP8 output.
         # For CustomRecipe, fp8_dpa only controls DPA-internal quantization.
         # External MHA boundary tensors become FP8 only when fp8_mha is enabled.
         dpa_fp8_output_enabled = fp8_mha if custom_recipe else (fp8_dpa or fp8_mha)
-        dpa_fp8_output = fp8 and dpa_fp8_output_enabled and not mxfp8_scaling
+        dpa_fp8_output = (
+            fp8 and dpa_fp8_output_enabled and not mxfp8_scaling and not IS_HIP_EXTENSION
+        )
         # Projection Gemm: match DPA output except
         # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling

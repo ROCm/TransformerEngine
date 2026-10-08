@@ -200,13 +200,18 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
   auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
                            : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+#ifdef USE_ROCM
+  const DType o_dtype = dtype == DType::kFloat8E4M3 ? DType::kBFloat16 : dtype;
+#else
+  const DType o_dtype = dtype;
+#endif
 
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
   auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
 
   // F16 doesn't use this tensor
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
-  auto o_tensor = TensorWrapper(nullptr, o_shape, dtype);
+  auto o_tensor = TensorWrapper(nullptr, o_shape, o_dtype);
 
   auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -290,8 +295,15 @@ static void FusedAttnForwardImpl(
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
     bool is_training, bool return_max_logit, bool deterministic, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal) {
+    int64_t window_size_right, bool bottom_right_diagonal, void *q_scale_inv, void *k_scale_inv,
+    void *v_scale_inv) {
   FUSED_ATTN_IMPL_COMMON_BLOCK;
+
+#ifdef USE_ROCM
+  const DType o_dtype = dtype == DType::kFloat8E4M3 ? DType::kBFloat16 : dtype;
+#else
+  const DType o_dtype = dtype;
+#endif
 
   /* Input tensors */
   auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
@@ -300,7 +312,7 @@ static void FusedAttnForwardImpl(
 
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * v_head_dim;
-    (void)cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
+    (void)cudaMemsetAsync(output, 0, output_size * typeToSize(o_dtype), stream);
 
     // Memset to 0xF0 for filling large negative numbers
     auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
@@ -314,7 +326,7 @@ static void FusedAttnForwardImpl(
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
   auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
                            : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
-  auto o_tensor = TensorWrapper(output, o_shape, dtype);
+  auto o_tensor = TensorWrapper(output, o_shape, o_dtype);
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
@@ -385,6 +397,14 @@ static void FusedAttnForwardImpl(
   auto q_tensor = TensorWrapper(q_ptr, q_shape, dtype);
   auto k_tensor = TensorWrapper(k_ptr, k_shape, dtype);
   auto v_tensor = TensorWrapper(v_ptr, v_shape, dtype);
+  // FP16/BF16 leave scale_inv null. FP8 carries one FP32 inverse scale per tensor.
+  if (dtype == DType::kFloat8E4M3) {
+    NVTE_CHECK(q_scale_inv != nullptr && k_scale_inv != nullptr && v_scale_inv != nullptr,
+               "FP8 fused attention requires one FP32 scale_inv for each of Q, K, and V.");
+    q_tensor.set_rowwise_scale_inv(q_scale_inv, DType::kFloat32, std::vector<size_t>{1});
+    k_tensor.set_rowwise_scale_inv(k_scale_inv, DType::kFloat32, std::vector<size_t>{1});
+    v_tensor.set_rowwise_scale_inv(v_scale_inv, DType::kFloat32, std::vector<size_t>{1});
+  }
 
   nvte_fused_attn_fwd(
       q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
@@ -437,11 +457,34 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Buffer_Type softmax_offset_buf, Buffer_Type seed_buf,
                                Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
-                               Variadic_Buffer_Type _unused_args, Result_Type output_buf,
-                               Result_Type softmax_aux_buf, Result_Type max_tensor_buf,
-                               Result_Type rng_state_buf, Result_Type workspace_buf,
+                               Buffer_Type /*q_segment_ids*/, Buffer_Type /*kv_segment_ids*/,
+                               Buffer_Type /*q_segment_pos*/, Buffer_Type /*kv_segment_pos*/,
+                               Buffer_Type q_scale_inv_buf, Buffer_Type k_scale_inv_buf,
+                               Buffer_Type v_scale_inv_buf, Variadic_Buffer_Type _unused_args,
+                               Result_Type output_buf, Result_Type softmax_aux_buf,
+                               Result_Type max_tensor_buf, Result_Type rng_state_buf,
+                               Result_Type workspace_buf,
                                Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
+
+  // Non-FP8 passes an empty buffer. A real FP8 launch passes one FP32 value.
+  auto scale_inv_arg = [](const Buffer_Type &buf) -> void * {
+    if (product(buf.dimensions()) == 0) {
+      return nullptr;
+    }
+    NVTE_CHECK(product(buf.dimensions()) == 1 &&
+                   convert_ffi_datatype_to_te_dtype(buf.element_type()) == DType::kFloat32,
+               "FP8 fused attention scale_inv must be one FP32 value.");
+    return buf.untyped_data();
+  };
+  void *q_scale_inv = nullptr;
+  void *k_scale_inv = nullptr;
+  void *v_scale_inv = nullptr;
+  if (dtype == DType::kFloat8E4M3) {
+    q_scale_inv = scale_inv_arg(q_scale_inv_buf);
+    k_scale_inv = scale_inv_arg(k_scale_inv_buf);
+    v_scale_inv = scale_inv_arg(v_scale_inv_buf);
+  }
 
   FusedAttnForwardImpl(
       stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
@@ -454,7 +497,8 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
       q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads, qk_head_dim, v_head_dim,
       max_segments_per_seq, wkspace_size, scaling_factor, dropout_probability, bias_type, mask_type,
       softmax_type, qkv_layout, dtype, wkspace_dtype, is_training, return_max_logit, deterministic,
-      window_size_left, window_size_right, bottom_right_diagonal);
+      window_size_left, window_size_right, bottom_right_diagonal, q_scale_inv, k_scale_inv,
+      v_scale_inv);
   return ffi_with_cuda_error_check();
 }
 
@@ -471,6 +515,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Arg<Buffer_Type>()      // kv_cu_seqlens
                                   .Arg<Buffer_Type>()      // q_seq_offsets
                                   .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .Arg<Buffer_Type>()      // q_segment_ids
+                                  .Arg<Buffer_Type>()      // kv_segment_ids
+                                  .Arg<Buffer_Type>()      // q_segment_pos
+                                  .Arg<Buffer_Type>()      // kv_segment_pos
+                                  .Arg<Buffer_Type>()      // q_scale_inv
+                                  .Arg<Buffer_Type>()      // k_scale_inv
+                                  .Arg<Buffer_Type>()      // v_scale_inv
                                   .RemainingArgs()         // _cp_aux_args unused
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // softmax_aux

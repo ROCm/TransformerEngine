@@ -112,8 +112,11 @@ std::string get_data_type_str(DType dtype){
     data_type_str = "fp16";
   }else if(dtype==DType::kBFloat16){
     data_type_str = "bf16";
+  }else if(dtype==DType::kFloat8E4M3){
+    data_type_str = "fp8bf16";
+    // TE dtype is FP8 E4M3. "fp8bf16" is the AITER ASM kernel tag for FP8 input with BF16 output
+    // Passing "fp8" would select a different precision mode (FP8 output)
   }else{
-    //TODO: better error out system
     throw std::runtime_error("Invalid dtype in ck_fused_attn.");
   }
   return data_type_str;

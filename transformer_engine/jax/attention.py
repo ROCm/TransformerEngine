@@ -1241,7 +1241,7 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
@@ -1263,6 +1263,9 @@ def _fused_attn(
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
 ):
     output, _ = _fused_attn_fwd_rule(
@@ -1285,6 +1288,9 @@ def _fused_attn(
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
         return_max_logit=return_max_logit,
     )
     return output
@@ -1310,6 +1316,9 @@ def _fused_attn_fwd_rule(
     context_parallel_axis,
     context_checkpoint_name,
     stripe_size,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
     return_max_logit,
 ):
     output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
@@ -1331,6 +1340,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
         return_max_logit=return_max_logit,
     )
     output = checkpoint_name(output, context_checkpoint_name)
@@ -1364,10 +1376,14 @@ def _fused_attn_bwd_rule(
     context_parallel_axis,
     context_checkpoint_name,
     stripe_size,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
     return_max_logit,
     ctx,
     dz,
 ):
+    del q_scale_inv, k_scale_inv, v_scale_inv
     del context_checkpoint_name
     if return_max_logit:
         dz, _ = dz
@@ -1496,6 +1512,9 @@ def fused_attn(
     score_mod_bprop: Optional[Callable] = None,
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
 ):
     """
@@ -1701,6 +1720,9 @@ def fused_attn(
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
         return_max_logit=return_max_logit,
     )
     return output
