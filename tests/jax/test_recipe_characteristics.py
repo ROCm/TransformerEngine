@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -33,6 +35,7 @@ from transformer_engine.jax.quantize import (
     QuantizeLayout,
 )
 from transformer_engine.jax.quantize.helper import _format2dtypes
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 from transformer_engine.jax.flax.module import TransformerEngineBase
 from transformer_engine.jax import flax as te_flax
@@ -102,13 +105,16 @@ class TestHelper(unittest.TestCase):
 
 
 def assert_fp8_format(quantizer, tensor_source, fp8_format):
+    # gfx942 uses the fnuz FP8 variants, gfx950 and CUDA use the OCP ones.
+    e4m3_type = get_jnp_float8_e4m3_type()
+    e5m2_type = get_jnp_float8_e5m2_type()
     if fp8_format == FP8Format.HYBRID:
         if tensor_source == TensorSource.DGRAD:
-            assert quantizer.q_dtype == jnp.float8_e5m2
+            assert quantizer.q_dtype == e5m2_type
         else:
-            assert quantizer.q_dtype == jnp.float8_e4m3fn
+            assert quantizer.q_dtype == e4m3_type
     elif fp8_format == FP8Format.E4M3:
-        assert quantizer.q_dtype == jnp.float8_e4m3fn
+        assert quantizer.q_dtype == e4m3_type
     else:
         raise ValueError(f"Unsupported FP8 format: {fp8_format}")
 

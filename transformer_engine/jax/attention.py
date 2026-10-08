@@ -342,6 +342,7 @@ def is_fused_attn_kernel_available(
     head_dim_qk,
     head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
+    return_max_logit: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
@@ -365,6 +366,7 @@ def is_fused_attn_kernel_available(
             head_dim_qk,
             head_dim_v,
             window_size_tuple,
+            return_max_logit,
         )
 
     return make_helper(attn_mask_type).is_fused_attn_kernel_available()
@@ -1056,6 +1058,7 @@ def _legacy_fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
+    return_max_logit: bool = False,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -1087,8 +1090,15 @@ def _legacy_fused_attn(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
+            [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
+        return_max_logit (bool): If True, also return per-head maximum attention logits
+            with shape ``[h]``.
     Returns:
-        (jnp.ndarray): The output tensor from the fused attention.
+        jnp.ndarray:
+            Attention output when ``return_max_logit`` is False.
+        tuple[jnp.ndarray, jnp.ndarray]:
+            ``(output, max_logit)`` when ``return_max_logit`` is True.
     """
     assert (
         not qkv_layout.is_thd()
@@ -1142,6 +1152,7 @@ def _legacy_fused_attn(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        return_max_logit=return_max_logit,
     )
 
     return output
@@ -1167,6 +1178,7 @@ def fused_attn_thd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
+    return_max_logit: bool = False,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -1221,13 +1233,15 @@ def fused_attn_thd(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        return_max_logit=return_max_logit,
     )
 
     return output
 
 
 @partial(
-    jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
+    jax.custom_vjp,
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
@@ -1252,6 +1266,7 @@ def _fused_attn(
     q_scale_inv: Optional[jnp.ndarray] = None,
     k_scale_inv: Optional[jnp.ndarray] = None,
     v_scale_inv: Optional[jnp.ndarray] = None,
+    return_max_logit: bool = False,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1276,6 +1291,7 @@ def _fused_attn(
         q_scale_inv=q_scale_inv,
         k_scale_inv=k_scale_inv,
         v_scale_inv=v_scale_inv,
+        return_max_logit=return_max_logit,
     )
     return output
 
@@ -1303,8 +1319,9 @@ def _fused_attn_fwd_rule(
     q_scale_inv,
     k_scale_inv,
     v_scale_inv,
+    return_max_logit,
 ):
-    output, softmax_aux, rng_state = tex.fused_attn_fwd(
+    output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
         qkv,
         bias,
         softmax_offset,
@@ -1326,11 +1343,14 @@ def _fused_attn_fwd_rule(
         q_scale_inv=q_scale_inv,
         k_scale_inv=k_scale_inv,
         v_scale_inv=v_scale_inv,
+        return_max_logit=return_max_logit,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
     rng_state = checkpoint_name(rng_state, context_checkpoint_name)
-    return output, (
+    max_logit = checkpoint_name(max_logit, context_checkpoint_name)
+    attn_output = (output, max_logit) if return_max_logit else output
+    return attn_output, (
         qkv,
         bias,
         sequence_descriptor,
@@ -1359,11 +1379,14 @@ def _fused_attn_bwd_rule(
     q_scale_inv,
     k_scale_inv,
     v_scale_inv,
+    return_max_logit,
     ctx,
     dz,
 ):
     del q_scale_inv, k_scale_inv, v_scale_inv
     del context_checkpoint_name
+    if return_max_logit:
+        dz, _ = dz
     (
         qkv,
         bias,
@@ -1492,6 +1515,7 @@ def fused_attn(
     q_scale_inv: Optional[jnp.ndarray] = None,
     k_scale_inv: Optional[jnp.ndarray] = None,
     v_scale_inv: Optional[jnp.ndarray] = None,
+    return_max_logit: bool = False,
 ):
     """
     Perform cuDNN fused attention.
@@ -1548,8 +1572,13 @@ def fused_attn(
             non-differentiable auxiliary inputs.
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
+        return_max_logit (bool): If True, also return per-head maximum attention logits
+            with shape ``[h]``.
     Returns:
-        (jnp.ndarray): The output tensor from the fused attention.
+        jnp.ndarray:
+            Attention output when ``return_max_logit`` is False.
+        tuple[jnp.ndarray, jnp.ndarray]:
+            ``(output, max_logit)`` when ``return_max_logit`` is True.
 
     Examples (non-THD, also known as non-packed):
         >>> #  q_segment_ids = [[1, 1, 1, 0], [1, 1, 0, 0]], 0 means padded tokens
@@ -1599,6 +1628,8 @@ def fused_attn(
         # escaping from a graph-building helper mid-trace.
         if is_hip_extension():
             raise NotImplementedError("score_mod fused attention is not supported on ROCm.")
+        if return_max_logit:
+            raise ValueError("return_max_logit is not supported with score_mod fused_attn.")
         tex.validate_fused_attn_score_mod(
             qkv,
             bias,
@@ -1658,6 +1689,7 @@ def fused_attn(
             context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
             context_parallel_axis=context_parallel_axis,
             softmax_offset=softmax_offset,
+            return_max_logit=return_max_logit,
         )
     if max_segments_per_seq > 1 and not qkv_layout.is_thd():
         warnings.warn(
@@ -1691,5 +1723,6 @@ def fused_attn(
         q_scale_inv=q_scale_inv,
         k_scale_inv=k_scale_inv,
         v_scale_inv=v_scale_inv,
+        return_max_logit=return_max_logit,
     )
     return output
