@@ -942,6 +942,19 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+if (USE_ROCM)
+  set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
+  file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
+  string(STRIP "${ROCM_VER}" ROCM_VER)
+  string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
+  get_git_commit("${TE}" TE_COMMIT_ID)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
+    "ROCM_VERSION: ${ROCM_VER}\n"
+    "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
+    "COMMIT_ID: ${TE_COMMIT_ID}\n"
+  )
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
+endif()
 if(NVTE_WITH_NCCL_EP)
   # Install a real file rather than the build-tree symlink so wheel packaging
   # does not need to preserve the versioned symlink chain.
