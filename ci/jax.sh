@@ -57,6 +57,9 @@ run_test_config() {
     export NVTE_JAX_UNITTEST_LEVEL=L0 # this env variable controls parameters set for some tests
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
+    # GEMM-partitioning is a device-agnostic sharding test; it runs on a simulated
+    # 8-device CPU mesh (self-skips unless 8 host devices are present).
+    XLA_FLAGS="--xla_force_host_platform_device_count=8" run_default_fa 1 test_gemm_partitioning.py
     run 1 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # skip smallseq in normal flow
     XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
