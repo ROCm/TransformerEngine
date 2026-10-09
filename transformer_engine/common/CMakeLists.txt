@@ -955,7 +955,7 @@ if (USE_ROCM)
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
 endif()
-if(NVTE_WITH_NCCL_EP)
+if(USE_CUDA AND NVTE_WITH_NCCL_EP)
   # Install a real file rather than the build-tree symlink so wheel packaging
   # does not need to preserve the versioned symlink chain.
   install(FILES "${NCCL_EP_SHARED_LIB}"
