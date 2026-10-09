@@ -10,6 +10,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
@@ -399,12 +400,15 @@ def _te_norm_fwd_triton(
             quantizer.amax,
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
-    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or IS_FP8_BLOCKWISE or isinstance(quantizer, NVFP4Quantizer):
-        _out = quantizer.make_empty(
-            input_tensor.shape,
-            dtype=te_dtype_to_torch_dtype(otype),
-            device=input_tensor.device
-        )
+    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or IS_FP8_BLOCKWISE or isinstance(quantizer, (NVFP4Quantizer, MXFP4Quantizer)):
+        if isinstance(quantizer, MXFP4Quantizer) and ln_out is not None:
+            _out = ln_out
+        else:
+            _out = quantizer.make_empty(
+                input_tensor.shape,
+                dtype=te_dtype_to_torch_dtype(otype),
+                device=input_tensor.device
+            )
         if isinstance(_out, QuantizedTensor):
             out = quantizer.quantize(out, out=_out)
         else:
