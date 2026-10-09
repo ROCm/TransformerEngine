@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,8 +8,10 @@ from typing import Tuple
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.jit as te_jit
 
 # Model names for test_torch_dynamo
 _model_factory = {
@@ -63,6 +67,63 @@ def test_lazy_compile():
     from transformer_engine.pytorch.jit import dgelu_fused_
 
     dgelu_fused_(torch.randn(10, 10), torch.randn(10, 10))
+
+
+def _lse_ref(softmax_lse, softmax_lse_per_step):
+    return torch.logaddexp(softmax_lse.double(), softmax_lse_per_step.double()).float()
+
+
+def _run_lse_correction(func, seqlen, seed):
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    make = lambda *shape: torch.randn(*shape, device="cuda", generator=gen) * 3 + 5
+    if func.__name__ == "flash_attn_fwd_softmax_lse_correction":
+        # [h, t]
+        softmax_lse, softmax_lse_per_step = make(8, seqlen), make(8, seqlen)
+        ref = _lse_ref(softmax_lse, softmax_lse_per_step)
+        func(softmax_lse, softmax_lse_per_step)
+    else:
+        # [b, h, s] merged with the second half of each sequence, [b, h, s//2]
+        softmax_lse, softmax_lse_per_step = make(2, 8, seqlen), make(2, 8, seqlen // 2)
+        ref = softmax_lse.clone()
+        ref[..., seqlen // 2 :] = _lse_ref(softmax_lse[..., seqlen // 2 :], softmax_lse_per_step)
+        func(softmax_lse.view(*softmax_lse.shape[:-1], 2, -1), softmax_lse_per_step)
+    return softmax_lse, ref
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Dynamic-shape compilation is ROCm only")
+@pytest.mark.skipif(
+    te_jit.jit_fuser_dynamic is not te_jit.lazy_compile_dynamic,
+    reason="torch.compile is disabled",
+)
+@pytest.mark.parametrize(
+    "func_name",
+    [
+        "flash_attn_fwd_softmax_lse_correction",
+        "flash_attn_fwd_second_half_softmax_lse_correction",
+    ],
+)
+def test_cp_softmax_lse_correction_single_compile(func_name):
+    """CP softmax LSE merges must compile once and stay bit-exact across input shapes.
+
+    See: https://github.com/ROCm/TransformerEngine/issues/693
+    """
+    import torch._dynamo
+    from torch._dynamo.utils import counters
+    from transformer_engine.pytorch.attention.dot_product_attention import context_parallel
+
+    func = getattr(context_parallel, func_name)
+    torch._dynamo.reset()
+    counters.clear()
+
+    out_first, ref = _run_lse_correction(func, 4096, seed=0)
+    for i, seqlen in enumerate((3072, 5120, 2000)):
+        _run_lse_correction(func, seqlen, seed=i + 1)
+    out_again, _ = _run_lse_correction(func, 4096, seed=0)
+
+    num_graphs = counters["stats"]["unique_graphs"]
+    assert num_graphs == 1, f"{func_name} was compiled into {num_graphs} graphs, expected 1"
+    torch.testing.assert_close(out_again, out_first, rtol=0, atol=0)
+    torch.testing.assert_close(out_first, ref, rtol=1e-6, atol=1e-6)
 
 
 def test_l2normalization_fused():
