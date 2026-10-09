@@ -1,9 +1,5 @@
-#!/usr/bin/env python
-###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
+# License for AMD contributions = MIT. See LICENSE for more information
 """GPU interference detection: warn when another process shares the
 benchmark GPU, so timings aren't silently skewed by a neighbor.
 

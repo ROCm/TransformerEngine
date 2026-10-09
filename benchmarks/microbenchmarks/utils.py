@@ -8,11 +8,15 @@
 
 import csv
 import functools
+import gc
 import importlib.util
 import itertools
 import math
 import mmap
 import os
+import statistics
+import time
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,7 +192,7 @@ def build_recipes(names=None):
 # ---------------------------------------------------------------------------
 
 def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
-    """Time *fn* and return ``(mean_ms, measurement)``.
+    """Time *fn* and return ``(median_ms, measurement)``.
 
     The ``Measurement`` object carries per-sample times accessible via
     ``measurement.times`` (total wall time per run) and
@@ -202,7 +206,7 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
         m = timer.blocked_autorange(min_run_time=min_run_time)
     else:
         m = timer.adaptive_autorange(min_run_time=min_run_time)
-    return m.mean * 1e3, m
+    return m.median * 1e3, m
 
 
 # Dual wall + GPU-kernel timing. Off by default; enabled per run by
@@ -216,45 +220,100 @@ def configure_kernel_profile(enabled):
     _KERNEL_PROFILE = bool(enabled)
 
 
-def _kernel_time_profiler_ms(fn, warmup=100, iters=100):
-    """Mean GPU kernel (device) time per call, in ms, via torch.profiler.
+def _prepared_calls(fn, prepare, n):
+    """*n* zero-arg calls of *fn*, each bound to its own ``prepare()`` result when given."""
+    if prepare is None:
+        return [fn] * n
+    return [functools.partial(fn, prepare()) for _ in range(n)]
 
-    Sums the self device time of every kernel launched per call, so it excludes
-    host launch overhead and host-side timing noise. Accurate for single-kernel
-    ops; unreliable for concurrent multi-stream ops (use the "event" method there).
+
+def _kernel_time_profiler_ms(fn, warmup=100, iters=100, prepare=None, block=None):
+    """Median GPU kernel (device) time per call, in ms, via torch.profiler.
+
+    Profiles ``iters`` back-to-back calls and splits the in-order kernel list into
+    per-call groups (matched against one call's kernel sequence), summing the device
+    time of each call's kernels; this excludes host launch overhead and host-side
+    timing noise. Accurate for single-stream ops; unreliable for concurrent
+    multi-stream ops (use the "event" method there). Returns ``None`` (with a
+    warning) when no call's kernels fully match. With *prepare*, each call is
+    ``fn(prepare())`` with ``prepare`` run before the profiled region, in sessions
+    of at most *block* calls.
     """
+    from torch.autograd import DeviceType
     from torch.profiler import profile, ProfilerActivity
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        for _ in range(iters):
-            fn()
+
+    def profiled_kernels(n):
+        # The previous session's pause lets the GPU clock down; bring it back up first.
+        start = time.perf_counter()
+        while time.perf_counter() - start < 0.02:
+            _prepared_calls(fn, prepare, 1)[0]()
+            torch.cuda.synchronize()
+        calls = _prepared_calls(fn, prepare, n)
         torch.cuda.synchronize()
-    events = [e for e in prof.key_averages() if e.self_device_time_total > 0]
-    device_us = sum(e.self_device_time_total for e in events)
-    return (device_us / iters) / 1e3
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            for call in calls:
+                call()
+            torch.cuda.synchronize()
+            # ROCm's profiler drops kernel records still being processed when the session stops.
+            time.sleep(0.05)
+        return sorted((e for e in prof.events() if e.device_type != DeviceType.CPU),
+                      key=lambda e: e.time_range.start)
+
+    for _ in range(warmup):
+        _prepared_calls(fn, prepare, 1)[0]()
+    torch.cuda.synchronize()
+    pattern = max(([e.name for e in profiled_kernels(1)] for _ in range(3)), key=len)
+    if not pattern:
+        warnings.warn("No kernel records captured; kernel time left empty.")
+        return None
+    per_call_us, n_kernels = [], 0
+    for start in range(0, iters, block or iters):
+        kernels = profiled_kernels(min(block or iters, iters - start))
+        n_kernels += len(kernels)
+        # ROCm's profiler can still drop the odd kernel record, so only fully matched calls count.
+        group = []
+        for e in kernels:
+            if e.name != pattern[len(group)]:
+                group = []
+                if e.name != pattern[0]:
+                    continue
+            group.append(e)
+            if len(group) == len(pattern):
+                per_call_us.append(sum(k.device_time_total for k in group))
+                group = []
+    if not per_call_us:
+        warnings.warn(f"No profiled call matched the {len(pattern)}-kernel pattern "
+                      f"({n_kernels} kernel records from {iters} calls); "
+                      "kernel time left empty.")
+        return None
+    return statistics.median(per_call_us) / 1e3
 
 
-def _kernel_time_event_ms(fn, warmup=100, iters=100):
-    """Mean elapsed GPU device time per call, in ms, via a CUDA-event makespan.
+def _kernel_time_event_ms(fn, warmup=100, iters=100, prepare=None, block=None):
+    """Median elapsed GPU device time per call, in ms, via CUDA events.
 
-    Brackets a saturated ``iters`` loop with events on the current stream, so
-    concurrent multi-stream kernels are measured by their overlapped span rather
-    than a per-kernel sum. Handles the multi-stream grouped-GEMM path (where the
-    profiler under-counts); converges to the wall time for device-bound ops.
+    Records an event on the current stream between consecutive calls of a
+    saturated loop, so concurrent multi-stream kernels are measured by their
+    overlapped span rather than a per-kernel sum. Handles the multi-stream
+    grouped-GEMM path (where a per-kernel sum double-counts overlapping kernels);
+    converges to the wall time for device-bound ops. *prepare* / *block* are as in
+    :func:`_kernel_time_profiler_ms`.
     """
     for _ in range(warmup):
-        fn()
+        _prepared_calls(fn, prepare, 1)[0]()
     torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters
+    spans = []
+    for start in range(0, iters, block or iters):
+        calls = _prepared_calls(fn, prepare, min(block or iters, iters - start))
+        torch.cuda.synchronize()
+        events = [torch.cuda.Event(enable_timing=True) for _ in range(len(calls) + 1)]
+        events[0].record()
+        for call, event in zip(calls, events[1:]):
+            call()
+            event.record()
+        torch.cuda.synchronize()
+        spans += [a.elapsed_time(b) for a, b in zip(events, events[1:])]
+    return statistics.median(spans)
 
 
 # Kernel-time method: "profiler" (default) or "event". A benchmark opts into the
@@ -270,11 +329,11 @@ def _resolve_kernel_method(method):
     return method or "profiler"
 
 
-def _kernel_time_ms(fn, warmup=100, iters=100, method=None):
-    """Mean GPU device time per call (ms) using the resolved kernel-time method."""
+def _kernel_time_ms(fn, warmup=100, iters=100, method=None, prepare=None, block=None):
+    """Median GPU device time per call (ms) using the resolved kernel-time method."""
     if _resolve_kernel_method(method) == "event":
-        return _kernel_time_event_ms(fn, warmup, iters)
-    return _kernel_time_profiler_ms(fn, warmup, iters)
+        return _kernel_time_event_ms(fn, warmup, iters, prepare, block)
+    return _kernel_time_profiler_ms(fn, warmup, iters, prepare, block)
 
 
 def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
@@ -282,15 +341,69 @@ def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECO
     """Time *fn* and return ``(wall_ms, measurement, kernel_ms)``.
 
     ``wall_ms`` / ``measurement`` are the host wall-clock timing from
-    :func:`time_func`. ``kernel_ms`` is the mean GPU kernel (device) time per
+    :func:`time_func`. ``kernel_ms`` is the median GPU kernel (device) time per
     call from :func:`_kernel_time_ms` when kernel profiling is enabled
     (``--kernel-profile``); otherwise it is ``None`` and no profiler pass runs.
+    It is also ``None`` when the profiler pass can't attribute kernels to calls.
     *kernel_method* selects the measurement ("profiler" default, or "event" for
     concurrent multi-stream ops such as grouped GEMM).
     """
     wall_ms, measurement = time_func(fn, method=method, min_run_time=min_run_time)
     kernel_ms = _kernel_time_ms(fn, method=kernel_method) if _KERNEL_PROFILE else None
     return wall_ms, measurement, kernel_ms
+
+
+# A backward block keeps this many forward graphs alive (fewer if they'd exceed the byte cap).
+_BWD_BLOCK_CALLS = 20
+_BWD_BLOCK_BYTES = 16 * 1024**3
+_BWD_MIN_BLOCKS = 15
+
+
+def _bwd_block_calls(fwd_func):
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    fwd_out = fwd_func()
+    graph_bytes = torch.cuda.memory_allocated() - before
+    del fwd_out
+    return max(2, min(_BWD_BLOCK_CALLS, _BWD_BLOCK_BYTES // max(graph_bytes, 1)))
+
+
+def time_backward_dual(fwd_func, bwd_func, min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
+                       kernel_method=None):
+    """Time the backward of *fwd_func* and return ``(wall_ms, measurement, kernel_ms)``.
+
+    *bwd_func* takes one *fwd_func* result, runs its backward and clears the gradients
+    it produced. Each block first runs its forwards, then times their backwards back to
+    back, so the host runs ahead of the GPU as in the forward timing and no forward time
+    is subtracted. The first block is warmup; GC is off while timing, as in
+    :func:`time_func`. ``measurement.times`` holds each block's time per call;
+    ``kernel_ms`` is as in :func:`time_func_dual`.
+    """
+    calls = _bwd_block_calls(fwd_func)
+    times = []
+    for block in itertools.count():
+        fwd_outs = [fwd_func() for _ in range(calls)]
+        torch.cuda.synchronize()
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            t0 = time.perf_counter()
+            for fwd_out in fwd_outs:
+                bwd_func(fwd_out)
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - t0
+        finally:
+            if gc_enabled:
+                gc.enable()
+        del fwd_outs, fwd_out
+        if block == 0:
+            continue
+        times.append(elapsed / calls)
+        if len(times) >= _BWD_MIN_BLOCKS and sum(times) * calls >= min_run_time:
+            break
+    kernel_ms = (_kernel_time_ms(bwd_func, method=kernel_method, prepare=fwd_func, block=calls)
+                 if _KERNEL_PROFILE else None)
+    return statistics.median(times) * 1e3, SimpleNamespace(times=times), kernel_ms
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +526,9 @@ def compute_gbps(nbytes, ms):
     return nbytes / (ms * 1e-3) / 1e9
 
 
-def make_metric_record(label, ms, unit, throughput, derived=False,
+def make_metric_record(label, ms, unit, throughput,
                        ms_precision=3, throughput_precision=2,
-                       measurement=None, samples_only=False,
+                       measurement=None,
                        kernel_ms=None, kernel_throughput=None):
     """Create a structured metric record for stdout and CSV generation.
 
@@ -423,118 +536,45 @@ def make_metric_record(label, ms, unit, throughput, derived=False,
     The harness formats these records for stdout and expands them into
     ``<label> Wall Time (ms)`` / ``<label> Wall <unit>`` columns, plus
     ``<label> Kernel Time (ms)`` / ``<label> Kernel <unit>`` when kernel timing
-    is enabled (``kernel_ms`` is not None).
+    is enabled (``--kernel-profile``; the cells are empty when ``kernel_ms`` is None).
 
     If *measurement* is provided (a ``torch.utils.benchmark.Measurement``),
     the per-sample times are available for the ``--csv-samples`` output.
-    Records with *samples_only=True* are excluded from stdout and the main
-    CSV but their samples are still written to the samples CSV.
     """
     return {
         "label": label,
         "ms": ms,
         "unit": unit,
         "throughput": throughput,
-        "derived": derived,
         "ms_precision": ms_precision,
         "throughput_precision": throughput_precision,
         "measurement": measurement,
-        "samples_only": samples_only,
         "kernel_ms": kernel_ms,
         "kernel_throughput": kernel_throughput,
     }
 
 
-def make_forward_backward_metric_records(label_prefix, unit,
-                                         forward_ms, forward_throughput,
-                                         backward_ms, backward_throughput,
-                                         backward_derived=False,
-                                         ms_precision=3,
-                                         throughput_precision=2,
-                                         fwd_measurement=None,
-                                         bwd_measurement=None,
-                                         fwd_bwd_measurement=None,
-                                         forward_kernel_ms=None,
-                                         forward_kernel_throughput=None,
-                                         backward_kernel_ms=None,
-                                         backward_kernel_throughput=None):
-    """Create standard forward/backward metric records for a benchmark.
-
-    When *backward_derived* is True and *fwd_bwd_measurement* is provided,
-    an extra samples-only record for "Forward+Backward" is emitted so that
-    the raw timing samples are preserved in the ``--csv-samples`` output.
-    """
-    records = [
-        make_metric_record(
-            f"{label_prefix} Forward",
-            forward_ms,
-            unit,
-            forward_throughput,
-            ms_precision=ms_precision,
-            throughput_precision=throughput_precision,
-            measurement=fwd_measurement,
-            kernel_ms=forward_kernel_ms,
-            kernel_throughput=forward_kernel_throughput,
-        ),
-        make_metric_record(
-            f"{label_prefix} Backward",
-            backward_ms,
-            unit,
-            backward_throughput,
-            derived=backward_derived,
-            ms_precision=ms_precision,
-            throughput_precision=throughput_precision,
-            measurement=bwd_measurement,
-            kernel_ms=backward_kernel_ms,
-            kernel_throughput=backward_kernel_throughput,
-        ),
-    ]
-    if fwd_bwd_measurement is not None:
-        records.append(make_metric_record(
-            f"{label_prefix} Forward+Backward",
-            forward_ms + backward_ms,
-            unit,
-            0,
-            samples_only=True,
-            measurement=fwd_bwd_measurement,
-        ))
-    return records
-
-
 def direction_records(direction, label, unit, throughput,
-                      fwd_func, fwd_bwd_func, fwd_work, bwd_work, kernel_method=None):
-    """Metric records for a forward-only or a derived-backward timing.
+                      fwd_func, bwd_func, fwd_work, bwd_work, kernel_method=None):
+    """Metric records for a forward or a backward timing.
 
     *direction* is ``"fwd"`` or ``"bwd"``. *throughput* is ``compute_tflops`` or
     ``compute_gbps`` and *fwd_work* / *bwd_work* the matching flops / bytes.
-    Backward is ``(fwd+bwd) - fwd``; its per-sample distribution is each fwd+bwd
-    sample shifted by the fwd mean (fwd and fwd+bwd are timed separately, so the
-    spread is inherited from fwd+bwd). *kernel_method* is forwarded to
-    :func:`time_func_dual` ("event" for concurrent multi-stream ops).
+    Forward times *fwd_func* (:func:`time_func_dual`); backward times *bwd_func* on
+    *fwd_func* results (:func:`time_backward_dual`). *kernel_method* is forwarded
+    ("event" for concurrent multi-stream ops).
     """
     if direction == "fwd":
-        fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func, kernel_method=kernel_method)
-        return [make_metric_record(
-            label, fwd_ms, unit, throughput(fwd_work, fwd_ms), measurement=fwd_measurement,
-            kernel_ms=fwd_kernel_ms,
-            kernel_throughput=throughput(fwd_work, fwd_kernel_ms) if fwd_kernel_ms else None,
-        )]
-    fwd_bwd_func()  # warm the backward graph
-    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func, kernel_method=kernel_method)
-    fwd_bwd_ms, fwd_bwd_measurement, fwd_bwd_kernel_ms = time_func_dual(
-        fwd_bwd_func, kernel_method=kernel_method)
-    bwd_ms = fwd_bwd_ms - fwd_ms
-    bwd_kernel_ms = (fwd_bwd_kernel_ms - fwd_kernel_ms
-                     if fwd_kernel_ms is not None and fwd_bwd_kernel_ms is not None else None)
-    fwd_mean_s = fwd_measurement.mean
-    bwd_measurement = SimpleNamespace(
-        times=[t - fwd_mean_s for t in fwd_bwd_measurement.times]
-    )
+        ms, measurement, kernel_ms = time_func_dual(fwd_func, kernel_method=kernel_method)
+        work = fwd_work
+    else:
+        ms, measurement, kernel_ms = time_backward_dual(
+            fwd_func, bwd_func, kernel_method=kernel_method)
+        work = bwd_work
     return [make_metric_record(
-        label, bwd_ms, unit, throughput(bwd_work, bwd_ms),
-        derived=True, measurement=bwd_measurement,
-        kernel_ms=bwd_kernel_ms,
-        kernel_throughput=throughput(bwd_work, bwd_kernel_ms) if bwd_kernel_ms else None,
+        label, ms, unit, throughput(work, ms), measurement=measurement,
+        kernel_ms=kernel_ms,
+        kernel_throughput=throughput(work, kernel_ms) if kernel_ms else None,
     )]
 
 
@@ -561,18 +601,18 @@ def _format_metric_number(value, precision):
 def _metric_row_from_records(metric_records):
     row = {}
     for metric in metric_records:
-        if metric.get("samples_only"):
-            continue
         row[_metric_time_key(metric)] = _format_metric_number(
             metric["ms"], metric.get("ms_precision", 3)
         )
         row[_metric_throughput_key(metric)] = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
-        # Kernel columns appear only under --kernel-profile (kernel_ms present).
-        if metric.get("kernel_ms") is not None:
-            row[_metric_kernel_time_key(metric)] = _format_metric_number(
-                metric["kernel_ms"], metric.get("ms_precision", 3)
+        # Kernel columns appear only under --kernel-profile, empty where unmeasured.
+        if _KERNEL_PROFILE or metric.get("kernel_ms") is not None:
+            km = metric.get("kernel_ms")
+            row[_metric_kernel_time_key(metric)] = (
+                _format_metric_number(km, metric.get("ms_precision", 3))
+                if km is not None else ""
             )
             kt = metric.get("kernel_throughput")
             row[_metric_kernel_throughput_key(metric)] = (
@@ -583,19 +623,17 @@ def _metric_row_from_records(metric_records):
 
 
 def _print_metric_records(metric_records):
-    printable = [m for m in metric_records if not m.get("samples_only")]
-    if not printable:
+    if not metric_records:
         return
-    label_width = max(24, *(len(metric["label"]) for metric in printable))
-    for metric in printable:
+    label_width = max(24, *(len(metric["label"]) for metric in metric_records))
+    for metric in metric_records:
         ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
         throughput_str = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
-        derived_suffix = " (derived)" if metric.get("derived", False) else ""
         line = (
             f"  {metric['label']:<{label_width}} {ms_str} ms | "
-            f"{throughput_str} {metric['unit']}{derived_suffix}"
+            f"{throughput_str} {metric['unit']}"
         )
         kernel_ms = metric.get("kernel_ms")
         if kernel_ms is not None:
@@ -614,6 +652,85 @@ def _print_metric_records(metric_records):
 # helpers below (no pytest import here, so importing utils.py never requires it).
 # Results are collected per family (test module) and written with the CSV / samples
 # schema the dashboard ingest consumes.
+
+# Backward runs on the autograd device thread; spread over cores that schedutil keeps at
+# partial-load clocks, launch-bound backward wall time flips up to 2x between runs.
+_PIN_CPUS = 4
+_CPU_SYSFS = Path("/sys/devices/system/cpu")
+
+
+def _parse_cpulist(text):
+    cpus = set()
+    for part in text.strip().split(","):
+        if part:
+            lo, _, hi = part.partition("-")
+            cpus.update(range(int(lo), int(hi or lo) + 1))
+    return cpus
+
+
+def _gpu_local_cores():
+    """Physical cores (one per SMT pair) on the NUMA node of cuda:0 that we may run on."""
+    allowed = os.sched_getaffinity(0)
+    cpus = allowed
+    try:
+        node = int(Path(f"/sys/bus/pci/devices/{_gpu_pci()}/numa_node").read_text())
+        if node >= 0:
+            node_cpus = Path(f"/sys/devices/system/node/node{node}/cpulist").read_text()
+            cpus = (_parse_cpulist(node_cpus) & allowed) or allowed
+    except (OSError, ValueError):
+        pass
+    cores = []
+    for cpu in sorted(cpus):
+        try:
+            siblings = (_CPU_SYSFS / f"cpu{cpu}/topology/thread_siblings_list").read_text()
+            if cpu != min(_parse_cpulist(siblings)):
+                continue
+        except (OSError, ValueError):
+            pass
+        cores.append(cpu)
+    return cores
+
+
+def pin_cpus():
+    """Pin every thread to a few GPU-local physical cores and set them to the performance governor.
+
+    The cores are offset by the GPU id so runs on other GPUs of the node use different ones.
+    The governor needs root; without it only the pinning is applied. Returns a namespace
+    with ``description`` and ``restore()``, which puts the previous governors back.
+    """
+    cores = _gpu_local_cores()
+    try:
+        gpu = int((os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0])
+    except ValueError:
+        gpu = 0
+    start = _PIN_CPUS * (gpu + 1) % max(len(cores) - _PIN_CPUS + 1, 1)
+    cpus = cores[start:start + _PIN_CPUS] or cores
+    for tid in os.listdir("/proc/self/task"):
+        try:
+            os.sched_setaffinity(int(tid), cpus)
+        except OSError:
+            pass
+
+    previous, error = {}, None
+    for cpu in cpus:
+        path = _CPU_SYSFS / f"cpu{cpu}/cpufreq/scaling_governor"
+        try:
+            old = path.read_text().strip()
+            path.write_text("performance")
+            previous[path] = old
+        except OSError as e:
+            error = e
+
+    def restore():
+        for path, old in previous.items():
+            try:
+                path.write_text(old)
+            except OSError:
+                pass
+
+    governor = "performance governor" if error is None else f"governor unchanged: {error}"
+    return SimpleNamespace(
+        description=f"pinned to cpus {','.join(map(str, cpus))} ({governor})", restore=restore)
 
 def configure_rotating(rotating, no_rotating):
     """Set module-level input-rotation state from parsed options."""
@@ -895,6 +1012,7 @@ def _write_run_info(path, meta):
         "rocm": rocm,
         "amdgpu_drv": read("/sys/module/amdgpu/version") or "?",
         "kernel": os.uname().release,
+        "cpus": meta.get("cpus") or "unpinned",
     }
     path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
 
@@ -944,16 +1062,8 @@ def write_dashboard_run(store, *, out_base="results", csv_samples=None, meta=Non
     return run_dir
 
 
-def _times_ms(measurement):
-    if measurement is None:
-        return []
-    return [float(t) * 1e3 for t in getattr(measurement, "times", [])]
-
-
 def _result_rows(store):
     """Flatten *store* into (suite, name, wall_ms, wall_thr, kernel_ms, kernel_thr, unit) rows."""
-    import numpy as np
-
     rows = []
     for family, fam in store.items():
         suite = family[len("benchmark_"):] if family.startswith("benchmark_") else family
@@ -961,13 +1071,10 @@ def _result_rows(store):
             base = node_name
             if base.endswith("]") and "[" in base:
                 base = base[base.index("[") + 1 : -1]  # keep the parametrize id
-            visible = [m for m in records if not m.get("samples_only")]
-            for m in visible:
-                name = base if len(visible) == 1 else f"{base} {m['label']}"
-                times = _times_ms(m.get("measurement"))
-                wall_ms = float(np.median(np.asarray(times))) if times else m["ms"]
+            for m in records:
+                name = base if len(records) == 1 else f"{base} {m['label']}"
                 rows.append((
-                    suite, name, wall_ms, m["throughput"],
+                    suite, name, m["ms"], m["throughput"],
                     m.get("kernel_ms"), m.get("kernel_throughput"), m["unit"],
                 ))
     return rows
@@ -1022,8 +1129,6 @@ _AGG_COLLAPSE_ALWAYS = frozenset({"Case", "dtype"})
 
 def _aggregate_rows(store):
     """Work-weighted harmonic-mean throughput per (suite, group), collapsing shape/size axes."""
-    import numpy as np
-
     agg = {}
     order = []
     for family, fam in store.items():
@@ -1036,11 +1141,10 @@ def _aggregate_rows(store):
             ]
             group = tuple((c, case_params[c]) for c in group_cols)
             for m in records:
-                if m.get("samples_only") or m["unit"] not in _THROUGHPUT_UNITS:
+                if m["unit"] not in _THROUGHPUT_UNITS:
                     continue
                 thr = m["throughput"]
-                times = _times_ms(m.get("measurement"))
-                wall_ms = float(np.median(np.asarray(times))) if times else m["ms"]
+                wall_ms = m["ms"]
                 if thr is None or not (thr > 0) or not (wall_ms > 0):
                     continue
                 key = (suite, m["label"], group, m["unit"])

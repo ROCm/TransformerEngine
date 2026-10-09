@@ -203,33 +203,27 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
     next_x = make_input((M, K), dtype, device=device, requires_grad=True)
 
     def fwd_func():
-        with te.autocast(enabled=use_fp8, recipe=recipe):
-            return linear(next_x())
-
-    out = fwd_func()
-    grad_out = torch.randn_like(out)
-
-    def fwd_bwd_func():
         xb = next_x()
         with te.autocast(enabled=use_fp8, recipe=recipe):
-            o = linear(xb)
-            o.backward(grad_out)
+            return linear(xb), xb
+
+    grad_out = torch.randn_like(fwd_func()[0])
+
+    def bwd_func(fwd_out):
+        out, xb = fwd_out
+        out.backward(grad_out)
         xb.grad = None
         linear.weight.grad = None
 
     if os.environ.get("NVTE_GEMM_BACKEND") == "FLYDSL" and _flydsl_fell_back(
-        fwd_bwd_func if Direction == "bwd" else fwd_func
+        (lambda: bwd_func(fwd_func())) if Direction == "bwd" else fwd_func
     ):
         pytest.skip("FlyDSL GEMM fell back to C++ for this shape/direction")
 
     fwd_flops = 2 * M * N * K
-    # fp8/mxfp8 multi-streams the operand cast; the profiler under-counts those
-    # concurrent kernels, so measure elapsed device time by makespan. bf16 is a
-    # single GEMM kernel -- keep the profiler, which isolates sub-wall device time.
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
-        fwd_func, fwd_bwd_func, fwd_flops, 2 * fwd_flops,
-        kernel_method="event" if use_fp8 else None,
+        fwd_func, bwd_func, fwd_flops, 2 * fwd_flops,
     )
 
 

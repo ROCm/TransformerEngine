@@ -1,9 +1,5 @@
-#!/usr/bin/env python
-###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
+# License for AMD contributions = MIT. See LICENSE for more information
 """pytest glue for the microbenchmarks.
 
 Thin shim: the option/CSV/timing logic lives in utils.py; this file only wires
@@ -38,11 +34,13 @@ from utils import (
     dashboard_run_plan,
     format_aggregate_table,
     format_results_table,
+    pin_cpus,
     print_case,
     record_bench,
     write_bench_outputs,
     write_dashboard_run,
 )
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 
 def pytest_addoption(parser):
@@ -75,6 +73,11 @@ def pytest_addoption(parser):
     group.addoption(
         "--no-gpu-interference-check", action="store_true", default=False,
         help="Disable the shared-GPU interference check.",
+    )
+    group.addoption(
+        "--no-cpu-pin", action="store_true", default=False,
+        help="Don't pin the run to a few GPU-local cores at the performance governor "
+             "(on by default; the governor change needs root).",
     )
     group.addoption(
         "--run-flydsl", action="store_true", default=False,
@@ -117,17 +120,23 @@ def pytest_configure(config):
             print("WARNING: GPU interference check skipped -- amdsmi package not available "
                   "(pip install amdsmi, or pass --no-gpu-interference-check to silence).")
 
+    config._cpu_pin = None if config.getoption("--no-cpu-pin") else pin_cpus()
+
     # Resolve the dashboard run dir up front so pytest_report_header can show it
     # and write_dashboard_run can reuse the same metadata at session end.
     if config.getoption("--dashboard-run"):
         config._dashboard_plan = dashboard_run_plan(
             config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"))
+        if config._cpu_pin is not None:
+            config._dashboard_plan.meta["cpus"] = config._cpu_pin.description
 
 
 def pytest_report_header(config):
+    pin = getattr(config, "_cpu_pin", None)
+    lines = [f"cpus: {pin.description if pin else 'unpinned'}"]
     plan = getattr(config, "_dashboard_plan", None)
     if plan is None:
-        return None
+        return lines
     extras = [name for name, opt in (
         ("kernel-profile", "--kernel-profile"),
         ("flydsl", "--run-flydsl"),
@@ -139,6 +148,7 @@ def pytest_report_header(config):
         f"  {m['model']} on {m['host']} gpu{m['gpu']} "
         f"({m['gpu_bdf'] or 'no pci'}) @ {m['short']}; "
         f"extras: {', '.join(extras) or 'none (wall only)'}",
+        *lines,
     ]
 
 
@@ -189,6 +199,13 @@ def microbench(request):
     return _MicroBench(request)
 
 
+@pytest.fixture(autouse=True)
+def _reset_fp8_global_state():
+    yield
+    # Every autocast exit reduces all DelayedScaling amaxes ever registered, dead modules included.
+    FP8GlobalStateManager.reset()
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     store = getattr(config, "_microbench_store", None)
     if not store:
@@ -207,6 +224,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 def pytest_sessionfinish(session, exitstatus):
     config = session.config
+    if getattr(config, "_cpu_pin", None) is not None:
+        config._cpu_pin.restore()
     store = getattr(config, "_microbench_store", None)
     if not store:
         return

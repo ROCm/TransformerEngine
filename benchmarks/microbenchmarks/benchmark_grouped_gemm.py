@@ -280,36 +280,34 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
     next_x = make_input((sum_M, K), dtype, device=device, requires_grad=True)
 
     def fwd_func():
-        with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
-            return grouped_linear(next_x(), m_splits, m_splits_tensor=m_splits_tensor)
-
-    out_te = fwd_func()
-    grad_out = torch.randn_like(out_te)
-
-    def fwd_bwd_func():
         xb = next_x()
         with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
-            out = grouped_linear(xb, m_splits, m_splits_tensor=m_splits_tensor)
-            out.backward(grad_out)
+            return grouped_linear(xb, m_splits, m_splits_tensor=m_splits_tensor), xb
+
+    grad_out = torch.randn_like(fwd_func()[0])
+
+    def bwd_func(fwd_out):
+        out, xb = fwd_out
+        out.backward(grad_out)
         xb.grad = None
         for param in grouped_linear.parameters():
             param.grad = None
 
     if os.environ.get(_CUTLASS) == "1":
-        # bwd is derived as fwd_bwd - fwd, so only fallbacks beyond the forward pass count.
+        # Only fallbacks beyond the forward pass count for the backward direction.
         fwd_fallbacks = _grouped_fallback_count(fwd_func)
         fell_back = (fwd_fallbacks > 0 if Direction == "fwd"
-                     else _grouped_fallback_count(fwd_bwd_func) > fwd_fallbacks)
+                     else _grouped_fallback_count(lambda: bwd_func(fwd_func())) > fwd_fallbacks)
         if fell_back:
             name = "HipKittens" if os.environ.get(_HK) == "1" else "CK"
             pytest.skip(f"{name} grouped GEMM fell back to per-expert GEMMs for this config")
 
     fwd_total_flops = 2 * sum_M * N * K
-    # The per-expert path runs the experts across compute streams; the profiler
-    # under-counts concurrent kernels, so measure elapsed device time by makespan.
+    # The per-expert path overlaps the experts on several streams, which a per-kernel sum
+    # double-counts, so measure elapsed device time by makespan.
     return direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
-        fwd_func, fwd_bwd_func, fwd_total_flops, 2 * fwd_total_flops,
+        fwd_func, bwd_func, fwd_total_flops, 2 * fwd_total_flops,
         kernel_method="event",
     )
 

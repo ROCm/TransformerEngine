@@ -64,6 +64,11 @@ python benchmark_gemm.py -k triton           # select the Triton backend
 - `--no-gpu-interference-check` / `--abort-on-gpu-interference`: control the
   shared-GPU neighbor check, which warns (or aborts) when another process is
   using the benchmark GPU (requires the `amdsmi` package).
+- `--no-cpu-pin`: by default the run is pinned to 4 physical cores on the GPU's NUMA
+  node (offset by GPU id), set to the performance governor for the session (needs root;
+  restored at the end, but not if the process is killed). Launch-bound backward runs on
+  PyTorch's autograd thread, and at the default schedutil clocks its wall time flipped
+  up to 2x between runs. The header and `run_info.txt` show the cores used.
 
 ### Kernel profiling
 
@@ -77,10 +82,16 @@ python benchmark_gemm.py --kernel-profile --csv
 
 - **Wall time** is the end-to-end host-side time per call (`torch.utils.benchmark.Timer`,
   reported as the median): Python dispatch + kernel launch/queue latency + GPU
-  execution.
-- **Kernel time** is the GPU device time only (`torch.profiler`, summing
-  `self_device_time_total`, reported as the mean over a separate profiling pass),
-  so it excludes host and launch overhead.
+  execution. Backward runs a block of forwards first and then times their backwards
+  back to back (after the autocast region, as in training), so no forward time is
+  subtracted.
+- **Kernel time** is the GPU device time only (`torch.profiler`, summing the device
+  time of each call's kernels, reported as the median over a separate profiling pass),
+  so it excludes host and launch overhead. Grouped GEMM instead brackets each call
+  with CUDA events, because its per-expert path overlaps kernels on several streams;
+  that span includes GPU idle time, so launch-bound grouped cases read close to wall time.
+  If no call's kernels can be matched, the kernel cells are left empty and a warning
+  names the case.
 
 Because kernel time drops the launch/dispatch overhead, kernel throughput is
 normally at least as high as wall throughput. A large gap means the case is
@@ -140,8 +151,8 @@ Each benchmark is a pytest module with three pieces:
    ```
 
 2. A `bench_*` function that runs the kernel and returns a list of metric
-   records built with `make_metric_record(...)` or
-   `make_forward_backward_metric_records(...)`.
+   records built with `make_metric_record(...)`, or with `direction_records(...)`,
+   which times the forward or the backward of a forward/backward callable pair.
 
 3. A `@pytest.mark.benchmark` test that applies any backend env vars and hands
    the work to the `microbench` fixture:
