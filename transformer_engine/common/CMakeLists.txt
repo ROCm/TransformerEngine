@@ -955,7 +955,10 @@ if (USE_ROCM)
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
 endif()
-if(NVTE_WITH_NCCL_EP)
+if(USE_CUDA AND NVTE_WITH_NCCL_EP)
+  # NCCL EP is CUDA-only (its sources and libnccl_ep.so are produced solely in
+  # the USE_CUDA branch above), so this install step must stay out of the ROCm
+  # build, where NCCL_EP_SHARED_LIB is never set.
   # Install a real file rather than the build-tree symlink so wheel packaging
   # does not need to preserve the versioned symlink chain.
   install(FILES "${NCCL_EP_SHARED_LIB}"
