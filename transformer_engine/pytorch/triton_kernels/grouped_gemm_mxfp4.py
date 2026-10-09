@@ -23,22 +23,6 @@ from .blockwise_fp8_grouped_gemm import _amd_compiler_knobs
 
 
 # ===============================================================================
-# Arch helper
-# ===============================================================================
-
-
-@functools.lru_cache(maxsize=None)
-def _is_gfx950_for(device_index: int) -> bool:
-    props = torch.cuda.get_device_properties(device_index)
-    return (props.major, props.minor) == (9, 5)
-
-
-def _is_gfx950() -> bool:
-    # Key the cache by device index so a set_device change isn't masked.
-    return _is_gfx950_for(torch.cuda.current_device())
-
-
-# ===============================================================================
 # AMD Triton compiler knobs
 #
 # The grouped FP4 kernels want the gfx950 knob set (async_copy,

@@ -12,9 +12,8 @@ import torch
 import torch.nn.functional as F
 
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
-from ..utils import round_up_to_nearest_multiple
+from ..utils import get_device_compute_capability, round_up_to_nearest_multiple
 from .grouped_gemm_mxfp4 import (
-    _is_gfx950,
     grouped_gemm_a8w4_triton_kernel,
     grouped_gemm_mxfp4_triton_kernel,
     grouped_gemm_mxfp4_variable_k_triton_kernel,
@@ -81,7 +80,7 @@ def _check_splits(
 
 def _require_gfx950() -> None:
     # The kernels use the CDNA4 scaled-FP4 MFMA (tl.dot_scaled e2m1); no other arch has it.
-    if not _is_gfx950():
+    if get_device_compute_capability() != (9, 5):
         raise RuntimeError(
             "grouped MXFP4 GEMM requires gfx950 (CDNA4); the current device lacks the"
             " scaled-FP4 MFMA used by tl.dot_scaled(..., \"e2m1\", ...)."
@@ -174,7 +173,7 @@ def _row_operand_mxfp8(x: torch.Tensor, transpose_scale: bool = False) -> Tuple[
     :func:`_row_operand_mxfp8_torch`. Used by the a8w4 forward (GATE-2 fused quant).
     ``transpose_scale`` emits the scale ``[K/32, M]``.
     """
-    if _is_gfx950():
+    if get_device_compute_capability() == (9, 5):
         return mxfp8_e4m3_rowwise_downcast(x, transpose_scale=transpose_scale)
     return _row_operand_mxfp8_torch(x, transpose_scale=transpose_scale)
 

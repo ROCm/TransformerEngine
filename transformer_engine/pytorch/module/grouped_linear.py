@@ -627,14 +627,10 @@ class _GroupedLinear(torch.autograd.Function):
             or (wgrad_store is not None and wgrad_store.delay_wgrad_compute())
         ):
             return False
-        try:
-            from ..triton_kernels.grouped_gemm_mxfp4 import _is_gfx950
-            from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
-            from ..custom_recipes.quantization_mxfp4_grouped import MXFP8E4M3QuantizerRef
-        except ImportError:
+        if get_device_compute_capability() != (9, 5):
             return False
-        if not _is_gfx950():
-            return False
+        from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+        from ..custom_recipes.quantization_mxfp4_grouped import MXFP8E4M3QuantizerRef
 
         def _plain_layout(q) -> bool:
             # The grouped Triton kernels need plain (un-shuffled, un-swizzled,
@@ -2786,14 +2782,11 @@ class GroupedLinear(TransformerEngineBaseModule):
             # blockwise paths consume as a quantized weight (_fp8_workspaces is shared and only
             # clears on a recipe *class* change, not between two CustomRecipe factories).
             ws_prefix = "weight"
-            if cache_weight and self.fp8:
-                try:
-                    from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+            if cache_weight and self.fp8 and IS_HIP_EXTENSION:
+                from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
 
-                    if isinstance(weight_quantizers[0], MXFP4QuantizerRef):
-                        ws_prefix = "mxfp4_grouped_weight"
-                except ImportError:
-                    pass
+                if isinstance(weight_quantizers[0], MXFP4QuantizerRef):
+                    ws_prefix = "mxfp4_grouped_weight"
             weight_workspaces = (
                 [self._fp8_workspaces.get(f"{ws_prefix}{i}") for i in range(num_gemms)]
                 if cache_weight
