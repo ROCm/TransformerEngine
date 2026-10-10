@@ -76,7 +76,7 @@ from ..utils import (
     nvtx_range_pop,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ...common.recipe import DelayedScaling, Recipe
+from ...common.recipe import DelayedScaling, Format, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
@@ -529,6 +529,15 @@ def initialize_ub(
         )
         comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
         if method in ("ring_exchange", "fused"):
+            p2p_kwargs = {}
+            if IS_HIP_EXTENSION:
+                # A row-parallel dgrad all-gather in MXFP8 runs as KOSMOS's fused dgrad +
+                # wgrad, whose region holds the grad output row- and column-quantized.
+                p2p_kwargs["kosmos_dual"] = (
+                    method == "fused"
+                    and buffer_dtype == torch.uint8
+                    and name in ("proj_dgrad", "fc2_dgrad")
+                )
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -546,6 +555,7 @@ def initialize_ub(
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
                 fused=method == "fused",
+                **p2p_kwargs,
             )
         else:
             ub_obj = tex.CommOverlap(
@@ -699,6 +709,41 @@ def _fused_rs_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch
     return shape[1] % 256 == 0
 
 
+# Op ids of the KOSMOS log (KosmosOp in rocm_comm_gemm_overlap.cpp)
+_KOSMOS_AG, _KOSMOS_RS, _KOSMOS_BULK_AG, _KOSMOS_BULK_RS, _KOSMOS_AG_DW = range(5)
+
+
+def _kosmos_mxfp8_fallback(name: str, op: int, what: str) -> None:
+    """Report (NVTE_KOSMOS_LOG=1) an MXFP8 call kept off the fused backend."""
+    if IS_HIP_EXTENSION and _ub_is_fused(name):
+        get_ub(name, True).kosmos_log_fallback(op, what)
+
+
+def _kosmos_mxfp8(name: str, fp8: bool, op: int, opted_in: bool, bulk: bool = False) -> bool:
+    """Whether an FP8 call on the fused communicator `name` is MXFP8 that the KOSMOS backend takes.
+
+    KOSMOS is the only fused backend with MXFP8 kernels (e4m3 operands, unswizzled e8m0 scales);
+    `opted_in` says whether the calling module has the MXFP8 fused path.
+    """
+    if not (IS_HIP_EXTENSION and fp8 and _ub_is_fused(name)):
+        return False
+    recipe = FP8GlobalStateManager.get_fp8_recipe()
+    if not recipe.mxfp8():
+        return False
+    why = ""
+    if not opted_in:
+        why = "no MXFP8 fused path in this module"
+    elif recipe.fp8_format != Format.E4M3:
+        why = "fp8_format is not E4M3"
+    elif getattr(recipe, "backward_override", None) is not None:
+        why = "backward_override is set"
+    elif not get_ub(name, True).kosmos_mxfp8(bulk):
+        why = "KOSMOS is off for this buffer"
+    if why:
+        _kosmos_mxfp8_fallback(name, op, why)
+    return not why
+
+
 def fused_ag_gemm_eligible(
     name: str,
     inp: torch.Tensor,
@@ -709,16 +754,33 @@ def fused_ag_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    kosmos_mxfp8: bool = False,
 ) -> bool:
-    """Whether the fused AG+GEMM backend covers this call."""
+    """Whether the fused AG+GEMM backend covers this call.
+
+    `kosmos_mxfp8` opts a caller in to MXFP8 on KOSMOS; with `is_dgrad` the caller must then run the
+    dgrad all-gather as `fused_overlap_ag_dgrad_wgrad` (the row-parallel te.Linear does).
+    """
     if not _ub_is_fused(name):
         return True  # not our backend
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    if fp8:
+        op = _KOSMOS_AG_DW if is_dgrad else _KOSMOS_AG
+        if not _kosmos_mxfp8(name, fp8, op, kosmos_mxfp8):
+            return False
+        if is_dgrad and not get_ub(name, True).kosmos_dgrad_wgrad():
+            _kosmos_mxfp8_fallback(name, op, "buffer without the dual MXFP8 region")
+            return False
+    # TODO: Drop these as the kernel gains bias and gelu support.
+    if gelu or bias is not None:
         return False
     if dtype != torch.bfloat16:
         return False
     m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad)
+    if fp8 and is_dgrad:
+        # kosmos_ag_dgrad_wgrad: tokens % (256 * tp), hidden and k_local % 256; inp holds all tokens
+        return (
+            tp_size in (4, 8) and n_chunk % (256 * tp_size) == 0 and k % 256 == 0 and m % 256 == 0
+        )
     return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
 
 
@@ -731,14 +793,17 @@ def fused_rs_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    kosmos_mxfp8: bool = False,
 ) -> bool:
-    """Whether the fused GEMM+RS backend covers this call."""
+    """Whether the fused GEMM+RS backend covers this call (MXFP8 on KOSMOS with `kosmos_mxfp8`)."""
     if not _ub_is_fused(name):
         return True  # not our backend
     if is_dgrad:
         return False
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    if fp8 and not _kosmos_mxfp8(name, fp8, _KOSMOS_RS, kosmos_mxfp8):
+        return False
+    # TODO: Drop these as the kernel gains bias and gelu support.
+    if gelu or bias is not None:
         return False
     if dtype != torch.bfloat16:
         return False
@@ -763,11 +828,16 @@ def fused_bulk_ag_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    kosmos_mxfp8: bool = False,
 ) -> bool:
-    """Whether this call may use the bulk all-gather overlap."""
+    """Whether this call may use the bulk all-gather overlap (MXFP8: KOSMOS, `kosmos_mxfp8`)."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    eligible = (
+        _ub_is_fused(name)
+        and (not fp8 or _kosmos_mxfp8(name, fp8, _KOSMOS_BULK_AG, kosmos_mxfp8, bulk=True))
+        and dtype == torch.bfloat16
+    )
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
@@ -784,12 +854,18 @@ def fused_bulk_rs_eligible(
     fp8: bool,
     bias: Optional[torch.Tensor] = None,
     fuse_wgrad_accumulation: bool = False,
+    kosmos_mxfp8: bool = False,
 ) -> bool:
-    """Whether this call may use the bulk reduce-scatter overlap."""
+    """Whether this call may use the bulk reduce-scatter overlap (MXFP8: KOSMOS, `kosmos_mxfp8`)."""
     if not IS_HIP_EXTENSION:
         return True
     # TODO: Add bias support
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16 and bias is None
+    eligible = (
+        _ub_is_fused(name)
+        and (not fp8 or _kosmos_mxfp8(name, fp8, _KOSMOS_BULK_RS, kosmos_mxfp8, bulk=True))
+        and dtype == torch.bfloat16
+        and bias is None
+    )
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
@@ -798,7 +874,7 @@ def fused_bulk_rs_eligible(
         # has that epilogue, otherwise take the non-fused path.
         main_grad = getattr(weight, "main_grad", None)
         eligible = (main_grad is None or main_grad.dtype == torch.float32) and get_ub(
-            name, False
+            name, fp8
         ).fused_bulk_rs_fp32()
     _ub_fused_bulk_decisions[name] = eligible
     return eligible
@@ -932,7 +1008,6 @@ def fill_userbuffers_buffer_for_all_gather(
         local_data = (
             local_tensor._rowwise_data if with_rowwise_data else local_tensor._columnwise_data
         )
-        comm.copy_into_buffer(local_data, local_chunk=True)
 
         # Gather scaling-inverses
         if math.prod(local_shape[:-1]) % 128 != 0 and not IS_HIP_EXTENSION:
@@ -940,7 +1015,10 @@ def fill_userbuffers_buffer_for_all_gather(
                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
             )
-        if local_tensor._with_gemm_swizzled_scales:
+        kosmos_region = _kosmos_mx_region(comm)
+        # The fused method is gfx950 only, where the ROCm MXFP8 quantize kernels write compact
+        # scales whatever the optimize_for_gemm flag says (only gfx1250 swizzles)
+        if local_tensor._with_gemm_swizzled_scales and not kosmos_region:
             raise ValueError("Userbuffers assumes MXFP8 tensors have unswizzled scales")
         local_scale_inv = (
             local_tensor._rowwise_scale_inv
@@ -948,16 +1026,26 @@ def fill_userbuffers_buffer_for_all_gather(
             else local_tensor._columnwise_scale_inv
         )
         local_scale_inv_size = list(local_scale_inv.size())
-        global_scale_inv = torch.empty(
-            [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
-            dtype=local_scale_inv.dtype,
-            device=local_scale_inv.device,
-        )
-        torch.distributed.all_gather_into_tensor(
-            global_scale_inv,
-            local_scale_inv,
-            group=process_group,
-        )
+        global_scale_inv_size = [
+            process_group_size * local_scale_inv_size[0]
+        ] + local_scale_inv_size[1:]
+        if kosmos_region:
+            # KOSMOS gathers the scales with the data: this rank's scale shard goes after the data,
+            # and the fused op leaves every rank's scales there.
+            comm.copy_mxfp8_into_buffer(local_data, local_scale_inv)
+            global_scale_inv = comm.get_buffer_scales(global_scale_inv_size)
+        else:
+            comm.copy_into_buffer(local_data, local_chunk=True)
+            global_scale_inv = torch.empty(
+                global_scale_inv_size,
+                dtype=local_scale_inv.dtype,
+                device=local_scale_inv.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                global_scale_inv,
+                local_scale_inv,
+                group=process_group,
+            )
 
         # Construct MXFP8 tensor with Userbuffers buffer
         rowwise_data, rowwise_scale_inv = None, None
@@ -981,6 +1069,35 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unsupported data format
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
+
+
+def _kosmos_mx_region(comm) -> bool:
+    """Whether `comm` is a fused all-gather buffer whose MXFP8 region holds data, then scales."""
+    return (
+        IS_HIP_EXTENSION
+        and isinstance(comm, tex.CommOverlapP2P)
+        and comm.is_fp8_ubuf()
+        and comm.kosmos_mxfp8(False)
+    )
+
+
+def fill_userbuffers_buffer_for_kosmos_dgrad_wgrad(
+    comm,
+    grad_output: torch.Tensor,
+    quantizer: MXFP8Quantizer,
+) -> MXFP8TensorStorage:
+    """Quantize the local grad output row- and column-wise into the dual region of a KOSMOS
+    dgrad + wgrad all-gather buffer (part 0: row-quantized data and scales, part 1:
+    column-quantized).
+
+    Returns the local quantized tensor. KOSMOS gathers both parts inside the fused op.
+    """
+    # The scales are compact on gfx950 (the only fused arch) even when flagged GEMM-swizzled
+    quantizer.set_usage(rowwise=True, columnwise=True)
+    grad_output = quantizer(grad_output)
+    comm.copy_mxfp8_into_buffer(grad_output._rowwise_data, grad_output._rowwise_scale_inv, 0)
+    comm.copy_mxfp8_into_buffer(grad_output._columnwise_data, grad_output._columnwise_scale_inv, 1)
+    return grad_output
 
 
 def _is_weight_workspace_valid(

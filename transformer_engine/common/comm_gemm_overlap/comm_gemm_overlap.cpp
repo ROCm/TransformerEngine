@@ -811,12 +811,16 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool fused)
+                                       bool atomic_gemm, bool aggregate, bool fused,
+                                       bool kosmos_dual)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm),
       _fused(fused) {
+#ifdef __HIP_PLATFORM_AMD__
+  _kosmos_dual = kosmos_dual;
+#endif
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 
@@ -850,6 +854,12 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   }
 
 #ifdef NVTE_WITH_KOSMOS
+  if (_fused && !_is_reduce_scatter && typeToSize(buffer_dtype) == 1) {
+    // An MXFP8 all-gather region holds the fp8 data, then its e8m0 scales (one per 32 values); a dual region
+    // (dgrad + wgrad) holds a row- and a column-quantized part.
+    _kosmos_mx_bytes = buffer_bytes + buffer_bytes / 32;
+    buffer_bytes     = _kosmos_mx_bytes * (_kosmos_dual ? 2 : 1);
+  }
   if (_fused) {
     // KOSMOS keeps its cross-rank flags in the buffer tail, zeroed by the allocation below.
     buffer_bytes += kosmos_comm_flag_bytes(_tp_size) + 256;

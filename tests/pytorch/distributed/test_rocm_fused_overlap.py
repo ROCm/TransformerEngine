@@ -132,16 +132,26 @@ def test_fused_ag_overlap_bf16(nprocs):
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
+@pytest.mark.parametrize("quantization", ("fp8",))
 def test_fused_ag_overlap_rejects_non_bf16(quantization, nprocs):
-    """Non-bf16 is currently outside the backend."""
+    """Per-tensor FP8 is outside the backend."""
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_ag(nprocs, quantization=quantization)
     assert result.returncode != 0, "fused AG+GEMM accepted a non-bf16 operand"
     assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_ag_overlap_mxfp8(nprocs):
+    """MXFP8 runs on KOSMOS and matches the reference; a build without KOSMOS refuses it."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_ag(nprocs, quantization="mxfp8")
+    if "needs the KOSMOS backend" in result.stderr.decode():
+        pytest.skip("built without the KOSMOS backend")
+    _assert_numerics_passed(result)
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -236,7 +246,7 @@ def test_fused_rs_overlap_bf16(nprocs):
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
 @pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
 def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
-    """A quantized row-parallel Linear must fall back cleanly instead of reaching the bf16 kernel."""
+    """A quantized row-parallel Linear never reaches the bf16 kernel (MXFP8 runs on KOSMOS)."""
     if quantization.startswith("fp8") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
@@ -293,6 +303,23 @@ def test_fused_rs_overlap_is_deterministic(nprocs):
     first_hashes, second_hashes = _output_hashes(first.stdout), _output_hashes(second.stdout)
     assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
     assert first_hashes == second_hashes, "two identical runs produced different outputs"
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_layer_mxfp8(nprocs):
+    """Column-parallel LayerNormLinear in MXFP8 (AG+GEMM, bulk AG, bulk RS) vs. no overlap."""
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_layer(
+        nprocs,
+        [
+            f"--out-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
+            "--fp8",
+            "--quantization=mxfp8",
+        ],
+    )
+    _assert_numerics_passed(result)
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)

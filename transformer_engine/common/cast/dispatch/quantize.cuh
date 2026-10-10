@@ -724,7 +724,8 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
     args.num_tensors++;
   }
 
-  if (args.num_tensors == 0) return;
+  // Every tensor empty (e.g. all of a rank's experts routed 0 rows): a 0-block grid is an invalid launch.
+  if (args.num_tensors == 0 || args.block_range[args.num_tensors] == 0 || tiles_x == 0) return;
 
   bool is_aligned = true;
   for (int i = 0; i < args.num_tensors; i++) {

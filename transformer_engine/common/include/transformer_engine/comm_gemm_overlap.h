@@ -359,6 +359,9 @@ class CommOverlapP2PBase : public CommOverlapCore {
   bool _kosmos_tried{false};
   int _rs_backend{0};
   unsigned _kosmos_logged{0};
+  // MXFP8 region of a fused all-gather buffer: fp8 data then its e8m0 scales; a dual buffer holds two such parts
+  size_t _kosmos_mx_bytes{0};
+  bool _kosmos_dual{false};
 #endif
 
  private:
@@ -379,7 +382,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false, bool fused = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool fused = false,
+                     bool kosmos_dual = false);
 
   // Constructor for cuBLASMp backend
   CommOverlapP2PBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
@@ -498,8 +502,26 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
 #ifdef __HIP_PLATFORM_AMD__
   bool fused_bulk_rs_fp32();
+  bool kosmos_mxfp8(bool bulk);
+  bool kosmos_dgrad_wgrad();
+  void kosmos_log_fallback(int op, const char *what);
+
+  /*
+  ** ROCm fused AllGather + dgrad and wgrad GEMMs (KOSMOS, MXFP8)
+  */
+  void fused_overlap_ag_dgrad_wgrad(const TensorWrapper &W, const TensorWrapper &X, TensorWrapper &dX,
+                                    TensorWrapper &dW, TensorWrapper &workspace, bool accumulate,
+                                    cudaStream_t stream_main);
 #else
   bool fused_bulk_rs_fp32() { return false; }
+  bool kosmos_mxfp8(bool bulk) { return false; }
+  bool kosmos_dgrad_wgrad() { return false; }
+  void kosmos_log_fallback(int op, const char *what) {}
+  void fused_overlap_ag_dgrad_wgrad(const TensorWrapper &W, const TensorWrapper &X, TensorWrapper &dX,
+                                    TensorWrapper &dW, TensorWrapper &workspace, bool accumulate,
+                                    cudaStream_t stream_main) {
+    NVTE_ERROR("Operation not supported.");
+  }
 #endif
 
   /*

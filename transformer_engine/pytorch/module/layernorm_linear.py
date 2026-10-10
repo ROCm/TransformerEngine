@@ -231,6 +231,7 @@ class _LayerNormLinear(torch.autograd.Function):
         )
         if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
             ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_size, fp8,
+            kosmos_mxfp8=True,
         ):
             ub_overlap_ag_fprop = False
         if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
@@ -239,6 +240,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_overlap_ag_dgrad = False
         if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
             ub_name + "_fprop", weight, bias, activation_dtype, tp_size, fp8,
+            kosmos_mxfp8=True,
         ):
             ub_overlap_rs_fprop = False
         if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
@@ -247,11 +249,12 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_overlap_rs_dgrad = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
             ub_name + "_dgrad", inp, weight, activation_dtype, tp_size, fp8,
+            kosmos_mxfp8=True,
         ):
             ub_bulk_dgrad = False
         if ub_bulk_wgrad and not fused_bulk_rs_eligible(
             ub_name + "_wgrad", inp, weight, activation_dtype, tp_size, fp8, bias,
-            fuse_wgrad_accumulation,
+            fuse_wgrad_accumulation, kosmos_mxfp8=True,
         ):
             ub_bulk_wgrad = False
         if ub_overlap_rs_fprop:

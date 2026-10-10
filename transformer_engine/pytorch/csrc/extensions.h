@@ -923,7 +923,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
                  bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false, bool fused = false);
+                 bool aggregate = false, bool fused = false, bool kosmos_dual = false);
 
   // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
   CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
@@ -940,6 +940,15 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
   std::pair<at::Stream, at::Stream> get_communication_stream();
+
+  // KOSMOS MXFP8 regions: this rank's shard of fp8 data and e8m0 scales into a part, the gathered scales of a part,
+  // and the fused all-gather + dgrad + wgrad op.
+  void copy_mxfp8_into_buffer(const at::Tensor &data, const at::Tensor &scale_inv, int part = 0);
+
+  at::Tensor get_buffer_scales(const std::vector<int64_t> &shape, int part = 0);
+
+  void ag_dgrad_wgrad(py::handle weight, py::handle input, at::Tensor dgrad, at::Tensor wgrad,
+                      at::Tensor workspace, bool accumulate);
 
 };  // CommOverlapP2P
 

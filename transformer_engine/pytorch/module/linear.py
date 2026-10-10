@@ -21,6 +21,9 @@ from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    fill_userbuffers_buffer_for_kosmos_dgrad_wgrad,
+    _kosmos_mxfp8_fallback,
+    _KOSMOS_AG_DW,
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
@@ -78,6 +81,7 @@ from ..distributed_weight import (
 from ..cpp_extensions import (
     general_gemm,
 )
+from ..cpp_extensions.gemm import get_cublas_workspace
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -835,6 +839,31 @@ def _linear_setup_ctx(
     return (saved_inputmat, wt_save, saved_weight, saved_bias)
 
 
+def _kosmos_dgrad_wgrad_refusal(
+    bwd_args: LinearBwdArgs,
+    grad_output: torch.Tensor,
+    main_grad: Optional[torch.Tensor],
+    accumulate: bool,
+    is_dist_weight: bool,
+) -> str:
+    """Why an MXFP8 dgrad all-gather cannot run as KOSMOS's fused dgrad + wgrad ("" if it can)."""
+    if not (bwd_args.requires_dgrad and bwd_args.requires_wgrad):
+        return "needs both dgrad and wgrad"
+    if bwd_args.wgrad_store is not None and bwd_args.wgrad_store.delay_wgrad_compute():
+        return "delayed wgrad"
+    if is_dist_weight or bwd_args.fsdp_group is not None or bwd_args.is_fsdp2:
+        return "sharded weight"
+    if bwd_args.debug or bwd_args.custom or bwd_args.grad_weight_quantizer is not None:
+        return "debug or custom quantization"
+    if isinstance(grad_output, QuantizedTensorStorage):
+        return "grad output already quantized"
+    if accumulate and main_grad is not None and main_grad.dtype != torch.float32:
+        return "accumulation into a non-fp32 main_grad"
+    if not get_ub(bwd_args.ub_name + "_dgrad", True).kosmos_dgrad_wgrad():
+        return "buffer without the dual MXFP8 region"
+    return ""
+
+
 def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
     """Backward implementation for the linear layer.
 
@@ -907,6 +936,34 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         )
         nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
 
+        # MXFP8 dgrad all-gather (row-parallel): KOSMOS gathers the grad output row- and
+        # column-quantized and runs the dgrad and wgrad GEMMs in one kernel. No other fused
+        # backend takes MXFP8, so any other case takes the non-overlapped path.
+        kosmos_dgrad_wgrad = False
+        kosmos_accumulate = False
+        kosmos_wgrad = None
+        if (
+            IS_HIP_EXTENSION
+            and bwd_args.ub_overlap_ag
+            and bwd_args.fp8
+            and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            and _ub_is_fused(bwd_args.ub_name + "_dgrad")
+        ):
+            if bwd_args.is_first_microbatch is not None:
+                kosmos_accumulate = (
+                    bwd_args.fuse_wgrad_accumulation and not bwd_args.is_first_microbatch
+                )
+            else:
+                kosmos_accumulate = bwd_args.fuse_wgrad_accumulation
+            kosmos_accumulate = kosmos_accumulate and not origin_weight_overwrites_main_grad
+            refusal = _kosmos_dgrad_wgrad_refusal(
+                bwd_args, grad_output, main_grad, kosmos_accumulate, is_dist_weight
+            )
+            kosmos_dgrad_wgrad = not refusal
+            if refusal:
+                bwd_args.ub_overlap_ag = False
+                _kosmos_mxfp8_fallback(bwd_args.ub_name + "_dgrad", _KOSMOS_AG_DW, refusal)
+
         # Configure Userbuffers communication (comm+GEMM overlap)
         bwd_args.ub_obj_gradout = None
         ub_obj_dgrad = None
@@ -952,7 +1009,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         if grad_output_quantizer is not None:
             quantizer = grad_output_quantizer
             quantizer.set_usage(rowwise=True, columnwise=True)
-            if bwd_args.ub_overlap_ag:
+            if bwd_args.ub_overlap_ag and not kosmos_dgrad_wgrad:
                 # Userbuffers only supports communication for one
                 # tensor usage at a time. Configure quantizer with
                 # usage for only dgrad GEMM.
@@ -977,15 +1034,22 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # tp_group, ub_obj_gradout, use_bias). ``LinearBwdArgs`` exposes the
         # same names so we can pass it directly.
         nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
-        (
-            grad_output,
-            grad_bias,
-        ) = TransformerEngineBaseModule.grad_output_preprocess(
-            bwd_args,
-            grad_output,
-            bwd_args.parallel_mode == "row",
-            grad_output_quantizer,
-        )
+        if kosmos_dgrad_wgrad:
+            grad_output = grad_output.reshape((-1, grad_output.shape[-1])).contiguous()
+            grad_bias = grad_output.sum(dim=0) if bwd_args.use_bias else None
+            grad_output = fill_userbuffers_buffer_for_kosmos_dgrad_wgrad(
+                ub_obj_dgrad, grad_output, grad_output_quantizer
+            )
+        else:
+            (
+                grad_output,
+                grad_bias,
+            ) = TransformerEngineBaseModule.grad_output_preprocess(
+                bwd_args,
+                grad_output,
+                bwd_args.parallel_mode == "row",
+                grad_output_quantizer,
+            )
         nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
         # --------------------------------------------------
@@ -1132,20 +1196,48 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 weight_for_dgrad = saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-            gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_for_dgrad,
-                grad_output,
-                layout="NN",
-                grad=True,
-                quantization_params=grad_input_quantizer,
-                out=gemm_out,
-                out_dtype=bwd_args.activation_dtype,
-                use_split_accumulator=use_split_accumulator,
-                ub=ub_obj_dgrad,
-                ub_type=ub_type_dgrad,
-                extra_output=reduce_scatter_out,
-                bulk_overlap=bwd_args.ub_bulk_dgrad,
-            )
+            if kosmos_dgrad_wgrad:
+                # dx = dy * w and dw = dy^T * x in one KOSMOS kernel, gathering dy into ub_obj_dgrad
+                inputmat_total.update_usage(columnwise_usage=True)
+                gemm_out = torch.empty(
+                    dgrad_shape,
+                    dtype=bwd_args.activation_dtype,
+                    device=grad_output_arg.device,
+                )
+                if bwd_args.fuse_wgrad_accumulation:
+                    kosmos_wgrad = main_grad
+                else:
+                    kosmos_wgrad = torch.empty(
+                        (grad_output_arg.shape[-1], dgrad_shape[1]),
+                        dtype=bwd_args.activation_dtype,
+                        device=grad_output_arg.device,
+                    )
+                ub_obj_dgrad.ag_dgrad_wgrad(
+                    weight_for_dgrad,
+                    inputmat_total,
+                    gemm_out,
+                    kosmos_wgrad,
+                    get_cublas_workspace(grad_output_arg.device.index, True, False),
+                    kosmos_accumulate,
+                )
+                if bwd_args.owns_input:
+                    clear_tensor_data(inputmat_total)
+                clear_tensor_data(grad_output)
+            else:
+                gemm_out, *_, reduce_scatter_out = general_gemm(
+                    weight_for_dgrad,
+                    grad_output,
+                    layout="NN",
+                    grad=True,
+                    quantization_params=grad_input_quantizer,
+                    out=gemm_out,
+                    out_dtype=bwd_args.activation_dtype,
+                    use_split_accumulator=use_split_accumulator,
+                    ub=ub_obj_dgrad,
+                    ub_type=ub_type_dgrad,
+                    extra_output=reduce_scatter_out,
+                    bulk_overlap=bwd_args.ub_bulk_dgrad,
+                )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             if bwd_args.fp8 and not bwd_args.keep_fp8_weight_transpose_cache:
@@ -1214,8 +1306,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # Compute grad weight
         # --------------------------------------------------
 
-        wgrad = None
-        if bwd_args.requires_wgrad:
+        wgrad = kosmos_wgrad
+        if bwd_args.requires_wgrad and kosmos_wgrad is None:
 
             # Prepare input tensor
             # Note: Synchronize tensor-parallel communication and
@@ -2096,17 +2188,17 @@ class Linear(TransformerEngineBaseModule):
 
             if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
                 self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, kosmos_mxfp8=True,
             ):
                 ub_overlap_ag_fprop = False
             if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor, None,
-                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, kosmos_mxfp8=True,
             ):
                 ub_overlap_ag_dgrad = False
             if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
                 self.ub_name + "_fprop", weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, kosmos_mxfp8=True,
             ):
                 ub_overlap_rs_fprop = False
             if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
@@ -2116,13 +2208,13 @@ class Linear(TransformerEngineBaseModule):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, kosmos_mxfp8=True,
             ):
                 ub_bulk_dgrad = False
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 self.ub_name + "_wgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
-                self.fuse_wgrad_accumulation,
+                self.fuse_wgrad_accumulation, kosmos_mxfp8=True,
             ):
                 ub_bulk_wgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
