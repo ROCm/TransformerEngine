@@ -140,8 +140,6 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const int warp_n = __builtin_amdgcn_readfirstlane(kittens::warpid() % WARPS_COL);
     const int tid = threadIdx.x;
 
-    const int sb_h0_idx = block_n / SCALE_BLOCK;
-    const int sb_h1_idx = sb_h0_idx + 1;
     const int a_row_h0 = warp_m * REG_M;
     const int a_row_h1 = HALF_ROW + warp_m * REG_M;
 
@@ -197,8 +195,15 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     // 1Dx2D reads scale_B as one scalar per (n-block, k-block) straight into an SGPR; 1Dx1D
     // stages [k_blocks][N] through LDS.  Both are set up: the unused one is a pointer and an
     // SRD, not a load, and having both lets every read site below be the same text.
-    const float *sb0_ptr = scale_B + (block_n / SCALE_BLOCK) * scale_K;
-    const float *sb1_ptr = sb0_ptr + scale_K;
+    // Clamped to the last existing 128-column group.  A 256-wide output block whose second half
+    // lies past the end of N has no second scale group, and the unclamped `+ scale_K` would read
+    // past scale_B -- the value is discarded at the store, so it never corrupts a result, but the
+    // load still happens.  micro_tk_partial_k clamps the same two indices the same way.
+    const int n_scale_blocks = (N + SCALE_BLOCK - 1) / SCALE_BLOCK;
+    const int sb_g0 = min(block_n / SCALE_BLOCK, n_scale_blocks - 1);
+    const int sb_g1 = min(sb_g0 + 1, n_scale_blocks - 1);
+    const float *sb0_ptr = scale_B + sb_g0 * scale_K;
+    const float *sb1_ptr = scale_B + sb_g1 * scale_K;
     kittens::i32x4 sb_srd = kittens::make_srsrc((const void *)scale_B, (uint32_t)(scale_K * N * (int)sizeof(float)));
 
     kittens::i32x4 sa_srd = kittens::make_srsrc((const void *)scale_A, (uint32_t)(scale_K * M * (int)sizeof(float)));
@@ -251,9 +256,10 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    // Two k-blocks per trip.  At 1Dx1D this spills (64 B/lane of scratch), but every scratch
-    // instruction lands in the prologue or the drain: the steady-state loop has none, so the
-    // spill executes once rather than once per trip and never serialises against the prefetch.
+    // Two k-blocks per trip.  This spills -- how much depends on the hipkittens revision -- and
+    // five of the reloads are inside the steady-state loop, so the cost is per trip, not once.
+    // It is still the faster setting at 1Dx2D by 4-6%; at 1Dx1D, where the spill is heaviest, it
+    // is about 1% slower below 16384^3.  Numbers and method are in the PR discussion, not here.
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
         // ---- cluster 0 ------------------------------------------------------------------
@@ -314,10 +320,12 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         // ---- cluster 6 ------------------------------------------------------------------
         __builtin_amdgcn_sched_barrier(0);
         G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base_ptr, Bs_LDS_base_addr + (tic * 2 + 1) * kBsTileStride);
-        // A trip issues ten vector-memory ops: the two scale DMAs, then As[toc][1], As[tic][0],
-        // Bs[tic][0], Bs[tic][1], two each.  The next trip reads smem_sa[toc], smem_sb[toc] and
-        // As[toc][1] before any other wait, so those four oldest must retire here -- leaving the
-        // six newest outstanding.  vmcnt(8) would retire the scales but not As[toc][1].
+        // 6 is the loosest count that is safe across every instantiation, which issue different
+        // numbers of ops per trip: 1Dx1D on a wave with tid < BLOCK_M issues ten (two scale DMAs
+        // then As[toc][1], As[tic][0], Bs[tic][0], Bs[tic][1], two each); 1Dx2D drops the column
+        // DMA to nine; waves past BLOCK_M issue no scale DMA at all, so eight.  What the next
+        // trip reads before reaching another wait is smem_sa[toc], smem_sb[toc] and As[toc][1],
+        // and in each case leaving the six newest outstanding retires exactly those.
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();

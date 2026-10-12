@@ -484,6 +484,19 @@ __device__ inline float ref_dgelu(float x) {
   return 0.5f * x * ((1.f - t * t) * (0.79788456f + 0.1070322243f * x * x)) + 0.5f * (1.f + t);
 }
 
+// out_dtype is only ever one of these three -- BlockwiseParams allows no other, and the kernel's
+// own dispatch agrees.  test_common.h's TYPE_SWITCH_ALL would additionally instantiate the fp8,
+// fp4 and integer cases, which cannot occur here and for which the float conversions below are
+// not meaningful.  A local switch keeps this test to its own domain without reaching into
+// transformer_engine/common/common.h, which is not a public header.
+#define BLOCKWISE_OUT_TYPE_SWITCH(dtype, type, ...)                            \
+  switch (dtype) {                                                             \
+    case DType::kFloat32: { using type = float; { __VA_ARGS__ } } break;       \
+    case DType::kFloat16: { using type = fp16;  { __VA_ARGS__ } } break;       \
+    case DType::kBFloat16: { using type = bf16; { __VA_ARGS__ } } break;       \
+    default: GTEST_FAIL() << "unsupported blockwise output dtype";             \
+  }
+
 // The fused epilogue, applied to that product and then converted to the output type.
 //
 // The order is the kernel's and is not arbitrary: the accumulate term rounds to the output type
@@ -1495,7 +1508,7 @@ void performBlockwiseTest(const BlockwiseParams& p) {
   const bool grad = p.use_gelu;
   const float beta = p.accumulate ? 1.0f : 0.0f;
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(p.out_dtype, OutType,
+  BLOCKWISE_OUT_TYPE_SWITCH(p.out_dtype, OutType,
     blockwise_ref_epilogue<OutType><<<grid, block, 0, 0>>>(
         static_cast<const float*>(Product.rowwise_dptr()),
         p.use_bias ? static_cast<const bf16*>(bias.rowwise_dptr()) : nullptr,
@@ -1513,7 +1526,7 @@ void performBlockwiseTest(const BlockwiseParams& p) {
                    prop.multiProcessorCount, /*stream=*/0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   RefD.to_cpu();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(p.out_dtype, OutType,
+  BLOCKWISE_OUT_TYPE_SWITCH(p.out_dtype, OutType,
     compareResults("D", D, RefD.rowwise_cpu_dptr<OutType>(), /*rowwise=*/true,
                    /*atol=*/1e-3, /*rtol=*/6e-2);
   );
@@ -1530,7 +1543,15 @@ TEST_P(BlockwiseGEMMTestSuite, TestFp8Blockwise) {
 static std::string BlockwiseTestName(
     const testing::TestParamInfo<BlockwiseGEMMTestSuite::ParamType>& info) {
   const auto& p = info.param;
-  std::string name = std::to_string(p.m) + "x" + std::to_string(p.k) + "x" +
+  // Operand and output types lead the name, spelled the way the rest of this file spells them
+  // (fp8 = e4m3, bf8 = e5m2), so these read like the FP8GEMMTestSuite cases above.
+  auto fp8_name = [](DType t) { return t == DType::kFloat8E5M2 ? "bf8" : "fp8"; };
+  auto out_name = [](DType t) {
+    return t == DType::kFloat32 ? "fp32" : (t == DType::kFloat16 ? "fp16" : "bf16");
+  };
+  std::string name = std::string(fp8_name(p.a_dtype)) + "x" + fp8_name(p.b_dtype) + "x" +
+                     out_name(p.out_dtype) + "x" +
+                     std::to_string(p.m) + "x" + std::to_string(p.k) + "x" +
                      std::to_string(p.n) + "x" + (p.a_2d_scaled ? "1Dx2D" : "1Dx1D") + "x" +
                      (p.fp32_scales ? "fp32scales" : "pow2scales");
   name += p.amax_epsilon > 0.0f ? "xeps" : "xnoeps";
@@ -1539,10 +1560,6 @@ static std::string BlockwiseTestName(
   if (p.use_bias) name += "xbias";
   if (p.use_gelu) name += "xdgelu";
   if (p.accumulate) name += "xaccumulate";
-  if (p.out_dtype == DType::kFloat32) name += "xoutfp32";
-  if (p.out_dtype == DType::kFloat16) name += "xoutfp16";
-  if (p.a_dtype == DType::kFloat8E5M2) name += "xae5m2";
-  if (p.b_dtype == DType::kFloat8E5M2) name += "xbe5m2";
   return name;
 }
 
@@ -1576,6 +1593,12 @@ INSTANTIATE_TEST_SUITE_P(
         // Partial tiles on both axes: 272 = 256 + 16, so the last block along each is short and
         // the epilogue has to stop where the output does.
         BlockwiseParams{272, 512, 272, false, true,  1e-4f, false, 0.0f, true},
+        // The same shape under 1Dx2D.  Worth having separately: with the weights blocked 128x128
+        // the second half of the last 256-wide output block has no scale group of its own, which
+        // is the case the scale-pointer clamp exists for.  The 1Dx1D variant above cannot reach
+        // it, because there the scale layout makes that read in bounds.
+        BlockwiseParams{272, 512, 272, true,  true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{272, 512, 272, true,  true,  1e-4f, false, 0.0f},
 
         // dgelu: implies grad, forbids bias, bf16 output only.
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true},

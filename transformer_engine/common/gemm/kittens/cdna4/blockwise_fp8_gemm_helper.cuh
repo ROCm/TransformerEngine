@@ -377,13 +377,6 @@ __device__ inline RowScaleT<AccType::width> load_row_scale_t(
     return rs;
 }
 
-
-using as3_u32_ptr_ = uint32_t __attribute__((address_space(3)))*;
-using i32x4_v_ = int32_t __attribute__((ext_vector_type(4)));
-extern "C" __device__ void
-raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
-    __asm("llvm.amdgcn.raw.buffer.load.lds");
-
 // HBM -> LDS for k-block `k`'s row scales, one float per row of the block.  Completion is
 // tracked by vmcnt, like the tile loads.
 template <int BLOCK_M>
@@ -414,10 +407,8 @@ __device__ __forceinline__ void row_scales_load_dma(
 // The compiler does not pad the hazard for an asm fold, so the padding here is ours, and the
 // paired sched_barrier is what keeps the builtin from drifting away from its fold.
 
-// Spelled out by the caller rather than given as a count: the two recipes want different waits,
-// and "no wait" has to be expressible and distinct from s_nop 0.
+// Spelled out by the caller rather than given as a count: the two recipes want different waits.
 #define FP8_NOP(n) "s_nop " #n "\n\t"
-#define FP8_NO_NOP ""
 
 // One fold, one shared scale: tile += t * s.
 #define FP8_FOLD(WAIT, tq, tile, s)                                                \
@@ -637,12 +628,12 @@ __device__ __forceinline__ void load4_contig(const void *p, size_t idx, float (&
     for (int r = 0; r < 4; r++) out[r] = (float)q.e[r];
 }
 
-// idx is a multiple of 4 within a row; for row-indexed operands the row base is m*N, so 4-byte
-// alignment needs N divisible by 4 -- the same condition store_output_t's merged store requires.
-// Out of range, fall back to scalar reads.
+// idx is 4*(lane/16) plus multiples of 16, so the run is 4-element aligned for any element width
+// and `idx + 3 < limit` is the only test needed.  Out of range -- the ragged last block along N --
+// fall back to scalar reads.
 __device__ __forceinline__ void read_elem4(const void *p, int dtype, size_t idx, size_t limit,
-                                           bool aligned, float (&out)[4]) {
-    if (aligned && idx + 3 < limit) {
+                                           float (&out)[4]) {
+    if (idx + 3 < limit) {
         if (dtype == 6) { load4_contig<__hip_bfloat16>(p, idx, out); return; }
         if (dtype == 5) { load4_contig<__half>(p, idx, out); return; }
         load4_contig<float>(p, idx, out);
@@ -686,7 +677,7 @@ __device__ inline void apply_epilogue_t(
             // the compiler hoists all eight tiles' worth, which spills.
             float bias_v[4];
             if constexpr (HAS_BIAS) {
-                read_elem4(bias, bias_dtype, (size_t)n0, (size_t)N, true, bias_v);
+                read_elem4(bias, bias_dtype, (size_t)n0, (size_t)N, bias_v);
             }
             #pragma unroll
             for (int r = 0; r < 4; r++) {
