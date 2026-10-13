@@ -40,9 +40,18 @@ extern "C" __device__ void
 raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
     __asm("llvm.amdgcn.raw.buffer.load.lds");
 
+// The m0 write and the load are ONE asm block, and must stay that way.  buffer_load ... lds takes
+// its destination from m0, but that dependency exists only in the hardware -- it is invisible to
+// the compiler, which is free to put another m0 write between a write and the load that needs it.
+// It does: with the two as separate statements, clang 24 emits `s_mov_b32 m0, -1` (its own LDS
+// init) between them, and the DMA lands wherever that points.  1Dx1D is where it shows, because
+// that is the recipe issuing two of these per trip.
 __device__ inline void load_scale_to_lds(kittens::i32x4 srd, uint32_t lds_base_warp, int voffset) {
-    asm volatile("s_mov_b32 m0, %0" :: "s"(lds_base_warp));
-    raw_buffer_load_lds_(__builtin_bit_cast(i32x4_v_, srd), (as3_u32_ptr_)0, 4, voffset, 0, 0, 0);
+    asm volatile("s_mov_b32 m0, %0\n\t"
+                 "buffer_load_dword %1, %2, 0 offen lds"
+                 :
+                 : "s"(lds_base_warp), "v"(voffset), "s"(srd)
+                 : "memory");
 }
 
 template <typename OType, typename AccType>
