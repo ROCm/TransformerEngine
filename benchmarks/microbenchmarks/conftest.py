@@ -133,7 +133,8 @@ def pytest_configure(config):
 
 def pytest_report_header(config):
     pin = getattr(config, "_cpu_pin", None)
-    lines = [f"cpus: {pin.description if pin else 'unpinned'}"]
+    lines = [f"cpus: {pin.description if pin else 'unpinned'}",
+             f"GPU_MAX_HW_QUEUES: {os.environ.get('GPU_MAX_HW_QUEUES', 'HIP default')}"]
     plan = getattr(config, "_dashboard_plan", None)
     if plan is None:
         return lines

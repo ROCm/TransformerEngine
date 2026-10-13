@@ -15,6 +15,7 @@ import math
 import mmap
 import os
 import statistics
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -24,6 +25,9 @@ from types import SimpleNamespace
 # build_recipes() call caches check_mxfp8_support(): a directly run `python benchmark_*.py` builds
 # its RECIPES at import time, before pytest loads conftest.py.
 os.environ.setdefault("NVTE_ROCM_ENABLE_MXFP8", "1")
+# Megatron's launch scripts default to 2 HW queues. With HIP's default 4, TE's high-priority compute
+# streams get a 5th queue whose pending event waits slow the main stream (per-expert grouped GEMM ~2x).
+os.environ.setdefault("GPU_MAX_HW_QUEUES", "2")
 
 import torch
 import torch.utils.benchmark as benchmark
@@ -692,12 +696,18 @@ def _gpu_local_cores():
 
 
 def pin_cpus():
-    """Pin every thread to a few GPU-local physical cores and set them to the performance governor.
+    """Pin the run to a few GPU-local physical cores and set them to the performance governor.
 
+    The main thread gets the cores; threads it creates later (the autograd device thread)
+    inherit them. The threads that already exist after HIP init (HIP/ROCr helpers, incl. a
+    busy event-polling one) go to the cores' SMT siblings: the multi-stream grouped GEMM
+    path runs ~1.6x slower when that helper lands on another CCD or socket than the main
+    thread, and slower still when it shares the main thread's cores.
     The cores are offset by the GPU id so runs on other GPUs of the node use different ones.
     The governor needs root; without it only the pinning is applied. Returns a namespace
     with ``description`` and ``restore()``, which puts the previous governors back.
     """
+    torch.cuda.init()
     cores = _gpu_local_cores()
     try:
         gpu = int((os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0])
@@ -705,11 +715,21 @@ def pin_cpus():
         gpu = 0
     start = _PIN_CPUS * (gpu + 1) % max(len(cores) - _PIN_CPUS + 1, 1)
     cpus = cores[start:start + _PIN_CPUS] or cores
-    for tid in os.listdir("/proc/self/task"):
+    siblings = set()
+    for cpu in cpus:
         try:
-            os.sched_setaffinity(int(tid), cpus)
-        except OSError:
+            siblings |= _parse_cpulist((_CPU_SYSFS / f"cpu{cpu}/topology/thread_siblings_list").read_text())
+        except (OSError, ValueError):
             pass
+    helpers = sorted(siblings - set(cpus)) or cpus
+    main = threading.get_native_id()
+    for tid in os.listdir("/proc/self/task"):
+        if int(tid) != main:
+            try:
+                os.sched_setaffinity(int(tid), helpers)
+            except OSError:
+                pass
+    os.sched_setaffinity(0, cpus)
 
     previous, error = {}, None
     for cpu in cpus:
@@ -730,7 +750,9 @@ def pin_cpus():
 
     governor = "performance governor" if error is None else f"governor unchanged: {error}"
     return SimpleNamespace(
-        description=f"pinned to cpus {','.join(map(str, cpus))} ({governor})", restore=restore)
+        description=f"main thread pinned to cpus {','.join(map(str, cpus))}, helper threads to "
+                    f"{','.join(map(str, helpers))} ({governor})",
+        restore=restore)
 
 def configure_rotating(rotating, no_rotating):
     """Set module-level input-rotation state from parsed options."""
@@ -1013,6 +1035,7 @@ def _write_run_info(path, meta):
         "amdgpu_drv": read("/sys/module/amdgpu/version") or "?",
         "kernel": os.uname().release,
         "cpus": meta.get("cpus") or "unpinned",
+        "hw_queues": os.environ.get("GPU_MAX_HW_QUEUES", "HIP default"),
     }
     path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
 

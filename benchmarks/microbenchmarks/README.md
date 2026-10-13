@@ -64,11 +64,23 @@ python benchmark_gemm.py -k triton           # select the Triton backend
 - `--no-gpu-interference-check` / `--abort-on-gpu-interference`: control the
   shared-GPU neighbor check, which warns (or aborts) when another process is
   using the benchmark GPU (requires the `amdsmi` package).
-- `--no-cpu-pin`: by default the run is pinned to 4 physical cores on the GPU's NUMA
-  node (offset by GPU id), set to the performance governor for the session (needs root;
-  restored at the end, but not if the process is killed). Launch-bound backward runs on
-  PyTorch's autograd thread, and at the default schedutil clocks its wall time flipped
-  up to 2x between runs. The header and `run_info.txt` show the cores used.
+- `--no-cpu-pin`: by default the main thread is pinned to 4 physical cores on the GPU's
+  NUMA node (offset by GPU id), set to the performance governor for the session (needs
+  root; restored at the end, but not if the process is killed). Launch-bound backward runs
+  on PyTorch's autograd thread, and at the default schedutil clocks its wall time flipped
+  up to 2x between runs. Pinning happens after HIP init: the autograd thread inherits the
+  main thread's cores, and the existing HIP/ROCr helper threads go to the cores' SMT
+  siblings (the multi-stream grouped GEMM path ran ~1.6x slower whenever the scheduler put
+  its busy event-polling helper on another CCD or socket). The header and `run_info.txt`
+  show the cores used.
+
+### Environment
+
+- `GPU_MAX_HW_QUEUES` defaults to `2`, as in Megatron's launch scripts (set it explicitly,
+  e.g. `GPU_MAX_HW_QUEUES=4` for HIP's default, to override). With 4 queues, TE's
+  high-priority compute streams get an extra HW queue whose pending event waits slow the
+  main stream, so the per-expert (multi-stream) grouped GEMM path runs up to ~2x slower.
+  The header and `run_info.txt` show the value used.
 
 ### Kernel profiling
 
