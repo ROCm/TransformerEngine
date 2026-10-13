@@ -786,13 +786,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
         // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
         // this guard. The standalone GEMM includes the same file without defining it.
-        //
-        // The K loop is NOT unrolled here. The loop is convergent (s_barrier) with a runtime trip
-        // count, which older LLVM refused to unroll, so the shared "#pragma unroll 2" was silently
-        // dropped; since llvm/llvm-project#192819 (ROCm 7.14) it is honoured. Unrolled, tic/toc
-        // fold to constants and every per-phase LDS/prefetch address is kept live across the loop.
-        // With the persistent-loop state on top that exceeds this kernel's 256 VGPRs, and the
-        // resulting in-loop reloads each wait on vmcnt(0), draining the prefetches.
+
 #define MXFP8_AG_SKEW_CLOSE 1
 #define MXFP8_NN_K_UNROLL 1
 #include "../mxfp8_nn_mainloop.inc"
