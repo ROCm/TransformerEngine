@@ -15,6 +15,8 @@ import math
 import mmap
 import os
 import statistics
+import subprocess
+import sys
 import threading
 import time
 import warnings
@@ -662,6 +664,19 @@ def _print_metric_records(metric_records):
 _PIN_CPUS = 4
 _CPU_SYSFS = Path("/sys/devices/system/cpu")
 
+# Runs as a separate process: EOF on stdin without a prior message means the benchmark process
+# died without calling restore(), so put the governors ("path=old" args) back.
+_GOVERNOR_GUARD = r"""
+import sys
+if not sys.stdin.buffer.read():
+    for arg in sys.argv[1:]:
+        path, _, old = arg.rpartition("=")
+        try:
+            open(path, "w").write(old)
+        except OSError:
+            pass
+"""
+
 
 def _parse_cpulist(text):
     cpus = set()
@@ -705,7 +720,8 @@ def pin_cpus():
     thread, and slower still when it shares the main thread's cores.
     The cores are offset by the GPU id so runs on other GPUs of the node use different ones.
     The governor needs root; without it only the pinning is applied. Returns a namespace
-    with ``description`` and ``restore()``, which puts the previous governors back.
+    with ``description`` and ``restore()``, which puts the previous governors back; if the
+    process dies first (killed, crashed), a watchdog process puts them back instead.
     """
     torch.cuda.init()
     cores = _gpu_local_cores()
@@ -740,6 +756,10 @@ def pin_cpus():
             previous[path] = old
         except OSError as e:
             error = e
+    # Own session, so a terminal Ctrl-C doesn't kill the guard along with the benchmark.
+    guard = subprocess.Popen(
+        [sys.executable, "-c", _GOVERNOR_GUARD, *(f"{p}={old}" for p, old in previous.items())],
+        stdin=subprocess.PIPE, start_new_session=True) if previous else None
 
     def restore():
         for path, old in previous.items():
@@ -747,6 +767,8 @@ def pin_cpus():
                 path.write_text(old)
             except OSError:
                 pass
+        if guard is not None:
+            guard.communicate(b"restored")
 
     governor = "performance governor" if error is None else f"governor unchanged: {error}"
     return SimpleNamespace(

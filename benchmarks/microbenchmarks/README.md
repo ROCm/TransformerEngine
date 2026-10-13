@@ -66,7 +66,8 @@ python benchmark_gemm.py -k triton           # select the Triton backend
   using the benchmark GPU (requires the `amdsmi` package).
 - `--no-cpu-pin`: by default the main thread is pinned to 4 physical cores on the GPU's
   NUMA node (offset by GPU id), set to the performance governor for the session (needs
-  root; restored at the end, but not if the process is killed). Launch-bound backward runs
+  root; restored at the end, also if the process is killed or crashes, by a small watchdog
+  process). Launch-bound backward runs
   on PyTorch's autograd thread, and at the default schedutil clocks its wall time flipped
   up to 2x between runs. Pinning happens after HIP init: the autograd thread inherits the
   main thread's cores, and the existing HIP/ROCr helper threads go to the cores' SMT
@@ -99,18 +100,23 @@ python benchmark_gemm.py --kernel-profile --csv
   subtracted.
 - **Kernel time** is the GPU device time only (`torch.profiler`, summing the device
   time of each call's kernels, reported as the median over a separate profiling pass),
-  so it excludes host and launch overhead. Grouped GEMM instead brackets each call
-  with CUDA events, because its per-expert path overlaps kernels on several streams;
-  that span includes GPU idle time, so launch-bound grouped cases read close to wall time.
-  If no call's kernels can be matched, the kernel cells are left empty and a warning
-  names the case.
+  so it excludes host and launch overhead. If no call's kernels can be matched, the
+  kernel cells are left empty and a warning names the case.
+- **Grouped GEMM kernel time is not device-only.** For all its backends it is the CUDA-event
+  span between consecutive calls on the main stream (the per-expert path overlaps kernels on
+  several streams, which a per-kernel sum would double-count). That span includes GPU idle
+  time while the host submits the next call, so launch-bound grouped cases read at or slightly
+  above wall time even when the GPU is mostly idle (e.g. bf16 per-expert hipBLASLt B4 M1024:
+  ~0.11 ms vs ~0.04 ms GPU-busy). Compare it with dense kernel time only for GPU-bound cases.
 
 Because kernel time drops the launch/dispatch overhead, kernel throughput is
 normally at least as high as wall throughput. A large gap means the case is
 launch/dispatch-bound rather than compute-bound (common at small sizes or with
-higher-overhead backends such as Triton); when the two nearly match, the op is
-compute-bound and any sub-percent difference is just noise between the two
-independent measurement passes.
+higher-overhead backends such as Triton). When the op is compute-bound, the two
+should nearly match, but kernel time can read a few percent above (or below) wall time: the
+profiler itself changes how the GPU executes back-to-back kernels (e.g. a 7-kernel
+MXFP8 HipKittens backward ran ~6% slower under it, a plain bf16 GEMM 2-5% faster),
+so for compute-bound cases wall time is the more faithful number.
 
 Because it runs an extra warmup plus a profiled loop under `torch.profiler`,
 `--kernel-profile` makes each benchmark take longer.
