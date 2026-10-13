@@ -79,14 +79,10 @@ else()
     kittens_add_arch(TAG cdna3 GFX gfx942
                      SOURCES cdna3/blockwise_fp8_gemm.cpp)
 
-    # -ffast-math folds fpext(fptrunc(x)) back to x, so any deliberate narrow-then-widen
-    # in blockwise_fp8_gemm.cpp has to be made opaque to the optimizer -- see
-    # round_to_out_dtype() in cdna4/blockwise_fp8_gemm_helper.cuh.
     kittens_add_arch(TAG cdna4 GFX gfx950
                      SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp
                              cdna4/overlap/comm_gemm.cpp
-                     FLAGS -gline-tables-only
-                     SOURCE_FLAGS cdna4/blockwise_fp8_gemm.cpp "-ffast-math")
+                     FLAGS -gline-tables-only)
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)

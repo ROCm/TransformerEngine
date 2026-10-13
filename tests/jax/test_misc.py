@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,6 +18,9 @@ def preserve_xla_flags():
     yield
     if old_flags is not None:
         os.environ["XLA_FLAGS"] = old_flags
+    else:
+        # XLA aborts at interpreter shutdown if the bogus flags set by these tests survive.
+        os.environ.pop("XLA_FLAGS", None)
 
 
 def test_get_xla_flag(request):

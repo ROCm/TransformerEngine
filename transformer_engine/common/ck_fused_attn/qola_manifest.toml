@@ -12,7 +12,7 @@ mode = "cpp_itfs"
 receipt = 700
 drop_srcs = ["mha_fwd_split.cu", "mha_fwd_batch_prefill.cu"]
 drop_directions = ["fwd_splitkv", "batch_prefill"]
-flags_extra_cc = ["'-DFA_WITH_NATIVE_SPLITKV=1'"]
+flags_extra_cc = ["'-DFA_WITH_NATIVE_SPLITKV=1'", "'-DFA_WITH_SINK=1'"]
 
 [[modules]]
 name = "libmha_bwd"

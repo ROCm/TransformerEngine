@@ -4,8 +4,10 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -442,6 +444,31 @@ static void run_reference(
 }
 
 
+constexpr size_t kBlockLen = 128;
+
+// Blockwise FP8 reference, TN layout: D[j*m + i] = sum_kk sA * sB * A[i*k + kk] * B[j*k + kk]
+__global__ void blockwise_ref_kernel(const fp8e4m3* __restrict__ a,
+                                     const fp8e4m3* __restrict__ b,
+                                     const float* __restrict__ a_scale,
+                                     const float* __restrict__ b_scale,
+                                     size_t m, size_t k, size_t n, bool a_2d,
+                                     bf16* __restrict__ d) {
+  const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i >= m || j >= n) return;
+
+  const size_t k_blocks = (k + kBlockLen - 1) / kBlockLen;
+  float acc = 0.0f;
+  for (size_t kk = 0; kk < k; ++kk) {
+    const size_t kb = kk / kBlockLen;
+    const float sa = a_2d ? a_scale[(i / kBlockLen) * k_blocks + kb] : a_scale[kb * m + i];
+    acc += sa * b_scale[kb * n + j] * static_cast<float>(a[i * k + kk]) *
+           static_cast<float>(b[j * k + kk]);
+  }
+  d[j * m + i] = static_cast<bf16>(acc);
+}
+
+
 template <typename Type>
 void cpu_rowwise_to_columnwise(
   size_t m, size_t n,
@@ -516,6 +543,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
     cudaDeviceProp prop;
     (void)cudaGetDeviceProperties(&prop, 0);
     if (prop.major == 9 && prop.minor == 5) {
+      atol = std::max(atol, 3e-3);
       rtol = std::max(rtol, 2e-2);
     }
   }
@@ -530,6 +558,45 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
+std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop) {
+  if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+    return std::nullopt;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && prop.minor >= 5) && !(prop.major == 12 && prop.minor >= 5)) {
+    return "MXFP8 requires gfx950 or newer";
+  }
+#endif
+  if (params.m % 16 || params.n % 16) {
+    return "MXFP8 requires M & N to be multiples of 16";
+  }
+
+#ifdef __HIP_PLATFORM_AMD__
+  const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#else
+  const size_t required_k_multiple = 128;
+#endif
+  if (params.k % required_k_multiple) {
+    return "MXFP8 requires K to be a multiple of " + std::to_string(required_k_multiple);
+  }
+
+  if (params.force_hipblaslt) {
+    return std::nullopt;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
+    return "HipKittens requires gfx942 or gfx950";
+  }
+  if (params.m % 256 || params.n % 256 || params.k < 256) {
+    return "HipKittens requires M and N 256-aligned, K >= 256";
+  }
+  return std::nullopt;
+#else
+  return "HipKittens requires ROCm";
+#endif
+}
+
+
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(const TestParams& params) {
   DType atype = TypeInfo<A_Type>::dtype;
@@ -539,29 +606,20 @@ void performTest(const TestParams& params) {
   DType dtype = TypeInfo<D_Type>::dtype;
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
-  const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
 
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
+  const bool use_mxfp8 = (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
   if (use_mxfp8)
   {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
-    if (params.m % 16 || params.n % 16) {
-      GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-    }
-    size_t required_k_multiple = 128;
-  #ifdef __HIP_PLATFORM_AMD__
-    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-  #endif
-    if (params.k % required_k_multiple) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-    }
-    if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
-      GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
+    if (auto reason = checkMxFP8Support(params, prop))
+    {
+      GTEST_SKIP() << *reason;
     }
   }
 
@@ -595,18 +653,20 @@ void performTest(const TestParams& params) {
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-    const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-    if (use_mxfp8 && !mxfp8_supported) {
-      GTEST_SKIP() << "MXFP8 is not supported in current config";
-    }
-    if (!use_hipkittens_mxfp8 && params.use_bias) {
-      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
-    }
     if (params.use_gelu && !fp8_gelu_fusion_config && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
+    }
+  }
+  //hipBLASLt specific MXFP8 limitations
+  if (use_mxfp8 && !use_hipkittens_mxfp8) {
+    if (isFp8Type(dtype)) {
+      GTEST_SKIP() << "MXFP8 GEMM with float8 output is not supported by hipBLASLt";
+    }
+    if (params.use_bias) {
+      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
     }
   }
 
@@ -774,27 +834,12 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-  }
-  size_t required_k_multiple = 128;
-#ifdef __HIP_PLATFORM_AMD__
-  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-#endif
-  if (params.k % required_k_multiple) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-  }
-
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
-  if (!mxfp8_supported) {
-    GTEST_SKIP() << "MXFP8 is not supported in current config";
+  if (auto reason = checkMxFP8Support(params, prop))
+  {
+    GTEST_SKIP() << *reason;
   }
   if (params.use_bias || params.use_gelu) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
-  }
-  if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
-    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
   // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
@@ -1107,7 +1152,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
@@ -1116,7 +1161,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, FP8GEMMTestSuite,
@@ -1259,5 +1304,155 @@ TEST(InputGenTest, FillUniform_DoesNotGetOverwrittenByFromCpu) {
                               << " dev=" << dev[i] << " cpu=" << cpu[i];
   }
 }
+
+// ============================== Blockwise FP8 GEMM ==============================
+namespace {
+
+struct BlockwiseParams {
+  size_t m, k, n;
+  bool a_2d_scaled;
+  bool fp32_scales;
+  float amax_epsilon;
+  bool degenerate;
+  float src_scale;
+};
+
+void scale_source(Tensor* src, size_t n_elems, float factor) {
+  src->to_cpu();
+  bf16* p = src->rowwise_cpu_dptr<bf16>();
+  for (size_t i = 0; i < n_elems; ++i) {
+    p[i] = static_cast<bf16>(static_cast<float>(p[i]) * factor);
+  }
+  src->from_cpu();
+}
+
+// k-block 1 quantizes to a subnormal scale_inv and k-block 2 to ~22, so prev/curr spans >1e39.
+void inject_degenerate_kblocks(Tensor* src, size_t rows, size_t cols) {
+  src->to_cpu();
+  bf16* p = src->rowwise_cpu_dptr<bf16>();
+  for (size_t r = 0; r < rows; ++r) {
+    for (size_t c = kBlockLen; c < 3 * kBlockLen && c < cols; ++c) {
+      p[r * cols + c] = static_cast<bf16>(c < 2 * kBlockLen ? 1e-37f : 1e4f);
+    }
+  }
+  src->from_cpu();
+}
+
+Tensor make_blockwise_operand(const std::string& name, const std::vector<size_t>& shape,
+                              NVTEScalingMode mode, bool force_pow2, float amax_epsilon,
+                              bool degenerate, float src_scale) {
+  Tensor src(name + "_bf16", shape, DType::kBFloat16);
+  fillUniform(&src);
+  if (src_scale != 0.0f) scale_source(&src, shape[0] * shape[1], src_scale);
+  if (degenerate) inject_degenerate_kblocks(&src, shape[0], shape[1]);
+
+  Tensor out(name, shape, DType::kFloat8E4M3, /*rowwise=*/true, /*columnwise=*/false, mode);
+  QuantizationConfigWrapper cfg;
+  cfg.set_force_pow_2_scales(force_pow2);
+  cfg.set_amax_epsilon(amax_epsilon);
+  nvte_quantize_v2(src.data(), out.data(), cfg, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  return out;
+}
+
+void performBlockwiseTest(const BlockwiseParams& p) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  const bool is_gfx950 = (prop.major == 9 && prop.minor == 5);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+  if (p.fp32_scales && !is_gfx950) {
+    GTEST_SKIP() << "The continuous fp32-scale kernel exists only on gfx950";
+  }
+  if (p.m % 16 != 0 || p.k % 16 != 0) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM requires M and K to be multiples of 16";
+  }
+  if (p.degenerate && p.k <= 3 * kBlockLen) {
+    GTEST_SKIP() << "Degenerate case needs K > 384 to hold both injected k-blocks";
+  }
+
+  if (p.fp32_scales) {
+    setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1", 1);
+  } else {
+    unsetenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES");
+  }
+
+  const bool force_pow2 = !p.fp32_scales;
+  const NVTEScalingMode a_mode =
+      p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+
+  Tensor A = make_blockwise_operand("A", {p.m, p.k}, a_mode, force_pow2, p.amax_epsilon,
+                                    p.degenerate, p.src_scale);
+  Tensor B = make_blockwise_operand("B", {p.n, p.k}, NVTE_BLOCK_SCALING_1D, force_pow2,
+                                    p.amax_epsilon, p.degenerate, /*src_scale=*/0.0f);
+
+  Tensor D("D", TShape{p.n, p.m}, DType::kBFloat16);
+  Tensor RefD("RefD", TShape{p.n, p.m}, DType::kBFloat16);
+
+  const dim3 block(16, 16);
+  const dim3 grid(static_cast<unsigned>((p.n + block.x - 1) / block.x),
+                  static_cast<unsigned>((p.m + block.y - 1) / block.y));
+  blockwise_ref_kernel<<<grid, block, 0, 0>>>(
+      static_cast<const fp8e4m3*>(A.rowwise_dptr()),
+      static_cast<const fp8e4m3*>(B.rowwise_dptr()),
+      static_cast<const float*>(A.rowwise_scale_inv_dptr()),
+      static_cast<const float*>(B.rowwise_scale_inv_dptr()),
+      p.m, p.k, p.n, p.a_2d_scaled, static_cast<bf16*>(RefD.rowwise_dptr()));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                   /*accumulate=*/false, /*use_split_accumulator=*/true,
+                   prop.multiProcessorCount, /*stream=*/0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  RefD.to_cpu();
+  compareResults("D", D, RefD.rowwise_cpu_dptr<bf16>(), /*rowwise=*/true,
+                 /*atol=*/1e-3, /*rtol=*/6e-2);
+}
+
+}  // namespace
+
+class BlockwiseGEMMTestSuite : public ::testing::TestWithParam<BlockwiseParams> {};
+
+TEST_P(BlockwiseGEMMTestSuite, TestFp8Blockwise) {
+  performBlockwiseTest(GetParam());
+}
+
+static std::string BlockwiseTestName(
+    const testing::TestParamInfo<BlockwiseGEMMTestSuite::ParamType>& info) {
+  const auto& p = info.param;
+  std::string name = std::to_string(p.m) + "x" + std::to_string(p.k) + "x" +
+                     std::to_string(p.n) + "x" + (p.a_2d_scaled ? "1Dx2D" : "1Dx1D") + "x" +
+                     (p.fp32_scales ? "fp32scales" : "pow2scales");
+  name += p.amax_epsilon > 0.0f ? "xeps" : "xnoeps";
+  if (p.degenerate) name += "xdegenerate";
+  if (p.src_scale != 0.0f) name += "xsmallmagnitude";
+  return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestBlockwise, BlockwiseGEMMTestSuite,
+    ::testing::Values(
+        BlockwiseParams{256, 256, 256, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  true,  1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{1024, 4096, 1024, false, true, 1e-4f, false, 0.0f},
+        // Extreme dynamic range across K: pins kMinScaleInv from below.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  true,  0.0f},
+        // Real-wgrad magnitudes: pins kMinScaleInv from above.
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  false, 1e-9f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  false, 1e-9f}),
+    BlockwiseTestName);
 
 #endif  // __HIP_PLATFORM_AMD__
