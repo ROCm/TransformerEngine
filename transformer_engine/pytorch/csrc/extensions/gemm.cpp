@@ -155,6 +155,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore* comm_overlap,
+                             CommOverlapCore* comm_overlap2,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
   using namespace transformer_engine::pytorch::detail;
@@ -383,7 +384,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
               comm_overlap->fused_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
                                                   bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                   accumulate, use_split_accumulator,
-                                                  extra_output_tensor, main_stream);
+                                                  extra_output_tensor, comm_overlap2, main_stream);
             } else {
               // The aggregated ring exchange needs the userbuffers transport, so the ROCm
               // split path serves both modes.
