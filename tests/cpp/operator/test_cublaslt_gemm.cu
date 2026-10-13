@@ -19,6 +19,7 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipblaslt/hipblaslt.h>  // HIPBLASLT_VERSION_{MAJOR,MINOR} for the MXFP4 capability gate
+#include <hip/hip_runtime.h>      // virtual-memory APIs, for the scale-boundary regression test
 #endif
 
 using namespace transformer_engine;
@@ -1635,5 +1636,131 @@ INSTANTIATE_TEST_SUITE_P(
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
                         DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3}),
     BlockwiseTestName);
+
+// ---- regression: the 1Dx2D scale read must stay inside the scale tensor ---------------------
+//
+// None of the cases above can catch an overrun here, and it is worth saying why rather than
+// adding another shape and assuming.  The out-of-bounds value only reaches the accumulator
+// halves that store_output_t masks off, so poisoning the memory past the scale tensor leaves the
+// output bit-identical -- any test that compares results against a reference passes either way.
+// What is observable is the access itself, so this test makes the memory immediately after the
+// scale tensor unreadable and checks that the kernel still completes.
+//
+// The GEMM swaps its operands, so the kernel's N is the caller's m and the kernel's scale_B is
+// the caller's A scale.  m = 272 = 256 + 16 is the shape that reaches the bug: the last 256-wide
+// output block's second half begins past the end, so it has no 128-column scale group of its
+// own, and an unclamped `+ scale_K` addresses one that does not exist.
+//
+// Runs in a child process, because a GPU memory fault aborts the process and no assertion in
+// this one can survive it.  The "threadsafe" death-test style re-executes the binary rather than
+// only forking, which matters twice: the HIP runtime does not survive a bare fork, and
+// NVTE_FP8_BLOCK_SCALING_FP32_SCALES is read once into a function-local static, so only a
+// freshly started process picks it up.
+namespace {
+
+#define OOB_CHECK_HIP(expr)                                                                 \
+  do {                                                                                      \
+    hipError_t status = (expr);                                                             \
+    if (status != hipSuccess) {                                                             \
+      std::cerr << "probe setup failed: " #expr " -> " << hipGetErrorString(status) << "\n"; \
+      std::exit(2);                                                                         \
+    }                                                                                       \
+  } while (0)
+
+void scale_b_boundary_probe() {
+  constexpr size_t kM = 272;   // the kernel's N
+  constexpr size_t kK = 512;
+  constexpr size_t kN = 272;
+
+  setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1", 1);
+
+  cudaDeviceProp dev_prop;
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&dev_prop, 0));
+
+  Tensor A = make_blockwise_operand("A", {kM, kK}, NVTE_BLOCK_SCALING_2D, /*force_pow2=*/false,
+                                    /*amax_epsilon=*/1e-4f, /*degenerate=*/false,
+                                    /*src_scale=*/0.0f);
+  Tensor B = make_blockwise_operand("B", {kN, kK}, NVTE_BLOCK_SCALING_1D, /*force_pow2=*/false,
+                                    /*amax_epsilon=*/1e-4f, /*degenerate=*/false,
+                                    /*src_scale=*/0.0f);
+
+  // Taken from the tensor rather than recomputed, so the shape and dtype stay whatever TE chose
+  // and only the pointer moves.
+  NVTEBasicTensor scale = nvte_get_tensor_param(A.data(), kNVTERowwiseScaleInv);
+  size_t scale_elems = 1;
+  for (size_t i = 0; i < scale.shape.ndim; ++i) {
+    scale_elems *= scale.shape.data[i];
+  }
+  const size_t scale_bytes = scale_elems * sizeof(float);
+
+  // The premise of this test is that the scale tensor is exactly ceil(M/128) x (K/128) with no
+  // padding -- CUDA pads these dimensions to a multiple of 4 and ROCm does not.  If that ever
+  // changes the overrun moves and the test stops testing anything, so say so loudly.
+  const size_t expect_elems = ((kM + 127) / 128) * (kK / 128);
+  if (scale_elems != expect_elems) {
+    std::cerr << "probe premise broken: scale has " << scale_elems << " elements, expected "
+              << expect_elems << " -- the scale layout changed\n";
+    std::exit(3);
+  }
+
+  int device = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+
+  hipMemAllocationProp alloc_prop = {};
+  alloc_prop.type = hipMemAllocationTypePinned;
+  alloc_prop.location.type = hipMemLocationTypeDevice;
+  alloc_prop.location.id = device;
+
+  size_t granularity = 0;
+  OOB_CHECK_HIP(hipMemGetAllocationGranularity(&granularity, &alloc_prop,
+                                               hipMemAllocationGranularityMinimum));
+
+  // Two pages of address space, only the first backed.
+  void* base = nullptr;
+  OOB_CHECK_HIP(hipMemAddressReserve(&base, 2 * granularity, granularity, nullptr, 0));
+  hipMemGenericAllocationHandle_t handle;
+  OOB_CHECK_HIP(hipMemCreate(&handle, granularity, &alloc_prop, 0));
+  OOB_CHECK_HIP(hipMemMap(base, granularity, 0, handle, 0));
+  hipMemAccessDesc access = {};
+  access.location = alloc_prop.location;
+  access.flags = hipMemAccessFlagsProtReadWrite;
+  OOB_CHECK_HIP(hipMemSetAccess(base, granularity, &access, 1));
+
+  // The scale tensor now ends on the mapped page's last byte, so the first float past it is the
+  // first byte of the reserved-but-unbacked page.
+  void* scale_at_edge = static_cast<char*>(base) + granularity - scale_bytes;
+  NVTE_CHECK_CUDA(cudaMemcpy(scale_at_edge, scale.data_ptr, scale_bytes, cudaMemcpyDeviceToDevice));
+  scale.data_ptr = scale_at_edge;
+  nvte_set_tensor_param_v2(A.data(), kNVTERowwiseScaleInv, &scale, sizeof(scale));
+
+  Tensor D("D", TShape{kN, kM}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                   /*accumulate=*/false, /*use_split_accumulator=*/true,
+                   dev_prop.multiProcessorCount, /*stream=*/0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  std::cerr << "blockwise-oob-probe: clean\n";
+  std::exit(0);
+}
+
+#undef OOB_CHECK_HIP
+
+}  // namespace
+
+TEST(BlockwiseGEMMBoundaryTest, ScaleReadStaysInsideScaleTensor) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor == 5)) {
+    GTEST_SKIP() << "The continuous fp32-scale kernel exists only on gfx950";
+  }
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(scale_b_boundary_probe(), ::testing::ExitedWithCode(0),
+              "blockwise-oob-probe: clean");
+}
 
 #endif  // __HIP_PLATFORM_AMD__
