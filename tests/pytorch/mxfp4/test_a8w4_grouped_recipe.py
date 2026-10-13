@@ -412,6 +412,8 @@ def test_a4w4_gate_rejects_nonplain_grad_output_quantizer():
         dgrad_out=None,
         fuse_wgrad_accumulation=False,
         wgrad_store=None,
+        single_grouped_weight=False,
+        single_grouped_bias=False,
         in_features=K,
         out_features=N,
     )

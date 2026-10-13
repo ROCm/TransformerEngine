@@ -17,7 +17,7 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import gemm
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
@@ -96,14 +96,14 @@ class MXFP8E4M3QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,
+        m_params: gemm.MMParams,
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        gemm_type: gemm.GEMMType = gemm.GEMMType.FPROP,
         qresult_x: QuantizedTensorStorage | None = None,
         qresult_w: QuantizedTensorStorage | None = None,
         layout: str = "TN",
