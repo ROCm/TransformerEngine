@@ -1299,9 +1299,18 @@ def grouped_quantize(
         return quantizer.quantize(x, flatten_axis=flatten_axis, group_sizes=group_sizes)
     n_groups = group_sizes.size
     original_shape = x.shape
-    assert n_groups == len(
-        quantizer.quantizers
-    ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
+    n_quantizers = len(quantizer.quantizers)
+    if quantizer.scaling_mode.is_mxfp8_scaling:
+        # Stateless MXFP8 quantizers may describe a global grouped operation
+        # while this primitive is traced inside shard_map on only the local
+        # groups. The recipe is identical for every group, and no per-group
+        # state is selected here, so the global descriptor only needs to cover
+        # the local operation.
+        assert (
+            n_groups <= n_quantizers
+        ), f"local n_groups={n_groups} exceeds global n_quantizers={n_quantizers}"
+    else:
+        assert n_groups == n_quantizers, f"n_groups={n_groups} != n_quantizers={n_quantizers}"
     scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
@@ -1379,7 +1388,8 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
 
     Args:
         grad: jnp.ndarray of shape (M, N)
-        group_sizes: jnp.ndarray of shape(num_groups,), sum(group_sizes) == M
+        group_sizes: jnp.ndarray of shape(num_groups,), sum(group_sizes) <= M.
+            Rows past the routed prefix are padding and are not reduced.
 
     Returns:
         dbias: jnp.ndarray of shape (num_groups, N)
@@ -1387,10 +1397,28 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     assert grad.ndim == 2, "Input grad must be a 2D tensor."
     assert group_sizes.ndim == 1, "group_sizes must be a 1D tensor."
 
-    segment_ids = jnp.repeat(
-        jnp.arange(group_sizes.size), group_sizes, total_repeat_length=grad.shape[0]
+    n_rows = grad.shape[0]
+    n_groups = group_sizes.shape[0]
+    segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes, total_repeat_length=n_rows)
+    # jnp.repeat pads leftover rows with the last group id when
+    # sum(group_sizes) < M. Those rows are ragged-buffer padding, not the last group.
+    segment_ids = jnp.where(jnp.arange(n_rows) < jnp.sum(group_sizes), segment_ids, n_groups)
+
+    # The padding rows carry the out-of-range id `n_groups`, and one_hot
+    # emits an all-zero row for it, so they drop out without a second mask.
+    # fp8 and other sub-16-bit grads are widened, matching the f32
+    # accumulation the scatter path gets from its explicit upcast.
+    compute_dtype = (
+        grad.dtype
+        if jnp.issubdtype(grad.dtype, jnp.floating) and grad.dtype.itemsize >= 2
+        else jnp.float32
     )
-    grad_fp32 = grad.astype(jnp.float32)
-    dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
+    one_hot = jax.nn.one_hot(segment_ids, n_groups, dtype=compute_dtype)
+    dbias_fp32 = jax.lax.dot_general(
+        one_hot,
+        grad.astype(compute_dtype),
+        (((0,), (0,)), ((), ())),
+        preferred_element_type=jnp.float32,
+    )
     dbias = dbias_fp32.astype(grad.dtype)
     return dbias
