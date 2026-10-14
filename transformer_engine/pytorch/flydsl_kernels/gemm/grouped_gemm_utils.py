@@ -23,6 +23,7 @@ kernel's own source, so that runtime-SSA control flow MUST stay inline in each
   identical across dtypes; they differ only in whether scales are also padded.
 """
 
+import functools
 import os
 
 import torch
@@ -117,41 +118,69 @@ def select_grouped_sched(num_tiles: int, device) -> str:
     return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * num_cus else "worksteal"
 
 
-def build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, block_m):
-    """Build the fwd/dgrad ``(pid_m, pid_n, expert)`` descriptor list.
+@functools.lru_cache(maxsize=512)
+def _fwd_dgrad_queue_cached(m_splits, num_pid_n, block_m, device):
+    """Cached flat ``(pid_m, pid_n, expert)`` work queue for a fwd/dgrad shape.
 
-    Each expert ``g`` owns the packed output M-block range
-    ``[group_offs[g], group_offs[g+1])`` (BLOCK_M-aligned so tiles never straddle
-    a group boundary), tiled over ``num_pid_n`` columns.
+    Keyed by the per-expert token counts + tiling, so repeated calls with the same
+    ``m_splits`` (every microbatch in training, every bench iteration) reuse one
+    already-uploaded queue instead of rebuilding + re-H2D-copying it each forward.
+    Built from the Python ``m_splits`` tuple directly -- NO device->host copy of
+    ``group_offs`` (that copy forced a ``hipDeviceSynchronize`` that stranded the
+    GPU idle for hundreds of microseconds before the kernel).
     """
     descriptors = []
-    for g in range(num_groups):
-        m_start_blk = int(group_offs_cpu[g]) // block_m
-        m_end_blk = int(group_offs_cpu[g + 1]) // block_m
+    off = 0
+    for g, m in enumerate(m_splits):
+        m_start_blk = off // block_m
+        m_end_blk = (off + m) // block_m
         for pid_m in range(m_start_blk, m_end_blk):
             for pid_n in range(num_pid_n):
                 descriptors.append((pid_m, pid_n, g))
-    return descriptors
+        off += m
+    num_tiles = len(descriptors)
+    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
+    return work_queue, num_tiles
 
 
-def build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n):
-    """Build the wgrad descriptor list: one tile per expert's local [N_out, K_in]."""
-    return [
+def build_fwd_dgrad_work_queue(m_splits, num_pid_n, block_m, device):
+    """Return ``(work_queue, work_counter, num_tiles)`` for a fwd/dgrad launch.
+
+    The descriptor queue is cached (shape-only, data-independent) so only the first
+    call with a given ``m_splits`` pays the build+upload; the zeroed atomic counter
+    is cheap and allocated fresh each call. ``m_splits`` is a Python list/tuple of
+    per-expert token counts -- no GPU->CPU sync.
+    """
+    work_queue, num_tiles = _fwd_dgrad_queue_cached(
+        tuple(int(m) for m in m_splits), int(num_pid_n), int(block_m), device
+    )
+    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
+    return work_queue, work_counter, num_tiles
+
+
+@functools.lru_cache(maxsize=512)
+def _wgrad_queue_cached(num_groups, num_pid_m, num_pid_n, device):
+    descriptors = [
         (pid_m, pid_n, g)
         for g in range(num_groups)
         for pid_m in range(num_pid_m)
         for pid_n in range(num_pid_n)
     ]
-
-
-def make_work_queue(descriptors, device):
-    """Flatten descriptors into the kernel's queue buffer + zeroed atomic counter.
-
-    Returns ``(work_queue, work_counter, num_tiles)``. ``work_queue`` is a flat
-    int32 ``[num_tiles*3]`` tensor; ``work_counter`` a zeroed one-int32 dispenser.
-    """
     num_tiles = len(descriptors)
     work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
+    return work_queue, num_tiles
+
+
+def build_wgrad_work_queue(num_groups, num_pid_m, num_pid_n, device):
+    """Return cached ``(work_queue, work_counter, num_tiles)`` for a wgrad launch.
+
+    The wgrad descriptor queue depends only on ``(num_groups, num_pid_m, num_pid_n)``
+    (per-expert tile geometry), so it is shape-cached and reused across calls -- no
+    per-call Python rebuild or H2D re-upload. Fresh zeroed atomic counter each call.
+    """
+    work_queue, num_tiles = _wgrad_queue_cached(
+        int(num_groups), int(num_pid_m), int(num_pid_n), device
+    )
     work_counter = torch.zeros(1, dtype=torch.int32, device=device)
     return work_queue, work_counter, num_tiles
 

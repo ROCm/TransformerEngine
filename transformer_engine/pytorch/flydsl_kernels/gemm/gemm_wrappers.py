@@ -1020,7 +1020,7 @@ def _run_mxfp8_grouped(
     b_scale,
     D,
     *,
-    group_offs,
+    m_splits,
     m_total,
     n,
     k,
@@ -1043,10 +1043,11 @@ def _run_mxfp8_grouped(
         output width n = K_in; experts pack on B's contraction (N_out) axis.
 
     In both, ``k`` is A's per-expert contraction (TN: K_in; NN: N_out) and ``n`` is
-    the output width. Each group ``g`` owns activation/grad rows
-    ``[group_offs[g], group_offs[g+1])``; ``group_offs`` is consumed on the host to
-    build the persistent kernel's per-tile ``(pid_m, pid_n, expert)`` descriptor
-    queue, so the kernel does no group lookup. Operands arrive already
+    the output width. ``m_splits`` is the Python list of per-expert token counts
+    (already host-resident); the per-tile ``(pid_m, pid_n, expert)`` descriptor
+    queue is built + shape-cached from it directly -- no device->host copy of a
+    ``group_offs`` tensor (that copy forced a blocking ``hipDeviceSynchronize``
+    that stranded the GPU idle before the kernel). Operands arrive already
     MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
     """
     if layout not in ("TN", "NN"):
@@ -1086,15 +1087,15 @@ def _run_mxfp8_grouped(
     # and repeats until slot >= num_tiles.
     from .mxfp8_gemm import BLOCK_M, BLOCK_N
 
-    num_groups = int(group_offs.numel()) - 1
+    num_groups = len(m_splits)
     num_pid_n = n // BLOCK_N
-    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
-
     # Per-expert M-block ranges over the packed [M_total, N] output. Each expert's
     # token count must be BLOCK_M-aligned (enforced upstream by the tiling check),
-    # so tiles never straddle a group boundary.
-    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, BLOCK_M)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
+    # so tiles never straddle a group boundary. Built + cached from the host-side
+    # m_splits list (no GPU->CPU sync).
+    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+        m_splits, num_pid_n, BLOCK_M, a_data.device
+    )
 
     # Schedule selection (compile-time specialization on the kernel side):
     #   "worksteal": persistent atomic tile-claiming, best for imbalanced experts.
@@ -1190,8 +1191,9 @@ def _run_mxfp8_grouped_wgrad(
     # kernel re-packs the output row via expert*N_out.
     num_pid_m = n_out // BLOCK_M
     num_pid_n = k_in // BLOCK_N
-    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
+    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+        num_groups, num_pid_m, num_pid_n, device
+    )
     sched = _select_grouped_sched(num_tiles, device)
 
     mxfp8_matmul(
@@ -1215,7 +1217,7 @@ def _run_bf16_grouped(
     b_data,
     D,
     *,
-    group_offs,
+    m_splits,
     m_total,
     n,
     k,
@@ -1233,6 +1235,11 @@ def _run_bf16_grouped(
         a = packed activations [M_total, K]   b = packed weights [G*N, K]
       NN (dgrad, dX = dY @ W):
         a = packed grad_output [M_total, N_out]   b = packed weights [G*N_out, K_in]
+
+    ``m_splits`` is the Python list of per-expert token counts (already on the
+    host). The descriptor queue is built + cached from it directly -- no
+    device->host copy of a ``group_offs`` tensor (that copy forced a blocking
+    ``hipDeviceSynchronize`` that stranded the GPU idle before the kernel).
     """
     from .half_prec_gemm import doGemm as _half_prec_doGemm
 
@@ -1249,11 +1256,11 @@ def _run_bf16_grouped(
 
     from .half_prec_gemm import _BLOCK_M, _BLOCK_N
 
-    num_groups = int(group_offs.numel()) - 1
+    num_groups = len(m_splits)
     num_pid_n = n // _BLOCK_N
-    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
-    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, _BLOCK_M)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
+    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+        m_splits, num_pid_n, _BLOCK_M, a_data.device
+    )
     sched = _select_grouped_sched(num_tiles, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
@@ -1321,8 +1328,9 @@ def _run_bf16_grouped_wgrad(
 
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
-    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
+    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+        num_groups, num_pid_m, num_pid_n, device
+    )
     sched = _select_grouped_sched(num_tiles, device)
 
     # The kernel's compile-time contraction K is the PER-EXPERT padded token count;
@@ -1354,7 +1362,7 @@ def _run_fp8_grouped(
     b_scale_vec,      # [num_groups] fp32 per-expert inverse scales
     D,
     *,
-    group_offs,
+    m_splits,
     m_total,
     n,
     k,
@@ -1367,10 +1375,12 @@ def _run_fp8_grouped(
     host-materialized transpose backings (see the backward helpers). Experts pack on
     B's output-N axis ([G*N, K]); each expert carries one scalar inverse scale, so the
     scales arrive as length-``num_groups`` vectors the kernel indexes by ``expert``.
+    ``m_splits`` is the host-side per-expert token list; the descriptor queue is built
+    + shape-cached from it (no GPU->CPU sync).
     """
     from .fp8_gemm import doGemm as _fp8_doGemm
 
-    num_groups = int(group_offs.numel()) - 1
+    num_groups = len(m_splits)
     if a_scale_vec.numel() != num_groups or b_scale_vec.numel() != num_groups:
         raise ValueError(
             f"FP8 grouped expects length-{num_groups} scale vectors, got "
@@ -1395,9 +1405,9 @@ def _run_fp8_grouped(
     from .fp8_gemm import _BLOCK_M, _BLOCK_N
 
     num_pid_n = n // _BLOCK_N
-    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
-    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, _BLOCK_M)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
+    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+        m_splits, num_pid_n, _BLOCK_M, a_data.device
+    )
     sched = _select_grouped_sched(num_tiles, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
@@ -1486,8 +1496,9 @@ def _run_fp8_grouped_wgrad(
 
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
-    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
-    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
+    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+        num_groups, num_pid_m, num_pid_n, device
+    )
     sched = _select_grouped_sched(num_tiles, device)
 
     _fp8_doGemm(

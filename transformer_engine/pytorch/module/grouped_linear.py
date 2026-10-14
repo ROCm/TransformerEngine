@@ -1237,13 +1237,12 @@ class _GroupedLinear(torch.autograd.Function):
         riding off the quantization TE already performed -- ``inputmats`` are the
         per-group MXFP8 activations from ``tex.split_quantize`` and ``weights_fp8`` the
         per-expert MXFP8 weights. This first iteration does not quantize: it packs the
-        rowwise MXFP8 payloads into the ``[M_total, K]`` / ``[G*N, K]`` layout, derives
-        ``group_offs`` from ``m_splits``, and issues one packed TN launch via
-        :func:`_run_mxfp8_grouped`, writing into ``out``.
+        rowwise MXFP8 payloads into the ``[M_total, K]`` / ``[G*N, K]`` layout and
+        issues one packed TN launch via :func:`_run_mxfp8_grouped`, writing into
+        ``out``. The descriptor queue is built host-side from ``m_splits``.
         """
         from ..flydsl_kernels.gemm import _run_mxfp8_grouped
 
-        num_gemms = len(inputmats)
         # TN packed operands: activations concatenated along the token (M) axis,
         # weights along the expert*N axis. Each MXFP8 operand carries its rowwise
         # fp8 payload and E8M0 scale; concatenate both.
@@ -1261,19 +1260,13 @@ class _GroupedLinear(torch.autograd.Function):
         k = weights_fp8[0]._rowwise_data.size(-1)
         m_total = a_data.size(0)
 
-        # group_offs: [num_gemms+1] exclusive scan over per-group token counts.
-        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=out.device)
-        group_offs[1:] = torch.cumsum(
-            m_splits_tensor.to(device=out.device, dtype=torch.int64), 0
-        )
-
         _run_mxfp8_grouped(
             a_data,
             a_scale,
             b_data,
             b_scale,
             out,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=n,
             k=k,
@@ -1300,7 +1293,6 @@ class _GroupedLinear(torch.autograd.Function):
         """
         from ..flydsl_kernels.gemm import _run_mxfp8_grouped
 
-        num_gemms = len(grad_output)
         # NN kernel-A = dY, rowwise (contraction over N_out): concat on the token
         # (M) axis. NN kernel-B = W, columnwise (transpose-read, contraction on the
         # N_out axis): concat on the packed N_out axis. Each MXFP8 operand carries
@@ -1317,19 +1309,13 @@ class _GroupedLinear(torch.autograd.Function):
         k_in = dgrad.size(-1)  # output width (K_in)
         m_total = a_data.size(0)
 
-        # group_offs: [num_gemms+1] exclusive scan over per-group token counts.
-        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=dgrad.device)
-        group_offs[1:] = torch.cumsum(
-            m_splits_tensor.to(device=dgrad.device, dtype=torch.int64), 0
-        )
-
         _run_mxfp8_grouped(
             a_data,
             a_scale,
             b_data,
             b_scale,
             dgrad,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=k_in,  # NN output width is K_in
             k=n_out,  # NN per-expert contraction is N_out
@@ -1389,24 +1375,6 @@ class _GroupedLinear(torch.autograd.Function):
             wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
 
     @staticmethod
-    def _flydsl_group_offs(num_gemms, m_splits, m_splits_tensor, device):
-        """Build the [num_gemms+1] exclusive-scan token offsets on ``device``.
-
-        Prefers the GPU ``m_splits_tensor`` (avoids a blocking H2D of pageable
-        ``m_splits``) but falls back to the Python ``m_splits`` list when the tensor
-        is absent (the BF16 path does not always carry it).
-        """
-        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
-        if m_splits_tensor is not None:
-            group_offs[1:] = torch.cumsum(
-                m_splits_tensor.to(device=device, dtype=torch.int64), 0
-            )
-        else:
-            counts = torch.tensor(list(m_splits), dtype=torch.int64, device=device)
-            group_offs[1:] = torch.cumsum(counts, 0)
-        return group_offs
-
-    @staticmethod
     def _grouped_gemm_flydsl_bf16(*, inputmats, weights, out, m_splits, m_splits_tensor):
         """FlyDSL BF16 grouped forward (TN): Y_e = X_e @ W_e^T, one packed launch.
 
@@ -1416,22 +1384,17 @@ class _GroupedLinear(torch.autograd.Function):
         """
         from ..flydsl_kernels.gemm import _run_bf16_grouped
 
-        num_gemms = len(inputmats)
         a_data = torch.cat([im.reshape(-1, im.shape[-1]) for im in inputmats], dim=0)
         b_data = torch.cat([w for w in weights], dim=0)
         n = weights[0].size(0)
         k = weights[0].size(-1)
         m_total = a_data.size(0)
 
-        group_offs = _GroupedLinear._flydsl_group_offs(
-            num_gemms, m_splits, m_splits_tensor, out.device
-        )
-
         _run_bf16_grouped(
             a_data,
             b_data,
             out,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=n,
             k=k,
@@ -1443,22 +1406,17 @@ class _GroupedLinear(torch.autograd.Function):
         """FlyDSL BF16 grouped dgrad (NN): dX_e = dY_e @ W_e, one packed launch."""
         from ..flydsl_kernels.gemm import _run_bf16_grouped
 
-        num_gemms = len(grad_output)
         a_data = torch.cat([g.reshape(-1, g.shape[-1]) for g in grad_output], dim=0)
         b_data = torch.cat([w for w in weights], dim=0)
         n_out = grad_output[0].shape[-1]  # per-expert contraction (N_out)
         k_in = dgrad.size(-1)  # output width (K_in)
         m_total = a_data.size(0)
 
-        group_offs = _GroupedLinear._flydsl_group_offs(
-            num_gemms, m_splits, m_splits_tensor, dgrad.device
-        )
-
         _run_bf16_grouped(
             a_data,
             b_data,
             dgrad,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=k_in,
             k=n_out,
@@ -1501,7 +1459,6 @@ class _GroupedLinear(torch.autograd.Function):
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
 
-        num_gemms = len(inputmats)
         a_data = torch.cat([im._data for im in inputmats], dim=0)
         b_data = torch.cat([w._data for w in weights_fp8], dim=0)
         a_data._fp8_dtype = inputmats[0]._fp8_dtype
@@ -1513,17 +1470,13 @@ class _GroupedLinear(torch.autograd.Function):
         k = weights_fp8[0]._data.size(-1)
         m_total = a_data.size(0)
 
-        group_offs = _GroupedLinear._flydsl_group_offs(
-            num_gemms, m_splits, m_splits_tensor, out.device
-        )
-
         _run_fp8_grouped(
             a_data,
             a_scale,
             b_data,
             b_scale,
             out,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=n,
             k=k,
@@ -1543,7 +1496,6 @@ class _GroupedLinear(torch.autograd.Function):
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
 
-        num_gemms = len(grad_output)
         # A = dY (rowwise fp8 data); B = W columnwise transpose, which is the
         # materialized [K_in, N_out] -> packed on K_in (output axis of the TN GEMM).
         a_data = torch.cat([g._data for g in grad_output], dim=0)
@@ -1557,17 +1509,13 @@ class _GroupedLinear(torch.autograd.Function):
         k_in = dgrad.size(-1)  # output width (K_in)
         m_total = a_data.size(0)
 
-        group_offs = _GroupedLinear._flydsl_group_offs(
-            num_gemms, m_splits, m_splits_tensor, dgrad.device
-        )
-
         _run_fp8_grouped(
             a_data,
             a_scale,
             b_data,
             b_scale,
             dgrad,
-            group_offs=group_offs,
+            m_splits=m_splits,
             m_total=m_total,
             n=k_in,
             k=n_out,
