@@ -207,6 +207,12 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
     """
+    # Untimed first (pre-warmup) call: the timers size their blocks from their first timed calls,
+    # and a slow one-off first call (e.g. lazy kernel load, JIT compilation, algorithm selection,
+    # autotuning) can make them pick a too-small block, so each sample includes a sync and
+    # measures latency instead of throughput.
+    fn()
+    torch.cuda.synchronize()
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
     if method == "blocked":
         m = timer.blocked_autorange(min_run_time=min_run_time)
