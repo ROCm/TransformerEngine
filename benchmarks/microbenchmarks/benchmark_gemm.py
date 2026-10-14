@@ -256,6 +256,8 @@ def test_gemm(microbench, case, monkeypatch):
             pytest.skip(f"MXFP8 GEMM needs the contraction dim divisible by {kmul}")
     if case["Backend"] == "triton" and not _triton_gemm_supported():
         pytest.skip("Triton GEMM backend not available in this TE build")
+    if case["Backend"] == "triton" and _device_cc() == (12, 5):
+        pytest.skip("Triton GEMM hangs or crashes on many shapes on gfx1250")
     if case["Backend"] == "hipkittens" and not te_honors_env(_HIPBLASLT_MXFP8):
         pytest.skip("HipKittens GEMM backend not available in this TE build")
     if case["Backend"] == "hipkittens" and (case["N"] % 256 or case["K"] % 256):

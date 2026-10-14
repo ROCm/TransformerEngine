@@ -358,6 +358,8 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
     # HK-vs-CK grouped MXFP8 is latched per process (rocm_gemm.cu); arch gates keep them apart.
     if backend.startswith("hipkittens") and get_device_compute_capability() != (9, 5):
         pytest.skip("HipKittens GEMM is gfx950-only")
+    if backend == "triton" and get_device_compute_capability() == (12, 5):
+        pytest.skip("Triton grouped GEMM hangs or crashes on many configs on gfx1250")
     if backend == "hipkittens_per_expert" and not te_honors_env(_HIPBLASLT_MXFP8):
         pytest.skip("HipKittens GEMM backend not available in this TE build")
     if backend == "ck_tile" and case["recipe"] == "mxfp8" and get_device_compute_capability() != (12, 5):

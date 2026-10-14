@@ -974,14 +974,14 @@ def _sample_rows(fam):
 # ---------------------------------------------------------------------------
 
 def _detect_gpu_model():
-    """Short GPU token (e.g. ``MI355X``) from torch's device name, else UNKNOWN."""
+    """Short GPU token (e.g. ``MI355X``) from torch's device name, else None."""
     import re
     try:
         name = torch.cuda.get_device_name(0)
     except Exception:
-        return "UNKNOWN"
+        return None
     m = re.search(r"MI\s?\d{3,4}[A-Za-z]*", name)
-    return m.group(0).replace(" ", "").upper() if m else "UNKNOWN"
+    return m.group(0).replace(" ", "").upper() if m else None
 
 
 def _gpu_pci():

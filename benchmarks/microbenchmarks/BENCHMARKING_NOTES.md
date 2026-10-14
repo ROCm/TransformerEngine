@@ -49,6 +49,7 @@ in one process on one GPU. Times are per call and are medians over many samples.
   Compare it with dense kernel time only for GPU-bound cases.
 - **An empty kernel cell** means the profiled kernels could not be matched to calls for that
   case; the run log names it.
+- **The TE dashboard plots wall time** for every case. Kernel time is only in the raw CSVs.
 
 ### Forward and backward
 

@@ -80,8 +80,8 @@ python benchmark_gemm.py -k triton           # select the Triton backend
   `benchmark_<family>.csv` (each row tagged with the run timestamp and commit),
   `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues) and, with
   `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
-  `results`); `--gpu-model NAME` overrides the detected GPU model (e.g. when it reads
-  `UNKNOWN`). A full dashboard run:
+  `results`); `--gpu-model NAME` overrides the detected GPU model (the run is refused if
+  no model can be detected and none is given). A full dashboard run:
 
   ```bash
   pytest . --dashboard-run --kernel-profile --run-flydsl --csv-samples

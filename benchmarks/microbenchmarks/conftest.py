@@ -97,7 +97,7 @@ def pytest_addoption(parser):
     group.addoption(
         "--gpu-model", default=None, metavar="NAME",
         help="Override the detected GPU model/arch name (e.g. MI400X) used in the "
-             "--dashboard-run dir + run_info; use when auto-detect returns UNKNOWN.",
+             "--dashboard-run dir + run_info; required when it can't be detected.",
     )
 
 
@@ -120,15 +120,23 @@ def pytest_configure(config):
             print("WARNING: GPU interference check skipped -- amdsmi package not available "
                   "(pip install amdsmi, or pass --no-gpu-interference-check to silence).")
 
-    config._cpu_pin = None if config.getoption("--no-cpu-pin") else pin_cpus()
-
     # Resolve the dashboard run dir up front so pytest_report_header can show it
     # and write_dashboard_run can reuse the same metadata at session end.
+    plan = None
     if config.getoption("--dashboard-run"):
-        config._dashboard_plan = dashboard_run_plan(
+        plan = dashboard_run_plan(
             config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"))
+        if not plan.meta["model"]:
+            raise pytest.UsageError(
+                "--dashboard-run: could not determine the GPU model from the device name; "
+                "pass --gpu-model NAME (e.g. MI355X).")
+
+    config._cpu_pin = None if config.getoption("--no-cpu-pin") else pin_cpus()
+
+    if plan is not None:
+        config._dashboard_plan = plan
         if config._cpu_pin is not None:
-            config._dashboard_plan.meta["cpus"] = config._cpu_pin.description
+            plan.meta["cpus"] = config._cpu_pin.description
 
 
 def pytest_report_header(config):
