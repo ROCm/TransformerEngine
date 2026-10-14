@@ -1285,6 +1285,14 @@ def _run_bf16_grouped(
     return D
 
 
+def _wgrad_max_buckets():
+    """Launch-count cap for the K-bucketed wgrad (env override, default uncapped)."""
+    v = os.getenv("NVTE_FLYDSL_WGRAD_MAX_BUCKETS", "")
+    if v.strip() in ("", "0"):
+        return None
+    return int(v)
+
+
 def _run_bf16_grouped_wgrad(
     dy_cols,          # list[G] of per-expert dY, each [m_e, N_out]
     x_cols,           # list[G] of per-expert X,  each [m_e, K_in]
@@ -1295,12 +1303,23 @@ def _run_bf16_grouped_wgrad(
     k_in,
     output_dtype,
 ):
-    """Grouped BF16 wgrad (NT): dW_e = dY_e^T @ X_e, per expert, one launch.
+    """Grouped BF16 wgrad (NT): dW_e = dY_e^T @ X_e, via K-bucketed launches.
 
-    Scaleless analog of :func:`_run_mxfp8_grouped_wgrad`: pad each expert's tokens
-    to a uniform M_pad on the contraction axis, pack dY/X to [G*M_pad, *], and emit
-    one NT launch writing the packed [G*N_out, K_in] gradient (each expert's output
-    tile shifted via store_m_expert_off).
+    Scaleless. The kernel's contraction K (the per-expert token count) is baked in
+    at compile time, so experts are grouped into **K-buckets** by their own padded
+    token count (``bucketize_wgrad_tokens``): each expert rounds up to its own
+    BLOCK_M multiple (floor 512), and experts sharing a rounded K share one launch.
+    This avoids the old global-max pad -- a single large expert no longer forces
+    every small expert to contract over its token count (which wasted work and
+    OOM'd the int32 launch-arg limit under skew). Balanced token counts collapse to
+    a single bucket, reproducing the prior single-launch path bit-for-bit.
+
+    Per bucket ``b`` with experts ``E_b`` and padded K ``k_pad``: pack those
+    experts' dY/X to ``[len(E_b)*k_pad, *]`` (bucket-local, so the kernel's
+    ``expert*K`` operand addressing uses the bucket-local index), launch into a
+    bucket-local output ``[len(E_b)*N_out, K_in]``, then copy each expert's
+    ``[N_out, K_in]`` block into its GLOBAL row of ``dW``. The hand-scheduled 4-wave
+    MFMA pipeline is untouched -- K stays compile-time-constant per launch.
     """
     from .half_prec_gemm import doGemm as _half_prec_doGemm, _BLOCK_M, _BLOCK_N
 
@@ -1310,13 +1329,6 @@ def _run_bf16_grouped_wgrad(
         raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
     if k_in % _BLOCK_N != 0:
         raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
-
-    max_m = max(int(m) for m in m_splits)
-    m_pad = ((max_m + _BLOCK_M - 1) // _BLOCK_M) * _BLOCK_M
-    m_pad = max(m_pad, 512)
-
-    dy_data = gd.uniform_pad_concat(dy_cols, m_pad)
-    x_data = gd.uniform_pad_concat(x_cols, m_pad)
 
     dW = _validate_or_allocate_output(
         dW,
@@ -1328,30 +1340,52 @@ def _run_bf16_grouped_wgrad(
 
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
-    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-        num_groups, num_pid_m, num_pid_n, device
-    )
-    sched = _select_grouped_sched(num_tiles, device)
+    buckets = gd.bucketize_wgrad_tokens(m_splits, _BLOCK_M, max_buckets=_wgrad_max_buckets())
 
-    # The kernel's compile-time contraction K is the PER-EXPERT padded token count;
-    # both operands are packed [G*M_pad, *] so doGemm de-packs K via num_groups.
-    _half_prec_doGemm(
-        dy_data,
-        x_data,
-        dW,
-        layout="NT",
-        m=n_out,
-        n=k_in,
-        k=m_pad,
-        input_dtype=torch.bfloat16,
-        label="BF16 grouped wgrad",
-        group=False,
-        num_groups=num_groups,
-        work_queue=work_queue,
-        work_counter=work_counter,
-        sched=sched,
-        wgrad=True,
-    )
+    for k_pad, ids in buckets:
+        bsize = len(ids)
+        dy_data = gd.uniform_pad_concat([dy_cols[e] for e in ids], k_pad)
+        x_data = gd.uniform_pad_concat([x_cols[e] for e in ids], k_pad)
+
+        # Fast path: when this bucket's experts are exactly rows 0..G-1 in order
+        # (the common single-bucket / balanced case), the bucket-local expert index
+        # equals the global index, so the kernel can write straight into dW -- no
+        # bucket-local buffer, no scatter copy. This reproduces the pre-bucketing
+        # single-launch path byte-for-byte (and avoids a full-dW-size copy that
+        # otherwise regresses the balanced case ~15%). Only genuinely multi-bucket
+        # (skewed) launches pay the scatter, where the K savings dwarf it.
+        direct = ids == list(range(num_groups))
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
+                                             device=device)
+
+        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+            bsize, num_pid_m, num_pid_n, device
+        )
+        sched = _select_grouped_sched(num_tiles, device)
+
+        _half_prec_doGemm(
+            dy_data,
+            x_data,
+            dW_b,
+            layout="NT",
+            m=n_out,
+            n=k_in,
+            k=k_pad,
+            input_dtype=torch.bfloat16,
+            label="BF16 grouped wgrad",
+            group=False,
+            num_groups=bsize,
+            work_queue=work_queue,
+            work_counter=work_counter,
+            sched=sched,
+            wgrad=True,
+        )
+
+        if not direct:
+            # Scatter each bucket-local expert block to its global dW row.
+            for j, e in enumerate(ids):
+                dW[e * n_out : (e + 1) * n_out].copy_(dW_b[j * n_out : (j + 1) * n_out])
+
     return dW
 
 

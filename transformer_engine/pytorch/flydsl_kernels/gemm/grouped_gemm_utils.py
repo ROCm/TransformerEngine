@@ -200,3 +200,49 @@ def uniform_pad_concat(tensors, rows):
         return out
 
     return torch.cat([_pad_rows(t) for t in tensors], dim=0)
+
+
+def bucketize_wgrad_tokens(m_splits, block_m, max_buckets=None):
+    """Group experts by their per-expert padded contraction length (K-bucketing).
+
+    The grouped wgrad kernel bakes its contraction length ``K`` in at compile time,
+    so experts that share a padded token count can share one launch. Instead of
+    padding every expert to the GLOBAL max token count (which wastes work and can
+    OOM under skew), round each expert's ``m_g`` UP to its own ``block_m`` multiple
+    (floor 512 = the pipeline's 4-K128-tile minimum), then group experts by that
+    rounded value. Each distinct value is one bucket -> one fixed-K launch.
+
+    When the number of distinct values exceeds ``max_buckets``, adjacent buckets
+    are merged UPWARD (experts promoted to the larger K) so the launch count is
+    capped; promoting only ever adds zero padding, never truncates, so results are
+    unchanged. Returns a list of ``(k_pad, [global_expert_ids])`` tuples, ordered
+    by ascending ``k_pad``.
+    """
+    def _round(m):
+        return max(((int(m) + block_m - 1) // block_m) * block_m, 512)
+
+    k_of = [_round(m) for m in m_splits]
+    distinct = sorted(set(k_of))
+
+    if max_buckets is not None and len(distinct) > max_buckets:
+        # Merge the smallest-K buckets upward onto a coarser ladder until the
+        # distinct-K count fits. Keep the largest K (one dominant expert) its own
+        # bucket so it is never dragged smaller (it can't be) nor inflates others.
+        # Simple policy: collapse the sorted distinct values into `max_buckets`
+        # contiguous groups, each group promoted to its group-max.
+        import math
+        per = math.ceil(len(distinct) / max_buckets)
+        ladder = {}
+        for i in range(0, len(distinct), per):
+            grp = distinct[i : i + per]
+            top = grp[-1]
+            for v in grp:
+                ladder[v] = top
+        k_of = [ladder[k] for k in k_of]
+        distinct = sorted(set(k_of))
+
+    buckets = []
+    for k_pad in distinct:
+        ids = [g for g, k in enumerate(k_of) if k == k_pad]
+        buckets.append((k_pad, ids))
+    return buckets
