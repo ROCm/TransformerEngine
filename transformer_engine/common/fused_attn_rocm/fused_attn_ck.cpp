@@ -4,9 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#include <algorithm>
 #include <iostream>
-#include <limits>
 #include <string>
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
@@ -507,20 +505,9 @@ void pad_remap_lse(
   }
 }
 
-// fill n floats with value
-__global__ void fill_float_kernel(float* ptr, uint64_t n, float value){
-  for(uint64_t i = blockIdx.x * static_cast<uint64_t>(blockDim.x) + threadIdx.x; i < n;
-      i += static_cast<uint64_t>(gridDim.x) * blockDim.x){
-    ptr[i] = value;
-  }
-}
-
-void fill_float(void* ptr, uint64_t n, float value, cudaStream_t stream){
-  constexpr int THREADS_PER_BLOCK = 256;
-  const uint64_t blocks = std::min<uint64_t>((n + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, 4096);
-  if(blocks > 0){
-    fill_float_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream>>>(static_cast<float*>(ptr), n, value);
-  }
+// fill n floats with -inf (bit pattern 0xFF800000)
+void fill_neg_inf(void* ptr, size_t n, cudaStream_t stream){
+  NVTE_CHECK_CUDA(hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(ptr), 0xFF800000u, n, stream));
 }
 
 // actual fwd implementation, calling ck api directly
@@ -559,9 +546,9 @@ void fused_attn_ck_fwd_impl(
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
 
-  const bool ck_small_seq_env_enabled =
-      getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") == "1";
-  bool ck_small_seq_enabled = false;
+  const bool ck_small_seq_enabled =
+      is_small_seq_possible(dtype, layout, bias_type, mask_type, dropout_probability, s_q, s_kv, d_qk,
+                            d_v, h, hg, softmax_type);
   void* ck_smallseq_workspace_prefix = nullptr;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -575,20 +562,9 @@ void fused_attn_ck_fwd_impl(
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
 
-  if(ck_small_seq_env_enabled) {
-    if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
-      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
-                                     h, hg, softmax_type)) {
-        if(is_ragged) {
-          ck_small_seq_enabled = true;
-          ck_smallseq_workspace_prefix =
-              planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
-        } else {
-          ck_small_seq_enabled =
-              is_BSHD && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
-        }
-      }
-    }
+  if(ck_small_seq_enabled && is_ragged) {
+    ck_smallseq_workspace_prefix =
+        planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
   }
   // The small-seq kernels do not write the max logit, and the backward picks them on its own, so
   // the backend selection (is_small_seq_possible) keeps such configs away from ck.
@@ -735,12 +711,11 @@ void fused_attn_ck_fwd_impl(
     // Rows that ck does not write (padding) must not contribute to the max: use -inf. In batch
     // mode ck writes every row and the BSHD->THD remap copies every row back, but the SBHD+padding
     // remap copies only the valid tokens and THD leaves the rows past the last sequence.
-    const float neg_inf = -std::numeric_limits<float>::infinity();
     if((is_SBHD && is_padding) || is_ragged){
-      fill_float(devPtrMax, is_ragged ? max_tokens_q*h : b*h*s_q, neg_inf, stream);
+      fill_neg_inf(devPtrMax, is_ragged ? max_tokens_q*h : b*h*s_q, stream);
     }
     if(devPtrMaxWithoutPadding){
-      fill_float(devPtrMaxWithoutPadding, h*max_tokens_q, neg_inf, stream);
+      fill_neg_inf(devPtrMaxWithoutPadding, h*max_tokens_q, stream);
     }
   }
 
@@ -953,9 +928,9 @@ void fused_attn_ck_bwd_impl(
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
-  const bool ck_small_seq_env_enabled =
-      getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") == "1";
-  bool ck_small_seq_enabled = false;
+  const bool ck_small_seq_enabled =
+      is_small_seq_possible(dtype, layout, bias_type, mask_type, dropout_probability, s_q, s_kv, d_qk,
+                            d_v, h, hg, softmax_type);
   void* ck_smallseq_workspace_prefix = nullptr;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -969,20 +944,9 @@ void fused_attn_ck_bwd_impl(
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
 
-  if(ck_small_seq_env_enabled) {
-    if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
-      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
-                                     h, hg, softmax_type)) {
-        if(is_ragged) {
-          ck_small_seq_enabled = true;
-          ck_smallseq_workspace_prefix =
-              planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
-        } else {
-          ck_small_seq_enabled =
-              is_BSHD && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
-        }
-      }
-    }
+  if(ck_small_seq_enabled && is_ragged) {
+    ck_smallseq_workspace_prefix =
+        planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
   }
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)

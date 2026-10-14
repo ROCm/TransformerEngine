@@ -499,40 +499,21 @@ model_configs_max_logit = {
         8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)
     ),
     "max_logit_6": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
-}
-
-
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_max_logit])
-@pytest.mark.parametrize("model", model_configs_max_logit.keys())
-@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
-def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
-    """Test DotProductAttention module with checkpointing"""
-    config = model_configs[model]
-    config.return_max_logit = True
-    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
-
-
-model_configs_max_logit_extra = {
-    # test: ModelConfig(b, sq, hq, dqk)
-    "max_logit_extra_1": ModelConfig(
-        2, 1024, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding"
-    ),
-    "max_logit_extra_2": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding_causal"),
-    "max_logit_extra_3": ModelConfig(2, 16, 16, 128, max_seqlen_kv=2048),
-    "max_logit_extra_4": ModelConfig(2, 1024, 16, 64, attn_mask_type="causal"),
-    "max_logit_extra_5": ModelConfig(
+    "max_logit_7": ModelConfig(2, 1024, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding"),
+    "max_logit_8": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding_causal"),
+    "max_logit_9": ModelConfig(2, 16, 16, 128, max_seqlen_kv=2048),
+    "max_logit_10": ModelConfig(2, 1024, 16, 64, attn_mask_type="causal"),
+    "max_logit_11": ModelConfig(
         2, 512, 16, 256, max_seqlen_kv=1024, attn_mask_type="causal_bottom_right"
     ),
-    "max_logit_extra_6": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
+    "max_logit_12": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
 }
 if IS_HIP_EXTENSION:
     # CK also returns the max logit with a softmax offset, which is not a logit
-    model_configs_max_logit_extra.update(
+    model_configs_max_logit.update(
         {
-            "max_logit_extra_7": ModelConfig(2, 1024, 16, 64, softmax_type="learnable"),
-            "max_logit_extra_8": ModelConfig(
+            "max_logit_13": ModelConfig(2, 1024, 16, 64, softmax_type="learnable"),
+            "max_logit_14": ModelConfig(
                 2, 1024, 16, 64, attn_mask_type="causal", softmax_type="off-by-one"
             ),
         }
@@ -541,17 +522,18 @@ if IS_HIP_EXTENSION:
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_max_logit_extra])
-@pytest.mark.parametrize("model", model_configs_max_logit_extra.keys())
+@pytest.mark.parametrize("model_configs", [model_configs_max_logit])
+@pytest.mark.parametrize("model", model_configs_max_logit.keys())
 @pytest.mark.parametrize("qkv_layout", ["bshd_bshd_bshd", "sbhd_sbhd_sbhd", "thd_thd_thd"])
-def test_dpa_max_logit_extra(dtype, model_configs, model, qkv_layout):
-    """Test max_logit with padded rows, decode-size queries, head dims 64/256, MLA and sinks"""
+def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with checkpointing"""
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 def _run_dpa_max_logit_exact(
+    monkeypatch,
     qkv_format,
     attn_mask_type,
     head_dim,
@@ -598,11 +580,11 @@ def _run_dpa_max_logit_exact(
         pytest.skip("No fused attention backend supports this configuration.")
 
     reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
     if IS_HIP_EXTENSION:
-        os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+        monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
     _attention_backends["backend_selection_requires_update"] = True
 
     # Actual lengths. Padded rows and the gaps between thd sequences hold data that must not count.
@@ -701,9 +683,13 @@ def _run_dpa_max_logit_exact(
 @pytest.mark.parametrize("head_dim", [64, 128, 256])
 @pytest.mark.parametrize("seqlen_q", [16, 1024])
 @pytest.mark.parametrize("num_gqa_groups", [8, 2])
-def test_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups):
+def test_dpa_max_logit_exact(
+    qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, monkeypatch
+):
     """Test that the fused max_logit is the exact max over the unmasked scores"""
-    _run_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups)
+    _run_dpa_max_logit_exact(
+        monkeypatch, qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups
+    )
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -753,13 +739,13 @@ def test_dpa_max_logit_exact(qkv_format, attn_mask_type, head_dim, seqlen_q, num
     ],
 )
 def test_dpa_max_logit_exact_variants(
-    qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, kwargs
+    qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, kwargs, monkeypatch
 ):
     """Test the exact max_logit with fp16, sinks, sliding windows, fully masked rows and MLA"""
     if kwargs.get("softmax_type", "vanilla") != "vanilla" and not IS_HIP_EXTENSION:
         pytest.skip("Checks that the softmax offset is left out of the max, as CK does.")
     _run_dpa_max_logit_exact(
-        qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, **kwargs
+        monkeypatch, qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, **kwargs
     )
 
 
@@ -786,22 +772,20 @@ def test_dpa_max_logit_ck_selected(config_kwargs, qkv_layout):
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm backend selection.")
 @pytest.mark.parametrize(
-    "unsupported",
+    "smallseq, unsupported",
     [
-        {"attn_bias_type": "post_scale_bias"},
-        {"attn_bias_type": "alibi", "attn_mask_type": "causal"},
-        {"dropout_p": 0.1},
-        {"smallseq": True},
+        (False, {"attn_bias_type": "post_scale_bias"}),
+        (False, {"attn_bias_type": "alibi", "attn_mask_type": "causal"}),
+        (False, {"dropout_p": 0.1}),
+        (True, {}),
     ],
     ids=["post_scale_bias", "alibi", "dropout", "smallseq"],
 )
-def test_dpa_max_logit_ck_fallback(unsupported, monkeypatch):
+def test_dpa_max_logit_ck_fallback(smallseq, unsupported, monkeypatch):
     """CK returns max_logit only without bias or dropout, and not from the small-seq kernels"""
-    if unsupported.pop("smallseq", False):
+    if smallseq:
         monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
-        config = ModelConfig(2, 16, 16, 128)
-    else:
-        config = ModelConfig(2, 1024, 16, 128, **unsupported)
+    config = ModelConfig(2, 16 if smallseq else 1024, 16, 128, **unsupported)
     _, _, fused_attn_backends = get_available_attention_backends(
         config, qkv_dtype=torch.bfloat16, qkv_layout="bshd_bshd_bshd"
     )

@@ -4,6 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <tuple>
@@ -315,6 +316,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   }
   if(ck_max_logit_unsupported && getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG")){
     std::cout<<"return_max_logit: ck does not return the max logit "<<ck_max_logit_unsupported<<std::endl;
+  }
+  if(ck_max_logit_unsupported && nvte_fused_attn_ck){
+    static std::atomic<bool> warned{false};
+    if(!warned.exchange(true)){
+      NVTE_WARN("return_max_logit: ck does not return the max logit ", ck_max_logit_unsupported,
+                ", so fused attention is not used for this configuration.");
+    }
   }
 
   // first check whether ck can be used, then check aotriton
