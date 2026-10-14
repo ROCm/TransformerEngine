@@ -578,6 +578,88 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _flydsl_grouped_common_ok(
+        *,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ) -> bool:
+        """Dtype-independent gate shared by every FlyDSL grouped GEMM path.
+
+        HIP extension, gfx950, the ``NVTE_USE_GROUPED_GEMM_FLYDSL=1`` opt-in,
+        128-aligned N/K for the tile geometry, and the same feature-set exclusions
+        as the blockwise-triton path. The per-dtype gates add only the quantization
+        condition (BF16: none; tensor-wise FP8: current/delayed scaling; MXFP8).
+        """
+        return (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+            and get_device_compute_capability() == (9, 5)
+            and in_features % 128 == 0
+            and out_features % 128 == 0
+            and not (
+                use_bias
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
+
+    @staticmethod
+    def _flydsl_grouped_kind(
+        *,
+        fp8,
+        recipe,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ):
+        """Return which FlyDSL grouped path applies: 'mxfp8' | 'fp8' | 'bf16' | None.
+
+        One dispatch signal replacing the former MXFP8-only boolean. All kinds share
+        the persistent work-stealing driver; they differ only in operand packing and
+        (fp8/mxfp8) the scale payload. BF16 is the unquantized path (fp8 is False).
+        """
+        if not _GroupedLinear._flydsl_grouped_common_ok(
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=in_features,
+            out_features=out_features,
+        ):
+            return None
+        if not fp8:
+            # Unquantized BF16 grouped GEMM (no recipe). FP16 is not routed here;
+            # the activation dtype is checked at the dispatch site.
+            return "bf16"
+        if recipe is None:
+            return None
+        if recipe.mxfp8():
+            return "mxfp8"
+        if recipe.float8_current_scaling() or recipe.delayed():
+            return "fp8"
+        return None
+
+    @staticmethod
     def _is_flydsl_mxfp8_grouped_gemm_supported(
         *,
         fp8,
@@ -592,31 +674,22 @@ class _GroupedLinear(torch.autograd.Function):
         in_features,
         out_features,
     ) -> bool:
-        """FlyDSL persistent work-stealing MXFP8 grouped GEMM: HIP, gfx950, env, MXFP8 recipe.
-
-        Opt-in via ``NVTE_USE_GROUPED_GEMM_FLYDSL=1``. The kernel is a TN-only packed
-        launch (see :func:`_run_mxfp8_grouped`); N (out_features) and K (in_features)
-        must be 128-aligned for the tile/scale geometry, and the same feature-set
-        exclusions as the blockwise-triton path apply.
-        """
+        """Back-compat shim: True only for the MXFP8 FlyDSL grouped path."""
         return (
-            IS_HIP_EXTENSION
-            and os.getenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
-            and get_device_compute_capability() == (9, 5)
-            and fp8
-            and recipe is not None
-            and recipe.mxfp8()
-            and in_features % 128 == 0
-            and out_features % 128 == 0
-            and not (
-                use_bias
-                or backward_override
-                or cpu_offloading
-                or save_original_input
-                or debug
-                or unpad_output
-                or actual_m_splits is not None
+            _GroupedLinear._flydsl_grouped_kind(
+                fp8=fp8,
+                recipe=recipe,
+                use_bias=use_bias,
+                backward_override=backward_override,
+                cpu_offloading=cpu_offloading,
+                save_original_input=save_original_input,
+                debug=debug,
+                unpad_output=unpad_output,
+                actual_m_splits=actual_m_splits,
+                in_features=in_features,
+                out_features=out_features,
             )
+            == "mxfp8"
         )
 
     @staticmethod
@@ -782,6 +855,232 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
         # Scatter the packed result back into the caller's per-expert wgrad tensors.
+        for g in range(num_gemms):
+            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+
+    @staticmethod
+    def _flydsl_group_offs(num_gemms, m_splits, m_splits_tensor, device):
+        """Build the [num_gemms+1] exclusive-scan token offsets on ``device``.
+
+        Prefers the GPU ``m_splits_tensor`` (avoids a blocking H2D of pageable
+        ``m_splits``) but falls back to the Python ``m_splits`` list when the tensor
+        is absent (the BF16 path does not always carry it).
+        """
+        group_offs = torch.zeros(num_gemms + 1, dtype=torch.int64, device=device)
+        if m_splits_tensor is not None:
+            group_offs[1:] = torch.cumsum(
+                m_splits_tensor.to(device=device, dtype=torch.int64), 0
+            )
+        else:
+            counts = torch.tensor(list(m_splits), dtype=torch.int64, device=device)
+            group_offs[1:] = torch.cumsum(counts, 0)
+        return group_offs
+
+    @staticmethod
+    def _grouped_gemm_flydsl_bf16(*, inputmats, weights, out, m_splits, m_splits_tensor):
+        """FlyDSL BF16 grouped forward (TN): Y_e = X_e @ W_e^T, one packed launch.
+
+        Unquantized analog of :meth:`_grouped_gemm_flydsl_mxfp8`: activations are the
+        per-group BF16 splits (concat on the token axis), weights the per-expert BF16
+        tensors (concat on the output-N axis). No scales.
+        """
+        from ..flydsl_kernels.gemm import _run_bf16_grouped
+
+        num_gemms = len(inputmats)
+        a_data = torch.cat([im.reshape(-1, im.shape[-1]) for im in inputmats], dim=0)
+        b_data = torch.cat([w for w in weights], dim=0)
+        n = weights[0].size(0)
+        k = weights[0].size(-1)
+        m_total = a_data.size(0)
+
+        group_offs = _GroupedLinear._flydsl_group_offs(
+            num_gemms, m_splits, m_splits_tensor, out.device
+        )
+
+        _run_bf16_grouped(
+            a_data,
+            b_data,
+            out,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+        )
+
+    @staticmethod
+    def _backward_flydsl_bf16_grouped(*, grad_output, weights, dgrad, m_splits, m_splits_tensor):
+        """FlyDSL BF16 grouped dgrad (NN): dX_e = dY_e @ W_e, one packed launch."""
+        from ..flydsl_kernels.gemm import _run_bf16_grouped
+
+        num_gemms = len(grad_output)
+        a_data = torch.cat([g.reshape(-1, g.shape[-1]) for g in grad_output], dim=0)
+        b_data = torch.cat([w for w in weights], dim=0)
+        n_out = grad_output[0].shape[-1]  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        group_offs = _GroupedLinear._flydsl_group_offs(
+            num_gemms, m_splits, m_splits_tensor, dgrad.device
+        )
+
+        _run_bf16_grouped(
+            a_data,
+            b_data,
+            dgrad,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=k_in,
+            k=n_out,
+            output_dtype=dgrad.dtype,
+            layout="NN",
+        )
+
+    @staticmethod
+    def _wgrad_flydsl_bf16_grouped(*, grad_output, inputmats, wgrad_list, m_splits):
+        """FlyDSL BF16 grouped wgrad (NT): dW_e = dY_e^T @ X_e, one packed launch."""
+        from ..flydsl_kernels.gemm import _run_bf16_grouped_wgrad
+
+        num_gemms = len(inputmats)
+        dy_cols = [g.reshape(-1, g.shape[-1]) for g in grad_output]
+        x_cols = [x.reshape(-1, x.shape[-1]) for x in inputmats]
+        n_out = dy_cols[0].shape[-1]
+        k_in = x_cols[0].shape[-1]
+
+        dW = torch.empty(
+            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+        )
+        _run_bf16_grouped_wgrad(
+            dy_cols,
+            x_cols,
+            dW,
+            m_splits=m_splits,
+            n_out=n_out,
+            k_in=k_in,
+            output_dtype=wgrad_list[0].dtype,
+        )
+        for g in range(num_gemms):
+            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+
+    @staticmethod
+    def _grouped_gemm_flydsl_fp8(*, inputmats, weights_fp8, out, m_splits, m_splits_tensor):
+        """FlyDSL tensor-wise FP8 grouped forward (TN): Y_e = X_e @ W_e^T.
+
+        Experts pack weights on the output-N axis ([G*N, K]); each operand carries
+        one scalar inverse scale, gathered into length-G per-expert vectors.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped
+
+        num_gemms = len(inputmats)
+        a_data = torch.cat([im._data for im in inputmats], dim=0)
+        b_data = torch.cat([w._data for w in weights_fp8], dim=0)
+        a_data._fp8_dtype = inputmats[0]._fp8_dtype
+        b_data._fp8_dtype = weights_fp8[0]._fp8_dtype
+        a_scale = torch.cat([im._scale_inv.reshape(1) for im in inputmats], dim=0)
+        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights_fp8], dim=0)
+
+        n = weights_fp8[0]._data.size(0)
+        k = weights_fp8[0]._data.size(-1)
+        m_total = a_data.size(0)
+
+        group_offs = _GroupedLinear._flydsl_group_offs(
+            num_gemms, m_splits, m_splits_tensor, out.device
+        )
+
+        _run_fp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            out,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+        )
+
+    @staticmethod
+    def _backward_flydsl_fp8_grouped(
+        *, grad_output, weights_for_dgrad, dgrad, m_splits, m_splits_tensor
+    ):
+        """FlyDSL tensor-wise FP8 grouped dgrad: dX_e = dY_e @ W_e, via the TN kernel.
+
+        FP8 is TN-only, so dgrad reaches the same TN kernel using materialized
+        transpose backings: A = dY rowwise ``_data`` [M_total, N_out], B = W^T
+        columnwise ``_transpose`` [G*N_out... ]. The TN kernel computes A @ B^T with
+        B packed on the output axis = K_in, i.e. per expert dY @ (W^T)^T = dY @ W.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped
+
+        num_gemms = len(grad_output)
+        # A = dY (rowwise fp8 data); B = W columnwise transpose, which is the
+        # materialized [K_in, N_out] -> packed on K_in (output axis of the TN GEMM).
+        a_data = torch.cat([g._data for g in grad_output], dim=0)
+        b_data = torch.cat([w._transpose for w in weights_for_dgrad], dim=0)
+        a_data._fp8_dtype = grad_output[0]._fp8_dtype
+        b_data._fp8_dtype = weights_for_dgrad[0]._fp8_dtype
+        a_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
+        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights_for_dgrad], dim=0)
+
+        n_out = grad_output[0]._data.size(-1)  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        group_offs = _GroupedLinear._flydsl_group_offs(
+            num_gemms, m_splits, m_splits_tensor, dgrad.device
+        )
+
+        _run_fp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            dgrad,
+            group_offs=group_offs,
+            m_total=m_total,
+            n=k_in,
+            k=n_out,
+            output_dtype=dgrad.dtype,
+        )
+
+    @staticmethod
+    def _wgrad_flydsl_fp8_grouped(*, grad_output, inputmats, wgrad_list, m_splits):
+        """FlyDSL tensor-wise FP8 grouped wgrad: dW_e = dY_e^T @ X_e, via the TN kernel.
+
+        Both operands reach the TN kernel already transposed: A = dY^T (the fp8
+        ``_transpose`` backing, [N_out, m_e]), B = X^T ([K_in, m_e]). The kernel
+        computes A @ B^T = dY^T @ X = dW.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped_wgrad
+
+        num_gemms = len(inputmats)
+        dyt_cols = [g._transpose for g in grad_output]
+        xt_cols = [x._transpose for x in inputmats]
+        dy_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
+        x_scale = torch.cat([x._scale_inv.reshape(1) for x in inputmats], dim=0)
+
+        # Operands may carry only the columnwise (_transpose) backing. The
+        # transpose is [feature, m_e]: dY^T is [N_out, m_e], X^T is [K_in, m_e].
+        n_out = dyt_cols[0].size(0)  # per-expert output feature N
+        k_in = xt_cols[0].size(0)  # per-expert input feature K
+
+        dW = torch.empty(
+            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+        )
+        _run_fp8_grouped_wgrad(
+            dyt_cols,
+            dy_scale,
+            xt_cols,
+            x_scale,
+            dW,
+            m_splits=m_splits,
+            n_out=n_out,
+            k_in=k_in,
+            dy_fp8_dtype=grad_output[0]._fp8_dtype,
+            x_fp8_dtype=inputmats[0]._fp8_dtype,
+            output_dtype=wgrad_list[0].dtype,
+        )
         for g in range(num_gemms):
             wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
 
@@ -1192,7 +1491,7 @@ class _GroupedLinear(torch.autograd.Function):
         # FlyDSL MXFP8 grouped GEMM (ROCm gfx950) opt-in. Unlike the blockwise-triton
         # path this does NOT quantize: it rides off TE's existing quantization and is
         # dispatched inline at the forward GEMM (see below), like the triton grouped path.
-        use_grouped_gemm_flydsl = _GroupedLinear._is_flydsl_mxfp8_grouped_gemm_supported(
+        flydsl_grouped_kind = _GroupedLinear._flydsl_grouped_kind(
             fp8=fp8,
             recipe=blockwise_recipe,
             use_bias=use_bias,
@@ -1205,6 +1504,11 @@ class _GroupedLinear(torch.autograd.Function):
             in_features=weights[0].size(-1),
             out_features=weights[0].size(0),
         )
+        # The BF16 kernel is bfloat16-only (FP16 grouped is not wired through
+        # FlyDSL); drop the BF16 kind for any other activation dtype.
+        if flydsl_grouped_kind == "bf16" and activation_dtype != torch.bfloat16:
+            flydsl_grouped_kind = None
+        use_grouped_gemm_flydsl = flydsl_grouped_kind is not None
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -1376,13 +1680,30 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         if use_grouped_gemm_flydsl:
-            _GroupedLinear._grouped_gemm_flydsl_mxfp8(
-                inputmats=inputmats,
-                weights_fp8=weights_fp8,
-                out=out,
-                m_splits=m_splits,
-                m_splits_tensor=m_splits_tensor,
-            )
+            if flydsl_grouped_kind == "mxfp8":
+                _GroupedLinear._grouped_gemm_flydsl_mxfp8(
+                    inputmats=inputmats,
+                    weights_fp8=weights_fp8,
+                    out=out,
+                    m_splits=m_splits,
+                    m_splits_tensor=m_splits_tensor,
+                )
+            elif flydsl_grouped_kind == "fp8":
+                _GroupedLinear._grouped_gemm_flydsl_fp8(
+                    inputmats=inputmats,
+                    weights_fp8=weights_fp8,
+                    out=out,
+                    m_splits=m_splits,
+                    m_splits_tensor=m_splits_tensor,
+                )
+            else:  # bf16
+                _GroupedLinear._grouped_gemm_flydsl_bf16(
+                    inputmats=inputmats,
+                    weights=weights_fp8,
+                    out=out,
+                    m_splits=m_splits,
+                    m_splits_tensor=m_splits_tensor,
+                )
         else:
             if use_grouped_gemm_triton:
                 general_grouped_gemm_func = general_grouped_gemm_triton
@@ -1433,6 +1754,7 @@ class _GroupedLinear(torch.autograd.Function):
             # FlyDSL grouped forward routes dgrad through the grouped NN path; the
             # shared backward branches on this flag (wgrad still uses the default).
             ctx.use_flydsl_mxfp8_grouped = use_grouped_gemm_flydsl
+            ctx.flydsl_grouped_kind = flydsl_grouped_kind
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
@@ -1881,13 +2203,30 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                if getattr(ctx, "use_flydsl_mxfp8_grouped", False):
+                _flydsl_kind = getattr(ctx, "flydsl_grouped_kind", None)
+                if _flydsl_kind == "mxfp8":
                     # dgrad dX = dY @ W through the FlyDSL grouped NN kernel, riding
                     # off the already-quantized grad_output (rowwise) and weights
-                    # (columnwise, ensured above). wgrad still uses the default path.
+                    # (columnwise, ensured above).
                     _GroupedLinear._backward_flydsl_mxfp8_grouped(
                         grad_output=grad_output,
                         weights_for_dgrad=weights_for_dgrad,
+                        dgrad=dgrad,
+                        m_splits=ctx.m_splits,
+                        m_splits_tensor=ctx.m_splits_tensor,
+                    )
+                elif _flydsl_kind == "fp8":
+                    _GroupedLinear._backward_flydsl_fp8_grouped(
+                        grad_output=grad_output,
+                        weights_for_dgrad=weights_for_dgrad,
+                        dgrad=dgrad,
+                        m_splits=ctx.m_splits,
+                        m_splits_tensor=ctx.m_splits_tensor,
+                    )
+                elif _flydsl_kind == "bf16":
+                    _GroupedLinear._backward_flydsl_bf16_grouped(
+                        grad_output=grad_output,
+                        weights=weights_for_dgrad,
                         dgrad=dgrad,
                         m_splits=ctx.m_splits,
                         m_splits_tensor=ctx.m_splits_tensor,
@@ -2010,8 +2349,9 @@ class _GroupedLinear(torch.autograd.Function):
                 # FlyDSL grouped wgrad (NT) opt-in. Phase 1 handles the plain path
                 # only; fused wgrad accumulation, bias grad, and delayed wgrad still
                 # fall through to the default grouped GEMM below.
+                _flydsl_kind = getattr(ctx, "flydsl_grouped_kind", None)
                 use_flydsl_wgrad = (
-                    getattr(ctx, "use_flydsl_mxfp8_grouped", False)
+                    _flydsl_kind is not None
                     and not ctx.fuse_wgrad_accumulation
                     and not ctx.use_bias  # bias-grad-in-wgrad-GEMM not supported yet
                     and not (
@@ -2019,12 +2359,27 @@ class _GroupedLinear(torch.autograd.Function):
                     )
                 )
                 if use_flydsl_wgrad:
-                    _GroupedLinear._wgrad_flydsl_mxfp8_grouped(
-                        grad_output=grad_output,
-                        inputmats=inputmats,
-                        wgrad_list=wgrad_list,
-                        m_splits=ctx.m_splits,
-                    )
+                    if _flydsl_kind == "mxfp8":
+                        _GroupedLinear._wgrad_flydsl_mxfp8_grouped(
+                            grad_output=grad_output,
+                            inputmats=inputmats,
+                            wgrad_list=wgrad_list,
+                            m_splits=ctx.m_splits,
+                        )
+                    elif _flydsl_kind == "fp8":
+                        _GroupedLinear._wgrad_flydsl_fp8_grouped(
+                            grad_output=grad_output,
+                            inputmats=inputmats,
+                            wgrad_list=wgrad_list,
+                            m_splits=ctx.m_splits,
+                        )
+                    else:  # bf16
+                        _GroupedLinear._wgrad_flydsl_bf16_grouped(
+                            grad_output=grad_output,
+                            inputmats=inputmats,
+                            wgrad_list=wgrad_list,
+                            m_splits=ctx.m_splits,
+                        )
                     clear_tensor_data(*inputmats)
                     grouped_gemm_wgrad = None
                 else:

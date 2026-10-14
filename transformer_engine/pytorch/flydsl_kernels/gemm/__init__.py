@@ -45,6 +45,10 @@ from .gemm_wrappers import (
     te_generic_gemm_flydsl,
     _run_mxfp8_grouped,
     _run_mxfp8_grouped_wgrad,
+    _run_bf16_grouped,
+    _run_bf16_grouped_wgrad,
+    _run_fp8_grouped,
+    _run_fp8_grouped_wgrad,
 )
 
 __all__ = [
@@ -52,4 +56,8 @@ __all__ = [
     "te_generic_gemm_flydsl",
     "_run_mxfp8_grouped",
     "_run_mxfp8_grouped_wgrad",
+    "_run_bf16_grouped",
+    "_run_bf16_grouped_wgrad",
+    "_run_fp8_grouped",
+    "_run_fp8_grouped_wgrad",
 ]

@@ -9,6 +9,7 @@ import os
 import torch
 import transformer_engine_torch as tex
 
+from . import grouped_gemm_utils as gd
 from .exceptions import FlyDSLUnsupportedError
 
 from .half_prec_gemm import bf16_matmul, fp16_matmul
@@ -1008,27 +1009,8 @@ def _run_mxfp8(
     return D, aux
 
 
-# Above this many persistent-loop rounds, dynamic atomic work-stealing pays for
-# itself; below it a single grid-stride sweep already balances the tiles, so the
-# atomic-free static schedule is preferred. Matches the HK reference's SCHED_ROUNDS.
-_GROUPED_SCHED_ROUNDS = 4
-
-
-def _select_grouped_sched(num_tiles: int, device) -> str:
-    """Pick the grouped-GEMM schedule: 'worksteal' (atomic) or 'static' (grid-stride).
-
-    Honors the NVTE_FLYDSL_GROUPED_SCHED override ('auto', 'static', 'worksteal')
-    for testing; otherwise applies the round-count heuristic against the CU grid.
-    """
-    override = os.getenv("NVTE_FLYDSL_GROUPED_SCHED", "auto").lower()
-    if override in ("static", "worksteal"):
-        return override
-    if override not in ("auto", ""):
-        raise ValueError(
-            f"NVTE_FLYDSL_GROUPED_SCHED must be auto|static|worksteal, got {override!r}"
-        )
-    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
-    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * num_cus else "worksteal"
+# Schedule selection now lives in the shared grouped driver (dtype-independent).
+_select_grouped_sched = gd.select_grouped_sched
 
 
 def _run_mxfp8_grouped(
@@ -1111,17 +1093,8 @@ def _run_mxfp8_grouped(
     # Per-expert M-block ranges over the packed [M_total, N] output. Each expert's
     # token count must be BLOCK_M-aligned (enforced upstream by the tiling check),
     # so tiles never straddle a group boundary.
-    descriptors = []
-    for g in range(num_groups):
-        m_start_blk = int(group_offs_cpu[g]) // BLOCK_M
-        m_end_blk = int(group_offs_cpu[g + 1]) // BLOCK_M
-        for pid_m in range(m_start_blk, m_end_blk):
-            for pid_n in range(num_pid_n):
-                descriptors.append((pid_m, pid_n, g))
-
-    num_tiles = len(descriptors)
-    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=a_data.device).reshape(-1)
-    work_counter = torch.zeros(1, dtype=torch.int32, device=a_data.device)
+    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, BLOCK_M)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
 
     # Schedule selection (compile-time specialization on the kernel side):
     #   "worksteal": persistent atomic tile-claiming, best for imbalanced experts.
@@ -1193,18 +1166,11 @@ def _run_mxfp8_grouped_wgrad(
     m_pad = ((max_m + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
     m_pad = max(m_pad, 512)
 
-    def _pad_rows(t, rows):
-        if t.size(0) == rows:
-            return t.contiguous()
-        out = t.new_zeros((rows, *t.shape[1:]))
-        out[: t.size(0)].copy_(t)
-        return out
-
     scale_rows = m_pad // SCALE_GROUP_SIZE
-    dy_data = torch.cat([_pad_rows(t, m_pad) for t in dy_cols], dim=0)
-    dy_scale = torch.cat([_pad_rows(t, scale_rows) for t in dy_scales], dim=0)
-    x_data = torch.cat([_pad_rows(t, m_pad) for t in x_cols], dim=0)
-    x_scale = torch.cat([_pad_rows(t, scale_rows) for t in x_scales], dim=0)
+    dy_data = gd.uniform_pad_concat(dy_cols, m_pad)
+    dy_scale = gd.uniform_pad_concat(dy_scales, scale_rows)
+    x_data = gd.uniform_pad_concat(x_cols, m_pad)
+    x_scale = gd.uniform_pad_concat(x_scales, scale_rows)
 
     if dy_data.dtype == torch.uint8:
         dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
@@ -1224,15 +1190,8 @@ def _run_mxfp8_grouped_wgrad(
     # kernel re-packs the output row via expert*N_out.
     num_pid_m = n_out // BLOCK_M
     num_pid_n = k_in // BLOCK_N
-    descriptors = [
-        (pid_m, pid_n, g)
-        for g in range(num_groups)
-        for pid_m in range(num_pid_m)
-        for pid_n in range(num_pid_n)
-    ]
-    num_tiles = len(descriptors)
-    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
-    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
+    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
     sched = _select_grouped_sched(num_tiles, device)
 
     mxfp8_matmul(
@@ -1247,6 +1206,305 @@ def _run_mxfp8_grouped_wgrad(
         work_counter=work_counter,
         sched=sched,
         wgrad=True,
+    )
+    return dW
+
+
+def _run_bf16_grouped(
+    a_data,
+    b_data,
+    D,
+    *,
+    group_offs,
+    m_total,
+    n,
+    k,
+    output_dtype: torch.dtype,
+    layout: str = "TN",
+    bias=None,
+):
+    """Dispatch a packed BF16 grouped GEMM through the persistent kernel.
+
+    Scaleless analog of :func:`_run_mxfp8_grouped`; the packed operand contracts
+    match the MXFP8 TN/NN layouts exactly (experts packed on B's output-N axis for
+    TN, on B's contraction axis for NN), only without E8M0 scales:
+
+      TN (forward, C = A @ B^T):
+        a = packed activations [M_total, K]   b = packed weights [G*N, K]
+      NN (dgrad, dX = dY @ W):
+        a = packed grad_output [M_total, N_out]   b = packed weights [G*N_out, K_in]
+    """
+    from .half_prec_gemm import doGemm as _half_prec_doGemm
+
+    if layout not in ("TN", "NN"):
+        raise FlyDSLUnsupportedError(f"FlyDSL BF16 grouped GEMM supports TN/NN, got {layout}")
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=torch.Size((m_total, n)),
+        dtype=output_dtype,
+        device=a_data.device,
+        backend_name=f"BF16 grouped {layout}",
+    )
+
+    from .half_prec_gemm import _BLOCK_M, _BLOCK_N
+
+    num_groups = int(group_offs.numel()) - 1
+    num_pid_n = n // _BLOCK_N
+    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
+    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, _BLOCK_M)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
+    sched = _select_grouped_sched(num_tiles, a_data.device)
+
+    epilogue, bias_arg = _resolve_epilogue(bias, n)
+    _half_prec_doGemm(
+        a_data,
+        b_data,
+        D.view(m_total, n),
+        layout=layout,
+        m=m_total,
+        n=n,
+        k=k,
+        input_dtype=torch.bfloat16,
+        label="BF16 grouped",
+        epilogue=epilogue,
+        bias=bias_arg,
+        group=True,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+    )
+    return D
+
+
+def _run_bf16_grouped_wgrad(
+    dy_cols,          # list[G] of per-expert dY, each [m_e, N_out]
+    x_cols,           # list[G] of per-expert X,  each [m_e, K_in]
+    dW,               # output [G*N_out, K_in]
+    *,
+    m_splits,
+    n_out,
+    k_in,
+    output_dtype,
+):
+    """Grouped BF16 wgrad (NT): dW_e = dY_e^T @ X_e, per expert, one launch.
+
+    Scaleless analog of :func:`_run_mxfp8_grouped_wgrad`: pad each expert's tokens
+    to a uniform M_pad on the contraction axis, pack dY/X to [G*M_pad, *], and emit
+    one NT launch writing the packed [G*N_out, K_in] gradient (each expert's output
+    tile shifted via store_m_expert_off).
+    """
+    from .half_prec_gemm import doGemm as _half_prec_doGemm, _BLOCK_M, _BLOCK_N
+
+    num_groups = len(m_splits)
+    device = dW.device
+    if n_out % _BLOCK_M != 0:
+        raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
+    if k_in % _BLOCK_N != 0:
+        raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
+
+    max_m = max(int(m) for m in m_splits)
+    m_pad = ((max_m + _BLOCK_M - 1) // _BLOCK_M) * _BLOCK_M
+    m_pad = max(m_pad, 512)
+
+    dy_data = gd.uniform_pad_concat(dy_cols, m_pad)
+    x_data = gd.uniform_pad_concat(x_cols, m_pad)
+
+    dW = _validate_or_allocate_output(
+        dW,
+        shape=torch.Size((num_groups * n_out, k_in)),
+        dtype=output_dtype,
+        device=device,
+        backend_name="BF16 grouped wgrad NT",
+    )
+
+    num_pid_m = n_out // _BLOCK_M
+    num_pid_n = k_in // _BLOCK_N
+    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
+    sched = _select_grouped_sched(num_tiles, device)
+
+    # The kernel's compile-time contraction K is the PER-EXPERT padded token count;
+    # both operands are packed [G*M_pad, *] so doGemm de-packs K via num_groups.
+    _half_prec_doGemm(
+        dy_data,
+        x_data,
+        dW,
+        layout="NT",
+        m=n_out,
+        n=k_in,
+        k=m_pad,
+        input_dtype=torch.bfloat16,
+        label="BF16 grouped wgrad",
+        group=False,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+    )
+    return dW
+
+
+def _run_fp8_grouped(
+    a_data,
+    a_scale_vec,      # [num_groups] fp32 per-expert inverse scales
+    b_data,
+    b_scale_vec,      # [num_groups] fp32 per-expert inverse scales
+    D,
+    *,
+    group_offs,
+    m_total,
+    n,
+    k,
+    output_dtype: torch.dtype,
+    bias=None,
+):
+    """Dispatch a packed tensor-wise FP8 grouped GEMM (TN) through the persistent kernel.
+
+    Tensor-wise FP8 is TN-only; grouped dgrad/wgrad reach this same TN kernel via
+    host-materialized transpose backings (see the backward helpers). Experts pack on
+    B's output-N axis ([G*N, K]); each expert carries one scalar inverse scale, so the
+    scales arrive as length-``num_groups`` vectors the kernel indexes by ``expert``.
+    """
+    from .fp8_gemm import doGemm as _fp8_doGemm
+
+    num_groups = int(group_offs.numel()) - 1
+    if a_scale_vec.numel() != num_groups or b_scale_vec.numel() != num_groups:
+        raise ValueError(
+            f"FP8 grouped expects length-{num_groups} scale vectors, got "
+            f"A={a_scale_vec.numel()}, B={b_scale_vec.numel()}"
+        )
+
+    a_fp8_dtype = getattr(a_data, "_fp8_dtype", None)
+    b_fp8_dtype = getattr(b_data, "_fp8_dtype", None)
+    if a_data.dtype == torch.uint8:
+        a_data = reinterpret_as_fp8_tensor(a_data, a_fp8_dtype)
+    if b_data.dtype == torch.uint8:
+        b_data = reinterpret_as_fp8_tensor(b_data, b_fp8_dtype)
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=torch.Size((m_total, n)),
+        dtype=output_dtype,
+        device=a_data.device,
+        backend_name="FP8 grouped TN",
+    )
+
+    from .fp8_gemm import _BLOCK_M, _BLOCK_N
+
+    num_pid_n = n // _BLOCK_N
+    group_offs_cpu = group_offs.to(device="cpu", dtype=torch.int64)
+    descriptors = gd.build_fwd_dgrad_descriptors(group_offs_cpu, num_groups, num_pid_n, _BLOCK_M)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, a_data.device)
+    sched = _select_grouped_sched(num_tiles, a_data.device)
+
+    epilogue, bias_arg = _resolve_epilogue(bias, n)
+    _fp8_doGemm(
+        a_data,
+        b_data,
+        D.view(m_total, n),
+        a_scale_vec.to(torch.float32).contiguous(),
+        b_scale_vec.to(torch.float32).contiguous(),
+        epilogue=epilogue,
+        bias=bias_arg,
+        group=True,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        m=m_total,
+        n=n,
+        k=k,
+    )
+    return D
+
+
+def _run_fp8_grouped_wgrad(
+    dyt_cols,         # list[G] of per-expert dY^T (host-transposed) [N_out, m_e]
+    dy_scale_vec,     # [num_groups] fp32 per-expert inverse scales for dY
+    xt_cols,          # list[G] of per-expert X^T (host-transposed) [K_in, m_e]
+    x_scale_vec,      # [num_groups] fp32 per-expert inverse scales for X
+    dW,               # output [G*N_out, K_in]
+    *,
+    m_splits,
+    n_out,
+    k_in,
+    dy_fp8_dtype,
+    x_fp8_dtype,
+    output_dtype,
+):
+    """Grouped tensor-wise FP8 wgrad: dW_e = dY_e^T @ X_e, one TN launch.
+
+    Tensor-wise FP8 is TN-NORMAL-read: the contraction axis (tokens m) is the
+    trailing dim and is never packed, so -- unlike the MXFP8/BF16 NT path -- the
+    operands arrive already transposed (the FP8 ``_transpose`` backing is a
+    materialized row-major transpose). Per expert: A = dY^T [N_out, m_e],
+    B = X^T [K_in, m_e]. Each expert's token count m_e is zero-padded up to a
+    common ``m_pad`` on the trailing (contraction) axis; experts stack on the
+    feature (output) axis to A [G*N_out, m_pad] / B [G*K_in, m_pad]. Output dW is
+    packed [G*N_out, K_in] on the M-row. Per-expert scalar scales are length-G
+    vectors indexed by expert in the kernel.
+    """
+    from .fp8_gemm import doGemm as _fp8_doGemm, _BLOCK_M, _BLOCK_N
+
+    num_groups = len(m_splits)
+    device = dW.device
+    if n_out % _BLOCK_M != 0:
+        raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
+    if k_in % _BLOCK_N != 0:
+        raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
+
+    max_m = max(int(m) for m in m_splits)
+    m_pad = ((max_m + _BLOCK_M - 1) // _BLOCK_M) * _BLOCK_M
+    m_pad = max(m_pad, 512)
+
+    # Zero-pad the trailing (token/contraction) axis of each [feature, m_e]
+    # transpose up to m_pad, then concat on the feature axis.
+    def _pad_cols(t):
+        if t.size(1) == m_pad:
+            return t.contiguous()
+        out = t.new_zeros((t.size(0), m_pad))
+        out[:, : t.size(1)].copy_(t)
+        return out
+
+    dy_data = torch.cat([_pad_cols(t) for t in dyt_cols], dim=0)
+    x_data = torch.cat([_pad_cols(t) for t in xt_cols], dim=0)
+    if dy_data.dtype == torch.uint8:
+        dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
+    if x_data.dtype == torch.uint8:
+        x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
+
+    dW = _validate_or_allocate_output(
+        dW,
+        shape=torch.Size((num_groups * n_out, k_in)),
+        dtype=output_dtype,
+        device=device,
+        backend_name="FP8 grouped wgrad TN",
+    )
+
+    num_pid_m = n_out // _BLOCK_M
+    num_pid_n = k_in // _BLOCK_N
+    descriptors = gd.build_wgrad_descriptors(num_groups, num_pid_m, num_pid_n)
+    work_queue, work_counter, num_tiles = gd.make_work_queue(descriptors, device)
+    sched = _select_grouped_sched(num_tiles, device)
+
+    _fp8_doGemm(
+        dy_data,
+        x_data,
+        dW,
+        dy_scale_vec.to(torch.float32).contiguous(),
+        x_scale_vec.to(torch.float32).contiguous(),
+        group=False,
+        num_groups=num_groups,
+        work_queue=work_queue,
+        work_counter=work_counter,
+        sched=sched,
+        wgrad=True,
+        m=n_out,
+        n=k_in,
+        k=m_pad,
     )
     return dW
 

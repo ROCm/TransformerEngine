@@ -28,16 +28,15 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
+from . import grouped_gemm_utils as gd
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import require_block_tiling, require_launch_size
+from .gemm_common_utils import get_num_cus, require_block_tiling, require_launch_size
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -59,10 +58,6 @@ BLOCK_M = _BLOCK_M
 BLOCK_N = _BLOCK_N
 BLOCK_K = _BLOCK_K
 SCALE_GROUP_SIZE = 32
-
-
-def get_num_cus() -> int:
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
 def _debug_enabled() -> bool:
@@ -524,9 +519,7 @@ def _compile_kernel(
         # all experts, so this is already the total. For wgrad, c_m = N_out is the
         # PER-EXPERT output-row count (the packed output [G*N_out, K_in] is addressed
         # via store_m_expert_off), so multiply by num_groups for the full count.
-        num_tiles = (c_m // BLOCK_M) * (c_n // BLOCK_N)
-        if const_expr(wgrad):
-            num_tiles = num_tiles * num_groups
+        num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -578,28 +571,19 @@ def _compile_kernel(
             # LDS broadcast scratch (one int32), following the persistent-kernel
             # idiom in mega_moe_stage1: recast the LDS slot to an int32 iterator and
             # a 1-element view. Thread 0 writes via ptr_store; every thread reads via
-            # the view after a workgroup barrier.
-            claim_iter = fx.recast_iter(fx.Int32, lds.claim_slot.ptr)
-            claim_view = fx.make_view(claim_iter, fx.make_layout(1, 1))
-
-            def _global_i32_ptr(tensor, index):
-                # Build an address-space-1 !llvm.ptr to tensor[index] (int32).
-                # llvm.atomicrmw requires an !llvm.ptr (not !fly.ptr).
-                ptr_ty = ir.Type.parse("!llvm.ptr<1>")
-                base = _fly.extract_aligned_pointer_as_index(ptr_ty, tensor)
-                base = llvm.PtrToIntOp(T.i64, base).result
-                byte_off = fx.as_ir_value(fx.Int64(fx.Index(index) * fx.Index(4)))
-                addr = llvm.AddOp(base, byte_off, llvm.IntegerOverflowFlags(0)).result
-                return llvm.IntToPtrOp(ptr_ty, addr).result
+            # the view after a workgroup barrier. (Descriptor reads reuse the int32
+            # ``scale_ld_atom`` as their copy atom.)
+            claim_iter, claim_view = gd.make_claim_broadcast(lds.claim_slot)
 
             def _claim_next_slot():
                 # One atomic per workgroup: thread 0 fetch-adds the shared counter
                 # and stores the pre-update value into the LDS scratch; a barrier
-                # then broadcasts it so every thread returns the same slot.
+                # then broadcasts it so every thread returns the same slot. The
+                # ``if tx==0`` control flow must stay inline (AST-rewritten here).
                 if tx_i32 == fx.Int32(0):
                     old = llvm.AtomicRMWOp(
                         llvm.AtomicBinOp.add,
-                        _global_i32_ptr(work_counter, fx.Int32(0)),
+                        gd.global_i32_ptr(work_counter, fx.Int32(0)),
                         fx.as_ir_value(fx.Int32(1)),
                         llvm.AtomicOrdering.monotonic,
                         syncscope="agent",
@@ -610,10 +594,7 @@ def _compile_kernel(
                 return fx.Vector(claim_view.load())[0]
 
             def _desc_field(slot, field):
-                # Read one int32 of the packed (pid_m, pid_n, expert) descriptor.
-                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-                fx.copy(scale_ld_atom, fx.slice(wq_div, (None, slot * fx.Int32(3) + field)), reg)
-                return fx.memref_load_vec(reg)[0]
+                return gd.read_desc_field(wq_div, scale_ld_atom, slot, field)
 
         def process_tile(pid_m, pid_n, expert):
             bx_m = pid_m * BLOCK_M

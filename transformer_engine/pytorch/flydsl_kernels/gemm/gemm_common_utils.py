@@ -12,10 +12,16 @@ private copies. Anything that varies by element type (global-swizzle layouts,
 G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 """
 
+import torch
+
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 
 from .exceptions import FlyDSLUnsupportedError
+
+
+def get_num_cus() -> int:
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
 def require_block_tiling(m, n, k, *, block_m, block_n, block_k, label, min_k_tiles=4):
