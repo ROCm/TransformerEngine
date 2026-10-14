@@ -1138,14 +1138,16 @@ def _run_mxfp8_grouped_wgrad(
     x_fp8_dtype,
     output_dtype,
 ):
-    """Grouped MXFP8 wgrad (NT): dW_e = dY_e^T @ X_e, per expert, one launch.
+    """Grouped MXFP8 wgrad (NT): dW_e = dY_e^T @ X_e, via K-bucketed launches.
 
-    Fixed uniform padding (phase 1): every expert's token count m_e is padded up to
-    a common M_pad (a multiple of BLOCK_M and 32); the padded rows are zero, so they
-    contribute nothing to the token-axis contraction -- no atomics or masking needed,
-    the dense NT pipeline runs unchanged. dY and X are packed on the contraction
-    (token) axis to [G*M_pad, *]; dW is packed on the output-M axis to [G*N_out, K_in]
-    and each expert's output tile is written via the kernel's store_m_expert_off.
+    K-bucketing (see :func:`_run_bf16_grouped_wgrad`): experts are grouped by their
+    own padded token count (rounded up to BLOCK_M, floor 512) rather than padded to
+    a single global max, so one large expert no longer forces every small expert to
+    contract over its token count. Each bucket is one fixed-K launch; MXFP8 also
+    packs each operand's E8M0 scale (``scale_rows = k_pad / SCALE_GROUP_SIZE``) to
+    the same bucket K. Per-bucket output goes to a bucket-local buffer then scatters
+    to global dW rows (fast direct-write when the bucket is all experts in order).
+    The 4-wave MFMA pipeline is untouched -- K stays compile-time per launch.
     """
     from .mxfp8_gemm import BLOCK_M, BLOCK_N, SCALE_GROUP_SIZE
 
@@ -1160,24 +1162,6 @@ def _run_mxfp8_grouped_wgrad(
             f"wgrad requires K_in divisible by BLOCK_N={BLOCK_N}, got {k_in}"
         )
 
-    # Uniform pad target: the largest per-expert token count, rounded up to BLOCK_M
-    # (also a multiple of 32). Enforce the two-page pipeline minimum (>= 4 K128
-    # tiles => M_pad >= 512).
-    max_m = max(int(m) for m in m_splits)
-    m_pad = ((max_m + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
-    m_pad = max(m_pad, 512)
-
-    scale_rows = m_pad // SCALE_GROUP_SIZE
-    dy_data = gd.uniform_pad_concat(dy_cols, m_pad)
-    dy_scale = gd.uniform_pad_concat(dy_scales, scale_rows)
-    x_data = gd.uniform_pad_concat(x_cols, m_pad)
-    x_scale = gd.uniform_pad_concat(x_scales, scale_rows)
-
-    if dy_data.dtype == torch.uint8:
-        dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
-    if x_data.dtype == torch.uint8:
-        x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
-
     dW = _validate_or_allocate_output(
         dW,
         shape=torch.Size((num_groups * n_out, k_in)),
@@ -1191,24 +1175,48 @@ def _run_mxfp8_grouped_wgrad(
     # kernel re-packs the output row via expert*N_out.
     num_pid_m = n_out // BLOCK_M
     num_pid_n = k_in // BLOCK_N
-    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-        num_groups, num_pid_m, num_pid_n, device
-    )
-    sched = _select_grouped_sched(num_tiles, device)
+    buckets = gd.bucketize_wgrad_tokens(m_splits, BLOCK_M, max_buckets=_wgrad_max_buckets())
 
-    mxfp8_matmul(
-        dy_data,
-        dy_scale,
-        x_data,
-        x_scale,
-        dW,
-        group=False,
-        num_groups=num_groups,
-        work_queue=work_queue,
-        work_counter=work_counter,
-        sched=sched,
-        wgrad=True,
-    )
+    for k_pad, ids in buckets:
+        bsize = len(ids)
+        scale_rows = k_pad // SCALE_GROUP_SIZE
+        dy_data = gd.uniform_pad_concat([dy_cols[e] for e in ids], k_pad)
+        dy_scale = gd.uniform_pad_concat([dy_scales[e] for e in ids], scale_rows)
+        x_data = gd.uniform_pad_concat([x_cols[e] for e in ids], k_pad)
+        x_scale = gd.uniform_pad_concat([x_scales[e] for e in ids], scale_rows)
+
+        if dy_data.dtype == torch.uint8:
+            dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
+        if x_data.dtype == torch.uint8:
+            x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
+
+        direct = ids == list(range(num_groups))
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
+                                             device=device)
+
+        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+            bsize, num_pid_m, num_pid_n, device
+        )
+        sched = _select_grouped_sched(num_tiles, device)
+
+        mxfp8_matmul(
+            dy_data,
+            dy_scale,
+            x_data,
+            x_scale,
+            dW_b,
+            group=False,
+            num_groups=bsize,
+            work_queue=work_queue,
+            work_counter=work_counter,
+            sched=sched,
+            wgrad=True,
+        )
+
+        if not direct:
+            for j, e in enumerate(ids):
+                dW[e * n_out : (e + 1) * n_out].copy_(dW_b[j * n_out : (j + 1) * n_out])
+
     return dW
 
 
@@ -1479,17 +1487,20 @@ def _run_fp8_grouped_wgrad(
     x_fp8_dtype,
     output_dtype,
 ):
-    """Grouped tensor-wise FP8 wgrad: dW_e = dY_e^T @ X_e, one TN launch.
+    """Grouped tensor-wise FP8 wgrad: dW_e = dY_e^T @ X_e, via K-bucketed TN launches.
 
     Tensor-wise FP8 is TN-NORMAL-read: the contraction axis (tokens m) is the
-    trailing dim and is never packed, so -- unlike the MXFP8/BF16 NT path -- the
-    operands arrive already transposed (the FP8 ``_transpose`` backing is a
-    materialized row-major transpose). Per expert: A = dY^T [N_out, m_e],
-    B = X^T [K_in, m_e]. Each expert's token count m_e is zero-padded up to a
-    common ``m_pad`` on the trailing (contraction) axis; experts stack on the
-    feature (output) axis to A [G*N_out, m_pad] / B [G*K_in, m_pad]. Output dW is
-    packed [G*N_out, K_in] on the M-row. Per-expert scalar scales are length-G
-    vectors indexed by expert in the kernel.
+    trailing dim, so -- unlike the MXFP8/BF16 NT path -- operands arrive already
+    transposed (the FP8 ``_transpose`` backing is a materialized row-major
+    transpose). Per expert: A = dY^T [N_out, m_e], B = X^T [K_in, m_e].
+
+    K-bucketing (see :func:`_run_bf16_grouped_wgrad`): experts are grouped by their
+    own padded token count instead of a single global max. Each expert's tokens are
+    zero-padded on the TRAILING (contraction) axis up to the bucket's ``k_pad``, and
+    the bucket's experts stack on the feature axis to A [bsize*N_out, k_pad] /
+    B [bsize*K_in, k_pad]. Per-expert scalar scales are sliced to the bucket. Output
+    goes to a bucket-local buffer then scatters to global dW rows (direct-write when
+    the bucket is all experts in order). The 4-wave MFMA pipeline is untouched.
     """
     from .fp8_gemm import doGemm as _fp8_doGemm, _BLOCK_M, _BLOCK_N
 
@@ -1500,26 +1511,6 @@ def _run_fp8_grouped_wgrad(
     if k_in % _BLOCK_N != 0:
         raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
 
-    max_m = max(int(m) for m in m_splits)
-    m_pad = ((max_m + _BLOCK_M - 1) // _BLOCK_M) * _BLOCK_M
-    m_pad = max(m_pad, 512)
-
-    # Zero-pad the trailing (token/contraction) axis of each [feature, m_e]
-    # transpose up to m_pad, then concat on the feature axis.
-    def _pad_cols(t):
-        if t.size(1) == m_pad:
-            return t.contiguous()
-        out = t.new_zeros((t.size(0), m_pad))
-        out[:, : t.size(1)].copy_(t)
-        return out
-
-    dy_data = torch.cat([_pad_cols(t) for t in dyt_cols], dim=0)
-    x_data = torch.cat([_pad_cols(t) for t in xt_cols], dim=0)
-    if dy_data.dtype == torch.uint8:
-        dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
-    if x_data.dtype == torch.uint8:
-        x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
-
     dW = _validate_or_allocate_output(
         dW,
         shape=torch.Size((num_groups * n_out, k_in)),
@@ -1528,29 +1519,62 @@ def _run_fp8_grouped_wgrad(
         backend_name="FP8 grouped wgrad TN",
     )
 
+    def _pad_cols(t, cols):
+        # Zero-pad the trailing (token/contraction) axis of a [feature, m_e] view.
+        if t.size(1) == cols:
+            return t.contiguous()
+        out = t.new_zeros((t.size(0), cols))
+        out[:, : t.size(1)].copy_(t)
+        return out
+
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
-    work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-        num_groups, num_pid_m, num_pid_n, device
-    )
-    sched = _select_grouped_sched(num_tiles, device)
+    dy_scale_vec = dy_scale_vec.to(torch.float32).contiguous()
+    x_scale_vec = x_scale_vec.to(torch.float32).contiguous()
+    buckets = gd.bucketize_wgrad_tokens(m_splits, _BLOCK_M, max_buckets=_wgrad_max_buckets())
 
-    _fp8_doGemm(
-        dy_data,
-        x_data,
-        dW,
-        dy_scale_vec.to(torch.float32).contiguous(),
-        x_scale_vec.to(torch.float32).contiguous(),
-        group=False,
-        num_groups=num_groups,
-        work_queue=work_queue,
-        work_counter=work_counter,
-        sched=sched,
-        wgrad=True,
-        m=n_out,
-        n=k_in,
-        k=m_pad,
-    )
+    for k_pad, ids in buckets:
+        bsize = len(ids)
+        dy_data = torch.cat([_pad_cols(dyt_cols[e], k_pad) for e in ids], dim=0)
+        x_data = torch.cat([_pad_cols(xt_cols[e], k_pad) for e in ids], dim=0)
+        if dy_data.dtype == torch.uint8:
+            dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
+        if x_data.dtype == torch.uint8:
+            x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
+        idx = torch.tensor(ids, device=device)
+        dy_scale_b = dy_scale_vec[idx]
+        x_scale_b = x_scale_vec[idx]
+
+        direct = ids == list(range(num_groups))
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
+                                             device=device)
+
+        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
+            bsize, num_pid_m, num_pid_n, device
+        )
+        sched = _select_grouped_sched(num_tiles, device)
+
+        _fp8_doGemm(
+            dy_data,
+            x_data,
+            dW_b,
+            dy_scale_b,
+            x_scale_b,
+            group=False,
+            num_groups=bsize,
+            work_queue=work_queue,
+            work_counter=work_counter,
+            sched=sched,
+            wgrad=True,
+            m=n_out,
+            n=k_in,
+            k=k_pad,
+        )
+
+        if not direct:
+            for j, e in enumerate(ids):
+                dW[e * n_out : (e + 1) * n_out].copy_(dW_b[j * n_out : (j + 1) * n_out])
+
     return dW
 
 
