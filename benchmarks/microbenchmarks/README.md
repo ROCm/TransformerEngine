@@ -2,6 +2,8 @@
 
 This directory contains lightweight Python microbenchmarks for selected
 Transformer Engine kernels and helper scripts for comparing benchmark CSVs.
+For how to read the results and why the harness measures the way it does, see
+[BENCHMARKING_NOTES.md](BENCHMARKING_NOTES.md).
 
 ## Benchmarks
 
@@ -9,7 +11,9 @@ Transformer Engine kernels and helper scripts for comparing benchmark CSVs.
   low-precision recipes (FP8, MXFP8, MXFP4, NVFP4) via `autocast`
 - `benchmark_grouped_gemm.py`: grouped GEMM benchmark for MoE-style shapes
 - `benchmark_casting.py`: quantize / dequantize benchmark across FP8, MXFP8, NVFP4, and MXFP4
-- `benchmark_normalization.py`: LayerNorm / RMSNorm forward benchmark across BF16 and quantized (FP8, MXFP8) output
+  (MXFP4 quantize only)
+- `benchmark_normalization.py`: LayerNorm / RMSNorm forward benchmark with BF16 output and each
+  supported quantized output (FP8, MXFP8, MXFP4, NVFP4)
 
 ## Running
 
@@ -64,24 +68,31 @@ python benchmark_gemm.py -k triton           # select the Triton backend
 - `--no-gpu-interference-check` / `--abort-on-gpu-interference`: control the
   shared-GPU neighbor check, which warns (or aborts) when another process is
   using the benchmark GPU (requires the `amdsmi` package).
-- `--no-cpu-pin`: by default the main thread is pinned to 4 physical cores on the GPU's
-  NUMA node (offset by GPU id), set to the performance governor for the session (needs
+- `--no-cpu-pin`: disable CPU pinning. By default the main thread is pinned to 4 physical
+  cores on the GPU's NUMA node (offset by GPU id), the HIP/ROCr helper threads to the cores'
+  SMT siblings, and the cores are set to the performance governor for the session (needs
   root; restored at the end, also if the process is killed or crashes, by a small watchdog
-  process). Launch-bound backward runs
-  on PyTorch's autograd thread, and at the default schedutil clocks its wall time flipped
-  up to 2x between runs. Pinning happens after HIP init: the autograd thread inherits the
-  main thread's cores, and the existing HIP/ROCr helper threads go to the cores' SMT
-  siblings (the multi-stream grouped GEMM path ran ~1.6x slower whenever the scheduler put
-  its busy event-polling helper on another CCD or socket). The header and `run_info.txt`
-  show the cores used.
+  process). The header and `run_info.txt` show the cores used; see
+  [CPU pinning](BENCHMARKING_NOTES.md#cpu-pinning) for why.
+- `--dashboard-run`: write all families of the session into one run directory for the TE
+  dashboard instead of the `--csv` outputs:
+  `<dashboard-out>/<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/` with
+  `benchmark_<family>.csv` (each row tagged with the run timestamp and commit),
+  `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues) and, with
+  `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
+  `results`); `--gpu-model NAME` overrides the detected GPU model (e.g. when it reads
+  `UNKNOWN`). A full dashboard run:
+
+  ```bash
+  pytest . --dashboard-run --kernel-profile --run-flydsl --csv-samples
+  ```
 
 ### Environment
 
-- `GPU_MAX_HW_QUEUES` defaults to `2`, as in Megatron's launch scripts (set it explicitly,
-  e.g. `GPU_MAX_HW_QUEUES=4` for HIP's default, to override). With 4 queues, TE's
-  high-priority compute streams get an extra HW queue whose pending event waits slow the
-  main stream, so the per-expert (multi-stream) grouped GEMM path runs up to ~2x slower.
-  The header and `run_info.txt` show the value used.
+- `GPU_MAX_HW_QUEUES` defaults to `2`, as in Megatron's launch scripts; set it explicitly to
+  override (with `4`, HIP's default, the per-expert grouped GEMM path runs up to ~2x slower;
+  see [HW queues](BENCHMARKING_NOTES.md#hw-queues)). The header and `run_info.txt` show the
+  value used.
 
 ### Kernel profiling
 
@@ -93,30 +104,19 @@ columns to the console table and the CSV:
 python benchmark_gemm.py --kernel-profile --csv
 ```
 
-- **Wall time** is the end-to-end host-side time per call (`torch.utils.benchmark.Timer`,
-  reported as the median): Python dispatch + kernel launch/queue latency + GPU
-  execution. Backward runs a block of forwards first and then times their backwards
-  back to back (after the autocast region, as in training), so no forward time is
-  subtracted.
+- **Wall time** is the end-to-end host-side time per call over back-to-back calls (median):
+  Python dispatch + kernel launch/queue latency + GPU execution. Forward is timed with
+  `torch.utils.benchmark.Timer`; backward runs a block of forwards untimed and then times
+  their backwards back to back, so no forward time is subtracted.
 - **Kernel time** is the GPU device time only (`torch.profiler`, summing the device
   time of each call's kernels, reported as the median over a separate profiling pass),
   so it excludes host and launch overhead. If no call's kernels can be matched, the
   kernel cells are left empty and a warning names the case.
-- **Grouped GEMM kernel time is not device-only.** For all its backends it is the CUDA-event
-  span between consecutive calls on the main stream (the per-expert path overlaps kernels on
-  several streams, which a per-kernel sum would double-count). That span includes GPU idle
-  time while the host submits the next call, so launch-bound grouped cases read at or slightly
-  above wall time even when the GPU is mostly idle (e.g. bf16 per-expert hipBLASLt B4 M1024:
-  ~0.11 ms vs ~0.04 ms GPU-busy). Compare it with dense kernel time only for GPU-bound cases.
+- **Grouped GEMM kernel time is not device-only.** It is the CUDA-event span between
+  consecutive calls on the main stream, which includes GPU idle time in launch-bound cases.
 
-Because kernel time drops the launch/dispatch overhead, kernel throughput is
-normally at least as high as wall throughput. A large gap means the case is
-launch/dispatch-bound rather than compute-bound (common at small sizes or with
-higher-overhead backends such as Triton). When the op is compute-bound, the two
-should nearly match, but kernel time can read a few percent above (or below) wall time: the
-profiler itself changes how the GPU executes back-to-back kernels (e.g. a 7-kernel
-MXFP8 HipKittens backward ran ~6% slower under it, a plain bf16 GEMM 2-5% faster),
-so for compute-bound cases wall time is the more faithful number.
+See [Wall time and kernel time](BENCHMARKING_NOTES.md#wall-time-and-kernel-time) for how to
+interpret the two (launch-bound gaps, profiler effects, grouped GEMM).
 
 Because it runs an extra warmup plus a profiled loop under `torch.profiler`,
 `--kernel-profile` makes each benchmark take longer.
@@ -157,7 +157,8 @@ expert count `B` in addition to `M`.
 
 ## Adding a benchmark
 
-Each benchmark is a pytest module with three pieces:
+Each benchmark is a pytest module named `benchmark_<family>.py` (`conftest.py` collects that
+pattern, and the family and CSV names come from it) with three pieces:
 
 1. A case generator plus `pytest_generate_tests`, which parametrizes a `case`:
 
@@ -197,14 +198,14 @@ if __name__ == "__main__":
 
 `microbench.run(case, bench_callable)` prints the case, records its metrics, and
 `conftest.py` collects them per family and writes the CSV. Each metric record
-represents one line such as `GEMM Forward` and expands into two CSV columns:
+represents one line such as `Normalization Forward` and expands into two CSV columns:
 
 - `<label> Wall Time (ms)`
 - `<label> Wall <unit>`
 
-For example, a `GEMM Forward` metric with unit `TFLOPS` becomes
-`GEMM Forward Wall Time (ms)` and `GEMM Forward Wall TFLOPS`. Passing `--kernel-profile`
-adds matching `<label> Kernel Time (ms)` / `<label> Kernel <unit>` columns.
+For example, a `Normalization Forward` metric with unit `GB/s` becomes
+`Normalization Forward Wall Time (ms)` and `Normalization Forward Wall GB/s`. Passing
+`--kernel-profile` adds matching `<label> Kernel Time (ms)` / `<label> Kernel <unit>` columns.
 
 ## Comparing results
 
@@ -216,4 +217,6 @@ python compare_results.py baseline.csv candidate.csv --bench-name GEMM
 ```
 
 The script auto-detects metric columns, computes speedups for overlapping rows,
-and reports rows that exist only in the baseline or only in the candidate.
+and reports rows that exist only in the baseline or only in the candidate. It ignores the
+run-tag columns of `--dashboard-run` CSVs (`run_ts`, `commit_sha`, `commit_date`), so two
+dashboard runs can be compared directly.
