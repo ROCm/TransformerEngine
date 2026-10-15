@@ -1,12 +1,10 @@
 # gitleaks.toml
 # Reference: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
 #
-# The default for repositories that ship no gitleaks config of their
-# own. A repository that ships one replaces this file wholesale rather
-# than layering onto it, so suppressions that belong to a single
-# repository belong in that repository's `gitleaks.toml` and
-# `.gitleaksignore`, not here. What goes here is what should hold for a
-# repository that has said nothing.
+# TransformerEngine's gitleaks config, passed to the security scan
+# workflows via `gitleaks_config_path`. It started from the shared
+# default and replaces it wholesale, so it carries both the generic
+# allowlists and TE-specific suppressions.
 #
 # Within a scan, the layering is:
 #   * the `[[allowlists]]` below, applying to every rule.
@@ -53,6 +51,16 @@ regexes = [
   '''(?i)\bINVALID_TOKEN\s*=''',
   '''(?i)\bwrong_secret\s*=''',
   '''(?i)\bsecret\s*='''
+]
+
+[[allowlists]]
+description = "TE dtype identifiers containing 'token' (e.g. max_token_dtype)"
+# generic-api-key keys on "token" in the identifier and flags the NVTEDType
+# enum value (kNVTEFloat32, ...) assigned to it as a secret. Anchor on the
+# `<...>token_dtype =` identifier so real token assignments still fire.
+regexTarget = "match"
+regexes = [
+  '''(?i)token_dtype\s*=''',
 ]
 
 [[allowlists]]

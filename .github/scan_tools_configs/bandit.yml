@@ -1,18 +1,31 @@
-# bandit minimal configuration
+# bandit configuration
 # Reference: https://bandit.readthedocs.io/en/latest/config.html
 #
-# The default for repositories that ship no bandit config of their own.
-# A repository that ships one (`bandit.yaml` or `bandit.yml`) replaces
-# this file wholesale rather than layering onto it, so suppressions and
-# tuning that belong to a single repository (e.g. `skips: [...]`) belong
-# there. What goes here is what should hold for a repository that has
-# said nothing.
+# TransformerEngine's bandit config, passed to the security scan workflows
+# via `bandit_config_path`. It started from the shared default and replaces
+# it wholesale, so it carries both the generic excludes and TE-specific
+# tuning.
 
+# Each entry is matched as a plain substring of the scanned file path
+# (e.g. `.scan-target/tests/foo.py`), not as a directory name, so entries
+# are slash-anchored: a bare `dist` would also drop `distributed.py`, and a
+# bare `build` would drop all of `build_tools/`.
 exclude_dirs:
-  - .git
-  - .venv
-  - venv
-  - build
-  - dist
-  - node_modules
-  - __pycache__
+  - /.git/
+  - /.venv/
+  - /venv/
+  - /build/
+  - /dist/
+  - /node_modules/
+  - /__pycache__/
+  # Sample code (top-level `examples/` and `docs/examples/`), not shipped
+  # with the library.
+  - /examples/
+
+# Plugin settings. B101 (assert_used) only matters for code that may run
+# under `python -O`; pytest-style tests and benchmarks rely on assert by
+# design. Patterns are fnmatch globs against the file path.
+assert_used:
+  skips:
+    - '*/tests/*'
+    - '*/benchmarks/*'
