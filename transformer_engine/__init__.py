@@ -27,6 +27,22 @@ else:
 
 import transformer_engine.common
 
+_use_pytorch = True
+_use_jax = True
+
+if os.getenv("NVTE_FRAMEWORK"):
+    _frameworks=os.getenv("NVTE_FRAMEWORK").split(",")
+
+    # Special framework names
+    if "none" in _frameworks:
+        _use_pytorch = False
+        _use_jax = False
+    elif "all" in _frameworks:
+        pass
+    else:
+        _use_pytorch = "pytorch" in _frameworks
+        _use_jax = "jax" in _frameworks
+
 # Minimum NCCL version for the runtime-loaded NCCL EP backend.
 _NCCL_EP_MIN_VERSION = (2, 30, 4)
 

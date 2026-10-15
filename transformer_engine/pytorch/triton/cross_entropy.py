@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import triton
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 from transformer_engine.common.triton.cross_entropy import (
     cross_entropy_forward_kernel,
     cross_entropy_tp_pre_kernel,
@@ -25,6 +26,7 @@ if IS_HIP_EXTENSION:
     NUM_WARPS = 16
 else:
     NUM_WARPS = 32
+
 
 def cross_entropy_forward(
     _input: torch.Tensor,
@@ -72,7 +74,7 @@ def cross_entropy_forward(
             COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            num_warps=NUM_WARPS,
         )
     else:
         local_data = torch.empty((n_rows, 4), dtype=torch.float32, device=_input.device)
@@ -93,7 +95,7 @@ def cross_entropy_forward(
             COMPUTE_X_SUM=label_smoothing > 0,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            num_warps=NUM_WARPS,
         )
         gathered_data = torch.empty(
             (world_size * n_rows, 4), dtype=torch.float32, device=_input.device

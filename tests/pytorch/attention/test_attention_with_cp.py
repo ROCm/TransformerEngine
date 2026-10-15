@@ -752,6 +752,11 @@ def test_cp_with_fused_attention(
     )
 
 
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION,
+    reason="THD + all_gather CP fused attention is unsupported on ROCm (CK lacks the FA3"
+    " seqused_k path).",
+)
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."

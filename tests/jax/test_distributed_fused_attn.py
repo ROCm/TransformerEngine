@@ -323,7 +323,7 @@ class TestDistributedScoreModSelfAttn:
     @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SCORE_MOD_DATA_SHAPES)
     @pytest.mark.parametrize("dtype", DTYPES)
     @pytest.mark.skipif(
-        get_device_compute_capability(0) < 90,
+        not is_hip_extension() and get_device_compute_capability(0) < 90,
         reason="Softcap score_mod tests require sm90+",
     )
     def test_softcap_score_mod_with_aux_params_backward(
