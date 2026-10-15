@@ -107,7 +107,7 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
-    run_default_fa 1 test_parallel_cross_entropy.py
+    run_default_fa 1 test_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
@@ -152,6 +152,7 @@ run_test_config_mgpu(){
     run_default_fa 2 distributed/test_numerics_exact.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
+    run_default_fa 1 distributed/test_parallel_cross_entropy.py
     if [ $_fus_attn = ck ]; then
         run 2 attention/test_attention_with_cp.py -k "with_fused"
     elif [ $_fus_attn = flash ]; then
