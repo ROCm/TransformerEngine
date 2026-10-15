@@ -88,7 +88,12 @@ else()
 endif()
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
-# Keep all operator tests in one process so CUDA initialization and, when enabled,
-# the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
-# TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
-add_test(NAME test_operator COMMAND test_operator)
+if(USE_CUDA)
+  # Keep all operator tests in one process so CUDA initialization and, when enabled,
+  # the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
+  # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
+  add_test(NAME test_operator COMMAND test_operator)
+else()
+  include(GoogleTest)
+  gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600)
+endif()

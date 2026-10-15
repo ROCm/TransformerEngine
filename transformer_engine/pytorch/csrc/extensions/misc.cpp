@@ -14,7 +14,9 @@
 
 #include "../extensions.h"
 #include "common/common.h"
+#ifndef USE_ROCM  // Disabled on ROCm
 #include "common/cudnn_min_version.h"
+#endif
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
