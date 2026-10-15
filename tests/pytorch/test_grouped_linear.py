@@ -266,6 +266,10 @@ def _test_grouped_linear_accuracy(
         split_size = 1
         if fp8:
             split_size = get_align_size_for_quantization(recipe)
+        elif os.environ.get("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1":
+            # The FlyDSL grouped GEMM tiles every expert with BLOCK_M=256, so even the
+            # unquantized path needs 256-aligned per-expert token counts.
+            split_size = 256
         m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
@@ -588,9 +592,9 @@ def test_grouped_linear_accuracy_cutlass(
     )
 
 
-# ROCm grouped GEMM backends (HipKittens / CK). Kept separate from the CUTLASS test above so the
-# upstream one stays untouched. The backend is picked by env var; use_cutlass only relaxes the
-# tolerances, since a non-reference GEMM will not be bit-exact against the sequential Linear.
+# ROCm grouped GEMM backends (HipKittens / CK / FlyDSL). Kept separate from the CUTLASS test above
+# so the upstream one stays untouched. The backend is picked by env var; use_cutlass only relaxes
+# the tolerances, since a non-reference GEMM will not be bit-exact against the sequential Linear.
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backends")
 @pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
@@ -600,7 +604,7 @@ def test_grouped_linear_accuracy_cutlass(
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
-@pytest.mark.parametrize("grouped_gemm_backend", ["hipkittens", "ck"], ids=str)
+@pytest.mark.parametrize("grouped_gemm_backend", ["hipkittens", "ck", "flydsl"], ids=str)
 def test_grouped_linear_accuracy_rocm_backends(
     dtype,
     num_gemms,
@@ -628,13 +632,35 @@ def test_grouped_linear_accuracy_rocm_backends(
         # Triton backends in test_grouped_linear_accuracy instead.
         pytest.skip("HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
 
-    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    if grouped_gemm_backend == "flydsl":
+        # FlyDSL grouped GEMM is gfx950-only and covers MXFP8, tensor-wise FP8
+        # (current/delayed scaling), and unquantized bf16/fp16. Skip configs its gate
+        # rejects, which would silently fall back to the default backend and give
+        # false "flydsl verified" coverage.
+        if get_device_compute_capability() != (9, 5):
+            pytest.skip("FlyDSL grouped GEMM is only supported on gfx950.")
+        if recipe is None and dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("FlyDSL unquantized grouped GEMM supports only bf16/fp16.")
+        if recipe is not None and not (
+            recipe.mxfp8() or recipe.float8_current_scaling() or recipe.delayed()
+        ):
+            pytest.skip("FlyDSL grouped GEMM supports MXFP8 and tensor-wise FP8 recipes only.")
+
+    # Select exactly one backend; leave the others' env vars unset. HipKittens and CK
+    # are gated behind NVTE_USE_CUTLASS_GROUPED_GEMM; FlyDSL has its own opt-in and
+    # must not see the cutlass/HK/CK env vars.
+    monkeypatch.delenv("NVTE_USE_CUTLASS_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
+    monkeypatch.delenv("NVTE_USE_GROUPED_GEMM_FLYDSL", raising=False)
     if grouped_gemm_backend == "hipkittens":
+        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
         monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
-    else:
+    elif grouped_gemm_backend == "ck":
+        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
         monkeypatch.setenv("NVTE_USE_CK_GROUPED_GEMM", "1")
+    else:
+        monkeypatch.setenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "1")
 
     # For the configs CK grouped GEMM is guaranteed to handle, 
     # assert it does not silently fall back to multi-stream hipBLASLt.

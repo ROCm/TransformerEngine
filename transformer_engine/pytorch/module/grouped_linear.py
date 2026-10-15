@@ -750,6 +750,518 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _flydsl_grouped_common_ok(
+        *,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ) -> bool:
+        """Dtype-independent gate shared by every FlyDSL grouped GEMM path.
+
+        HIP extension, gfx950, the ``NVTE_USE_GROUPED_GEMM_FLYDSL=1`` opt-in,
+        128-aligned N/K for the tile geometry, and the unsupported-feature
+        exclusions. The per-dtype gates add only the quantization condition
+        (BF16/FP16: none; tensor-wise FP8: current/delayed scaling; MXFP8).
+        """
+        return (
+            IS_HIP_EXTENSION
+            and os.getenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+            and get_device_compute_capability() == (9, 5)
+            and in_features % 128 == 0
+            and out_features % 128 == 0
+            and not (
+                use_bias
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
+
+    @staticmethod
+    def _flydsl_grouped_kind(
+        *,
+        fp8,
+        recipe,
+        use_bias,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ):
+        """Return which FlyDSL grouped path applies: 'mxfp8' | 'fp8' | 'bf16' | None.
+
+        All kinds share the persistent work-stealing driver; they differ only in
+        operand packing and (fp8/mxfp8) the scale payload. The 'bf16' kind is the
+        unquantized half-precision path (bf16/fp16; fp8 is False).
+        """
+        if not _GroupedLinear._flydsl_grouped_common_ok(
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=in_features,
+            out_features=out_features,
+        ):
+            return None
+        if not fp8:
+            # Unquantized BF16 grouped GEMM (no recipe). FP16 is not routed here;
+            # the activation dtype is checked at the dispatch site.
+            return "bf16"
+        if recipe is None:
+            return None
+        if recipe.mxfp8():
+            return "mxfp8"
+        if recipe.float8_current_scaling() or recipe.delayed():
+            return "fp8"
+        return None
+
+    @staticmethod
+    def _grouped_gemm_flydsl_mxfp8(
+        *,
+        inputmats,
+        weights,
+        out,
+        m_splits,
+        m_splits_tensor,
+    ):
+        """Dispatch the FlyDSL MXFP8 grouped GEMM over already-quantized operands.
+
+        Called inline at the forward GEMM dispatch. It does not quantize -- it
+        consumes TE's quantized operands (``inputmats`` the per-group MXFP8
+        activations from ``tex.split_quantize``, ``weights`` the per-expert MXFP8
+        weights): activations are packed into the ``[M_total, K]`` layout and weights
+        are addressed via per-expert base pointers, then one TN launch is issued via
+        :func:`_run_mxfp8_grouped`, writing into ``out``. The descriptor queue is
+        built host-side from ``m_splits``.
+        """
+        from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        # TN packed operands: activations concatenated along the token (M) axis,
+        # weights along the expert*N axis. Each MXFP8 operand carries its rowwise
+        # fp8 payload and E8M0 scale. Activations are bulk-allocated by
+        # split_quantize (per-expert payloads physically adjacent), so pack them
+        # with a zero-copy spanning view when contiguous; weights come from
+        # separate parameter storages and fall back to a real concat.
+        a_data = concat_or_view_rows([im._rowwise_data for im in inputmats])
+        a_scale = concat_or_view_rows([im._rowwise_scale_inv for im in inputmats])
+        # Weights are independently-allocated per-expert slabs. The grouped-TN
+        # kernel reads each expert's weight from a per-expert base pointer, so the
+        # host passes an int64[G] address array instead of concatenating the G
+        # weights into one packed buffer (the dominant host cost). b_data is a
+        # per-expert representative used only for dtype/shape. The B-scale stays
+        # packed (cheap) and keeps the in-kernel packed-column fold.
+        b_data_ptrs = torch.tensor(
+            [w._rowwise_data.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]._rowwise_data
+        b_scale = concat_or_view_rows([w._rowwise_scale_inv for w in weights])
+
+        # Preserve the native MXFP8 dtype so the wrapper reinterprets the uint8
+        # payload to the correct fp8 view at the kernel boundary.
+        a_data._fp8_dtype = inputmats[0]._fp8_dtype
+        b_data._fp8_dtype = weights[0]._fp8_dtype
+
+        n = weights[0]._rowwise_data.size(0)
+        k = weights[0]._rowwise_data.size(-1)
+        m_total = a_data.size(0)
+
+        _run_mxfp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            out,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _backward_flydsl_mxfp8_grouped(
+        *,
+        grad_output,
+        weights,
+        dgrad,
+        m_splits,
+        m_splits_tensor,
+    ):
+        """FlyDSL grouped dgrad: dX = dY @ W through the packed NN kernel.
+
+        Rides off backward's existing quantization -- ``grad_output`` are the
+        per-group MXFP8 activations (rowwise) and ``weights`` the per-expert MXFP8
+        weights with columnwise payloads ensured by the caller. Packs dY as the NN
+        kernel-A ``[M_total, N_out]`` and W (columnwise) as the contraction-packed
+        kernel-B ``[G*N_out, K_in]``, then issues one grouped NN launch writing into
+        ``dgrad`` ``[M_total, K_in]``. No quantization here.
+        """
+        from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        # NN kernel-A = dY, rowwise (contraction over N_out): concat on the token
+        # (M) axis. NN kernel-B = W, columnwise (transpose-read, contraction on the
+        # N_out axis). Weights are independent per-expert [N_out, K_in] columnwise
+        # slabs addressed via per-expert base pointers (no concat); dY still concats.
+        a_data = concat_or_view_rows([g._rowwise_data for g in grad_output])
+        a_scale = concat_or_view_rows([g._rowwise_scale_inv for g in grad_output])
+        b_data_ptrs = torch.tensor(
+            [w._columnwise_data.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]._columnwise_data
+        b_scale = concat_or_view_rows([w._columnwise_scale_inv for w in weights])
+
+        a_data._fp8_dtype = grad_output[0]._fp8_dtype
+        b_data._fp8_dtype = weights[0]._fp8_dtype
+
+        n_out = grad_output[0]._rowwise_data.size(-1)  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        _run_mxfp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            dgrad,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=k_in,  # NN output width is K_in
+            k=n_out,  # NN per-expert contraction is N_out
+            output_dtype=dgrad.dtype,
+            layout="NN",
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _wgrad_flydsl_mxfp8_grouped(
+        *,
+        grad_output,
+        inputmats,
+        wgrad_list,
+        m_splits,
+    ):
+        """FlyDSL grouped wgrad: dW = dY^T @ X per expert, through the packed NT kernel.
+
+        Both operands transpose-read and contract over the token axis, so both use
+        their COLUMNWISE MXFP8 payloads (dY from ``grad_output``, X from
+        ``inputmats``). The wrapper pads each expert's tokens to a uniform M_pad and
+        writes into the packed ``[G*N_out, K_in]`` gradient; per-expert results land
+        in ``wgrad_list[g]`` (a view of that packed buffer). No quantization here.
+        """
+        from ..flydsl_kernels.gemm import _run_mxfp8_grouped_wgrad
+
+        num_gemms = len(inputmats)
+        dy_cols = [g._columnwise_data for g in grad_output]
+        dy_scales = [g._columnwise_scale_inv for g in grad_output]
+        x_cols = [x._columnwise_data for x in inputmats]
+        x_scales = [x._columnwise_scale_inv for x in inputmats]
+
+        n_out = grad_output[0]._columnwise_data.size(-1)  # per-expert output feature N
+        k_in = inputmats[0]._columnwise_data.size(-1)  # per-expert input feature K
+
+        # Pack the per-expert [N_out, K_in] outputs into one [G*N_out, K_in] buffer;
+        # wgrad_list[g] are the per-expert slices the caller expects written.
+        dW = torch.empty(
+            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+        )
+
+        _run_mxfp8_grouped_wgrad(
+            dy_cols,
+            dy_scales,
+            x_cols,
+            x_scales,
+            dW,
+            m_splits=m_splits,
+            n_out=n_out,
+            k_in=k_in,
+            dy_fp8_dtype=grad_output[0]._fp8_dtype,
+            x_fp8_dtype=inputmats[0]._fp8_dtype,
+            output_dtype=wgrad_list[0].dtype,
+        )
+
+        # Scatter the packed result back into the caller's per-expert wgrad tensors.
+        for g in range(num_gemms):
+            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+
+    @staticmethod
+    def _grouped_gemm_flydsl_bf16(*, inputmats, weights, out, m_splits, m_splits_tensor):
+        """FlyDSL BF16 grouped forward (TN): Y_e = X_e @ W_e^T, one packed launch.
+
+        Unquantized analog of :meth:`_grouped_gemm_flydsl_mxfp8`: activations are the
+        per-group BF16 splits (concat on the token axis), weights the per-expert BF16
+        tensors (concat on the output-N axis). No scales.
+        """
+        from ..flydsl_kernels.gemm import _run_bf16_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        a_data = concat_or_view_rows([im.reshape(-1, im.shape[-1]) for im in inputmats])
+        # Weights are independent per-expert [N_out, K] tensors; the grouped-TN kernel
+        # reads each from a per-expert base pointer, so pass an int64[G] address array
+        # instead of concatenating the G weights. b_data is a per-expert representative
+        # (shape only; the kernel addresses weights via the pointers).
+        b_data_ptrs = torch.tensor(
+            [w.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]
+        n = weights[0].size(0)
+        k = weights[0].size(-1)
+        m_total = a_data.size(0)
+
+        _run_bf16_grouped(
+            a_data,
+            b_data,
+            out,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _backward_flydsl_bf16_grouped(*, grad_output, weights, dgrad, m_splits, m_splits_tensor):
+        """FlyDSL BF16 grouped dgrad (NN): dX_e = dY_e @ W_e, one packed launch."""
+        from ..flydsl_kernels.gemm import _run_bf16_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        a_data = concat_or_view_rows([g.reshape(-1, g.shape[-1]) for g in grad_output])
+        # Weights are independent per-expert [N_out, K_in] tensors; the grouped-NN
+        # kernel reads each from a per-expert base pointer (no concat). b_data is a
+        # per-expert representative.
+        b_data_ptrs = torch.tensor(
+            [w.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]
+        n_out = grad_output[0].shape[-1]  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        _run_bf16_grouped(
+            a_data,
+            b_data,
+            dgrad,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=k_in,
+            k=n_out,
+            output_dtype=dgrad.dtype,
+            layout="NN",
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _wgrad_flydsl_bf16_grouped(*, grad_output, inputmats, wgrad_list, m_splits):
+        """FlyDSL BF16 grouped wgrad (NT): dW_e = dY_e^T @ X_e, one packed launch."""
+        from ..flydsl_kernels.gemm import _run_bf16_grouped_wgrad
+
+        num_gemms = len(inputmats)
+        dy_cols = [g.reshape(-1, g.shape[-1]) for g in grad_output]
+        x_cols = [x.reshape(-1, x.shape[-1]) for x in inputmats]
+        n_out = dy_cols[0].shape[-1]
+        k_in = x_cols[0].shape[-1]
+
+        dW = torch.empty(
+            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+        )
+        _run_bf16_grouped_wgrad(
+            dy_cols,
+            x_cols,
+            dW,
+            m_splits=m_splits,
+            n_out=n_out,
+            k_in=k_in,
+            output_dtype=wgrad_list[0].dtype,
+        )
+        for g in range(num_gemms):
+            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+
+    @staticmethod
+    def _grouped_gemm_flydsl_fp8(*, inputmats, weights, out, m_splits, m_splits_tensor):
+        """FlyDSL tensor-wise FP8 grouped forward (TN): Y_e = X_e @ W_e^T.
+
+        Experts pack weights on the output-N axis ([G*N, K]); each operand carries
+        one scalar inverse scale, gathered into length-G per-expert vectors.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        a_data = concat_or_view_rows([im._data for im in inputmats])
+        # Weights are independent per-expert [N, K] FP8 tensors; the grouped-TN kernel
+        # reads each from a per-expert base pointer, so pass an int64[G] address array
+        # instead of concatenating the G weights. b_data is a per-expert representative.
+        b_data_ptrs = torch.tensor(
+            [w._data.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]._data
+        a_data._fp8_dtype = inputmats[0]._fp8_dtype
+        b_data._fp8_dtype = weights[0]._fp8_dtype
+        a_scale = torch.cat([im._scale_inv.reshape(1) for im in inputmats], dim=0)
+        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights], dim=0)
+
+        n = weights[0]._data.size(0)
+        k = weights[0]._data.size(-1)
+        m_total = a_data.size(0)
+
+        _run_fp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            out,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=n,
+            k=k,
+            output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _backward_flydsl_fp8_grouped(
+        *, grad_output, weights, dgrad, m_splits, m_splits_tensor
+    ):
+        """FlyDSL tensor-wise FP8 grouped dgrad: dX_e = dY_e @ W_e, via the TN kernel.
+
+        FP8 is TN-only, so dgrad reaches the same TN kernel using materialized
+        transpose backings: A = dY rowwise ``_data`` [M_total, N_out], B = W^T
+        columnwise ``_transpose`` [G*N_out... ]. The TN kernel computes A @ B^T with
+        B packed on the output axis = K_in, i.e. per expert dY @ (W^T)^T = dY @ W.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+
+        # A = dY (rowwise fp8 data); B = W columnwise transpose, the materialized
+        # [K_in, N_out] packed on K_in (the TN GEMM output axis). The transpose
+        # backings are independent per-expert slabs, addressed via per-expert base
+        # pointers through the same TN per-expert path (no concat); dY still concats.
+        a_data = concat_or_view_rows([g._data for g in grad_output])
+        b_data_ptrs = torch.tensor(
+            [w._transpose.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]._transpose
+        a_data._fp8_dtype = grad_output[0]._fp8_dtype
+        b_data._fp8_dtype = weights[0]._fp8_dtype
+        a_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
+        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights], dim=0)
+
+        n_out = grad_output[0]._data.size(-1)  # per-expert contraction (N_out)
+        k_in = dgrad.size(-1)  # output width (K_in)
+        m_total = a_data.size(0)
+
+        _run_fp8_grouped(
+            a_data,
+            a_scale,
+            b_data,
+            b_scale,
+            dgrad,
+            m_splits=m_splits,
+            m_total=m_total,
+            n=k_in,
+            k=n_out,
+            output_dtype=dgrad.dtype,
+            b_data_ptrs=b_data_ptrs,
+        )
+
+    @staticmethod
+    def _wgrad_flydsl_fp8_grouped(*, grad_output, inputmats, wgrad_list, m_splits):
+        """FlyDSL tensor-wise FP8 grouped wgrad: dW_e = dY_e^T @ X_e, via the TN kernel.
+
+        Both operands reach the TN kernel already transposed: A = dY^T (the fp8
+        ``_transpose`` backing, [N_out, m_e]), B = X^T ([K_in, m_e]). The kernel
+        computes A @ B^T = dY^T @ X = dW.
+        """
+        from ..flydsl_kernels.gemm import _run_fp8_grouped_wgrad
+
+        num_gemms = len(inputmats)
+        dyt_cols = [g._transpose for g in grad_output]
+        xt_cols = [x._transpose for x in inputmats]
+        dy_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
+        x_scale = torch.cat([x._scale_inv.reshape(1) for x in inputmats], dim=0)
+
+        # Operands may carry only the columnwise (_transpose) backing. The
+        # transpose is [feature, m_e]: dY^T is [N_out, m_e], X^T is [K_in, m_e].
+        n_out = dyt_cols[0].size(0)  # per-expert output feature N
+        k_in = xt_cols[0].size(0)  # per-expert input feature K
+
+        dW = torch.empty(
+            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+        )
+        _run_fp8_grouped_wgrad(
+            dyt_cols,
+            dy_scale,
+            xt_cols,
+            x_scale,
+            dW,
+            m_splits=m_splits,
+            n_out=n_out,
+            k_in=k_in,
+            dy_fp8_dtype=grad_output[0]._fp8_dtype,
+            x_fp8_dtype=inputmats[0]._fp8_dtype,
+            output_dtype=wgrad_list[0].dtype,
+        )
+        for g in range(num_gemms):
+            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+
+    @classmethod
+    def _flydsl_grouped_dispatch(cls, phase, kind):
+        """Return the FlyDSL grouped helper for ``phase`` and dtype ``kind``.
+
+        ``phase`` is 'fwd' | 'dgrad' | 'wgrad' and ``kind`` is the value from
+        :meth:`_flydsl_grouped_kind` ('mxfp8' | 'fp8' | 'bf16'). All helpers of a
+        phase share a keyword signature, so the caller passes one kwarg set.
+        """
+        table = {
+            "fwd": {
+                "mxfp8": cls._grouped_gemm_flydsl_mxfp8,
+                "fp8": cls._grouped_gemm_flydsl_fp8,
+                "bf16": cls._grouped_gemm_flydsl_bf16,
+            },
+            "dgrad": {
+                "mxfp8": cls._backward_flydsl_mxfp8_grouped,
+                "fp8": cls._backward_flydsl_fp8_grouped,
+                "bf16": cls._backward_flydsl_bf16_grouped,
+            },
+            "wgrad": {
+                "mxfp8": cls._wgrad_flydsl_mxfp8_grouped,
+                "fp8": cls._wgrad_flydsl_fp8_grouped,
+                "bf16": cls._wgrad_flydsl_bf16_grouped,
+            },
+        }
+        return table[phase][kind]
+
+    @staticmethod
     def _forward_blockwise_fp8_triton(
         ctx,
         *,
@@ -1161,6 +1673,32 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
             )
 
+        # FlyDSL grouped GEMM (ROCm gfx950) opt-in, covering MXFP8, tensor-wise FP8,
+        # and BF16/FP16. It does not quantize -- it consumes TE's existing quantized
+        # operands and is dispatched inline at the forward GEMM (see below). Returns
+        # the dtype kind ('mxfp8' | 'fp8' | 'bf16') or None when unsupported.
+        flydsl_grouped_kind = _GroupedLinear._flydsl_grouped_kind(
+            fp8=fp8,
+            recipe=blockwise_recipe,
+            use_bias=use_bias,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=weights[0].size(-1),
+            out_features=weights[0].size(0),
+        )
+        # The half-precision kernel handles bf16 and fp16 (the MFMA opcode is selected
+        # per operand dtype); drop the kind for any other (e.g. fp32) activation dtype.
+        if flydsl_grouped_kind == "bf16" and activation_dtype not in (
+            torch.bfloat16,
+            torch.float16,
+        ):
+            flydsl_grouped_kind = None
+        use_grouped_gemm_flydsl = flydsl_grouped_kind is not None
+
         backward_needs_input = is_grad_enabled and weight_requires_grad
         if backward_override is None and save_original_input and backward_needs_input:
             if recipe is not None and recipe.delayed():
@@ -1382,25 +1920,34 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        if use_grouped_gemm_triton:
-            general_grouped_gemm_func = general_grouped_gemm_triton
-            kwargs = {"m_splits_tensor": m_splits_tensor}
+        if use_grouped_gemm_flydsl:
+            _GroupedLinear._flydsl_grouped_dispatch("fwd", flydsl_grouped_kind)(
+                inputmats=inputmats,
+                weights=weights_fp8,
+                out=out,
+                m_splits=m_splits,
+                m_splits_tensor=m_splits_tensor,
+            )
         else:
-            general_grouped_gemm_func = general_grouped_gemm
-            kwargs = {}
-        general_grouped_gemm_func(
-            weights_fp8,
-            inputmats,
-            [out],
-            output_quantizers,
-            activation_dtype,
-            single_output=True,
-            m_splits=m_splits,
-            bias=biases,
-            use_bias=use_bias,
-            use_split_accumulator=use_split_accumulator,
-            **kwargs,
-        )
+            if use_grouped_gemm_triton:
+                general_grouped_gemm_func = general_grouped_gemm_triton
+                kwargs = {"m_splits_tensor": m_splits_tensor}
+            else:
+                general_grouped_gemm_func = general_grouped_gemm
+                kwargs = {}
+            general_grouped_gemm_func(
+                weights_fp8,
+                inputmats,
+                [out],
+                output_quantizers,
+                activation_dtype,
+                single_output=True,
+                m_splits=m_splits,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=use_split_accumulator,
+                **kwargs,
+            )
 
         output_unpadded = False
         if (
@@ -1428,6 +1975,10 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.grouped_tensor_supported = False
+            # FlyDSL grouped forward routes dgrad through the grouped NN path; the
+            # shared backward branches on this kind (wgrad still uses the default
+            # where a dtype/feature is unsupported).
+            ctx.flydsl_grouped_kind = flydsl_grouped_kind
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
@@ -1987,25 +2538,38 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,
                         )
-                if ctx.use_grouped_gemm_triton:
-                    general_grouped_gemm_func = general_grouped_gemm_triton
-                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                _flydsl_kind = getattr(ctx, "flydsl_grouped_kind", None)
+                if _flydsl_kind is not None:
+                    # dgrad dX = dY @ W through the FlyDSL grouped NN kernel, riding
+                    # off the already-quantized grad_output (rowwise) and weights
+                    # (columnwise, ensured above).
+                    _GroupedLinear._flydsl_grouped_dispatch("dgrad", _flydsl_kind)(
+                        grad_output=grad_output,
+                        weights=weights_for_dgrad,
+                        dgrad=dgrad,
+                        m_splits=ctx.m_splits,
+                        m_splits_tensor=ctx.m_splits_tensor,
+                    )
                 else:
-                    general_grouped_gemm_func = general_grouped_gemm
-                    kwargs = {}
-                general_grouped_gemm_func(
-                    weights_for_dgrad,
-                    grad_output,
-                    [dgrad],
-                    ctx.grad_input_quantizers,
-                    ctx.activation_dtype,
-                    single_output=True,
-                    layout="NN",
-                    m_splits=ctx.m_splits,
-                    grad=True,
-                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    **kwargs,
-                )
+                    if ctx.use_grouped_gemm_triton:
+                        general_grouped_gemm_func = general_grouped_gemm_triton
+                        kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                    else:
+                        general_grouped_gemm_func = general_grouped_gemm
+                        kwargs = {}
+                    general_grouped_gemm_func(
+                        weights_for_dgrad,
+                        grad_output,
+                        [dgrad],
+                        ctx.grad_input_quantizers,
+                        ctx.activation_dtype,
+                        single_output=True,
+                        layout="NN",
+                        m_splits=ctx.m_splits,
+                        grad=True,
+                        use_split_accumulator=dgrad_gemm_use_split_accumulator,
+                        **kwargs,
+                    )
 
                 if ctx.actual_m_splits is not None and ctx.actual_m_splits != ctx.m_splits \
                         and not ctx.output_unpadded:
@@ -2116,43 +2680,69 @@ class _GroupedLinear(torch.autograd.Function):
                             inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                     inputmats = inputmats_dequant
 
-                if ctx.use_grouped_gemm_triton:
-                    general_grouped_gemm_func = general_grouped_gemm_triton
-                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
-                else:
-                    general_grouped_gemm_func = general_grouped_gemm
-                    kwargs = {}
-                grouped_gemm_wgrad = functools.partial(
-                    general_grouped_gemm_func,
-                    quantization_params=ctx.grad_weight_quantizers,
-                    out_dtype=ctx.activation_dtype,
-                    layout="NT",
-                    grad=True,
-                    m_splits=ctx.m_splits,
-                    use_bias=ctx.use_bias if grad_biases[0] is None else None,
-                    bias=biases,
-                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=(
-                        accumulate_wgrad_into_param_main_grad
-                        if not is_dist_weight
-                        and not getattr(ctx, "origin_weights_overwrite_main_grad", False)
-                        else False
-                    ),
-                    **kwargs,
+                # FlyDSL grouped wgrad (NT) opt-in, plain path only; fused wgrad
+                # accumulation, bias grad, and delayed wgrad fall through to the
+                # default grouped GEMM below.
+                _flydsl_kind = getattr(ctx, "flydsl_grouped_kind", None)
+                use_flydsl_wgrad = (
+                    _flydsl_kind is not None
+                    and not ctx.fuse_wgrad_accumulation
+                    and not ctx.use_bias  # bias-grad-in-wgrad-GEMM not supported yet
+                    and not (
+                        ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute()
+                    )
                 )
-                # WGRAD
-                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
-                else:
-                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
-
-                    for i in range(ctx.num_gemms):
-                        if grad_biases[i] is None:
-                            grad_biases[i] = grad_biases_[i]
-                    del grad_biases_
-
-                    # Deallocate input tensor
+                if use_flydsl_wgrad:
+                    _GroupedLinear._flydsl_grouped_dispatch("wgrad", _flydsl_kind)(
+                        grad_output=grad_output,
+                        inputmats=inputmats,
+                        wgrad_list=wgrad_list,
+                        m_splits=ctx.m_splits,
+                    )
                     clear_tensor_data(*inputmats)
+                    grouped_gemm_wgrad = None
+                else:
+                    if ctx.use_grouped_gemm_triton:
+                        general_grouped_gemm_func = general_grouped_gemm_triton
+                        kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                    else:
+                        general_grouped_gemm_func = general_grouped_gemm
+                        kwargs = {}
+                    grouped_gemm_wgrad = functools.partial(
+                        general_grouped_gemm_func,
+                        quantization_params=ctx.grad_weight_quantizers,
+                        out_dtype=ctx.activation_dtype,
+                        layout="NT",
+                        grad=True,
+                        m_splits=ctx.m_splits,
+                        use_bias=ctx.use_bias if grad_biases[0] is None else None,
+                        bias=biases,
+                        use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                        accumulate=(
+                            accumulate_wgrad_into_param_main_grad
+                            if not is_dist_weight
+                            and not getattr(ctx, "origin_weights_overwrite_main_grad", False)
+                            else False
+                        ),
+                        **kwargs,
+                    )
+                    # WGRAD
+                    if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
+                        ctx.wgrad_store.put(
+                            [inputmats, grad_output, wgrad_list], grouped_gemm_wgrad
+                        )
+                    else:
+                        _, grad_biases_, _ = grouped_gemm_wgrad(
+                            inputmats, grad_output, wgrad_list
+                        )
+
+                        for i in range(ctx.num_gemms):
+                            if grad_biases[i] is None:
+                                grad_biases[i] = grad_biases_[i]
+                        del grad_biases_
+
+                        # Deallocate input tensor
+                        clear_tensor_data(*inputmats)
 
                 def handle_custom_ddp_from_mcore(weight, main_grad, wgrad):
                     if ctx.weights_requires_grad:
