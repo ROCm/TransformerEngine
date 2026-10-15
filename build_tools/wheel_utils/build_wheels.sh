@@ -42,7 +42,7 @@ if [ "$LOCAL_TREE_BUILD" != "1" ]; then
         if $ROCM_BUILD ; then
                 git pull
         fi
-        git checkout $TARGET_BRANCH
+        git checkout "$TARGET_BRANCH"
         git submodule update --init --recursive
 else
         git submodule status --recursive | cut -d' ' -f3 | xargs -l -P1 -I_SUB_ git config --global --add safe.directory /TransformerEngine/_SUB_
