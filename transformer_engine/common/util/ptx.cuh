@@ -1732,9 +1732,6 @@ __device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
 #endif
-<<<<<<< HEAD
-#endif //!__HIP_PLATFORM_AMD__
-=======
 //
 // L2 cache-eviction policies for global memory accesses.
 //
@@ -1913,7 +1910,7 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
->>>>>>> upstream/release_v2.20.2
+#endif //!__HIP_PLATFORM_AMD__
 }  // namespace ptx
 
 namespace {

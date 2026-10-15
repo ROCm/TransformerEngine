@@ -157,9 +157,6 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-<<<<<<< HEAD
-if(USE_CUDA)
-=======
 option(NVTE_WITH_CUTEDSL
        "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
 if(NVTE_WITH_CUTEDSL)
@@ -173,7 +170,7 @@ if(NVTE_WITH_CUTEDSL)
   endif()
 endif()
 
->>>>>>> upstream/release_v2.20.2
+if(USE_CUDA)
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -278,18 +275,16 @@ list(APPEND transformer_engine_cpp_sources
      newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
-<<<<<<< HEAD
 # Sources that only apply to CUDA builds (removed when building for ROCm)
 set(cuda_only_cpp_sources
      cudnn_utils.cpp
      fused_attn/fused_attn.cpp
      util/cuda_nvml.cpp
      newton_schulz/newton_schulz.cpp)
-=======
+
 if(NVTE_WITH_CUTEDSL)
   list(APPEND transformer_engine_cpp_sources init_python.cpp)
 endif()
->>>>>>> upstream/release_v2.20.2
 
 list(APPEND transformer_engine_cuda_sources
      common.cu

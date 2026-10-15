@@ -147,18 +147,10 @@ def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis=-1):
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
-<<<<<<< HEAD
     # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
     if is_hip_extension():
         return (99, 0, 0)
-    encoded_version = transformer_engine_jax.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
-=======
     return decode_cudnn_version(transformer_engine_jax.get_cudnn_version())
->>>>>>> upstream/release_v2.20.2
 
 
 def get_xla_flag(flag: str, default=None, cast=str):

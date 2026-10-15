@@ -21,9 +21,8 @@ import logging
 from typing import Optional, Tuple
 import warnings
 
-<<<<<<< HEAD
 import transformer_engine
-=======
+
 # Minimum cuDNN version supported by Transformer Engine, as (major, minor, patch).
 # Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
 MIN_CUDNN_VERSION = (9, 12, 0)
@@ -46,7 +45,6 @@ def check_cudnn_version(encoded_version: int) -> None:
             f" but the cuDNN runtime is {'.'.join(map(str, cudnn_version))}."
         )
 
->>>>>>> upstream/release_v2.20.2
 
 @functools.lru_cache(maxsize=None)
 def _is_package_installed(package) -> bool:
@@ -250,7 +248,8 @@ def load_framework_extension(framework: str) -> None:
     spec.loader.exec_module(solib)
 
     # Check if the cuDNN version is supported.
-    check_cudnn_version(solib.get_cudnn_version())
+    if not te_rocm_build:
+        check_cudnn_version(solib.get_cudnn_version())
 
     # Plugin system: set NVTE_PLUGIN=<module_name> to let plugin stub take over
     # transformer_engine_torch and register original pybind as _nv for CUDA backend.
