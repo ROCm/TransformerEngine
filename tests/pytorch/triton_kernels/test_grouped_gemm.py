@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 # This file is adapted from the aiter project (https://github.com/ROCm/aiter)
 # commit:04dc719, directory: aiter/op_tests/triton_tests/test_gmm.py

@@ -1,4 +1,4 @@
-# Copyright © 2025-2026 Advanced Micro Devices, Inc.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
 #Set AOTriton commit SHA1 to environment variable
