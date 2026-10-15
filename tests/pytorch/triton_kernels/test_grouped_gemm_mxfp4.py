@@ -1,0 +1,331 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+
+"""Numeric correctness tests for the grouped MXFP4 Triton GEMM (gfx950)."""
+
+import pytest
+import torch
+
+from transformer_engine.pytorch.quantization import check_mxfp4_support
+
+_MXFP4_OK, _MXFP4_REASON = check_mxfp4_support()
+
+from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
+    MXFP4_BLOCK,
+    _col_operand,
+    _col_operand_grouped_padded,
+    _row_operand,
+    _row_operand_mxfp8,
+    grouped_gemm_a8w4_fprop,
+    grouped_gemm_mxfp4_dgrad,
+    grouped_gemm_mxfp4_fprop,
+    grouped_gemm_mxfp4_wgrad,
+    grouped_linear_mxfp4,
+)
+
+pytestmark = [
+    pytest.mark.skipif(not _MXFP4_OK, reason=f"MXFP4 unsupported: {_MXFP4_REASON}"),
+]
+
+DTYPE = torch.bfloat16
+# Uneven, non-128-multiple group sizes exercise fprop/dgrad masking and the
+# wgrad per-group zero-padding to 128.
+M_SPLITS = [96, 128, 160, 128]
+# K = 256 (>128) so the reduction loop runs multiple iterations (loop_k =
+# K/BLOCK_K), exercising the in-loop operand pointer advance.
+N, K = 256, 256
+# Precise-reference bar: kernel vs dequant-of-the-same-operands differ only by
+# ~bf16 output rounding.
+_TIGHT_TOL = 3.0e-2
+# Loose bar vs the true (unquantized) bf16 matmul: ~0.16 MXFP4 noise floor for
+# these shapes, well below the ~1.4 an uncorrelated (layout-bug) output gives.
+_REL_TOL = 2.0e-1
+
+# OCP E2M1 magnitude indexed by the 3 low bits (exp2 | mantissa1); bit 3 = sign.
+_E2M1_MAG = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+@pytest.fixture(autouse=True)
+def _mxfp4_env(monkeypatch):
+    # Triton MXFP4 quantizer (no aiter dependency); seed for a deterministic
+    # quantization error.
+    monkeypatch.setenv("NVTE_USE_CAST_TRANSPOSE_TRITON", "1")
+    torch.manual_seed(0)
+
+
+def _rand(*shape):
+    return torch.randn(*shape, dtype=DTYPE, device="cuda")
+
+
+def _rel_err(out, ref):
+    out = out.float()
+    ref = ref.float()
+    return (out - ref).norm() / ref.norm().clamp_min(1e-12)
+
+
+def _dequant_mxfp4(data_u8, scale_u8, feat):
+    """Independent OCP MXFP4 dequant of packed operands -> fp32 ``[R, feat]``.
+
+    ``data_u8`` ``[R, feat/2]`` packs two E2M1 codes per byte (low nibble = even
+    index along ``feat``); ``scale_u8`` ``[R, feat/32]`` is one E8M0 scale
+    (value ``2**(x-127)``) per 1x32 block.
+    """
+    lut = torch.tensor(_E2M1_MAG, dtype=torch.float32, device=data_u8.device)
+    lo = (data_u8 & 0xF).to(torch.long)
+    hi = ((data_u8 >> 4) & 0xF).to(torch.long)
+    codes = torch.stack((lo, hi), dim=-1).reshape(data_u8.shape[0], feat)
+    mag = lut[codes & 0x7]
+    vals = torch.where((codes & 0x8).bool(), -mag, mag)
+    scale = torch.exp2(scale_u8.to(torch.float32) - 127.0)
+    return vals * scale.repeat_interleave(MXFP4_BLOCK, dim=1)
+
+
+# MXFP8 (e4m3) activation side, for the a8w4 forward: the quantizer lives in the
+# impl module (_row_operand_mxfp8); here we only need the independent decoder.
+def _dequant_mxfp8(data_e4m3, scale_u8):
+    """Independent MXFP8 dequant: e4m3 [R, K] + e8m0 [R, K/32] -> fp32 [R, K]."""
+    rows, feat = data_e4m3.shape
+    vals = data_e4m3.float().reshape(rows, feat // MXFP4_BLOCK, MXFP4_BLOCK)
+    scale = torch.exp2(scale_u8.to(torch.float32) - 127.0)
+    return (vals * scale.unsqueeze(-1)).reshape(rows, feat)
+
+
+def test_fprop_precise():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in M_SPLITS]
+
+    out = grouped_gemm_mxfp4_fprop(a, weights, M_SPLITS, out_dtype=DTYPE)
+
+    # Dequantize the same row-wise operands the kernel used, then grouped matmul.
+    a_deq = _dequant_mxfp4(*_row_operand(a), K)
+    ref = torch.empty((total_m, N), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, M_SPLITS):
+        w_deq = _dequant_mxfp4(*_row_operand(w), K)  # [N, K]
+        ref[start : start + m] = a_deq[start : start + m] @ w_deq.t()
+        start += m
+
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_fprop_unaligned_total_m():
+    # total_M not divisible by 32 must still quantize (leading dim is padded).
+    splits = [100, 130]  # sum = 230, not a multiple of 32
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out = grouped_gemm_mxfp4_fprop(a, weights, splits, out_dtype=DTYPE)
+
+    ref = torch.empty((total_m, N), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, splits):
+        ref[start : start + m] = a[start : start + m].float() @ w.float().t()
+        start += m
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _REL_TOL
+
+
+def test_fprop_zero_group():
+    # An expert may receive no tokens (m_split == 0): it must contribute no tiles
+    # and leave the other groups' outputs correct.
+    splits = [96, 0, 160, 0, 128]  # two empty experts
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out = grouped_gemm_mxfp4_fprop(a, weights, splits, out_dtype=DTYPE)
+
+    a_deq = _dequant_mxfp4(*_row_operand(a), K)
+    ref = torch.empty((total_m, N), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, splits):
+        if m == 0:
+            continue
+        w_deq = _dequant_mxfp4(*_row_operand(w), K)
+        ref[start : start + m] = a_deq[start : start + m] @ w_deq.t()
+        start += m
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_dgrad_precise():
+    total_m = sum(M_SPLITS)
+    grad_out = _rand(total_m, N)
+    weights = [_rand(N, K) for _ in M_SPLITS]
+
+    dgrad = grouped_gemm_mxfp4_dgrad(grad_out, weights, M_SPLITS, out_dtype=DTYPE)
+
+    # gradO row-wise, weight col-wise (the transposed operand): dA = gradO @ W.
+    go_deq = _dequant_mxfp4(*_row_operand(grad_out), N)  # [total_M, N]
+    ref = torch.empty((total_m, K), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, M_SPLITS):
+        w_col_deq = _dequant_mxfp4(*_col_operand(w), N)  # [K, N] ~ W^T
+        ref[start : start + m] = go_deq[start : start + m] @ w_col_deq.t()
+        start += m
+
+    assert dgrad.shape == (total_m, K)
+    assert _rel_err(dgrad, ref) < _TIGHT_TOL
+
+
+def test_wgrad_precise_and_padding():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    grad_out = _rand(total_m, N)
+
+    wgrad = grouped_gemm_mxfp4_wgrad(a, grad_out, M_SPLITS, out_dtype=DTYPE)
+    assert wgrad.shape == (len(M_SPLITS), N, K)
+
+    # Precise: dequant the exact per-group padded col operands the kernel reduced
+    # over, sliced by the padded offsets. C[g] = lhs[:, g] @ rhs[:, g]^T.
+    lhs_data, lhs_scale, go_pad = _col_operand_grouped_padded(grad_out, M_SPLITS)  # [N, Mpad/2]
+    rhs_data, rhs_scale, _ = _col_operand_grouped_padded(a, M_SPLITS)  # [K, Mpad/2]
+    m_pad_total = lhs_data.shape[1] * 2
+    lhs_deq = _dequant_mxfp4(lhs_data, lhs_scale, m_pad_total)  # [N, Mpad]
+    rhs_deq = _dequant_mxfp4(rhs_data, rhs_scale, m_pad_total)  # [K, Mpad]
+    go = go_pad.tolist()
+    ref = torch.empty((len(M_SPLITS), N, K), dtype=torch.float32, device="cuda")
+    for g in range(len(M_SPLITS)):
+        s, e = go[g], go[g + 1]
+        ref[g] = lhs_deq[:, s:e] @ rhs_deq[:, s:e].t()
+    assert _rel_err(wgrad, ref) < _TIGHT_TOL
+
+    # End-to-end vs the true (unquantized) matmul: exercises the per-group
+    # zero-padding -- the padded rows must contribute nothing.
+    ref_true = torch.empty((len(M_SPLITS), N, K), dtype=torch.float32, device="cuda")
+    start = 0
+    for g, m in enumerate(M_SPLITS):
+        ref_true[g] = grad_out[start : start + m].float().t() @ a[start : start + m].float()
+        start += m
+    assert _rel_err(wgrad, ref_true) < _REL_TOL
+
+
+def test_wgrad_accumulate():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    grad_out = _rand(total_m, N)
+    G = len(M_SPLITS)
+
+    # beta=1: dW accumulates into an existing (main_grad-style) fp32 buffer.
+    base = torch.randn(G, N, K, dtype=torch.float32, device="cuda")
+    out = base.clone()
+    grouped_gemm_mxfp4_wgrad(a, grad_out, M_SPLITS, out_dtype=torch.float32, out=out, accumulate=True)
+
+    fresh = grouped_gemm_mxfp4_wgrad(a, grad_out, M_SPLITS, out_dtype=torch.float32)
+    torch.testing.assert_close(out, base + fresh)
+
+
+def test_autograd_matches_ops():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K).requires_grad_(True)
+    weight = torch.stack([_rand(N, K) for _ in M_SPLITS], dim=0).requires_grad_(True)
+
+    out = grouped_linear_mxfp4(a, weight, M_SPLITS)
+    assert out.shape == (total_m, N)
+
+    grad_out = _rand(total_m, N)
+    out.backward(grad_out)
+
+    # The autograd grads must equal the direct op calls (same code path).
+    ref_da = grouped_gemm_mxfp4_dgrad(
+        grad_out, list(weight.detach().unbind(0)), M_SPLITS, out_dtype=a.dtype
+    )
+    ref_dw = grouped_gemm_mxfp4_wgrad(a.detach(), grad_out, M_SPLITS, out_dtype=weight.dtype)
+    torch.testing.assert_close(a.grad, ref_da)
+    torch.testing.assert_close(weight.grad, ref_dw)
+
+
+# a8w4 forward: MXFP8 (e4m3) activation x MXFP4 (e2m1) weight, grouped along M.
+# The op (grouped_gemm_a8w4_fprop) does the quantize + call; each test re-derives
+# the same e4m3 operands via _row_operand_mxfp8 to build the precise reference.
+def _a8w4_reference(a_q, a_s, weights, m_splits):
+    """Per-group fp32 ref on the same operands: dequant(e4m3 A) @ dequant(e2m1 W)^T."""
+    a_deq = _dequant_mxfp8(a_q, a_s)
+    n, feat_k = weights[0].shape
+    ref = torch.empty((a_q.shape[0], n), dtype=torch.float32, device="cuda")
+    start = 0
+    for w, m in zip(weights, m_splits):
+        w_deq = _dequant_mxfp4(*_row_operand(w), feat_k)  # [N, K]
+        ref[start : start + m] = a_deq[start : start + m] @ w_deq.t()
+        start += m
+    return ref
+
+
+def test_a8w4_fprop_precise():
+    total_m = sum(M_SPLITS)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in M_SPLITS]
+
+    out = grouped_gemm_a8w4_fprop(a, weights, M_SPLITS, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
+    ref = _a8w4_reference(a_q, a_s, weights, M_SPLITS)
+
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_a8w4_fprop_single_group():
+    # G=1 dense case (Gluon-style): the group scan degenerates to one expert.
+    splits = [512]
+    a = _rand(512, K)
+    weights = [_rand(N, K)]
+
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+def test_a8w4_fprop_unaligned_total_m():
+    # total_M not a multiple of 32 must still quantize + run (leading dim padded).
+    splits = [100, 130]  # sum = 230
+    total_m = sum(splits)
+    a = _rand(total_m, K)
+    weights = [_rand(N, K) for _ in splits]
+
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert out.shape == (total_m, N)
+    assert _rel_err(out, ref) < _TIGHT_TOL
+
+
+# Kimi-K3 MoE expert-GEMM shapes: fc1 gate-up and fc2 down, G=28 experts.
+# Small per-group M keeps the check light while still exercising the K3 N/K
+# tiling (deep K, multi-tile N) and the 28-group scan under balanced and
+# imbalanced (~4:1 routing skew) token distributions.
+_K3_SHAPES = {"gateup": (6144, 3584), "down": (3584, 3072)}  # (N, K)
+
+
+def _k3_splits(kind, G=28, per=8):
+    total = G * per
+    if kind == "balanced":
+        return [per] * G
+    # deterministic ~4:1 max:min skew, integer, exact sum
+    w = [1.0 + 3.0 * i / (G - 1) for i in range(G)]
+    s = sum(w)
+    sp = [max(1, round(total * wi / s)) for wi in w]
+    sp[-1] += total - sum(sp)
+    return sp
+
+
+@pytest.mark.parametrize("shape", list(_K3_SHAPES), ids=list(_K3_SHAPES))
+@pytest.mark.parametrize("split", ["balanced", "imbalanced"])
+def test_a8w4_fprop_k3(shape, split):
+    n, k = _K3_SHAPES[shape]
+    splits = _k3_splits(split)
+    total_m = sum(splits)
+    a = _rand(total_m, k)
+    weights = [_rand(n, k) for _ in splits]
+
+    out = grouped_gemm_a8w4_fprop(a, weights, splits, out_dtype=DTYPE)
+    a_q, a_s = _row_operand_mxfp8(a)
+    ref = _a8w4_reference(a_q, a_s, weights, splits)
+
+    assert out.shape == (total_m, n)
+    assert _rel_err(out, ref) < _TIGHT_TOL

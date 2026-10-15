@@ -392,3 +392,12 @@ def test_quantization_noncontiguous_inputs(
     torch.testing.assert_close(
         sx[:M, :num_scale_cols], sx_contig[:M, :num_scale_cols], atol=0, rtol=0
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("x_dtype", [torch.float16, torch.float32], ids=str)
+def test_quantization_rejects_non_bf16_input(x_dtype):
+    """The C++ MXFP4 cast kernel only reads BF16 input; other dtypes must error, not misquantize."""
+    x = torch.randn((128, 128), dtype=x_dtype, device="cuda")
+    with pytest.raises(RuntimeError, match="only supports BF16 input"):
+        tex.quantize(x, MXFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1))
