@@ -901,7 +901,7 @@ def print_case(case_params, metric_records):
 def _write_csv(path, rows, columns):
     """Write list-of-dict *rows* to *path* with header *columns*."""
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
