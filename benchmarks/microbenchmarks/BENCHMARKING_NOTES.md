@@ -67,10 +67,10 @@ workload). Weights are not rotated.
 
 - A backend is selected with TE's environment variables; if the installed TE build doesn't
   honor them, the case is skipped rather than silently timing the default path.
-- FlyDSL cases are opt-in (`--run-flydsl`). Each one first runs once with FlyDSL's fallback
-  warning enabled and is skipped if FlyDSL hands the shape back to the default GEMM, so every
-  `flydsl` row is a FlyDSL measurement. CK and HipKittens grouped GEMM are probed the same way
-  for fallbacks to the per-expert path.
+- Each FlyDSL case first runs once with FlyDSL's fallback warning enabled and is skipped if
+  FlyDSL hands the shape back to the default GEMM, so every `flydsl` row is a FlyDSL
+  measurement. CK and HipKittens grouped GEMM are probed the same way for fallbacks to the
+  per-expert path.
 - Grouped GEMM backends:
   - `hipblaslt`: per-expert hipBLASLt GEMMs on TE's compute streams (TE's default for BF16,
     FP8 and NVFP4).

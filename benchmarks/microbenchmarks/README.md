@@ -58,13 +58,13 @@ Use pytest's `-k` to run a subset by parametrize id:
 ```bash
 python benchmark_gemm.py -k "bf16 and QKV"   # select shapes/precisions
 python benchmark_gemm.py -k triton           # select the Triton backend
+python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
 ```
 
 ### Other options
 
 - `--kernel-profile`: also measure GPU kernel (device) time (see
   [Kernel profiling](#kernel-profiling)).
-- `--run-flydsl`: include FlyDSL-backed cases (skipped by default due to long compile times).
 - `--no-gpu-interference-check` / `--abort-on-gpu-interference`: control the
   shared-GPU neighbor check, which warns (or aborts) when another process is
   using the benchmark GPU (requires the `amdsmi` package).
@@ -84,7 +84,7 @@ python benchmark_gemm.py -k triton           # select the Triton backend
   no model can be detected and none is given). A full dashboard run:
 
   ```bash
-  pytest . --dashboard-run --kernel-profile --run-flydsl --csv-samples
+  pytest . --dashboard-run --kernel-profile --csv-samples
   ```
 
 ### Environment

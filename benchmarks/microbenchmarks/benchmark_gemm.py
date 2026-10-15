@@ -18,7 +18,7 @@ Examples::
     python benchmark_gemm.py --csv                   # -> benchmark_gemm.csv
     python benchmark_gemm.py -k "bf16 and QKV"       # select shapes/precisions
     python benchmark_gemm.py -k triton               # select the Triton backend
-    python benchmark_gemm.py -k flydsl --run-flydsl  # select the FlyDSL backend
+    python benchmark_gemm.py -k "not flydsl"         # skip FlyDSL (long compile times)
 
 Output: benchmark_gemm.csv (written to cwd when --csv is passed).
 """
@@ -182,9 +182,9 @@ def _known_hipblaslt_qkv_xfail(c):
 
 
 def _marks_for(c):
-    """pytest marks for one case: the flydsl marker plus a temporary xfail for the
-    known hipBLASLt QKV bug (remove once hipBLASLt / hipblaslt_gemm is fixed)."""
-    marks = [pytest.mark.flydsl] if c["Backend"] == "flydsl" else []
+    """pytest marks for one case: a temporary xfail for the known hipBLASLt QKV bug
+    (remove once hipBLASLt / hipblaslt_gemm is fixed)."""
+    marks = []
     if _known_hipblaslt_qkv_xfail(c):
         marks.append(pytest.mark.xfail(
             reason="known hipBLASLt algo bug on Llama3.1-405B/TP8-QKV bf16/nvfp4 at "

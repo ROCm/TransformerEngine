@@ -80,10 +80,6 @@ def pytest_addoption(parser):
              "(on by default; the governor change needs root).",
     )
     group.addoption(
-        "--run-flydsl", action="store_true", default=False,
-        help="Run FlyDSL-backed cases (marked @pytest.mark.flydsl); skipped by default due to long compile times.",
-    )
-    group.addoption(
         "--dashboard-run", action="store_true", default=False,
         help="Collect all families into one run dir (born-tagged CSVs + samples/ + "
              "run_info.txt) under --dashboard-out, for the TE dashboard.",
@@ -103,7 +99,6 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "benchmark: TE GPU microbenchmark")
-    config.addinivalue_line("markers", "flydsl: FlyDSL-backed case; opt-in via --run-flydsl")
     configure_rotating(config.getoption("--rotating"), config.getoption("--no-rotating"))
     configure_kernel_profile(config.getoption("--kernel-profile"))
     config._microbench_store = {}
@@ -148,7 +143,6 @@ def pytest_report_header(config):
         return lines
     extras = [name for name, opt in (
         ("kernel-profile", "--kernel-profile"),
-        ("flydsl", "--run-flydsl"),
         ("samples", "--csv-samples"),
     ) if config.getoption(opt)]
     m = plan.meta
@@ -159,17 +153,6 @@ def pytest_report_header(config):
         f"extras: {', '.join(extras) or 'none (wall only)'}",
         *lines,
     ]
-
-
-def pytest_collection_modifyitems(config, items):
-    # FlyDSL cases are opt-in: skip anything marked @pytest.mark.flydsl unless
-    # --run-flydsl is passed.
-    if config.getoption("--run-flydsl"):
-        return
-    skip_flydsl = pytest.mark.skip(reason="FlyDSL is opt-in; pass --run-flydsl")
-    for item in items:
-        if "flydsl" in item.keywords:
-            item.add_marker(skip_flydsl)
 
 
 def pytest_collect_file(parent, file_path):
