@@ -34,6 +34,11 @@ def install_requirements() -> List[str]:
         "onnx",
         "packaging",
         "pydantic",
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
+=======
+        "nvdlfw-inspect",
+        "nvidia-cudnn-frontend>=1.29.0",
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
     ]
     if not rocm_build():
         # NVIDIA-only: nvdlfw-inspect is CUDA framework-inspect; nvidia-cudnn-frontend

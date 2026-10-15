@@ -157,7 +157,23 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
 if(USE_CUDA)
+=======
+option(NVTE_WITH_CUTEDSL
+       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+if(NVTE_WITH_CUTEDSL)
+  # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
+    message(FATAL_ERROR
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
+            "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
+  endif()
+endif()
+
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -262,12 +278,18 @@ list(APPEND transformer_engine_cpp_sources
      newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
 # Sources that only apply to CUDA builds (removed when building for ROCm)
 set(cuda_only_cpp_sources
      cudnn_utils.cpp
      fused_attn/fused_attn.cpp
      util/cuda_nvml.cpp
      newton_schulz/newton_schulz.cpp)
+=======
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -538,6 +560,15 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cudart
                       CUDNN::cudnn_all)
 target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
+
+if(NVTE_WITH_CUTEDSL)
+  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_compile_definitions(
+    transformer_engine PRIVATE
+    NVTE_WITH_CUTEDSL
+    Py_LIMITED_API=0x030A0000)
+  target_link_libraries(transformer_engine PRIVATE Python::Module)
+endif()
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

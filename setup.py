@@ -105,7 +105,23 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
     cmake_flags = []
+=======
+    cmake_flags = [
+        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
+        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
+    ]
+
+    with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
+    if with_cutedsl:
+        tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
+        cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
+    else:
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
             assert (
                 os.getenv("MPI_HOME") is not None

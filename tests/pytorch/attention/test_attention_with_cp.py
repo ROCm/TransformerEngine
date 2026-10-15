@@ -581,8 +581,12 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+=======
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
@@ -782,7 +786,6 @@ def test_cp_with_fused_attention(
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
 )

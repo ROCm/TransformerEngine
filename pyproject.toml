@@ -5,7 +5,11 @@
 # See LICENSE for license information.
 
 [build-system]
+<<<<<<< 12ec2a09cd96d737291d83901671f1d608c9ed07
 requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "ninja", "pip", "torch>=2.1", "jax>=0.5.0", "flax>=0.7.1"]
+=======
+requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "ninja", "pip", "torch>=2.1", "jax>=0.5.0", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.29.0"]
+>>>>>>> 6ea2a74a9e98c99e6d7b164a33775cc457520027
 
 # Use legacy backend to import local packages in setup.py
 build-backend = "setuptools.build_meta:__legacy__"
