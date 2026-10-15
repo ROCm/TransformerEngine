@@ -14,6 +14,7 @@
 
 #include "../extensions.h"
 #include "common/common.h"
+#include "common/cudnn_min_version.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
