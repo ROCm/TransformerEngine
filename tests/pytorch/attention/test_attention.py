@@ -332,7 +332,6 @@ def test_dot_product_mem_calc(monkeypatch):
     torch.cuda.synchronize()
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -591,7 +590,6 @@ _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
 
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="cuDNN graph cache is not used on ROCm.")
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_fused_attn_graph_cache():
     """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
     to avoid contamination from other tests as the counters are process-wide.
@@ -674,7 +672,6 @@ def test_fused_attn_graph_cache():
         )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
@@ -698,7 +695,6 @@ model_configs_max_logit = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_max_logit])
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
@@ -717,7 +713,6 @@ model_configs_num_splits = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_num_splits])
 @pytest.mark.parametrize("model", model_configs_num_splits.keys())
@@ -1008,7 +1003,6 @@ model_configs_softmax = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_softmax])
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
@@ -1065,7 +1059,6 @@ def test_dpa_softcap(dtype, model_configs, model):
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_softcap])
 @pytest.mark.parametrize("model", ["softcap_1_0"])
@@ -1430,7 +1423,6 @@ model_configs_mla = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_mla])
 @pytest.mark.parametrize("model", model_configs_mla.keys())
@@ -1485,7 +1477,6 @@ model_configs_mask = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
 @pytest.mark.parametrize("model", model_configs_mask.keys())
@@ -1591,7 +1582,6 @@ model_configs_bias = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
 @pytest.mark.parametrize("model", model_configs_bias.keys())
@@ -1630,7 +1620,6 @@ model_configs_bias_shapes = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
@@ -1777,7 +1766,6 @@ model_configs_layout = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
@@ -1790,7 +1778,6 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_packed = [l for l in qkv_layouts if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", ["layout_1_1", "layout_1_2"])
@@ -1863,8 +1850,6 @@ model_configs_layout_thd = {
 }
 
 
-# ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     (not IS_HIP_EXTENSION) and
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
@@ -1881,8 +1866,6 @@ def test_dpa_qkv_layout_thd(
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
-    if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
-        pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
     test_dot_product_attention(
         dtype,
         model_configs,
@@ -1930,7 +1913,6 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
 qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
@@ -2462,7 +2444,6 @@ model_configs_te_layer = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
@@ -2635,7 +2616,6 @@ def test_transformer_layer(
                 torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_2[i], **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
@@ -2650,7 +2630,6 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
@@ -2881,7 +2860,6 @@ model_configs_fp8_extra_state = {
 
 
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
-@pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_dpa_fp8_extra_state(model, dtype):
@@ -3157,7 +3135,6 @@ def _mha_fp8_vs_f16_seqlens(config, qkv_format):
     return seqlens_q, seqlens_kv
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -3412,7 +3389,6 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -3750,10 +3726,6 @@ model_configs_fp8 = {
 param_types_fp8 = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.skipif(
-    get_cudnn_version() < (9, 2, 1),
-    reason="cuDNN 9.2.1+ is required for FP8 fused attention.",
-)
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8)
