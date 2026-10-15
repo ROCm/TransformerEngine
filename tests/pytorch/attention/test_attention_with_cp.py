@@ -211,21 +211,6 @@ class PoolWorker:
                     or "timed out" in msg_head
                     or "before request could be sent" in msg_head
                 )
-<<<<<<< HEAD
-                # Heterogeneous CP cases can leave a retained worker in a state where
-                # FP8 THD emits NaNs even though the same case passes in a fresh worker.
-                # Retry only that signature once; a NaN from the fresh worker still fails.
-                fp8_thd_nan = (
-                    kwargs.get("dtype") == "fp8"
-                    and kwargs.get("qkv_format") == "thd"
-                    and "has nan values" in msg.lower()
-                )
-                retryable = infrastructure_flake or fp8_thd_nan
-                if not retryable or attempt == self._MAX_RETRIES:
-                    if first_err is not None:
-                        sys.stderr.write(
-                            f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
-=======
                 retryable = infrastructure_flake or (
                     kwargs.get("dtype") == "fp8"
                     and kwargs.get("qkv_format") == "thd"
@@ -236,7 +221,6 @@ class PoolWorker:
                         sys.stderr.write(
                             f"[POOL-RETRY-FAIL] status=failed test={test_id!r} "
                             f"world_size={self.world_size}: "
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                             "both attempts failed; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
@@ -244,14 +228,9 @@ class PoolWorker:
                     raise
                 first_err = e
                 sys.stderr.write(
-<<<<<<< HEAD
-                    f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
-                    f"failed: {msg_head!r}; respawning pool and retrying\n"
-=======
                     f"[POOL-RETRY] status=retrying test={test_id!r} "
                     f"world_size={self.world_size} attempt={attempt + 1} "
                     f"error={msg_head!r}; respawning pool and retrying\n"
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -374,15 +353,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-<<<<<<< HEAD
-        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
-=======
         has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
         has_fa4 = fa4_enabled and FlashAttentionUtils.v4_is_installed
         if not (has_fa3 or has_fa4):
             pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
@@ -454,8 +428,6 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         log_level=pytest_logging_level,
     )
 
-<<<<<<< HEAD
-=======
 
 @pytest.mark.skipif(
     not FlashAttentionUtils.v2_6_0_plus, reason="CP softcap requires flash-attn 2.6.0+."
@@ -496,7 +468,6 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
     )
 
 
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=not IS_HIP_EXTENSION),  # MHA
@@ -792,27 +763,6 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-<<<<<<< HEAD
-    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
-    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
-    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
-    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
-    # config uses b>2.
-    SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
-    if (
-        not IS_HIP_EXTENSION
-        and _deterministic
-        and qkv_format == "thd"
-        and get_device_compute_capability() == (9, 0)
-        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
-        >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
-    ):
-        pytest.skip(
-            "Deterministic FusedAttention backward with THD format OOMs on sm90"
-            " for large bHSS configs (known cuDNN issue)."
-        )
-=======
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     _submit(
         pool,

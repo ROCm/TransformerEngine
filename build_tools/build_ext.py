@@ -270,15 +270,11 @@ def get_build_ext(
                             os.path.splitext(src)[1] in [".cu", ".cuh"]
                             and not framework_extension_only
                         ):
-<<<<<<< HEAD
-=======
-                            nvcc_bin = nvcc_path()
                             if nvcc_bin is None:
                                 raise RuntimeError(
                                     f"NVCC not found and is required for building CUDA source {src}"
                                 )
 
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]

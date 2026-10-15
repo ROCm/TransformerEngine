@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -6,8 +8,10 @@
 
 #include "config_and_params.h"
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 #include <cudnn.h>
 #include <cudnn_frontend_version.h>
+#endif
 
 #include <cinttypes>
 #include <cstdio>
@@ -33,6 +37,7 @@ namespace transformer_engine {
 
 namespace fused_attn {
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 // Forward declarations
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
@@ -172,6 +177,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
 
   return cache_cfg;
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 std::string FusedAttnConfig::to_string() const {
   char buf[1024];

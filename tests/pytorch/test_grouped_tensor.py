@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -53,7 +55,6 @@ reason_for_no_fp8_block_scaling_grouped = (
     )
 )
 
-<<<<<<< HEAD
 # Grouped FP8 current-scaling quantize is not implemented on ROCm; plain FP8 is otherwise
 # available, so gate the grouped tests separately.
 fp8_current_scaling_grouped_available = fp8_available and not IS_HIP_EXTENSION
@@ -62,7 +63,6 @@ reason_for_no_fp8_current_scaling_grouped = (
     if not fp8_available
     else "Grouped FP8 current-scaling quantize is not implemented on ROCm."
 )
-=======
 
 def test_mark_grouped_tensor_supports_plain_tensor():
     tensor = torch.empty(16)
@@ -101,7 +101,6 @@ def test_mark_grouped_tensor_marks_quantized_columnwise_storage():
     assert columnwise_data.grouped_tensor_scale_inv is False
     assert columnwise_scale_inv.grouped_tensor_scale_inv is True
 
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 _quantization_params = [
     pytest.param(
@@ -946,6 +945,17 @@ class TestGroupedTensor:
             grouped_output = tex.group_scaled_swiglu(
                 input_2h, prob, quantizer, num_tensors, first_dims
             )
+
+        if IS_HIP_EXTENSION:
+            # ROCm kernels do not fuse the scale swizzle on any arch; the GEMM path swizzles
+            # compact scales where needed (gfx1250), so the flag must say compact.
+            assert not grouped_output._with_gemm_swizzled_scales
+            if optimize_for_gemm:
+                pytest.skip(
+                    "Per-expert tensors and the reference quantize take their scale layout from"
+                    " quantizer.optimize_for_gemm, so ROCm flags their compact scales swizzled"
+                    " and dequantizes them in the wrong layout"
+                )
 
         outputs = grouped_output.split_into_quantized_tensors()
         assert len(outputs) == num_tensors

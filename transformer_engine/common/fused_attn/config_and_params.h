@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -223,6 +225,7 @@ struct FusedAttnConfig {
                     rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv, rhs.device_id);
   }
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
   // Derive relevant fields based on input fields that have been set by the caller. They are
   // read by the graph build, cache lookup, and support query.
   void derive();
@@ -238,6 +241,7 @@ struct FusedAttnConfig {
   // It drops fields that are either invariant (e.g. attn_scale) or irrelevant (e.g. dO/dQKV dtypes
   // and `deterministic` for forward, and `return_max_logit` for backward).
   FusedAttnConfig make_cache_key(Pass pass) const;
+#endif  // __HIP_PLATFORM_AMD__
 
   // Return a string representation of this config for level-2 cache diagnostics.
   std::string to_string() const;

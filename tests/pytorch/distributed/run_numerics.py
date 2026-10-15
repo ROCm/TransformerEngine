@@ -821,8 +821,21 @@ def test_linear():
             continue
         if kwargs.get("use_compile", False) and QUANTIZATION == "fp8":
             continue
+        # TE falls back to an eager path that fullgraph cannot trace when this torch build
+        # lacks the opaque-object API.
+        if kwargs.get("use_compile", False) and te.utils._compile_disabled_reason is not None:
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
+                # TODO(ROCm): the backward input all-gather leaves buffers in the CUDA-graph pool.
+                if (
+                    IS_HIP_EXTENSION
+                    and kwargs.get("compile_mode") == "reduce-overhead"
+                    and parallel_mode == "column"
+                    and sequence_parallel
+                    and QUANTIZATION in ("fp8_block_scaling", "nvfp4")
+                ):
+                    continue
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
 
 

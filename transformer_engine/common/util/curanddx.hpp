@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -20,11 +22,16 @@ inline constexpr unsigned int philox4x32_m4x32_1 = 0xCD9E8D57U;
 
 __forceinline__ __device__ unsigned int mulhilo32(unsigned int a, unsigned int b,
                                                   unsigned int* hip) {
+#ifdef __HIP_PLATFORM_AMD__
+  *hip = __umulhi(a, b);
+  return a * b;
+#else
   // Returns uint64_t(a) * b in two uint32 halves
   uint64_t product;
   asm("mul.wide.u32 %0, %1, %2;" : "=l"(product) : "r"(a), "r"(b));
   *hip = static_cast<unsigned int>(product >> 32);
   return static_cast<unsigned int>(product);
+#endif
 }
 
 __forceinline__ __device__ uint4 single_round(uint4 ctr, uint2 key) {

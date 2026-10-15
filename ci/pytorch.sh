@@ -86,7 +86,6 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
-    run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
@@ -98,6 +97,7 @@ run_test_config(){
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 attention/test_cu_seqlens_cache.py
+    run_default_fa 1 attention/test_mixed_thd_attention.py
     run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
@@ -107,7 +107,7 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
-    run_default_fa 1 test_parallel_cross_entropy.py
+    run_default_fa 1 test_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
@@ -150,6 +150,7 @@ run_test_config_mgpu(){
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 2 distributed/test_sanity.py
     run_default_fa 2 distributed/test_numerics_exact.py
+    run_default_fa 1 distributed/test_parallel_cross_entropy.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then

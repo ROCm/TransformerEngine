@@ -709,46 +709,54 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-            for x in [dq, out, dq_, out_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_q_padded[-1] :] = 0
-                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_q[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
+            if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+                for x in [dq, out, dq_, out_]:
+                    if (
+                        IS_HIP_EXTENSION
+                        and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0
+                    ):
+                        warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                        x[cu_seqlens_q_padded[-1] :] = 0
+                    assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_q[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (
+                                        cu_seqlens_q_padded[b + 1] - num_pads_q[b]
+                                    ) : cu_seqlens_q_padded[b + 1]
                                 ]
-                            ]
-                        ).item()
-                        == 0
-                    )
+                            ).item()
+                            == 0
+                        )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
             )
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-            for x in [dk, dv, dk_, dv_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_kv_padded[-1] :] = 0
-                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_kv[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (
-                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                ) : cu_seqlens_kv_padded[b + 1]
-                            ]
-                        ).item()
-                        == 0
-                    )
+            if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+                for x in [dk, dv, dk_, dv_]:
+                    if (
+                        IS_HIP_EXTENSION
+                        and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0
+                    ):
+                        warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                        x[cu_seqlens_kv_padded[-1] :] = 0
+                    assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_kv[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (
+                                        cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                    ) : cu_seqlens_kv_padded[b + 1]
+                                ]
+                            ).item()
+                            == 0
+                        )
             # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
             # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
             # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.

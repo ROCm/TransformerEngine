@@ -243,12 +243,8 @@ set(transformer_engine_cuda_arch_specific_sources)
 list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp #CUDA-only
      transformer_engine.cpp
-<<<<<<< HEAD
      fused_attn/fused_attn.cpp #CUDA-only
-=======
-     fused_attn/fused_attn.cpp
      fused_attn/config_and_params.cpp
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
@@ -356,16 +352,10 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
-<<<<<<< HEAD
+     cast/fused_group_requantize.cu
      gemm/cutlass_grouped_gemm.cu #CUDA-only
      hadamard_transform/group_hadamard_transform.cu #CUDA-only
      hadamard_transform/graph_safe_group_hadamard_transform.cu #CUDA-only
-=======
-     cast/fused_group_requantize.cu
-     gemm/cutlass_grouped_gemm.cu
-     hadamard_transform/group_hadamard_transform.cu
-     hadamard_transform/graph_safe_group_hadamard_transform.cu
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu #CUDA-only
      hadamard_transform/group_hadamard_transform_cast_fusion.cu #CUDA-only
@@ -976,7 +966,6 @@ endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-<<<<<<< HEAD
 if (USE_ROCM)
   set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
@@ -989,8 +978,8 @@ if (USE_ROCM)
     "COMMIT_ID: ${TE_COMMIT_ID}\n"
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
-=======
-if(NVTE_WITH_NCCL_EP)
+endif()
+if(USE_CUDA AND NVTE_WITH_NCCL_EP)
   # Install a real file rather than the build-tree symlink so wheel packaging
   # does not need to preserve the versioned symlink chain.
   install(FILES "${NCCL_EP_SHARED_LIB}"
@@ -1002,5 +991,4 @@ if(NVTE_WITH_NCCL_EP)
           DESTINATION nccl_ep/include)
   install(DIRECTORY "${NCCL_EP_INCLUDE_DIR}/nccl_ep"
           DESTINATION nccl_ep/include)
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 endif()

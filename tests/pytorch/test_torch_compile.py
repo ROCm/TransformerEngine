@@ -1,3 +1,4 @@
+# This file was modified for portability to AMDGPU
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
@@ -12,24 +13,21 @@ import warnings
 
 import pytest
 import torch
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 
 try:
     from torch._dynamo.utils import counters
 except ImportError:  # pragma: no cover
     counters = None
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
 try:
     from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
-        register_custom_class,
         MemberType,
     )
+    from transformer_engine.pytorch.dynamo.opaque_compat import register_custom_class
 
     _opaque_available = True
 except ImportError:
@@ -1848,6 +1846,7 @@ def test_tensor_spec_create_tensor(factory, shape, fake):
         assert isinstance(getattr(out, name), FakeTensor) == fake
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("factory, shape", _SPEC_QUANTIZERS)
 def test_tensor_spec_create_tensor_compiles(factory, shape):
     """``TensorSpec.create_tensor`` traces under ``fullgraph=True`` (CPU)."""
@@ -1943,6 +1942,28 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
         for _ in range(n_iters):
             base = torch.randn(32, 64, dtype=dtype, device=device)
             _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only te.Linear option")
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=lambda r: type(r).__name__)
+def test_te_linear_compiles_without_transpose_cache(fp8_recipe):
+    """torch.compile(fullgraph=True) of ``te.Linear(keep_fp8_weight_transpose_cache=False)``,
+    which drops the weight's columnwise usage that the fake forward must mirror."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    model = te.Linear(
+        64, 32, params_dtype=dtype, device=device, keep_fp8_weight_transpose_cache=False
+    )
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(32, 64, dtype=dtype, device=device)
+    _assert_close_eager_compiled(fn, compiled, model, base)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -2083,6 +2104,8 @@ def test_te_linear_compile_eager_fallback(case):
     """Configs unsupported on the compiled custom-op path must fall back to
     eager under ``torch.compile`` -- warning + numerics identical to eager --
     and graph-break with the explicit reason under ``fullgraph=True``."""
+    if IS_HIP_EXTENSION and case == "fuse_wgrad_accumulation":
+        pytest.skip("ROCm does not support fused wgrad accumulation for torch.bfloat16.")
     dtype, device = torch.bfloat16, "cuda"
     torch.manual_seed(0)
     model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)

@@ -77,7 +77,11 @@ __device__ inline CompType extract_qb_cutoff_and_compact(int *topk_indices, Comp
       }
     }
     __syncwarp();
+#ifdef __HIP_PLATFORM_AMD__
+    return __shfl(cutoff, 0, kThreadsPerWarp);
+#else
     return __shfl_sync(0xffffffff, cutoff, 0);
+#endif
   }
 }
 

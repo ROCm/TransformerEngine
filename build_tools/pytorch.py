@@ -34,18 +34,13 @@ def install_requirements() -> List[str]:
         "onnx",
         "packaging",
         "pydantic",
-<<<<<<< HEAD
-=======
-        "nvdlfw-inspect",
-        "nvidia-cudnn-frontend>=1.28.0",
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     ]
     if not rocm_build():
         # NVIDIA-only: nvdlfw-inspect is CUDA framework-inspect; nvidia-cudnn-frontend
         # supplies the cuDNN headers for the CUDA build (ROCm uses a stub).
         requirements += [
             "nvdlfw-inspect",
-            "nvidia-cudnn-frontend>=1.25.0",
+            "nvidia-cudnn-frontend>=1.28.0",
         ]
     return requirements
 
@@ -117,12 +112,7 @@ def setup_pytorch_extension(
     # Mirror the NCCL EP gate from setup.py / common CMake. When disabled, the
     # ep.cpp source no-ops at the #ifdef boundary; without the define it would
     # produce undefined references to nvte_ep_*.
-<<<<<<< HEAD
-    # Disabled on ROCm
-    if not rocm_build() and bool(int(os.getenv("NVTE_WITH_NCCL_EP", "1"))):
-=======
     if nccl_ep_enabled():
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
         # PyTorch's symm-mem headers gate the NCCL_HAS_SYMMEM_* feature macros on
         # USE_NCCL. The EP extension shares the symm-mem NCCL comm with torch, so

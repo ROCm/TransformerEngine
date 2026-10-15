@@ -380,9 +380,19 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
+#ifdef USE_ROCM
+  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
+  if (transformer_engine::cuda::sm_arch() != 125) {
+    return std::nullopt;
+  }
+#endif
   if (input.get_with_gemm_swizzled_scales()) {
     return std::nullopt;
   }
+#ifdef USE_ROCM
+  // The grouped swizzle writes the CUDA 128x4 layout, not the gfx1250 MX pre-swizzle layout.
+  NVTE_ERROR("Grouped MXFP8 scale pre-swizzling is not implemented for gfx1250.");
+#endif
 
   const auto row_scales = input.get_rowwise_scale_inv();
   const auto col_scales = input.get_columnwise_scale_inv();

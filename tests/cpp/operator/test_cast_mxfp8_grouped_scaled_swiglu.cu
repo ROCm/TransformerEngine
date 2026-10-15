@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -317,6 +319,13 @@ void performTest(const ShapeRepresentation shape_rep,
         return;
     }
 
+#ifdef __HIP_PLATFORM_AMD__
+    // ROCm kernels do not fuse the scale swizzle on any arch, so the scales come out compact.
+    const bool reference_swizzled_scales = false;
+#else
+    const bool reference_swizzled_scales = with_gemm_swizzled_scales;
+#endif
+
     // Reference (CPU), one expert at a time.
     std::vector<OutputType> out_data_ref(out_elts, static_cast<OutputType>(0.0f));
     std::vector<fp8e8m0> out_scales_ref(sfs_num, static_cast<fp8e8m0>(0));
@@ -332,7 +341,7 @@ void performTest(const ShapeRepresentation shape_rep,
                                            prob_ptr + row_base,
                                            out_data_ref.data() + data_offsets[t],
                                            out_scales_ref.data() + scale_offsets[t],
-                                           M, F, scales_stride, with_gemm_swizzled_scales, clamp);
+                                           M, F, scales_stride, reference_swizzled_scales, clamp);
         row_base += M;
     }
 
@@ -341,6 +350,13 @@ void performTest(const ShapeRepresentation shape_rep,
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+#ifdef __HIP_PLATFORM_AMD__
+    uint8_t out_swizzled = 1;
+    nvte_get_grouped_tensor_param(out_group_tensor,
+                                  NVTEGroupedTensorParam::kNVTEGroupedWithGEMMSwizzledScales,
+                                  &out_swizzled, sizeof(out_swizzled), nullptr);
+    EXPECT_EQ(out_swizzled, 0) << "ROCm writes compact scales and must flag them as such";
+#endif
 
     std::vector<OutputType> out_data_h(out_elts);
     std::vector<fp8e8m0> out_scales_h(sfs_num);
@@ -362,8 +378,15 @@ void performTest(const ShapeRepresentation shape_rep,
     const double rel_tolerable_mismatches_limit = 1.0;
 
     size_t mismatches_scales = 0;
+#ifdef USE_ROCM
+    std::vector<size_t> mismatches_scales_indices;
+#endif
     compare_scaling_factors("colwise_scales", out_scales_h.data(), out_scales_ref.data(),
-                            1, sfs_num, sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                            1, sfs_num, sfs_num,
+#ifdef USE_ROCM
+                            mismatches_scales_indices,
+#endif
+                            mismatches_scales, scale_diff_abs_tolerance,
                             abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
     compare_quantized_elts<OutputType>("colwise_output", out_data_ref.data(), out_data_h.data(),
@@ -413,10 +436,12 @@ class GroupedScaledSwigluMXFP8TestSuite : public ::testing::TestWithParam
                 >> {};
 
 TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
+#ifndef __HIP_PLATFORM_AMD__
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
 
     using namespace transformer_engine;
     using namespace test;
@@ -435,9 +460,14 @@ TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
     // The swizzled layout tiles the scale matrix 128-wide along F, and each expert owns a
     // block sized by its own token count. Configs that violate either requirement must be
     // rejected by the launcher rather than silently produce a wrong layout.
+#ifdef __HIP_PLATFORM_AMD__
+    // ROCm does not fuse the swizzle, so it has nothing to reject.
+    const bool expect_rejection = false;
+#else
     const bool expect_rejection = with_gemm_swizzled_scales
                                   && ((F % 128 != 0)
                                       || (num_tensors > 1 && shape_rep == SAME_BOTH_DIMS));
+#endif
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,

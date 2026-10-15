@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -449,6 +451,8 @@ def test_thd_mask_type_runtime_dispatch_uses_backend_selection(monkeypatch):
         },
     ]
     observed_params = []
+    # The cache key includes NVTE_FLASH_ATTN, so it must start unset for the setenv below to miss
+    monkeypatch.delenv("NVTE_FLASH_ATTN", raising=False)
 
     def fake_get_attention_backend(attention_params):
         observed_params.append(attention_params)

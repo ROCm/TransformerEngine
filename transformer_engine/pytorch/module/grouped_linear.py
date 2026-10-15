@@ -1302,7 +1302,6 @@ class _GroupedLinear(torch.autograd.Function):
         m_splits = m_splits.tolist()
 
         inp_view = inp.reshape(-1, in_features)
-<<<<<<< HEAD
         inputmats: list
         if IS_HIP_EXTENSION:
             if fp8 and not debug:
@@ -1328,28 +1327,14 @@ class _GroupedLinear(torch.autograd.Function):
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
-            inputmats = _split_quantize(
+            inputmats, _ = _split_quantization._split_quantize(
                 inp_view,
                 m_splits,
+                input_quantizers,
+                activation_dtype,
                 with_quantized_output=fp8 or debug,
-                quantizers=input_quantizers,
-                dtype=activation_dtype,
-                with_debug_quantizers=debug,
                 disable_bulk_allocation=cpu_offloading,
             )
-=======
-        # Disable bulk allocation when CPU offloading is active: offloading skips small
-        # tensors (like scales), but bulk allocation shares storage across all tensors,
-        # so if scales can't be offloaded, nothing in the group can be offloaded.
-        inputmats, _ = _split_quantization._split_quantize(
-            inp_view,
-            m_splits,
-            input_quantizers,
-            activation_dtype,
-            with_quantized_output=fp8 or debug,
-            disable_bulk_allocation=cpu_offloading,
-        )
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
         if cpu_offloading:
             start_offload(*inputmats)
@@ -1910,7 +1895,6 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.m_splits,
                         ctx.activation_dtype,
                     )
-<<<<<<< HEAD
                 else:
                     # Only split grad output. Grad bias is fused with
                     # wgrad GEMM.
@@ -1932,34 +1916,21 @@ class _GroupedLinear(torch.autograd.Function):
                             rowwise=ctx.requires_dgrad,
                             columnwise=ctx.weights_requires_grad,
                         )
-                grad_output, grad_biases = _split_quantize_and_bias(
+                grad_output, grad_biases = _split_quantization._split_quantize(
                     grad_output_view,
                     ctx.m_splits,
-                    fp8=ctx.fp8,
-                    debug=ctx.debug,
-                    quantizers=ctx.grad_output_quantizers,
-                    dtype=ctx.activation_dtype,
-                    use_bias=ctx.use_bias,
-                    recipe=ctx.fp8_recipe,
-                    disable_bulk_allocation=ctx.cpu_offloading,
+                    ctx.grad_output_quantizers,
+                    ctx.activation_dtype,
+                    with_quantized_output=ctx.fp8 or ctx.debug,
+                    compute_dbias=(ctx.fp8 or ctx.debug) and ctx.use_bias,
+                    disable_bulk_allocation=(
+                        ctx.cpu_offloading
+                        and isinstance(grad_output_reference, HybridQuantizer)
+                        and not _split_quantization._uses_identity_quantizer(grad_output_reference)
+                    ),
                 )
-=======
-            grad_output, grad_biases = _split_quantization._split_quantize(
-                grad_output_view,
-                ctx.m_splits,
-                ctx.grad_output_quantizers,
-                ctx.activation_dtype,
-                with_quantized_output=ctx.fp8 or ctx.debug,
-                compute_dbias=(ctx.fp8 or ctx.debug) and ctx.use_bias,
-                disable_bulk_allocation=(
-                    ctx.cpu_offloading
-                    and isinstance(grad_output_reference, HybridQuantizer)
-                    and not _split_quantization._uses_identity_quantizer(grad_output_reference)
-                ),
-            )
-            if grad_biases is None:
-                grad_biases = [None] * N
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+                if grad_biases is None:
+                    grad_biases = [None] * N
 
             if is_dist_weight:
                 accumulate_wgrad_into_param_main_grad = False
@@ -2098,7 +2069,6 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
-<<<<<<< HEAD
                     inputmats: list
                     if IS_HIP_EXTENSION:
                         if ctx.fp8 and not ctx.debug:
@@ -2127,25 +2097,14 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 inputmats = [cast_if_needed(inp_view, ctx.activation_dtype)]
                     else:
-                        inputmats = _split_quantize(
+                        inputmats, _ = _split_quantization._split_quantize(
                             inp_view,
                             ctx.m_splits,
+                            ctx.input_quantizers,
+                            ctx.activation_dtype,
                             with_quantized_output=ctx.fp8 or ctx.debug,
-                            quantizers=ctx.input_quantizers,
-                            dtype=ctx.activation_dtype,
-                            with_debug_quantizers=ctx.debug,
                             disable_bulk_allocation=ctx.cpu_offloading,
                         )
-=======
-                    inputmats, _ = _split_quantization._split_quantize(
-                        inp_view,
-                        ctx.m_splits,
-                        ctx.input_quantizers,
-                        ctx.activation_dtype,
-                        with_quantized_output=ctx.fp8 or ctx.debug,
-                        disable_bulk_allocation=ctx.cpu_offloading,
-                    )
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
                 elif ctx.backward_override == "dequantized":
                     inputmats_dequant = []
                     for inputmat in inputmats:

@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
@@ -361,7 +362,8 @@ class NVFP4Quantizer(Quantizer):
             "nontensor_kwargs": {
                 "fp4_dtype": self.dtype,
                 "quantizer": self,
-                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                # ROCm skips the post-quantize swizzle, so NVFP4 scales stay compact there.
+                "with_gemm_swizzled_scales": self.optimize_for_gemm and not IS_HIP_EXTENSION,
                 "row_scaled_nvfp4": self.row_scaled_nvfp4,
                 "nvfp4_use_4over6": self.nvfp4_use_4over6,
                 "nvfp4_e4m3_max": self.nvfp4_e4m3_max,

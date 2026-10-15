@@ -191,11 +191,9 @@ class LinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
-<<<<<<< HEAD
     # --- ROCm feature fields ---
     keep_fp8_weight_transpose_cache: bool
     use_fsdp2: bool
-=======
     def compile_unsupported_reason(self) -> Optional[str]:
         """Reason this config can't use the torch.compile custom-op path (else None)."""
         if self.debug:
@@ -204,6 +202,8 @@ class LinearFwdArgs:
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
         if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
             return "a quantized input tensor"
+        if self.use_fsdp2:
+            return "use_fsdp2=True (ROCm)"
         if self.fsdp_group is not None:
             return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
         if (
@@ -246,7 +246,6 @@ class LinearFwdArgs:
             if quantizer is not None and not is_value_opaque_quantizer(quantizer):
                 return "a quantizer not registered as a torch.compile value-opaque type"
         return None
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 
 @dataclass(slots=True)
@@ -319,16 +318,12 @@ class LinearBwdArgs:
     cpu_offloading: bool = False
     owns_input: bool = False
 
-<<<<<<< HEAD
     # --- ROCm feature fields ---
     keep_fp8_weight_transpose_cache: bool = True
     use_fsdp2: bool = False
     autocast_fp8_reduction_skipped: bool = False
 
-    # --- Per-backward scratch state (populated inside _linear_backward) ---
-=======
     # --- Per-backward scratch state (populated inside _linear_backward_impl) ---
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     ub_obj_gradout: Optional[Any] = None
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
@@ -422,13 +417,9 @@ def _linear_forward_impl(
     debug = args.debug
     backward_override = args.backward_override
     is_fsdp2 = args.is_fsdp2
-<<<<<<< HEAD
     keep_fp8_weight_transpose_cache = args.keep_fp8_weight_transpose_cache
     use_fsdp2 = args.use_fsdp2
-    backward_needs_input = is_grad_enabled and weight.requires_grad
-=======
     backward_needs_input = is_grad_enabled and args.weight_requires_grad
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
     if backward_override == "high_precision":
         save_original_input = True
     elif backward_override == "dequantized":
@@ -592,16 +583,12 @@ def _linear_forward_impl(
         # No need to set the quantizer states if weight is already quantized
         # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
         if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
-<<<<<<< HEAD
             columnwise_usage = (
                 is_grad_enabled
-                and inp.requires_grad
+                and args.input_requires_grad
                 and not is_fsdp2
                 and keep_fp8_weight_transpose_cache
             )
-=======
-            columnwise_usage = is_grad_enabled and args.input_requires_grad and not is_fsdp2
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
             if backward_override is not None:
                 columnwise_usage = False
             if not columnwise_usage and keep_fp8_weight_transpose_cache:
@@ -614,7 +601,7 @@ def _linear_forward_impl(
             # In dequantized/high_precision backward_override modes the weight is dequantized
             # before the dgrad GEMM, so columnwise data is not required.
             if not columnwise_usage and backward_override is None and isinstance(weight_quantizer, NVFP4Quantizer):
-                columnwise_usage = is_grad_enabled and inp.requires_grad
+                columnwise_usage = is_grad_enabled and args.input_requires_grad
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif isinstance(weight, QuantizedTensor):
             weight_quantizer = weight._quantizer
@@ -771,7 +758,7 @@ def _linear_forward_impl(
 
         # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
         # Not needed in backward override modes since the weight is used in high-precision there.
-        if backward_override is None and inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
+        if backward_override is None and args.input_requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
             if isinstance(weightmat, QuantizedTensorStorage):
                 weightmat.update_usage(columnwise_usage=True)
 
@@ -918,14 +905,25 @@ def _linear_forward_fake(
     weightmat_aliases_weight = False
     if fp8_or_debug:
         if weight_quantizer is not None and (not weight.is_quantized or debug):
-            columnwise_usage = is_grad_enabled and args.input_requires_grad and not args.is_fsdp2
+            columnwise_usage = (
+                is_grad_enabled
+                and args.input_requires_grad
+                and not args.is_fsdp2
+                and args.keep_fp8_weight_transpose_cache
+            )
             if args.backward_override is not None:
                 columnwise_usage = False
-            if not columnwise_usage:
+            if not columnwise_usage and args.keep_fp8_weight_transpose_cache:
                 columnwise_usage = (
                     is_fp8_activation_recompute_enabled()
                     and not in_fp8_activation_recompute_phase()
                 )
+            if (
+                not columnwise_usage
+                and args.backward_override is None
+                and isinstance(weight_quantizer, NVFP4Quantizer)
+            ):
+                columnwise_usage = is_grad_enabled and args.input_requires_grad
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif weight.is_quantized:
             weight_quantizer = weight.quantizer
@@ -1017,6 +1015,17 @@ def _linear_forward_fake(
                 saved_inputmat = TensorSpec(
                     shape=tuple(inp.shape), dtype=activation_dtype, device=inp.device
                 )
+
+        # Mirror the impl's save-time columnwise usage for the dgrad GEMM.
+        if (
+            args.backward_override is None
+            and args.input_requires_grad
+            and args.keep_fp8_weight_transpose_cache
+            and not args.use_fsdp2
+            and weightmat_is_storage
+            and not weightmat_aliases_weight
+        ):
+            weightmat.update_usage(columnwise_usage=True)
 
         # Slot 1 -- ``wt_save``, with the impl's alias dedup (rebuilt in
         # ``_linear_setup_ctx`` instead of being saved twice).

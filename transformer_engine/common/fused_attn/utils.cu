@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -11,13 +9,7 @@
 #include <cmath>
 
 #include "../common.h"
-<<<<<<< HEAD
-#ifndef __HIP_PLATFORM_AMD__
-#include "../cudnn_utils.h"
-#endif
-=======
 #include "../util/cuda_runtime.h"
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
 

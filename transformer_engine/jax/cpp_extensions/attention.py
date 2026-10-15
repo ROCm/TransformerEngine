@@ -145,8 +145,6 @@ class _FusedAttnConfig:
         int | None
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
-<<<<<<< HEAD
-=======
 
     @property
     def effective_window_size(self) -> Tuple[int, int]:
@@ -154,7 +152,6 @@ class _FusedAttnConfig:
         if self.cp_striped_window_size is not None:
             return self.cp_striped_window_size
         return self.window_size
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
 
 @dataclass
@@ -238,8 +235,6 @@ class FusedAttnHelper:
     head_dim_v: int
     window_size: Tuple[int, int]
     return_max_logit: bool = False
-<<<<<<< HEAD
-=======
     bottom_right_diagonal: bool = True
     attn_scale: float = 1.0
     bias_batch: Optional[int] = None
@@ -247,7 +242,6 @@ class FusedAttnHelper:
     bias_seqlen_q: Optional[int] = None
     bias_seqlen_kv: Optional[int] = None
     max_segments_per_seq: int = 1
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -255,28 +249,6 @@ class FusedAttnHelper:
         return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
     def get_fused_attn_backend(self):
-<<<<<<< HEAD
-        """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(
-            self.is_training,
-            jax_dtype_to_te_dtype(self.q_dtype),
-            jax_dtype_to_te_dtype(self.kv_dtype),
-            self.qkv_layout.value,
-            self.attn_bias_type.value,
-            self.attn_mask_type.value,
-            self.softmax_type.value,
-            self.dropout_probability,
-            self.q_num_heads,
-            self.kv_num_heads,
-            self.q_max_seqlen,
-            self.kv_max_seqlen,
-            self.head_dim_qk,
-            self.head_dim_v,
-            self.window_size[0],
-            self.window_size[1],
-            self.return_max_logit,
-            not self.is_non_deterministic_allowed(),
-=======
         """Get the fused attention kernel backend.
 
         Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
@@ -334,7 +306,6 @@ class FusedAttnHelper:
                 bias_seqlen_q=bias_seqlen_q,
                 bias_seqlen_kv=bias_seqlen_kv,
             )
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         )
 
         AttentionLogging.setup_logging()
@@ -544,25 +515,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
-<<<<<<< HEAD
-        backend = FusedAttnHelper(
-            config.is_training,
-            q_dtype,
-            k_dtype,
-            config.qkv_layout,
-            config.attn_bias_type,
-            config.attn_mask_type,
-            config.softmax_type,
-            config.dropout_probability,
-            attn_heads,
-            num_gqa_groups,
-            q_max_seqlen,
-            kv_max_seqlen,
-            q_head_dim,
-            v_head_dim,
-            config.window_size,
-            config.return_max_logit,
-=======
         input_batch = reduce(operator.mul, batch_shape)
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
         if config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
@@ -593,7 +545,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=config.max_segments_per_seq,
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         ).get_fused_attn_backend()
 
         if not is_hip_extension():
@@ -613,7 +564,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                     )
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
-                raise ValueError(f"Unsupported {backend=}")
+                raise ValueError(f"Unsupported backend: {message}")
         else:
             if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
@@ -625,19 +576,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
-<<<<<<< HEAD
-                raise ValueError(f"Unsupported {backend=}")
-=======
-                softmax_shape = (
-                    *batch_shape,
-                    attn_heads,
-                    q_max_seqlen,
-                    config.max_segments_per_seq,
-                )
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-        else:
-            raise ValueError(f"Unsupported backend: {message}")
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
+                raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
             # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
@@ -689,17 +628,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             config.max_segments_per_seq,
-<<<<<<< HEAD
-            config.window_size[0],
-            config.window_size[1],
-            config.return_max_logit,
-            bottom_right_diagonal,
-=======
             config.effective_window_size[0],
             config.effective_window_size[1],
             config.return_max_logit,
             config.bottom_right_diagonal,
->>>>>>> 796346c0e0497b1f56a8d36ec76e02db5a6fed47
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])

@@ -547,6 +547,12 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
     }
   });
 
+#ifdef USE_ROCM
+  // The kernel records the scale layout it wrote (compact on ROCm).
+  grouped_output_py.attr("_with_gemm_swizzled_scales") =
+      py::cast(grouped_output_tensor_cpp.get_with_gemm_swizzled_scales());
+#endif
+
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
@@ -920,10 +926,16 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // total_tokens > 0: an empty grouped tensor carries null data pointers, which the
   // unfused chain's dedicated empty-input handling accepts and the kernel's pointer
   // validation (correctly) rejects.
+#ifdef USE_ROCM
+  // The ROCm kernel runs on every supported arch.
+  const bool fused_kernel_supported = true;
+#else
+  const bool fused_kernel_supported = transformer_engine::cuda::sm_arch() >= 100;
+#endif
   const bool use_fused_kernel =
       transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true) && need_columnwise &&
       has_usable_offsets && total_tokens > 0 && otype == DType::kBFloat16 &&
-      op_dtype == DType::kFloat8E4M3 && transformer_engine::cuda::sm_arch() >= 100;
+      op_dtype == DType::kFloat8E4M3 && fused_kernel_supported;
   if (use_fused_kernel) {
     const auto rowwise_data = rowwise_data_py.cast<at::Tensor>();
     const auto rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
@@ -994,7 +1006,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
     grouped_x.attr("columnwise_data") = columnwise_data;
     grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
-    grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
+    // The kernel records the scale layout it wrote (compact on ROCm).
+    grouped_x.attr("_with_gemm_swizzled_scales") =
+        py::cast(output_nvte.get_with_gemm_swizzled_scales());
 
     if (return_dequantized) {
       return py::cast(dequantized);
