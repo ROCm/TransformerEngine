@@ -64,19 +64,18 @@ SCALE_GROUP_SIZE = 32
 def _dummy_arg(dtype: torch.dtype, device: torch.device):
     """One-element placeholder for an unused uniform-signature kernel arg.
 
-    Cached per (dtype, device): the kernel never dereferences these buffers, so a
-    single shared zero tensor is reused across calls instead of allocating+zeroing
-    a fresh one each launch (which added a per-call alloc + fill-kernel + launch).
+    Cached per (dtype, device) and shared across calls: the kernel never
+    dereferences these buffers, so a single zero tensor avoids a per-launch
+    allocate+zero of a fresh one.
     """
     return torch.zeros(1, dtype=dtype, device=device)
 
 
 # Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
-# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on EVERY
-# launch -- ~70 us/launch of pure Python, which dominated the host cost on small
-# GEMMs. flyc.compile returns a CompiledFunction whose __call__ skips all of that
-# (~5 us): constexpr values are baked at compile time, so one CompiledFunction per
-# (shape-class, dtype, layout) key serves every pointer/scalar/stream variation.
+# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
+# launch; flyc.compile returns a CompiledFunction whose __call__ skips that, baking
+# constexpr values at compile time so one CompiledFunction per (shape-class, dtype,
+# layout) key serves every pointer/scalar/stream variation.
 # NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
 # these kernel modules never mutate their captured globals between launches, so it
 # is safe here. Keyed identically to the underlying @lru_cache launcher builders.
@@ -548,7 +547,6 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
-        b_scale_ptrs: fx.Tensor = None,
     ):
         # Total output tiles. Dense uses this as the grid extent; grouped uses it as
         # the drain bound for the persistent loop. For fwd/dgrad, c_m = M_total spans
@@ -604,12 +602,12 @@ def _compile_kernel(
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
             wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
 
-            # Grouped-TN forward: the weights arrive as G independently-allocated
+            # Grouped fwd/dgrad: the weights arrive as G independently-allocated
             # per-expert slabs (not one packed buffer), so B is addressed from a
             # per-expert base pointer read from ``b_data_ptrs`` rather than an
-            # expert-shifted column into a packed B. Reuse ``gB``'s static layout
-            # (compile-time cosize) and swap only the base per tile. NN/wgrad keep
-            # the packed-B expert-offset folds; dense never enters here.
+            # expert-shifted offset into a packed B. Reuse ``gB``'s static layout
+            # (compile-time cosize) and swap only the base per tile. wgrad keeps the
+            # packed-B expert-offset folds; dense never enters here.
             b_ptr_layout = fx.get_layout(gB)
 
             # LDS broadcast scratch (one int32), following the persistent-kernel
@@ -1769,7 +1767,6 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
-        b_scale_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # The integration only dispatches aligned shapes; no partial-tile masking exists.
@@ -1793,7 +1790,6 @@ def _compile_kernel(
             work_queue,
             work_counter,
             b_data_ptrs,
-            b_scale_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1817,7 +1813,6 @@ def do_gemm(
     work_queue: fx.Tensor = None,
     work_counter: fx.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
-    b_scale_ptrs: torch.Tensor = None,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -1969,11 +1964,9 @@ def do_gemm(
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.view(-1)
-    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
-    # These placeholders are never dereferenced by the kernel, so they are cached
-    # (per dtype+device) rather than re-allocated+zeroed every call -- each
-    # torch.zeros is an alloc + a fill kernel + a launch, which on small/fast GEMMs
-    # dominated the host launch time (4 such allocs per call -> ~4.6x CPU overhead).
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers. These
+    # placeholders are never dereferenced by the kernel, so a cached shared buffer
+    # (see _dummy_arg) is used rather than a fresh allocate+zero every call.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
@@ -1993,19 +1986,15 @@ def do_gemm(
         work_queue_arg = _dummy_arg(torch.int32, A.device)
         work_counter_arg = _dummy_arg(torch.int32, A.device)
 
-    # Per-expert weight base pointers (grouped TN forward only): an int64[G] device
-    # array of each expert's B-data / B-scale base address, read in-kernel so the
-    # weight operand needs no host-side concat. Every other path (dense, NN, wgrad)
-    # supplies a dtype-correct placeholder to keep the flyc.compile positional ABI
-    # uniform; the kernel never dereferences it there.
+    # Per-expert weight base pointers (grouped fwd TN / dgrad NN): an int64[G] device
+    # array of each expert's B-data base address, read in-kernel so the weight operand
+    # needs no host-side concat. Dense and wgrad supply a dtype-correct placeholder to
+    # keep the flyc.compile positional ABI uniform; the kernel never dereferences it
+    # there. (The B-scale stays packed -- no per-expert scale pointers.)
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
-    if b_scale_ptrs is not None:
-        b_scale_ptrs_arg = b_scale_ptrs.contiguous().view(-1)
-    else:
-        b_scale_ptrs_arg = _dummy_arg(torch.int64, A.device)
 
     launch_key = (
         "mxfp8_gemm",
@@ -2033,7 +2022,6 @@ def do_gemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
-        b_scale_ptrs_arg,
         stream,
     )
     _compiled_launch(

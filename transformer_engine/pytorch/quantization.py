@@ -343,6 +343,15 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     # alignment as the conservative fallback for context-free callers.
     if recipe.custom():
         return recipe.quantization_alignment
+    # The FlyDSL grouped GEMM (gfx950 opt-in) tiles every expert with BLOCK_M=256
+    # across all dtypes, so per-expert token counts must be 256-aligned regardless of
+    # recipe.
+    if (
+        IS_HIP_EXTENSION
+        and get_device_compute_capability() == (9, 5)
+        and os.environ.get("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+    ):
+        return 256
     if recipe.mxfp8():
         # HipKittens grouped GEMM requires 256-aligned expert dimensions.
         # HK is used by default when NVTE_USE_CUTLASS_GROUPED_GEMM=1,

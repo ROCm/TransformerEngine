@@ -1046,9 +1046,8 @@ def _run_mxfp8_grouped(
     In both, ``k`` is A's per-expert contraction (TN: K_in; NN: N_out) and ``n`` is
     the output width. ``m_splits`` is the Python list of per-expert token counts
     (already host-resident); the per-tile ``(pid_m, pid_n, expert)`` descriptor
-    queue is built + shape-cached from it directly -- no device->host copy of a
-    ``group_offs`` tensor (that copy forced a blocking ``hipDeviceSynchronize``
-    that stranded the GPU idle before the kernel). Operands arrive already
+    queue is built + shape-cached from it directly, so no device->host copy of a
+    ``group_offs`` tensor (and its blocking sync) is needed. Operands arrive already
     MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
     """
     if layout not in ("TN", "NN"):
@@ -1108,11 +1107,12 @@ def _run_mxfp8_grouped(
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
 
-    # TN forward addresses the weight operand from per-expert base pointers supplied
-    # by the caller (one int64 base per expert slab); the kernel reads B slab g from
-    # b_data_ptrs[g] instead of an expert-shifted column into one packed B, so the
-    # host never concatenates the G per-expert weights. NN dgrad has no pointer array
-    # and keeps the packed-B contraction fold (phase 2).
+    # Both TN forward and NN dgrad address the weight operand from per-expert base
+    # pointers supplied by the caller (one int64 base per expert slab) when
+    # ``b_data_ptrs`` is given; the kernel reads B slab g from b_data_ptrs[g] instead
+    # of folding the expert into a packed B (an output-N column for TN, the
+    # contraction base for NN), so the host never concatenates the G per-expert
+    # weights. When ``b_data_ptrs`` is None the packed-B expert fold is used.
     mxfp8_matmul(
         a_data,
         a_scale,
@@ -1254,21 +1254,28 @@ def _run_bf16_grouped(
         a = packed grad_output [M_total, N_out]   b = packed weights [G*N_out, K_in]
 
     ``m_splits`` is the Python list of per-expert token counts (already on the
-    host). The descriptor queue is built + cached from it directly -- no
-    device->host copy of a ``group_offs`` tensor (that copy forced a blocking
-    ``hipDeviceSynchronize`` that stranded the GPU idle before the kernel).
+    host). The descriptor queue is built + cached from it directly, so no
+    device->host copy of a ``group_offs`` tensor (and its blocking sync) is needed.
     """
     from .half_prec_gemm import doGemm as _half_prec_doGemm
 
     if layout not in ("TN", "NN"):
-        raise FlyDSLUnsupportedError(f"FlyDSL BF16 grouped GEMM supports TN/NN, got {layout}")
+        raise FlyDSLUnsupportedError(f"FlyDSL half-precision grouped GEMM supports TN/NN, got {layout}")
+
+    # BF16 and FP16 share this kernel (the MFMA opcode is selected per operand dtype);
+    # take the input dtype from the operands so both route through unchanged.
+    input_dtype = a_data.dtype
+    if input_dtype not in (torch.bfloat16, torch.float16):
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL half-precision grouped GEMM requires bf16/fp16 operands, got {input_dtype}"
+        )
 
     D = _validate_or_allocate_output(
         D,
         shape=torch.Size((m_total, n)),
         dtype=output_dtype,
         device=a_data.device,
-        backend_name=f"BF16 grouped {layout}",
+        backend_name=f"half-precision grouped {layout}",
     )
 
     from .half_prec_gemm import _BLOCK_M, _BLOCK_N
@@ -1289,8 +1296,8 @@ def _run_bf16_grouped(
         m=m_total,
         n=n,
         k=k,
-        input_dtype=torch.bfloat16,
-        label="BF16 grouped",
+        input_dtype=input_dtype,
+        label="half-precision grouped",
         epilogue=epilogue,
         bias=bias_arg,
         group=True,
@@ -1343,6 +1350,12 @@ def _run_bf16_grouped_wgrad(
 
     num_groups = len(m_splits)
     device = dW.device
+    # BF16/FP16 share the kernel; take the dtype from the operands.
+    input_dtype = dy_cols[0].dtype
+    if input_dtype not in (torch.bfloat16, torch.float16):
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL half-precision grouped wgrad requires bf16/fp16 operands, got {input_dtype}"
+        )
     if n_out % _BLOCK_M != 0:
         raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
     if k_in % _BLOCK_N != 0:
@@ -1366,12 +1379,10 @@ def _run_bf16_grouped_wgrad(
         x_data = gd.uniform_pad_concat([x_cols[e] for e in ids], k_pad)
 
         # Fast path: when this bucket's experts are exactly rows 0..G-1 in order
-        # (the common single-bucket / balanced case), the bucket-local expert index
-        # equals the global index, so the kernel can write straight into dW -- no
-        # bucket-local buffer, no scatter copy. This reproduces the pre-bucketing
-        # single-launch path byte-for-byte (and avoids a full-dW-size copy that
-        # otherwise regresses the balanced case ~15%). Only genuinely multi-bucket
-        # (skewed) launches pay the scatter, where the K savings dwarf it.
+        # (the single-bucket / balanced case), the bucket-local expert index equals
+        # the global index, so the kernel writes straight into dW -- no bucket-local
+        # buffer and no scatter copy. Only multi-bucket (skewed) launches allocate a
+        # bucket-local output and scatter it back into dW.
         direct = ids == list(range(num_groups))
         dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
                                              device=device)
@@ -1389,8 +1400,8 @@ def _run_bf16_grouped_wgrad(
             m=n_out,
             n=k_in,
             k=k_pad,
-            input_dtype=torch.bfloat16,
-            label="BF16 grouped wgrad",
+            input_dtype=input_dtype,
+            label="half-precision grouped wgrad",
             group=False,
             num_groups=bsize,
             work_queue=work_queue,

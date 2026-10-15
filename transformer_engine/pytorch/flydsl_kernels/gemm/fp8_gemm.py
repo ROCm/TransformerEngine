@@ -257,10 +257,12 @@ def _compile_kernel(
         grouped = group or wgrad
         num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
 
-        # Grouped-TN forward (weight_ptrs): weights are G independently-allocated
-        # per-expert slabs, addressed from a per-expert base pointer read from
-        # ``b_data_ptrs`` (reusing gB's static layout) instead of an expert-shifted
-        # B row. Forward-only compile flag; dgrad/wgrad keep the packed-B fold.
+        # weight_ptrs: weights are G independently-allocated per-expert slabs,
+        # addressed from a per-expert base pointer read from ``b_data_ptrs`` (reusing
+        # gB's static layout) instead of an expert-shifted B row. FP8 is TN-only, so
+        # both grouped forward and dgrad (dgrad feeds host-transposed weights through
+        # this same TN kernel) set this compile-time flag; wgrad keeps the packed-B
+        # fold.
         if const_expr(weight_ptrs):
             b_ptr_layout = fx.get_layout(gB)
 
@@ -1371,10 +1373,11 @@ def doGemm(
         work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
         work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
 
-    # Per-expert weight base pointers (grouped TN forward only): compile a kernel that
-    # reads each expert's weight slab from b_data_ptrs[g] instead of concatenating the
-    # G weights host-side. weight_ptrs is a compile-time flag keyed into the kernel
-    # cache; dgrad/wgrad leave it False and pass a placeholder never dereferenced.
+    # Per-expert weight base pointers (grouped forward and dgrad -- both run on this
+    # TN kernel, dgrad over host-transposed weights): compile a kernel that reads each
+    # expert's weight slab from b_data_ptrs[g] instead of concatenating the G weights
+    # host-side. weight_ptrs is a compile-time flag keyed into the kernel cache; wgrad
+    # leaves it False and passes a placeholder never dereferenced.
     weight_ptrs = b_data_ptrs is not None
     if weight_ptrs:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)

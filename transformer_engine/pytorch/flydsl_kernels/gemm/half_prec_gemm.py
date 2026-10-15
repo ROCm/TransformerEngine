@@ -425,11 +425,11 @@ def _compile_kernel(
             wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
             desc_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
 
-            # Grouped-TN forward: weights arrive as G independently-allocated
-            # per-expert slabs, so B is addressed from a per-expert base pointer read
-            # from ``b_data_ptrs`` (byte-addressed, reusing gB's static layout) rather
-            # than an expert-shifted column into one packed B. NN/wgrad keep the
-            # packed-B folds; dense never enters here.
+            # Grouped fwd/dgrad: weights arrive as G independently-allocated per-expert
+            # slabs, so B is addressed from a per-expert base pointer read from
+            # ``b_data_ptrs`` (byte-addressed, reusing gB's static layout) rather than
+            # an expert-shifted offset into one packed B. wgrad keeps the packed-B
+            # folds; dense never enters here.
             b_ptr_layout = fx.get_layout(gB)
 
             # LDS broadcast scratch (one int32): thread 0 writes the atomically
