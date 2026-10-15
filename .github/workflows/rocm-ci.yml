@@ -48,6 +48,9 @@ concurrency:
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
 
+permissions:
+  contents: read
+
 jobs:
   select_image:
     name: Select Docker Image
@@ -57,7 +60,7 @@ jobs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
           ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
           sparse-checkout: ci/ci_config.json
@@ -65,11 +68,16 @@ jobs:
 
       - name: Select Docker Image Tag
         id: select-image
+        env:
+          CONFIG_FROM_SOURCE: ${{ inputs.test_config_from_source }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'dev' }}
+          BRANCH_NAME: ${{ github.base_ref || github.ref_name }}
+          MANUAL_OVERRIDE: ${{ inputs.docker_image_override }}
         run: |
-          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
+          if [[ "${CONFIG_FROM_SOURCE}" == "true" ]]; then
+             echo "::notice::Debugging mode: Using ci/ci_config.json from ${GITHUB_REF_NAME}"
           else
-             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
+             echo "::notice::Using ci/ci_config.json from ${DEFAULT_BRANCH}"
           fi
 
           if [[ ! -f "ci/ci_config.json" ]]; then
@@ -77,7 +85,6 @@ jobs:
              exit 1
           fi
 
-          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
           VERSION_KEY="$BRANCH_NAME"
 
@@ -90,7 +97,6 @@ jobs:
           echo "Selected config key: $JSON_KEY"
           IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
 
-          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
           fi
@@ -116,7 +122,7 @@ jobs:
         arch_label: [mi30x, mi35x]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
 
       - name: Initialize required submodules
         run: |
@@ -137,14 +143,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - &run_container
         name: Run Container
@@ -161,9 +167,9 @@ jobs:
             --pid=host \
             --group-add $(getent group render | cut -d: -f3) \
             --group-add $(getent group video | cut -d: -f3) \
-            -v "${{ github.workspace }}:/workspace" \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
+            "${DOCKER_IMAGE}"
 
       - name: Install packages
         run: |
@@ -200,7 +206,7 @@ jobs:
 
           docker exec \
             -e TEST_SGPU=1 \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
@@ -246,7 +252,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
@@ -273,7 +279,7 @@ jobs:
         framework: [pytorch, jax]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
 
       - name: Host Diagnostics
         run: |
@@ -287,14 +293,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - *run_container
 
@@ -338,7 +344,7 @@ jobs:
 
           docker exec \
             -e TEST_MGPU=1 \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e TEST_SCRIPT=$TEST_SCRIPT \
             -e LOG_FILE=$LOG_FILE \
             -e SUITE_NAME=$SUITE_NAME \
@@ -374,7 +380,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
           path: |
