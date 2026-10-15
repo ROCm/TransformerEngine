@@ -9,7 +9,6 @@
 import csv
 import functools
 import gc
-import importlib.util
 import itertools
 import math
 import mmap
@@ -116,22 +115,6 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # offline tooling importable).
 
 
-def _check_mxfp4_support_with_aiter():
-    """MXFP4 gate: device support plus the aiter FP4 GEMM backend.
-
-    The MXFP4 GEMM path calls into aiter's a4w4 kernels, so a missing aiter
-    package would crash at benchmark time even on supported hardware.
-    """
-    from transformer_engine.pytorch.quantization import check_mxfp4_support
-
-    supported, reason = check_mxfp4_support()
-    if not supported:
-        return supported, reason
-    if importlib.util.find_spec("aiter") is None:
-        return False, "aiter is not installed (required for the MXFP4 GEMM backend)."
-    return True, ""
-
-
 def _precision_specs():
     """Ordered sweep of (name, recipe factory | None, support check | None).
 
@@ -148,6 +131,7 @@ def _precision_specs():
     )
     from transformer_engine.pytorch.quantization import (
         check_fp8_support,
+        check_mxfp4_support,
         check_mxfp8_support,
         check_nvfp4_support,
     )
@@ -164,7 +148,7 @@ def _precision_specs():
             check_fp8_support,
         ),
         ("mxfp8", MXFP8BlockScaling, check_mxfp8_support),
-        ("mxfp4", MXFP4BlockScaling, _check_mxfp4_support_with_aiter),
+        ("mxfp4", MXFP4BlockScaling, check_mxfp4_support),
         ("nvfp4", NVFP4BlockScaling, check_nvfp4_support),
     )
 
@@ -755,7 +739,10 @@ def pin_cpus():
 
     previous, error = {}, None
     for cpu in cpus:
-        path = _CPU_SYSFS / f"cpu{cpu}/cpufreq/scaling_governor"
+        # CPUs that share a cpufreq policy link to the same governor file.
+        path = (_CPU_SYSFS / f"cpu{cpu}/cpufreq/scaling_governor").resolve()
+        if path in previous:
+            continue
         try:
             old = path.read_text().strip()
             path.write_text("performance")

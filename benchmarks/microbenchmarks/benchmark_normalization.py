@@ -36,7 +36,9 @@ if __name__ == "__main__":
 
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
 
+import functools
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -87,6 +89,16 @@ NORM_BACKENDS = {
 }
 
 _NORM_CLS = {name: cls for name, cls in NORM_TYPES}
+
+
+@functools.lru_cache(maxsize=1)
+def _triton_norm_handles_mxfp4():
+    """False on TE builds whose Triton norm predates MXFP4 output support."""
+    try:
+        src = (Path(te.__file__).parent / "triton_kernels/norms_common.py").read_text()
+    except OSError:
+        return False
+    return "MXFP4Quantizer" in src
 
 
 def generate_cases():
@@ -159,9 +171,9 @@ def test_norm(request, microbench, case, monkeypatch):
                else "NVTE_USE_LAYERNORM_TRITON")
         if not te_honors_env(var):
             pytest.skip("Triton norm backend not available in this TE build")
-        if case["Precision"] == "mxfp4":
+        if case["Precision"] == "mxfp4" and not _triton_norm_handles_mxfp4():
             # Imperative xfail (not run): the GPU memory fault would abort the whole session.
-            pytest.xfail("Triton norm lacks MXFP4Quantizer handling: GPU memory fault")
+            pytest.xfail("Triton norm lacks MXFP4 support in this TE build (GPU memory fault)")
     if case["Backend"] == "hip" and case["hidden_size"] == 16384:
         # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch, which
         # makes HIP's exit-time teardown segfault (see pytest_unconfigure in conftest.py).

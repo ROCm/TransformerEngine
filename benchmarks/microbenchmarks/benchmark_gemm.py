@@ -32,6 +32,7 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
 
 import functools
+import importlib.util
 import os
 import warnings
 
@@ -55,8 +56,11 @@ RECIPES = build_recipes()
 # per build by _triton_gemm_env. mxfp8 defaults to HipKittens, forced to hipBLASLt via
 # NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. FlyDSL
 # (gfx950-only, BF16/FP8/MXFP8) is NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
+# mxfp4 runs AITER a4w4 unless NVTE_ROCM_USE_HIPBLASLT_MXFP4=1 (cpp_extensions/gemm.py);
+# that hipBLASLt path fails in the te.Linear backward, so it isn't benchmarked.
 _GEMM_TRITON = "NVTE_USE_GEMM_TRITON"
 _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
+_HIPBLASLT_MXFP4 = "NVTE_ROCM_USE_HIPBLASLT_MXFP4"
 _GEMM_BACKEND = "NVTE_GEMM_BACKEND"
 
 # Triton's env is resolved at runtime by _triton_gemm_env (mechanism varies by build).
@@ -64,6 +68,7 @@ GEMM_BACKENDS = {
     "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None},
     "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
     "flydsl":     {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: "FLYDSL"},
+    "aiter":      {_GEMM_TRITON: None, _HIPBLASLT_MXFP4: None, _GEMM_BACKEND: None},
 }
 
 # Backends with a real choice per precision (the supported-backends table).
@@ -71,6 +76,7 @@ _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "triton", "flydsl"],
     "fp8": ["hipblaslt", "flydsl"],
     "mxfp8": ["hipblaslt", "hipkittens", "flydsl"],
+    "mxfp4": ["aiter"],
 }
 
 
@@ -264,6 +270,8 @@ def test_gemm(microbench, case, monkeypatch):
         pytest.skip("HipKittens GEMM needs 256-aligned N/K")
     if case["Backend"] == "flydsl" and not _flydsl_gemm_supported():
         pytest.skip("FlyDSL GEMM backend not available (needs gfx950 + flydsl package)")
+    if case["Backend"] == "aiter" and importlib.util.find_spec("aiter") is None:
+        pytest.skip("aiter is not installed (required for the MXFP4 GEMM backend)")
     # Triton's selector varies by TE version (NVTE_GEMM_BACKEND=TRITON or legacy toggle).
     backend_env = _triton_gemm_env() if case["Backend"] == "triton" else GEMM_BACKENDS[case["Backend"]]
     apply_backend_env(monkeypatch, backend_env)
