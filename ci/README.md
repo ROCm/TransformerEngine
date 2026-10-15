@@ -17,6 +17,25 @@ If `JUNITXML_PREFIX` contains only a directory (no filename prefix), it should e
 Test scripts do not add any extension to the log filename so it is advised to end `JUNITXML_SUFFIX` with `.xml`.
 It is the caller's responsibility to clean up generated files.
 
+## Work-queue runner
+
+CI does not run the suite scripts one after another; `run_queue.sh` expands them into one work item per test invocation and packs those across the GPUs of the box.
+* `run_queue.sh --queue sgpu` runs the single-GPU tests of the suites in [`ci_sgpu_queue.conf`](ci_sgpu_queue.conf), one item per GPU.
+* `run_queue.sh --queue mgpu` runs the multi-GPU tests of the suites in [`ci_mgpu_queue.conf`](ci_mgpu_queue.conf). An item runs on the number of GPUs its call site declares with a `TE_CI_GPUS=N` prefix, e.g. `TE_CI_GPUS=4 run_default_fa 2 distributed/test_numerics.py`, and items that fit side by side share the box. An item that declares nothing gets the whole box.
+
+When adding a multi-GPU test, declare the smallest `N` that still runs every case the whole box does. Leave it undeclared if the test sizes itself to the visible GPU count (e.g. `nproc = torch.cuda.device_count()`): with fewer GPUs such a test does not fail, it silently runs less.
+
+The queue learns per-item durations (`ci-weights/`) to order the next run, and on a re-run of a failed job queues only the items, and where possible the individual tests, that failed (`ci-rerun/`).
+
+## Which suites a pull request runs
+
+Pull requests run only the suites their changes can affect; pushes to `dev` and release branches, and manual runs, always run every suite. The rules live in [`change_scope.py`](change_scope.py) as a first-match-wins table of path patterns: documentation alone runs nothing, a change under `transformer_engine/pytorch` runs the PyTorch suites and the examples, a change to the core library or to shared CI scripts runs everything, and a path no rule names runs everything. The job summary of the "Select Test Suites" job lists the rule each changed path matched.
+
+* CI evaluates a PR with the rules from its base branch, not from the PR, so a PR that edits the rules is judged by the merged ones (and, being a `ci/` change, runs every suite).
+* Add the label `ci-skip-scope` next to the `ci-level` label to skip these rules and run every suite at that level. Adding it to a PR that already has a `ci-level` label starts that run.
+* Check what a branch would run before pushing: `git diff --name-status --no-renames dev...HEAD | python3 ci/change_scope.py`
+* `run_queue.sh --suites "<label>..."` (or `TE_CI_SUITES`) runs a subset of a queue's suites locally the same way CI does; the rest get a passing "not selected" verdict.
+
 ## CI Docker images
 
 Default and release-specific TE CI images are listed in [`ci_config.json`](ci_config.json) under `docker_images`.
