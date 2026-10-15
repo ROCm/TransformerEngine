@@ -708,7 +708,7 @@ def _gpu_local_cores():
     for cpu in sorted(cpus):
         try:
             siblings = (_CPU_SYSFS / f"cpu{cpu}/topology/thread_siblings_list").read_text()
-            if cpu != min(_parse_cpulist(siblings)):
+            if cpu != min(_parse_cpulist(siblings) & cpus):
                 continue
         except (OSError, ValueError):
             pass
