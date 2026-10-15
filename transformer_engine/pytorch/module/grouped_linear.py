@@ -1242,14 +1242,29 @@ class _GroupedLinear(torch.autograd.Function):
         ``out``. The descriptor queue is built host-side from ``m_splits``.
         """
         from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
         # TN packed operands: activations concatenated along the token (M) axis,
         # weights along the expert*N axis. Each MXFP8 operand carries its rowwise
-        # fp8 payload and E8M0 scale; concatenate both.
-        a_data = torch.cat([im._rowwise_data for im in inputmats], dim=0)
-        a_scale = torch.cat([im._rowwise_scale_inv for im in inputmats], dim=0)
-        b_data = torch.cat([w._rowwise_data for w in weights_fp8], dim=0)
-        b_scale = torch.cat([w._rowwise_scale_inv for w in weights_fp8], dim=0)
+        # fp8 payload and E8M0 scale. Activations are bulk-allocated by
+        # split_quantize (per-expert payloads physically adjacent), so pack them
+        # with a zero-copy spanning view when contiguous; weights come from
+        # separate parameter storages and fall back to a real concat.
+        a_data = concat_or_view_rows([im._rowwise_data for im in inputmats])
+        a_scale = concat_or_view_rows([im._rowwise_scale_inv for im in inputmats])
+        # Weights are independently-allocated per-expert slabs. The grouped-TN
+        # kernel reads each expert's weight from a per-expert base pointer, so the
+        # host passes an int64[G] address array instead of concatenating the G
+        # weights into one packed buffer (the dominant host cost). b_data is a
+        # per-expert representative used only for dtype/shape. The B-scale stays
+        # packed (cheap) and keeps the in-kernel packed-column fold.
+        b_data_ptrs = torch.tensor(
+            [w._rowwise_data.data_ptr() for w in weights_fp8],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights_fp8[0]._rowwise_data
+        b_scale = concat_or_view_rows([w._rowwise_scale_inv for w in weights_fp8])
 
         # Preserve the native MXFP8 dtype so the wrapper reinterprets the uint8
         # payload to the correct fp8 view at the kernel boundary.
@@ -1271,6 +1286,7 @@ class _GroupedLinear(torch.autograd.Function):
             n=n,
             k=k,
             output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod
@@ -1292,15 +1308,21 @@ class _GroupedLinear(torch.autograd.Function):
         launch writing into ``dgrad`` ``[M_total, K_in]``. No quantization here.
         """
         from ..flydsl_kernels.gemm import _run_mxfp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
         # NN kernel-A = dY, rowwise (contraction over N_out): concat on the token
         # (M) axis. NN kernel-B = W, columnwise (transpose-read, contraction on the
-        # N_out axis): concat on the packed N_out axis. Each MXFP8 operand carries
-        # its selected payload + E8M0 scale.
-        a_data = torch.cat([g._rowwise_data for g in grad_output], dim=0)
-        a_scale = torch.cat([g._rowwise_scale_inv for g in grad_output], dim=0)
-        b_data = torch.cat([w._columnwise_data for w in weights_for_dgrad], dim=0)
-        b_scale = torch.cat([w._columnwise_scale_inv for w in weights_for_dgrad], dim=0)
+        # N_out axis). Weights are independent per-expert [N_out, K_in] columnwise
+        # slabs addressed via per-expert base pointers (no concat); dY still concats.
+        a_data = concat_or_view_rows([g._rowwise_data for g in grad_output])
+        a_scale = concat_or_view_rows([g._rowwise_scale_inv for g in grad_output])
+        b_data_ptrs = torch.tensor(
+            [w._columnwise_data.data_ptr() for w in weights_for_dgrad],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights_for_dgrad[0]._columnwise_data
+        b_scale = concat_or_view_rows([w._columnwise_scale_inv for w in weights_for_dgrad])
 
         a_data._fp8_dtype = grad_output[0]._fp8_dtype
         b_data._fp8_dtype = weights_for_dgrad[0]._fp8_dtype
@@ -1321,6 +1343,7 @@ class _GroupedLinear(torch.autograd.Function):
             k=n_out,  # NN per-expert contraction is N_out
             output_dtype=dgrad.dtype,
             layout="NN",
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod
@@ -1383,9 +1406,19 @@ class _GroupedLinear(torch.autograd.Function):
         tensors (concat on the output-N axis). No scales.
         """
         from ..flydsl_kernels.gemm import _run_bf16_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
-        a_data = torch.cat([im.reshape(-1, im.shape[-1]) for im in inputmats], dim=0)
-        b_data = torch.cat([w for w in weights], dim=0)
+        a_data = concat_or_view_rows([im.reshape(-1, im.shape[-1]) for im in inputmats])
+        # Weights are independent per-expert [N_out, K] tensors; the grouped-TN kernel
+        # reads each from a per-expert base pointer, so pass an int64[G] address array
+        # instead of concatenating the G weights. b_data is a per-expert representative
+        # (shape only; the kernel addresses weights via the pointers).
+        b_data_ptrs = torch.tensor(
+            [w.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]
         n = weights[0].size(0)
         k = weights[0].size(-1)
         m_total = a_data.size(0)
@@ -1399,15 +1432,25 @@ class _GroupedLinear(torch.autograd.Function):
             n=n,
             k=k,
             output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod
     def _backward_flydsl_bf16_grouped(*, grad_output, weights, dgrad, m_splits, m_splits_tensor):
         """FlyDSL BF16 grouped dgrad (NN): dX_e = dY_e @ W_e, one packed launch."""
         from ..flydsl_kernels.gemm import _run_bf16_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
-        a_data = torch.cat([g.reshape(-1, g.shape[-1]) for g in grad_output], dim=0)
-        b_data = torch.cat([w for w in weights], dim=0)
+        a_data = concat_or_view_rows([g.reshape(-1, g.shape[-1]) for g in grad_output])
+        # Weights are independent per-expert [N_out, K_in] tensors; the grouped-NN
+        # kernel reads each from a per-expert base pointer (no concat). b_data is a
+        # per-expert representative.
+        b_data_ptrs = torch.tensor(
+            [w.data_ptr() for w in weights],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights[0]
         n_out = grad_output[0].shape[-1]  # per-expert contraction (N_out)
         k_in = dgrad.size(-1)  # output width (K_in)
         m_total = a_data.size(0)
@@ -1422,6 +1465,7 @@ class _GroupedLinear(torch.autograd.Function):
             k=n_out,
             output_dtype=dgrad.dtype,
             layout="NN",
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod
@@ -1458,9 +1502,18 @@ class _GroupedLinear(torch.autograd.Function):
         one scalar inverse scale, gathered into length-G per-expert vectors.
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
-        a_data = torch.cat([im._data for im in inputmats], dim=0)
-        b_data = torch.cat([w._data for w in weights_fp8], dim=0)
+        a_data = concat_or_view_rows([im._data for im in inputmats])
+        # Weights are independent per-expert [N, K] FP8 tensors; the grouped-TN kernel
+        # reads each from a per-expert base pointer, so pass an int64[G] address array
+        # instead of concatenating the G weights. b_data is a per-expert representative.
+        b_data_ptrs = torch.tensor(
+            [w._data.data_ptr() for w in weights_fp8],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights_fp8[0]._data
         a_data._fp8_dtype = inputmats[0]._fp8_dtype
         b_data._fp8_dtype = weights_fp8[0]._fp8_dtype
         a_scale = torch.cat([im._scale_inv.reshape(1) for im in inputmats], dim=0)
@@ -1481,6 +1534,7 @@ class _GroupedLinear(torch.autograd.Function):
             n=n,
             k=k,
             output_dtype=out.dtype,
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod
@@ -1495,11 +1549,19 @@ class _GroupedLinear(torch.autograd.Function):
         B packed on the output axis = K_in, i.e. per expert dY @ (W^T)^T = dY @ W.
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
 
-        # A = dY (rowwise fp8 data); B = W columnwise transpose, which is the
-        # materialized [K_in, N_out] -> packed on K_in (output axis of the TN GEMM).
-        a_data = torch.cat([g._data for g in grad_output], dim=0)
-        b_data = torch.cat([w._transpose for w in weights_for_dgrad], dim=0)
+        # A = dY (rowwise fp8 data); B = W columnwise transpose, the materialized
+        # [K_in, N_out] packed on K_in (the TN GEMM output axis). The transpose
+        # backings are independent per-expert slabs, addressed via per-expert base
+        # pointers through the same TN per-expert path (no concat); dY still concats.
+        a_data = concat_or_view_rows([g._data for g in grad_output])
+        b_data_ptrs = torch.tensor(
+            [w._transpose.data_ptr() for w in weights_for_dgrad],
+            dtype=torch.int64,
+            device=a_data.device,
+        )
+        b_data = weights_for_dgrad[0]._transpose
         a_data._fp8_dtype = grad_output[0]._fp8_dtype
         b_data._fp8_dtype = weights_for_dgrad[0]._fp8_dtype
         a_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
@@ -1520,6 +1582,7 @@ class _GroupedLinear(torch.autograd.Function):
             n=k_in,
             k=n_out,
             output_dtype=dgrad.dtype,
+            b_data_ptrs=b_data_ptrs,
         )
 
     @staticmethod

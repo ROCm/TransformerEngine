@@ -1027,6 +1027,7 @@ def _run_mxfp8_grouped(
     output_dtype: torch.dtype,
     layout: str = "TN",
     bias=None,
+    b_data_ptrs=None,
 ):
     """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel.
 
@@ -1106,6 +1107,12 @@ def _run_mxfp8_grouped(
     sched = _select_grouped_sched(num_tiles, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
+
+    # TN forward addresses the weight operand from per-expert base pointers supplied
+    # by the caller (one int64 base per expert slab); the kernel reads B slab g from
+    # b_data_ptrs[g] instead of an expert-shifted column into one packed B, so the
+    # host never concatenates the G per-expert weights. NN dgrad has no pointer array
+    # and keeps the packed-B contraction fold (phase 2).
     mxfp8_matmul(
         a_data,
         a_scale,
@@ -1119,6 +1126,7 @@ def _run_mxfp8_grouped(
         num_groups=num_groups,
         work_queue=work_queue,
         work_counter=work_counter,
+        b_data_ptrs=b_data_ptrs,
         sched=sched,
     )
     return D
@@ -1232,6 +1240,7 @@ def _run_bf16_grouped(
     output_dtype: torch.dtype,
     layout: str = "TN",
     bias=None,
+    b_data_ptrs=None,
 ):
     """Dispatch a packed BF16 grouped GEMM through the persistent kernel.
 
@@ -1288,6 +1297,7 @@ def _run_bf16_grouped(
         num_groups=num_groups,
         work_queue=work_queue,
         work_counter=work_counter,
+        b_data_ptrs=b_data_ptrs,
         sched=sched,
     )
     return D
@@ -1410,6 +1420,7 @@ def _run_fp8_grouped(
     k,
     output_dtype: torch.dtype,
     bias=None,
+    b_data_ptrs=None,
 ):
     """Dispatch a packed tensor-wise FP8 grouped GEMM (TN) through the persistent kernel.
 
@@ -1465,6 +1476,7 @@ def _run_fp8_grouped(
         num_groups=num_groups,
         work_queue=work_queue,
         work_counter=work_counter,
+        b_data_ptrs=b_data_ptrs,
         sched=sched,
         m=m_total,
         n=n,

@@ -54,6 +54,40 @@ def global_i32_ptr(tensor, index):
     return llvm.IntToPtrOp(ptr_ty, addr).result
 
 
+def read_ptr_at(ptr_array, index):
+    """Load the int64 base address stored at ``ptr_array[index]``.
+
+    ``ptr_array`` is a device ``int64[G]`` of per-expert operand base addresses
+    (each the ``data_ptr()`` of one expert's independently-allocated weight slab).
+    Recovers the array base, offsets by ``index`` int64 elements (8 bytes), and
+    loads the stored address as an i64 IR value -- the per-expert operand base.
+    """
+    ptr_ty = ir.Type.parse("!llvm.ptr<1>")
+    base = _fly.extract_aligned_pointer_as_index(ptr_ty, ptr_array)
+    base = llvm.PtrToIntOp(T.i64, base).result
+    byte_off = fx.as_ir_value(fx.Int64(fx.Index(index) * fx.Index(8)))
+    addr = llvm.AddOp(base, byte_off, llvm.IntegerOverflowFlags(0)).result
+    elt_ptr = llvm.IntToPtrOp(ptr_ty, addr).result
+    return llvm.LoadOp(T.i64, elt_ptr).result
+
+
+def rebase_buffer_view(base_i64, elem_ir_type, layout):
+    """Rebuild a buffer-tensor logical-divide view at a runtime base address.
+
+    Reuses an EXISTING static ``layout`` (compile-time cosize) but swaps the base
+    pointer to the runtime ``base_i64`` address. This is how a per-expert operand
+    slice is addressed without constructing a fresh runtime-sized layout
+    (``fx.make_layout`` requires a static extent): the packed operand's layout is
+    reused and only the base moves. ``max_size=True`` lets the buffer descriptor
+    span the per-expert extent; the loader's dynamic ``soffset`` walks within it.
+    """
+    buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir_type, address_space=1)
+    base_ptr = fx.inttoptr(buf_ptr_ty, fx.Int64(base_i64))
+    view = fx.make_view(base_ptr, layout)
+    buf = fx.rocdl.make_buffer_tensor(fx.Tensor(view), max_size=True)
+    return fx.logical_divide(buf, fx.make_layout(1, 1))
+
+
 def make_claim_broadcast(claim_slot_array):
     """Recast a one-int32 LDS scratch array into a claim iterator + 1-elem view.
 
@@ -183,6 +217,84 @@ def build_wgrad_work_queue(num_groups, num_pid_m, num_pid_n, device):
     )
     work_counter = torch.zeros(1, dtype=torch.int32, device=device)
     return work_queue, work_counter, num_tiles
+
+
+def concat_or_view_rows(tensors):
+    """Concatenate per-expert tensors on dim 0, skipping the copy when possible.
+
+    ``tex.split_quantize`` bulk-allocates its per-expert outputs into one base
+    buffer (data blocks packed back-to-back, then scale blocks back-to-back), so
+    the per-expert rowwise payloads are frequently already physically adjacent --
+    the ``[M_total, cols]`` concatenation the grouped kernel wants already exists
+    in memory. When that holds, return a zero-copy spanning view over the shared
+    region instead of materializing a redundant ``torch.cat`` copy (the activation
+    and activation-scale cats on the MXFP8 forward/dgrad hot path).
+
+    Adjacency is not guaranteed (independently-allocated operands -- e.g. weights
+    from separate ``nn.Parameter`` storages -- are scattered), so fall back to
+    ``torch.cat`` whenever the inputs are not a single contiguous run. The view and
+    the cat produce bitwise-identical operands; only the copy is elided.
+    """
+    if len(tensors) == 1:
+        return tensors[0]
+
+    first = tensors[0]
+    if not first.is_cuda or first.ndim < 1:
+        return torch.cat(tensors, dim=0)
+
+    # __cuda_array_interface__ is unavailable on grad-tracking tensors. The grouped
+    # GEMM operand is consumed inside a custom autograd Function (grad handled at the
+    # module level), so a detached data view is correct; detach once up front so the
+    # adjacency walk and span wrapper both see plain tensors.
+    if any(t.requires_grad for t in tensors):
+        tensors = [t.detach() for t in tensors]
+        first = tensors[0]
+
+    trailing = first.shape[1:]
+    elem = first.element_size()
+    total_rows = 0
+    expected_ptr = first.data_ptr()
+    for t in tensors:
+        # Adjacency + uniformity: same trailing shape/dtype, row-contiguous, and
+        # starting exactly where the previous tensor ended.
+        if (
+            t.dtype != first.dtype
+            or t.shape[1:] != trailing
+            or not t.is_contiguous()
+            or t.data_ptr() != expected_ptr
+        ):
+            return torch.cat(tensors, dim=0)
+        total_rows += t.size(0)
+        expected_ptr += t.numel() * elem
+
+    # One contiguous run: wrap [total_rows*row_bytes] over the shared base pointer as
+    # raw uint8, then reinterpret back to the operand dtype. Going through bytes keeps
+    # this dtype-agnostic -- __cuda_array_interface__ has no typestr for bfloat16, so a
+    # native-dtype CAI would reject it; uint8 is always representable.
+    # The CAI carries no ownership, so anchor the source tensors on the result to keep
+    # their bulk buffer alive for the view's lifetime.
+    row_bytes = 1
+    for d in trailing:
+        row_bytes *= d
+    row_bytes *= elem
+    total_bytes = total_rows * row_bytes
+
+    class _SpanCAI:
+        __slots__ = ("__cuda_array_interface__",)
+
+        def __init__(self):
+            self.__cuda_array_interface__ = {
+                "shape": (total_bytes,),
+                "typestr": "|u1",
+                "data": (first.data_ptr(), False),
+                "strides": None,
+                "version": 3,
+            }
+
+    byte_view = torch.as_tensor(_SpanCAI(), device=first.device)
+    view = byte_view.view(first.dtype).view(total_rows, *tuple(trailing))
+    view._flydsl_span_anchor = tensors
+    return view
 
 
 def uniform_pad_concat(tensors, rows):

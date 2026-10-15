@@ -392,6 +392,7 @@ def _compile_kernel(
         num_groups: fx.Int32 = 0,
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
+        b_data_ptrs: fx.Tensor = None,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -423,6 +424,13 @@ def _compile_kernel(
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
             wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
             desc_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+
+            # Grouped-TN forward: weights arrive as G independently-allocated
+            # per-expert slabs, so B is addressed from a per-expert base pointer read
+            # from ``b_data_ptrs`` (byte-addressed, reusing gB's static layout) rather
+            # than an expert-shifted column into one packed B. NN/wgrad keep the
+            # packed-B folds; dense never enters here.
+            b_ptr_layout = fx.get_layout(gB)
 
             # LDS broadcast scratch (one int32): thread 0 writes the atomically
             # claimed slot, a barrier broadcasts it to the whole workgroup. The
@@ -503,8 +511,22 @@ def _compile_kernel(
                 fx.Uint8.ir_type,
                 wave_id,
             )
+            # Grouped B-data: rebase onto this tile's expert weight slab (byte buffer);
+            # the per-expert base already selects the expert, so in-tile addressing is
+            # LOCAL. TN reads a local column (by_n_idx); NN (dgrad, transpose-read)
+            # packs experts on the contraction axis, so the base replaces the expert*K
+            # contraction shift (b_k_off -> 0). Dense/wgrad keep the shared packed view.
+            if const_expr(group):
+                b_base_i64 = gd.read_ptr_at(b_data_ptrs, expert)
+                b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
+                b_data_col = by_n_idx
+                b_k_off = fx.Index(0)
+            else:
+                b_div_tile = b_div
+                b_data_col = by_n_b_idx
+                b_k_off = b_expert_k_off
             b_g2s = G2SLoader(
-                b_div,
+                b_div_tile,
                 gl_off_b,
                 LOAD_PASSES_HALF,
                 fx.Uint8.ir_type,
@@ -669,9 +691,11 @@ def _compile_kernel(
                 a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
             def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-                # b_expert_k_off shifts the contraction base (grouped NN/NT transpose
-                # read); by_n_b_idx shifts the B column (grouped TN). Both 0 for dense.
-                global_base = _b_global_base_bytes(k_base + b_expert_k_off, subtile, c_n, by_n_b_idx)
+                # Grouped fwd/dgrad select the expert via the rebased per-expert B view
+                # (b_g2s) with LOCAL coords: TN a local column (b_data_col), NN a zero
+                # contraction shift (b_k_off). Dense/wgrad use the shared view with the
+                # packed column by_n_b_idx and expert contraction shift b_k_off.
+                global_base = _b_global_base_bytes(k_base + b_k_off, subtile, c_n, b_data_col)
                 b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
             def stage_a_subtile(k_base, subtile, lds_a):
@@ -1336,6 +1360,7 @@ def _compile_kernel(
         num_groups: fx.Int32 = 0,
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
+        b_data_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1355,6 +1380,7 @@ def _compile_kernel(
             num_groups,
             work_queue,
             work_counter,
+            b_data_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1555,6 +1581,7 @@ def doGemm(
     num_groups: int = 0,
     work_queue: torch.Tensor = None,
     work_counter: torch.Tensor = None,
+    b_data_ptrs: torch.Tensor = None,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -1671,6 +1698,14 @@ def doGemm(
         work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
         work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
 
+    # Per-expert weight base pointers (grouped TN only): an int64[G] device array of
+    # each expert's weight-slab base address, read in-kernel so the weight operand
+    # needs no host-side concat. Dense/NN/wgrad pass a placeholder never read there.
+    if b_data_ptrs is not None:
+        b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
+    else:
+        b_data_ptrs_arg = torch.zeros(1, dtype=torch.int64, device=A.device)
+
     launch(
         A_arg,
         B_arg,
@@ -1682,5 +1717,6 @@ def doGemm(
         num_groups,
         work_queue_arg,
         work_counter_arg,
+        b_data_ptrs_arg,
         stream=stream,
     )

@@ -99,6 +99,7 @@ def _compile_kernel(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    weight_ptrs: bool = False,
 ):
     """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
 
@@ -216,6 +217,7 @@ def _compile_kernel(
         num_groups: fx.Int32 = 0,
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
+        b_data_ptrs: fx.Tensor = None,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -254,6 +256,13 @@ def _compile_kernel(
         # queue / work-steal driver; const_expr folds it out of the dense binary.
         grouped = group or wgrad
         num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
+
+        # Grouped-TN forward (weight_ptrs): weights are G independently-allocated
+        # per-expert slabs, addressed from a per-expert base pointer read from
+        # ``b_data_ptrs`` (reusing gB's static layout) instead of an expert-shifted
+        # B row. Forward-only compile flag; dgrad/wgrad keep the packed-B fold.
+        if const_expr(weight_ptrs):
+            b_ptr_layout = fx.get_layout(gB)
 
         if const_expr(grouped):
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
@@ -336,7 +345,17 @@ def _compile_kernel(
             gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
             gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
             a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
-            b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
+            # Grouped-TN forward B-data: rebase onto this tile's expert weight slab and
+            # read with a LOCAL column (base selects the expert). Other paths keep the
+            # shared packed b_div / by_n_b_idx.
+            if const_expr(weight_ptrs):
+                b_base_i64 = gd.read_ptr_at(b_data_ptrs, expert)
+                b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
+                b_data_col = by_n_idx
+            else:
+                b_div_tile = b_div
+                b_data_col = by_n_b_idx
+            b_g2s = G2SLoader(b_div_tile, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
             s2r = S2RLoader(fx.Int32(0), 1)
 
             layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -494,11 +513,12 @@ def _compile_kernel(
                 a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
             def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-                # by_n_b_idx shifts the B row to this tile's expert block (grouped TN
-                # fwd/dgrad weights, and grouped wgrad X^T packed [G*K_in, m_pad]);
-                # reduces to the dense by_n for the dense path.
+                # Grouped-TN forward selects the expert via the rebased per-expert B
+                # view (b_g2s) with a LOCAL column (b_data_col). Other paths: by_n_b_idx
+                # shifts the B row to the expert block (grouped dgrad weights, grouped
+                # wgrad X^T); reduces to dense by_n for the dense path.
                 global_base = (
-                    (by_n_b_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K)
+                    (b_data_col + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K)
                     + k_base
                 )
                 b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
@@ -1088,6 +1108,7 @@ def _compile_kernel(
         num_groups: fx.Int32 = 0,
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
+        b_data_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1109,6 +1130,7 @@ def _compile_kernel(
             num_groups,
             work_queue,
             work_counter,
+            b_data_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1126,6 +1148,7 @@ def _cached_launch(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    weight_ptrs: bool = False,
 ):
     return _compile_kernel(
         K,
@@ -1137,6 +1160,7 @@ def _cached_launch(
         group=group,
         sched=sched,
         wgrad=wgrad,
+        weight_ptrs=weight_ptrs,
     )
 
 
@@ -1240,6 +1264,7 @@ def doGemm(
     num_groups: int = 0,
     work_queue: torch.Tensor = None,
     work_counter: torch.Tensor = None,
+    b_data_ptrs: torch.Tensor = None,
     sched: str = "worksteal",
     wgrad: bool = False,
     m: int = None,
@@ -1346,6 +1371,16 @@ def doGemm(
         work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
         work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
 
+    # Per-expert weight base pointers (grouped TN forward only): compile a kernel that
+    # reads each expert's weight slab from b_data_ptrs[g] instead of concatenating the
+    # G weights host-side. weight_ptrs is a compile-time flag keyed into the kernel
+    # cache; dgrad/wgrad leave it False and pass a placeholder never dereferenced.
+    weight_ptrs = b_data_ptrs is not None
+    if weight_ptrs:
+        b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
+    else:
+        b_data_ptrs_arg = torch.zeros(1, dtype=torch.int64, device=A.device)
+
     launch = _cached_launch(
         int(K_runtime),
         A.dtype,
@@ -1356,6 +1391,7 @@ def doGemm(
         group,
         sched,
         wgrad,
+        weight_ptrs,
     )
     launch(
         A_arg,
@@ -1370,5 +1406,6 @@ def doGemm(
         num_groups,
         work_queue_arg,
         work_counter_arg,
+        b_data_ptrs_arg,
         stream=stream,
     )
