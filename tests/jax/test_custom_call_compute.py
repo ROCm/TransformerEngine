@@ -567,17 +567,13 @@ class TestNorm:
 
         precise_comparison = True
 
-<<<<<<< HEAD
         if (
-            get_cudnn_version() < (9, 10, 0) or is_hip_extension()
+            is_hip_extension()
         ) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
             precise_comparison = False
         elif is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
-=======
-        if is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
->>>>>>> upstream/release_v2.20.2
             # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
             # for zero-centered gamma always
             precise_comparison = False
