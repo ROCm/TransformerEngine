@@ -1,18 +1,35 @@
 name: Claude PR Action
 
-# Single workflow: PR review or summary, triggered by label, comment, or manually.
+# Single workflow: PR review or summary, triggered by comment or manually.
 #
 # Triggers:
-#   - Label `claude-review` / `claude-summary` on a PR
-#   - Comment `/claude review` / `/claude summary` from a writer on a PR
+#   - Comment `/claude review` / `/claude summary` on a PR from a user with
+#     write access to this repository
 #   - Manual workflow_dispatch (re-runs)
+#
+# Security model:
+#   These triggers run with CLAUDE_CODE_OAUTH_TOKEN and a write-scoped
+#   GITHUB_TOKEN, while the job checks out PR code that may come from an
+#   untrusted fork. The trust decision is the requester's: a maintainer
+#   asks for one run on the PR as it is at that moment.
+#     - Only users with write/maintain/admin permission (checked via the
+#       API, not `author_association`) can trigger a run.
+#     - Each request runs once; later pushes are not reviewed until someone
+#       asks again. The job fails if the PR head moved between the request
+#       and the checkout.
+#     - Claude Code configuration from the PR tree (`.claude/`, CLAUDE.md,
+#       `.mcp.json`) is deleted before Claude runs, since it can define hooks
+#       that execute shell commands with the job's secrets. The trusted
+#       CLAUDE.md is restored from the default branch.
+#   Prompt injection through PR content remains possible; the requester
+#   should skim the PR before asking for a run.
 #
 # Auth model:
 #   - Anthropic: subscription via CLAUDE_CODE_OAUTH_TOKEN.
 #   - GitHub:    workflow's GITHUB_TOKEN passed as `github_token` to
 #                claude-code-action. This skips the Anthropic OIDC App-token
-#                exchange (which rejects pull_request_target / issue_comment
-#                subjects), so this workflow can run directly on those events
+#                exchange (which rejects issue_comment subjects), so this
+#                workflow can run directly on that event
 #                with no repository_dispatch indirection and no PAT. Cost:
 #                comments post as `github-actions[bot]` instead of
 #                `claude[bot]`. Dedup across runs uses an HTML marker
@@ -28,8 +45,6 @@ name: Claude PR Action
 # from upstream changes.
 
 on:
-  pull_request_target:
-    types: [labeled]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -50,35 +65,34 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
   resolve:
     # Fast dispatcher: parse the event, decide whether to act, ack the user.
-    # Kept lightweight so PR label/comment churn doesn't queue heavy jobs.
+    # Kept lightweight so PR comment churn doesn't queue heavy jobs.
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request_target' ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    permissions:
+      contents: read
+      pull-requests: write  # react to / reply on the triggering comment
+      issues: write
     outputs:
       action: ${{ steps.resolve.outputs.action }}
       pr:     ${{ steps.resolve.outputs.pr }}
       base:   ${{ steps.resolve.outputs.base }}
+      head:   ${{ steps.resolve.outputs.head }}
       help:   ${{ steps.resolve.outputs.help }}
     steps:
-      - name: Resolve action, PR number, and base branch
+      - name: Resolve action, PR number, base branch, and head commit
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          LABEL_NAME: ${{ github.event.label.name }}
           COMMENT_BODY: ${{ github.event.comment.body }}
-          AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
-          PR_FROM_LABEL: ${{ github.event.pull_request.number }}
+          COMMENTER: ${{ github.event.comment.user.login }}
           PR_FROM_COMMENT: ${{ github.event.issue.number }}
-          BASE_FROM_LABEL: ${{ github.event.pull_request.base.ref }}
           INPUT_ACTION: ${{ inputs.action }}
           INPUT_PR: ${{ inputs.pr_number }}
           INPUT_BASE: ${{ inputs.base }}
@@ -87,20 +101,7 @@ jobs:
           action=""; pr=""; base=""
 
           case "$EVENT_NAME" in
-            pull_request_target)
-              case "$LABEL_NAME" in
-                claude-review)  action="review"  ;;
-                claude-summary) action="summary" ;;
-              esac
-              pr="$PR_FROM_LABEL"
-              base="$BASE_FROM_LABEL"
-              ;;
             issue_comment)
-              # Only writers can trigger — drop bots and outside contributors.
-              case "$AUTHOR_ASSOC" in
-                OWNER|MEMBER|COLLABORATOR) ;;
-                *) echo "Ignoring comment from $AUTHOR_ASSOC"; exit 0 ;;
-              esac
               # Look at the first whitespace-separated token. If it's not
               # `/claude`, this isn't addressed to us — stay silent.
               first=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $1}')
@@ -108,6 +109,16 @@ jobs:
                 echo "Not a /claude command; ignoring."
                 exit 0
               fi
+              # Only writers can trigger. Check the actual repository
+              # permission: `author_association` reports MEMBER for any
+              # org member and COLLABORATOR for read/triage collaborators.
+              # `.permission` folds maintain into write.
+              perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" \
+                       --jq .permission 2>/dev/null || echo none)
+              case "$perm" in
+                admin|maintain|write) ;;
+                *) echo "Ignoring /claude from $COMMENTER (permission: $perm)"; exit 0 ;;
+              esac
               # Second token is the subcommand. Unknown/missing → post help.
               cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $2}')
               case "$cmd" in
@@ -138,17 +149,24 @@ jobs:
             exit 1
           fi
 
-          # Comment triggers (and workflow_dispatch w/o base) — look up the
-          # PR's actual merge target so the worker diffs against it.
-          if [[ -z "$base" ]]; then
-            base=$(gh pr view "$pr" \
-                     --repo "${{ github.repository }}" \
-                     --json baseRefName -q .baseRefName)
+          # Look up the PR's actual merge target (unless workflow_dispatch
+          # gave one) so the worker diffs against it, and record the head
+          # commit the run was requested for so the worker can refuse to
+          # review anything pushed after the request.
+          read -r pr_base head < <(gh pr view "$pr" \
+                                     --repo "$GITHUB_REPOSITORY" \
+                                     --json baseRefName,headRefOid \
+                                     -q '"\(.baseRefName) \(.headRefOid)"')
+          if [[ -z "${head:-}" ]]; then
+            echo "::error::Could not look up PR #$pr" >&2
+            exit 1
           fi
+          base="${base:-$pr_base}"
 
           echo "action=$action" >> "$GITHUB_OUTPUT"
           echo "pr=$pr"         >> "$GITHUB_OUTPUT"
           echo "base=$base"     >> "$GITHUB_OUTPUT"
+          echo "head=$head"     >> "$GITHUB_OUTPUT"
 
       - name: React to comment (acknowledge)
         if: steps.resolve.outputs.action != '' && github.event_name == 'issue_comment'
@@ -182,7 +200,9 @@ jobs:
           - `/claude review` — request a code review of this PR
           - `/claude summary` — generate (or update) a walkthrough comment
 
-          You can also add a label to the PR: `claude-review` or `claude-summary`.
+          Commands are accepted from users with write access. Each command runs
+          once against the PR as it is now; push more commits and ask again for
+          a new run.
           <!-- by:claude -->
           EOF
 
@@ -202,48 +222,51 @@ jobs:
       ACTION:    ${{ needs.resolve.outputs.action }}
       PR_NUMBER: ${{ needs.resolve.outputs.pr }}
       BASE_REF:  ${{ needs.resolve.outputs.base }}
+      HEAD_SHA:  ${{ needs.resolve.outputs.head }}
     steps:
-      # SECURITY GATE — must run before any step that materializes PR code.
-      # pull_request_target grants this job write-scoped GITHUB_TOKEN and the
-      # CLAUDE_CODE_OAUTH_TOKEN secret. If we then check out the fork's tree
-      # and let Claude run `git diff` etc. on it, a malicious PR can hijack
-      # those credentials (e.g. via a `.gitattributes` textconv driver).
-      # Restrict fork PRs to authors with write/maintain/admin on the base
-      # repo; same-repo PRs and workflow_dispatch already require write perms
-      # to reach this point.
-      - name: Block fork PRs from non-collaborators
-        if: github.event_name == 'pull_request_target'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          if [[ "$HEAD_REPO" == "${{ github.repository }}" ]]; then
-            echo "Same-repo PR; collaborator check not required."
-            exit 0
-          fi
-          perm=$(gh api "repos/${{ github.repository }}/collaborators/$PR_AUTHOR/permission" \
-                   --jq .permission 2>/dev/null || echo none)
-          case "$perm" in
-            admin|maintain|write)
-              echo "Fork PR author $PR_AUTHOR has $perm; allowing."
-              ;;
-            *)
-              echo "::error::Fork PR from $PR_AUTHOR ($HEAD_REPO) lacks write access (perm=$perm); refusing to run on untrusted code."
-              exit 1
-              ;;
-          esac
-
       # refs/pull/<n>/merge is GitHub's synthetic merge commit (base tip
       # merged with PR head). Checking it out gives us both parents in one
       # shot: HEAD^1 = base tip, HEAD^2 = PR head — no separate base fetch
       # needed. Caveat: the merge ref only exists when the PR is mergeable;
       # if it's missing/stale, the workflow will fail fast on checkout, which
       # is the right behavior for an unreviewable PR.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
+
+      # SECURITY: run only on the PR head the requester asked about. If the
+      # author pushed after the /claude comment, the merge ref now contains
+      # code nobody approved for a run. The clone is shallow, so read the
+      # second parent from the raw commit object rather than `HEAD^2`.
+      - name: Verify PR head matches the requested commit
+        run: |
+          set -euo pipefail
+          merged_head=$(git cat-file -p HEAD | awk '/^parent /{n++; if (n == 2) print $2}')
+          if [[ "$merged_head" != "$HEAD_SHA" ]]; then
+            echo "::error::PR head is ${merged_head:-unknown}, but the run was requested for $HEAD_SHA. The PR changed after the request; ask again to review the new commits."
+            exit 1
+          fi
+          echo "PR head $HEAD_SHA matches the request."
+
+      # SECURITY: Claude Code loads project configuration from the working
+      # tree. A PR can add `.claude/settings.json` with hooks (shell commands
+      # run with this job's secrets), `.mcp.json` servers, or CLAUDE.md files
+      # (at any depth) that steer the model. Delete all of it from the
+      # untrusted checkout, then restore the root CLAUDE.md from the default
+      # branch so reviews still get the repository's instructions.
+      - name: Remove untrusted Claude Code configuration
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          find . -path ./.git -prune -o -type d -name .claude -prune -print -exec rm -rf {} +
+          find . -path ./.git -prune -o -type f \
+            \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name .mcp.json \) -print -delete
+          git fetch --depth=1 origin "$DEFAULT_BRANCH"
+          if git cat-file -e "FETCH_HEAD:CLAUDE.md" 2>/dev/null; then
+            git show "FETCH_HEAD:CLAUDE.md" > CLAUDE.md
+          fi
 
       # Skills live in .github/agent-skills/.
       # Stage them into .claude/skills/ at runtime so Claude Code discovers
@@ -291,6 +314,8 @@ jobs:
       # of trigger event.
       - name: Configure inline-comment MCP
         id: mcp
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
           server=$(find "$(dirname "$RUNNER_WORKSPACE")/_actions/anthropics/claude-code-action" \
@@ -302,10 +327,10 @@ jobs:
                 "command": "bun",
                 "args": ["run", "$server"],
                 "env": {
-                  "REPO_OWNER": "${{ github.repository_owner }}",
-                  "REPO_NAME":  "${{ github.event.repository.name }}",
-                  "PR_NUMBER":  "${{ env.PR_NUMBER }}",
-                  "GITHUB_API_URL": "${{ github.api_url }}"
+                  "REPO_OWNER": "${GITHUB_REPOSITORY_OWNER}",
+                  "REPO_NAME":  "${REPO_NAME}",
+                  "PR_NUMBER":  "${PR_NUMBER}",
+                  "GITHUB_API_URL": "${GITHUB_API_URL}"
                 }
               }
             }
@@ -329,7 +354,7 @@ jobs:
           # exchange in claude-code-action (src/github/token.ts). Without this
           # the action would try to exchange the workflow's OIDC subject for
           # the official `claude[bot]` App token, which Anthropic rejects on
-          # pull_request_target / issue_comment events. Trade-off: comments
+          # issue_comment events. Trade-off: comments
           # post as github-actions[bot]. Dedup uses the HTML marker in the
           # prompt rather than the bot login, so this is identity-portable.
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -352,7 +377,7 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR:   ${{ env.PR_NUMBER }}
-            BASE: ${{ env.BASE_REF }}   # PR's actual merge target (label only)
+            BASE: ${{ env.BASE_REF }}   # PR's actual merge target
 
             The synthetic merge commit `refs/pull/${{ env.PR_NUMBER }}/merge`
             is checked out, so `HEAD^1` is the base tip (the PR's merge
@@ -455,7 +480,7 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR:   ${{ env.PR_NUMBER }}
-            BASE: ${{ env.BASE_REF }}   # PR's actual merge target (label only)
+            BASE: ${{ env.BASE_REF }}   # PR's actual merge target
 
             The synthetic merge commit `refs/pull/${{ env.PR_NUMBER }}/merge`
             is checked out, so `HEAD^1` is the base tip and `HEAD^2` is the
@@ -517,17 +542,7 @@ jobs:
 
       - name: Upload Claude execution log
         if: always() && (steps.review.outputs.execution_file != '' || steps.summary.outputs.execution_file != '')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: claude-${{ env.ACTION }}-pr${{ env.PR_NUMBER }}-log
           path: ${{ steps.review.outputs.execution_file || steps.summary.outputs.execution_file }}
-
-      - name: Remove trigger label
-        if: always() && github.event_name == 'pull_request_target'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          label="claude-${{ env.ACTION }}"
-          gh api --method DELETE \
-            "/repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/labels/$label" \
-            || true

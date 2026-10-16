@@ -1,0 +1,20 @@
+# trivy configuration
+# Reference: https://trivy.dev/latest/docs/references/configuration/config-file/
+#
+# TransformerEngine's trivy config, passed to the security scan workflows
+# via `trivy_config_path`. It started from the shared default and replaces
+# it wholesale, so it carries both the generic skips and TE-specific
+# tuning.
+
+scan:
+  skip-dirs:
+    - .git
+    - .venv
+    - venv
+    - build
+    - dist
+    - node_modules
+    - __pycache__
+    # Sample code with its own pinned requirements.txt files; these are
+    # not TE runtime dependencies.
+    - docs/examples
