@@ -470,8 +470,8 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=not IS_HIP_EXTENSION),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=not IS_HIP_EXTENSION),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
@@ -556,6 +556,28 @@ model_configs_fused_attn = {
     "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
     "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
+if IS_HIP_EXTENSION:
+    # max_logit turns off the asm forward on ROCm, so cp_1_6/cp_1_7 are cp_1_0/cp_1_1 without it;
+    # cp_3_5 (MLA) and cp_4_4 (sink) add max_logit cases
+    model_configs_fused_attn.update(
+        {
+            "cp_1_6": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
+            "cp_1_7": ModelConfig(2, 4096, 12, 128),  # MHA
+            "cp_3_5": ModelConfig(
+                2, 4096, 64, 192, head_dim_v=128, attn_mask_type="causal", return_max_logit=True
+            ),  # MLA
+            "cp_4_4": ModelConfig(
+                2,
+                4096,
+                64,
+                64,
+                num_gqa_groups=8,
+                attn_mask_type="causal",
+                softmax_type="learnable",
+                return_max_logit=True,
+            ),  # GQA
+        }
+    )
 
 
 dtypes = ["bf16", "fp16", "fp8"]
@@ -576,6 +598,8 @@ if test_essential:
         "cp_5_0",
         "cp_5_1",
     ]
+    if IS_HIP_EXTENSION:
+        configs += ["cp_1_6", "cp_3_5"]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
