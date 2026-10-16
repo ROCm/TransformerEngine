@@ -604,26 +604,21 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
-// Prepare a native (gfx1250) NVFP4 hipBLASLt GEMM: swizzle the block scales and fold the per-tensor
-// amax correction into a HOST scalar alpha.
+// Prepare a native (gfx1250) NVFP4 hipBLASLt GEMM: swizzle the block scales and compute the
+// per-tensor amax correction on device.
 //
-// hipBLASLt applies the FP8 (E4M3) block scales but has no NVFP4 solution that accepts a device
-// alpha, so the per-tensor (global) correction cannot ride on a device alpha the way the CUDA path
-// does. A single fused kernel swizzles both operands' scales and forms
+// hipBLASLt applies the FP8 (E4M3) block scales. A single fused kernel swizzles both operands'
+// scales and forms
 //   c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
-// on device; only that scalar is copied back to the host. The GEMM then computes c0*(A*B) + beta*C
-// in its fp32 accumulator with a single round to the output dtype (matching the reference addmm).
-// No post-GEMM scaling or C copy is needed.
-//
-// FIXME(AIHPBLAS-3571): the host-scalar-alpha detour (device->host c0 copy + stream sync) only
-// exists because hipBLASLt has no NVFP4 device-alpha solution. Once
-// https://amd-hub.atlassian.net/browse/AIHPBLAS-3571 is fixed, pass c0 as a device scalar alpha and
-// drop the c0 readback / hipStreamSynchronize below.
+// in device memory. c0 is then used as the GEMM alpha, so the GEMM computes c0*(A*B) + beta*C in
+// its fp32 accumulator with a single round to the output dtype (matching the reference addmm).
+// No post-GEMM scaling or C copy is needed. hipblaslt_gemm() passes c0 as a device scalar alpha
+// when hipBLASLt has a matching solution and otherwise reads it back to the host.
 static void setup_nvfp4_gemm_native(
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
     int m, int n, int k, float alpha_in,
-    void* workspace, size_t& workspaceSize, float* alpha_out,
+    void* workspace, size_t& workspaceSize, const float** c0_dev_out,
     const void** a_scale_swz_out, const void** b_scale_swz_out,
     hipStream_t stream) {
 
@@ -672,15 +667,11 @@ static void setup_nvfp4_gemm_native(
   float* c0_dev = reinterpret_cast<float*>(base + res_a + res_b);
 
   // One fused launch swizzles both operands' scales (padding written inline, no memset) and forms
-  // c0 on device; a single 4-byte copy then brings c0 to the host for the GEMM's host scalar alpha.
+  // c0 on device.
   launch_nvfp4_prep(a_sinv.dptr, swz_a, m, static_cast<int>(a_sinv.shape[1]), b_sinv.dptr, swz_b, n,
                     static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B, alpha_in,
                     factor_inv, c0_dev, stream);
-  float host_c0 = 0.0f;
-  // FIXME(AIHPBLAS-3571): drop this c0 readback + sync once hipBLASLt supports NVFP4 device alpha.
-  NVTE_CHECK_CUDA(hipMemcpyAsync(&host_c0, c0_dev, sizeof(float), hipMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-  *alpha_out = host_c0;
+  *c0_dev_out = c0_dev;
   *a_scale_swz_out = swz_a;
   *b_scale_swz_out = swz_b;
 }
@@ -1447,6 +1438,46 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
   }
 }
 
+// Select device scalar alpha if hipBLASLt has a kernel for this GEMM config (not all NVFP4 kernels
+// support it yet), probed once per config. Returns false and leaves host pointer mode otherwise.
+static bool use_device_scalar_alpha(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t operationDesc,
+                                    hipblasLtMatrixLayout_t Adesc, hipblasLtMatrixLayout_t Bdesc,
+                                    hipblasLtMatrixLayout_t Ddesc, size_t workspaceSize,
+                                    const GemmAlgoCache::Key& cfg) {
+#ifdef NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA
+  static std::mutex mt;
+  static std::map<GemmAlgoCache::Key, bool, GemmAlgoCache::Key::Comp> supported;
+
+  int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+      operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+
+  std::lock_guard<std::mutex> lock(mt);
+  auto it = supported.find(cfg);
+  if (it == supported.end()) {
+    hipblasLtMatmulPreference_t preference = nullptr;
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
+        preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+    hipblasLtMatmulHeuristicResult_t result;
+    int count = 0;
+    const hipblasStatus_t status = hipblasLtMatmulAlgoGetHeuristic(
+        handle, operationDesc, Adesc, Bdesc, Ddesc, Ddesc, preference, 1, &result, &count);
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
+    it = supported.emplace(cfg, status == HIPBLAS_STATUS_SUCCESS && count > 0).first;
+  }
+
+  if (!it->second) {
+    pointer_mode = HIPBLASLT_POINTER_MODE_HOST;
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+  }
+  return it->second;
+#else
+  return false;
+#endif
+}
+
 
 void hipblaslt_gemm(const Tensor *inputA,
                     const Tensor *inputB,
@@ -1479,11 +1510,11 @@ void hipblaslt_gemm(const Tensor *inputA,
   // On every other architecture hipBLASLt cannot consume the block scales, so we fall
   // back to dequantizing FP4 -> BF16 (block scales only) and running a standard BF16 GEMM.
   //
-  // The per-tensor amax correction (alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)) is applied
-  // differently per path because hipBLASLt has no NVFP4 solution that accepts a device alpha: the
-  // native path folds it into a HOST scalar alpha (setup_nvfp4_gemm_native) so the GEMM computes
-  // c0*(A*B) + beta*C directly, while the BF16 dequant fallback folds it into a device alpha vector
-  // (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST).
+  // The per-tensor amax correction c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2) is
+  // folded into the GEMM alpha. The native path passes c0 as a device scalar alpha
+  // (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT) when hipBLASLt has a solution for it
+  // and otherwise reads c0 back to a host scalar alpha; the BF16 dequant fallback uses a device
+  // alpha vector (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST).
   //
   // Only NVFP4 uses this dequant fallback. MXFP4 (also an FP4 data dtype) has a native
   // hipBLASLt path, so gate on the scaling mode rather than the FP4 data dtype (which
@@ -1502,17 +1533,16 @@ void hipblaslt_gemm(const Tensor *inputA,
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
 
-  // Native NVFP4 (gfx1250) folds the per-tensor amax correction into a host scalar alpha (c0) so
-  // hipBLASLt computes c0*(A*B) + beta*C in one fp32-accumulated round; beta stays the caller's.
+  // Native NVFP4 (gfx1250) uses c0 as alpha so hipBLASLt computes c0*(A*B) + beta*C in one
+  // fp32-accumulated round; beta stays the caller's. alpha_ptr is set once the pointer mode is known.
   float nvfp4_c0 = 1.0f;
+  const float* nvfp4_c0_dev = nullptr;
   const void* nvfp4_scaleA_swz = nullptr;
   const void* nvfp4_scaleB_swz = nullptr;
   if (use_nvfp4_native) {
     setup_nvfp4_gemm_native(*inputA, transa, *inputB, transb, m, n, k, alpha,
-                            workspace, workspaceSize, &nvfp4_c0,
+                            workspace, workspaceSize, &nvfp4_c0_dev,
                             &nvfp4_scaleA_swz, &nvfp4_scaleB_swz, stream);
-    alpha_ptr = static_cast<const void*>(&nvfp4_c0);
-    beta_ptr = static_cast<const void*>(&beta);
   } else if (use_nvfp4) {
     dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
                             m, n, k, alpha, workspace, workspaceSize,
@@ -1714,7 +1744,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     // Native NVFP4 GEMM (gfx1250): the FP4 (E2M1) operands carry FP8 (E4M3) scales, one per
     // 16-element block along the contraction (innermost) dimension. hipBLASLt applies these block
     // scales (K-tiled, see setup_nvfp4_gemm_native); the per-tensor amax correction rides on the
-    // host scalar alpha (c0) so it is folded into the GEMM itself.
+    // alpha (c0) so it is folded into the GEMM itself.
     scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
     NVTE_CHECK_HIPBLASLT(
         hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
@@ -1776,8 +1806,8 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-  // Only the BF16 dequant fallback uses the device alpha vector; the native NVFP4 path applies
-  // its per-tensor correction after the GEMM, so it keeps the default host pointer mode.
+  // Only the BF16 dequant fallback uses the device alpha vector; the native NVFP4 path selects its
+  // pointer mode below.
   if (use_nvfp4 && !use_nvfp4_native) {
     int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
@@ -1790,6 +1820,18 @@ void hipblaslt_gemm(const Tensor *inputA,
     ((use_fp8 || use_mxfp4) && gelu) ? aux_type : (hipDataType)-1,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
     use_nvfp4 && !use_nvfp4_native);
+
+  if (use_nvfp4_native) {
+    if (use_device_scalar_alpha(handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg)) {
+      alpha_ptr = static_cast<const void*>(nvfp4_c0_dev);
+    } else {
+      NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
+                                     stream));
+      NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+      alpha_ptr = static_cast<const void*>(&nvfp4_c0);
+    }
+  }
+
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
