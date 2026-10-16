@@ -13,6 +13,8 @@ set -euo pipefail
 # Derive ROCm version and aiter commit -> cache key
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DIR="${ROOT_DIR}/ci"
+# ci/_utils.sh reads TEST_SGPU/TEST_MGPU without defaults.
+: "${TEST_SGPU:=}" "${TEST_MGPU:=}"
 . "${ROOT_DIR}/ci/_utils.sh"
 ROCM_PATH="$(resolve_rocm_path)"
 export ROCM_PATH
