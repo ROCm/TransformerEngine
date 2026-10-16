@@ -131,8 +131,7 @@ def setup_common_extension() -> CMakeExtension:
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
 
-        # AITER a4w4 (FP4) GEMM backend (gfx950-only; CMake disables it cleanly
-        # on other arches).
+        # AITER a4w4 (FP4) GEMM backend (gfx950-only)
         if int(os.getenv("NVTE_AITER_GEMM", "1"))==0:
             cmake_flags.append("-DUSE_AITER_GEMM=OFF")
         else:
