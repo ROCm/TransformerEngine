@@ -557,7 +557,8 @@ model_configs_fused_attn = {
     "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 if IS_HIP_EXTENSION:
-    # max_logit turns off the asm forward on ROCm, so cp_1_6/cp_1_7 keep covering it
+    # max_logit turns off the asm forward on ROCm, so cp_1_6/cp_1_7 are cp_1_0/cp_1_1 without it;
+    # cp_3_5 (MLA) and cp_4_4 (sink) add max_logit cases
     model_configs_fused_attn.update(
         {
             "cp_1_6": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
