@@ -89,6 +89,34 @@ if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
     import os
 
+
+# Cache of the per-expert weight base-pointer device tensors used by the FlyDSL
+# grouped GEMM (one int64[G] array of each expert's data_ptr()). Rebuilding it
+# every call -- torch.tensor([...], device=cuda) -- costs a blocking H2D copy that
+# is the single largest host cost on the grouped forward/dgrad path. Expert weight
+# storages are stable across calls, so key the cache on the storage pointers and
+# only re-upload when one actually moves (reallocation / first use).
+_B_DATA_PTRS_CACHE = {}
+
+
+def _cached_b_data_ptrs(datas, device):
+    """Return (and cache) an int64[G] device tensor of ``t.data_ptr()`` for ``datas``.
+
+    ``datas`` is the list of per-expert operand tensors (e.g. each weight's rowwise
+    or columnwise payload). ``data_ptr()`` reads are host-only (no sync); the
+    expensive H2D ``torch.tensor`` upload runs only on a cache miss. Keyed on the
+    pointer tuple itself, so stable weight storage (the common case) reuses one
+    device tensor across every call and the cache stays bounded to the distinct
+    weight sets actually seen.
+    """
+    key = (tuple(t.data_ptr() for t in datas), device)
+    tensor = _B_DATA_PTRS_CACHE.get(key)
+    if tensor is None:
+        tensor = torch.tensor(key[0], dtype=torch.int64, device=device)
+        _B_DATA_PTRS_CACHE[key] = tensor
+    return tensor
+
+
 _NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
     {
         Float8Quantizer,
@@ -1225,10 +1253,8 @@ class _GroupedLinear(torch.autograd.Function):
         # weights into one packed buffer (the dominant host cost). b_data is a
         # per-expert representative used only for dtype/shape. The B-scale stays
         # packed (cheap) and keeps the in-kernel packed-column fold.
-        b_data_ptrs = torch.tensor(
-            [w._rowwise_data.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
+        b_data_ptrs = _cached_b_data_ptrs(
+            [w._rowwise_data for w in weights], a_data.device
         )
         b_data = weights[0]._rowwise_data
         b_scale = concat_or_view_rows([w._rowwise_scale_inv for w in weights])
@@ -1283,10 +1309,8 @@ class _GroupedLinear(torch.autograd.Function):
         # slabs addressed via per-expert base pointers (no concat); dY still concats.
         a_data = concat_or_view_rows([g._rowwise_data for g in grad_output])
         a_scale = concat_or_view_rows([g._rowwise_scale_inv for g in grad_output])
-        b_data_ptrs = torch.tensor(
-            [w._columnwise_data.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
+        b_data_ptrs = _cached_b_data_ptrs(
+            [w._columnwise_data for w in weights], a_data.device
         )
         b_data = weights[0]._columnwise_data
         b_scale = concat_or_view_rows([w._columnwise_scale_inv for w in weights])
@@ -1380,11 +1404,7 @@ class _GroupedLinear(torch.autograd.Function):
         # reads each from a per-expert base pointer, so pass an int64[G] address array
         # instead of concatenating the G weights. b_data is a per-expert representative
         # (shape only; the kernel addresses weights via the pointers).
-        b_data_ptrs = torch.tensor(
-            [w.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
-        )
+        b_data_ptrs = _cached_b_data_ptrs(list(weights), a_data.device)
         b_data = weights[0]
         n = weights[0].size(0)
         k = weights[0].size(-1)
@@ -1412,11 +1432,7 @@ class _GroupedLinear(torch.autograd.Function):
         # Weights are independent per-expert [N_out, K_in] tensors; the grouped-NN
         # kernel reads each from a per-expert base pointer (no concat). b_data is a
         # per-expert representative.
-        b_data_ptrs = torch.tensor(
-            [w.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
-        )
+        b_data_ptrs = _cached_b_data_ptrs(list(weights), a_data.device)
         b_data = weights[0]
         n_out = grad_output[0].shape[-1]  # per-expert contraction (N_out)
         k_in = dgrad.size(-1)  # output width (K_in)
@@ -1475,10 +1491,8 @@ class _GroupedLinear(torch.autograd.Function):
         # Weights are independent per-expert [N, K] FP8 tensors; the grouped-TN kernel
         # reads each from a per-expert base pointer, so pass an int64[G] address array
         # instead of concatenating the G weights. b_data is a per-expert representative.
-        b_data_ptrs = torch.tensor(
-            [w._data.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
+        b_data_ptrs = _cached_b_data_ptrs(
+            [w._data for w in weights], a_data.device
         )
         b_data = weights[0]._data
         a_data._fp8_dtype = inputmats[0]._fp8_dtype
@@ -1523,10 +1537,8 @@ class _GroupedLinear(torch.autograd.Function):
         # backings are independent per-expert slabs, addressed via per-expert base
         # pointers through the same TN per-expert path (no concat); dY still concats.
         a_data = concat_or_view_rows([g._data for g in grad_output])
-        b_data_ptrs = torch.tensor(
-            [w._transpose.data_ptr() for w in weights],
-            dtype=torch.int64,
-            device=a_data.device,
+        b_data_ptrs = _cached_b_data_ptrs(
+            [w._transpose for w in weights], a_data.device
         )
         b_data = weights[0]._transpose
         a_data._fp8_dtype = grad_output[0]._fp8_dtype
@@ -1618,6 +1630,39 @@ class _GroupedLinear(torch.autograd.Function):
             },
         }
         return table[phase][kind]
+
+    @classmethod
+    def _try_flydsl_grouped(cls, phase, kind, **kwargs):
+        """Run the FlyDSL grouped helper for ``phase``/``kind``; report if it ran.
+
+        Returns True when FlyDSL handled the GEMM. A ``FlyDSLUnsupportedError``
+        (e.g. a per-expert dimension the kernel tiling cannot cover) means the
+        config is unsupported, so the helper returns False and the caller runs the
+        default grouped GEMM instead -- mirroring the dense GEMM fallback in
+        ``cpp_extensions.gemm``. ``NVTE_FLYDSL_GEMM_WARN_FALLBACK`` warns on fallback.
+        """
+        from ..flydsl_kernels.gemm import FlyDSLUnsupportedError
+
+        try:
+            cls._flydsl_grouped_dispatch(phase, kind)(**kwargs)
+            return True
+        except FlyDSLUnsupportedError as exc:
+            warn_fallback = os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "0").lower() not in (
+                "",
+                "0",
+                "false",
+                "no",
+                "off",
+            )
+            if warn_fallback:
+                warnings.warn(
+                    "[FLYDSL WARNING]: FlyDSL grouped GEMM does not support this "
+                    f"configuration ({phase}); falling back to the default backend. "
+                    f"Reason: {exc}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            return False
 
     @staticmethod
     def _forward_blockwise_fp8_triton(
@@ -2281,15 +2326,16 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        if use_grouped_gemm_flydsl:
-            _GroupedLinear._flydsl_grouped_dispatch("fwd", flydsl_grouped_kind)(
-                inputmats=inputmats,
-                weights=weights_fp8,
-                out=out,
-                m_splits=m_splits,
-                m_splits_tensor=m_splits_tensor,
-            )
-        else:
+        ran_flydsl_fwd = use_grouped_gemm_flydsl and _GroupedLinear._try_flydsl_grouped(
+            "fwd",
+            flydsl_grouped_kind,
+            inputmats=inputmats,
+            weights=weights_fp8,
+            out=out,
+            m_splits=m_splits,
+            m_splits_tensor=m_splits_tensor,
+        )
+        if not ran_flydsl_fwd:
             if use_grouped_gemm_triton:
                 general_grouped_gemm_func = general_grouped_gemm_triton
                 kwargs = {"m_splits_tensor": m_splits_tensor}
@@ -2896,18 +2942,20 @@ class _GroupedLinear(torch.autograd.Function):
                             columnwise_usage=quantizer.columnwise_usage,
                         )
                 _flydsl_kind = getattr(ctx, "flydsl_grouped_kind", None)
-                if _flydsl_kind is not None:
-                    # dgrad dX = dY @ W through the FlyDSL grouped NN kernel, riding
-                    # off the already-quantized grad_output (rowwise) and weights
-                    # (columnwise, ensured above).
-                    _GroupedLinear._flydsl_grouped_dispatch("dgrad", _flydsl_kind)(
-                        grad_output=grad_output,
-                        weights=weights_for_dgrad,
-                        dgrad=dgrad,
-                        m_splits=ctx.m_splits,
-                        m_splits_tensor=ctx.m_splits_tensor,
-                    )
-                else:
+                # dgrad dX = dY @ W through the FlyDSL grouped NN kernel, riding off
+                # the already-quantized grad_output (rowwise) and weights (columnwise,
+                # ensured above). Falls back to the default backend when FlyDSL does
+                # not support this config.
+                ran_flydsl_dgrad = _flydsl_kind is not None and _GroupedLinear._try_flydsl_grouped(
+                    "dgrad",
+                    _flydsl_kind,
+                    grad_output=grad_output,
+                    weights=weights_for_dgrad,
+                    dgrad=dgrad,
+                    m_splits=ctx.m_splits,
+                    m_splits_tensor=ctx.m_splits_tensor,
+                )
+                if not ran_flydsl_dgrad:
                     if ctx.use_grouped_gemm_triton:
                         general_grouped_gemm_func = general_grouped_gemm_triton
                         kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
@@ -3050,13 +3098,15 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute()
                     )
                 )
-                if use_flydsl_wgrad:
-                    _GroupedLinear._flydsl_grouped_dispatch("wgrad", _flydsl_kind)(
-                        grad_output=grad_output,
-                        inputmats=inputmats,
-                        wgrad_list=wgrad_list,
-                        m_splits=ctx.m_splits,
-                    )
+                ran_flydsl_wgrad = use_flydsl_wgrad and _GroupedLinear._try_flydsl_grouped(
+                    "wgrad",
+                    _flydsl_kind,
+                    grad_output=grad_output,
+                    inputmats=inputmats,
+                    wgrad_list=wgrad_list,
+                    m_splits=ctx.m_splits,
+                )
+                if ran_flydsl_wgrad:
                     clear_tensor_data(*inputmats)
                     grouped_gemm_wgrad = None
                 else:

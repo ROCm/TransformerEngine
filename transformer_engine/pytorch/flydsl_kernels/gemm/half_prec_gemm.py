@@ -1412,6 +1412,48 @@ def _cached_launch(
     )
 
 
+@functools.lru_cache(maxsize=None)
+def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
+    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
+    placeholders.
+
+    The dense half-precision binary requires the grouped/epilogue tensor arguments
+    (Bias/Aux/work_queue/work_counter/b_data_ptrs) to be present but never
+    dereferences them. Re-allocating them via ``torch.zeros`` on every call is pure
+    host overhead that dominates wall time at small M; since the contents are never
+    read, a single shared read-only buffer per (device, dtype) is safe to reuse.
+    """
+    return torch.zeros(numel, dtype=dtype, device=device)
+
+
+# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
+# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
+# launch -- ~190us/call, which dominates wall time at small M where the kernel is
+# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
+# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
+# time so one CompiledFunction per launch_key serves every pointer/scalar/stream
+# variation. M/N are runtime scalar args (not baked), so the key excludes them --
+# identical to the MXFP8/FP8 paths.
+# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
+# this module never mutates its captured globals between launches, so it is safe.
+_COMPILED_LAUNCH_CACHE = {}
+
+
+def _compiled_launch(key, jit_fn, args):
+    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
+
+    ``key`` uniquely identifies the compiled specialization (the same tuple the
+    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
+    for the first call; used once to compile, then the cached CompiledFunction is
+    reused positionally for all later calls with the same ABI.
+    """
+    cf = _COMPILED_LAUNCH_CACHE.get(key)
+    if cf is None:
+        cf = flyc.compile(jit_fn, *args)
+        _COMPILED_LAUNCH_CACHE[key] = cf
+    return cf
+
+
 def _half_prec_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1432,16 +1474,16 @@ def _half_prec_matmul(
 
     ``input_dtype`` is the required FP16/BF16 operand dtype and ``label`` is the
     human-readable kernel name used in error messages.
+
+    Only the checks ``doGemm`` does not repeat are performed here: the
+    layout-specific physical operand shapes, operand/output contiguity, and
+    device agreement. Layout validity, operand dtype, output dtype, and tiling
+    are validated by ``doGemm`` against the runtime geometry, so they are not
+    duplicated in this shim.
     """
-    if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported {label} layout: {layout}")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
             f"FlyDSL {label} expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
-    if a.dtype != input_dtype or b.dtype != input_dtype:
-        raise TypeError(
-            f"FlyDSL {label} GEMM expects {input_dtype} operands, got A={a.dtype}, B={b.dtype}"
         )
     if not a.is_contiguous() or not b.is_contiguous():
         raise FlyDSLUnsupportedError(
@@ -1459,6 +1501,8 @@ def _half_prec_matmul(
         "NN": ((m, k), (k, n)),
         "NT": ((k, m), (k, n)),
     }
+    if layout not in expected_shapes:
+        raise ValueError(f"Unsupported {label} layout: {layout}")
     expected_a, expected_b = expected_shapes[layout]
     if tuple(a.shape) != expected_a or tuple(b.shape) != expected_b:
         raise ValueError(
@@ -1469,10 +1513,6 @@ def _half_prec_matmul(
 
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(
-            f"FlyDSL {label} output must be float16, bfloat16, or float32, got {c.dtype}"
-        )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
             f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
@@ -1662,7 +1702,43 @@ def doGemm(
     if stream is None:
         stream = torch.cuda.current_stream()
 
-    launch = _cached_launch(
+    # Preserve the original validated byte-addressed G2L path. These are
+    # metadata-only dtype/flatten views of the already-contiguous row-major
+    # tensors selected by gemm_wrappers.py; no transpose or copy is performed.
+    A_arg = A.view(torch.uint8).view(-1)
+    B_arg = B.view(torch.uint8).view(-1)
+    C_arg = C.view(-1)
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
+    # The placeholders are never dereferenced by the kernel, so reuse one cached
+    # buffer per (device, dtype) instead of re-allocating each call.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = _dense_placeholder(A.device, torch.float32)
+    if needs_aux:
+        Aux_arg = aux.view(-1)
+    else:
+        Aux_arg = _dense_placeholder(A.device, C.dtype)
+
+    # Grouped runtime tensors are required by the kernel signature; the dense
+    # binary never dereferences them but still needs placeholder buffers.
+    if group or wgrad:
+        work_queue_arg = work_queue.contiguous().view(-1)
+        work_counter_arg = work_counter.contiguous().view(-1)
+    else:
+        work_queue_arg = _dense_placeholder(A.device, torch.int32)
+        work_counter_arg = _dense_placeholder(A.device, torch.int32)
+
+    # Per-expert weight base pointers (grouped TN only): an int64[G] device array of
+    # each expert's weight-slab base address, read in-kernel so the weight operand
+    # needs no host-side concat. Dense/NN/wgrad pass a placeholder never read there.
+    if b_data_ptrs is not None:
+        b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
+    else:
+        b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+
+    launch_key = (
+        "half_prec_gemm",
         K_runtime,
         C.dtype,
         layout,
@@ -1673,40 +1749,7 @@ def doGemm(
         sched,
         wgrad,
     )
-    # Preserve the original validated byte-addressed G2L path. These are
-    # metadata-only dtype/flatten views of the already-contiguous row-major
-    # tensors selected by gemm_wrappers.py; no transpose or copy is performed.
-    A_arg = A.view(torch.uint8).view(-1)
-    B_arg = B.view(torch.uint8).view(-1)
-    C_arg = C.view(-1)
-    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
-    if needs_bias:
-        Bias_arg = bias.contiguous().view(-1)
-    else:
-        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
-    if needs_aux:
-        Aux_arg = aux.view(-1)
-    else:
-        Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
-
-    # Grouped runtime tensors are required by the kernel signature; the dense
-    # binary never dereferences them but still needs placeholder buffers.
-    if group or wgrad:
-        work_queue_arg = work_queue.contiguous().view(-1)
-        work_counter_arg = work_counter.contiguous().view(-1)
-    else:
-        work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
-        work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
-
-    # Per-expert weight base pointers (grouped TN only): an int64[G] device array of
-    # each expert's weight-slab base address, read in-kernel so the weight operand
-    # needs no host-side concat. Dense/NN/wgrad pass a placeholder never read there.
-    if b_data_ptrs is not None:
-        b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
-    else:
-        b_data_ptrs_arg = torch.zeros(1, dtype=torch.int64, device=A.device)
-
-    launch(
+    launch_args = (
         A_arg,
         B_arg,
         C_arg,
@@ -1718,5 +1761,23 @@ def doGemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
-        stream=stream,
+        stream,
     )
+    # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
+    # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
+    # runtime scalars, so one compiled launcher per launch_key serves all shapes.
+    _compiled_launch(
+        launch_key,
+        _cached_launch(
+            K_runtime,
+            C.dtype,
+            layout,
+            _MFMA_SUFFIX[input_dtype],
+            bool(use_xcd_remap),
+            epilogue,
+            group,
+            sched,
+            wgrad,
+        ),
+        launch_args,
+    )(*launch_args)

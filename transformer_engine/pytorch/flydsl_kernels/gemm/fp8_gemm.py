@@ -1140,6 +1140,49 @@ def _compile_kernel(
 
 
 @functools.lru_cache(maxsize=None)
+def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
+    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
+    placeholders.
+
+    The dense FP8 binary requires the grouped/epilogue tensor arguments
+    (Bias/Aux/work_queue/work_counter/b_data_ptrs) to be present but never
+    dereferences them. Re-allocating them via ``torch.zeros`` on every call is
+    pure host overhead that dominates wall time at small M; since the contents
+    are never read, a single shared read-only buffer per (device, dtype) is
+    safe to reuse across calls.
+    """
+    return torch.zeros(numel, dtype=dtype, device=device)
+
+
+# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
+# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
+# launch -- ~190us/call, which dominates wall time at small M where the kernel is
+# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
+# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
+# time so one CompiledFunction per (shape-class, dtype, layout) key serves every
+# pointer/scalar/stream variation. M/N are runtime scalar args (not baked), so the
+# key excludes them -- identical to the MXFP8 path in mxfp8_gemm.py.
+# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
+# this module never mutates its captured globals between launches, so it is safe.
+_COMPILED_LAUNCH_CACHE = {}
+
+
+def _compiled_launch(key, jit_fn, args):
+    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
+
+    ``key`` uniquely identifies the compiled specialization (the same tuple the
+    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
+    for the first call; used once to compile, then the cached CompiledFunction is
+    reused positionally for all later calls with the same ABI.
+    """
+    cf = _COMPILED_LAUNCH_CACHE.get(key)
+    if cf is None:
+        cf = flyc.compile(jit_fn, *args)
+        _COMPILED_LAUNCH_CACHE[key] = cf
+    return cf
+
+
+@functools.lru_cache(maxsize=None)
 def _cached_launch(
     K: int,
     a_fp8_dtype: torch.dtype,
@@ -1190,54 +1233,13 @@ def fp8_matmul(
     The wrapper is responsible for adapting TE's logical [K, N] operand into
     the core's row-major [N, K] representation. No operand swap or transpose
     is performed in this module.
+
+    ``_run_fp8`` (the sole caller) has already validated operand rank, FP8
+    dtypes, inverse-scale dtype/numel, and contiguity; ``doGemm`` re-validates
+    dtypes, inner-dim match, scale numel, and C shape/dtype against the runtime
+    geometry. This shim therefore just forwards, rather than repeating those
+    checks a third time (``doGemm`` derives M/N/K from the operands itself).
     """
-    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        raise TypeError("FlyDSL FP8 GEMM expects plain torch.Tensor payloads")
-
-    if a.ndim != 2 or b.ndim != 2:
-        raise ValueError(
-            f"FlyDSL FP8 TN expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
-
-    supported_fp8_dtypes = (
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    )
-    if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
-        raise TypeError(
-            f"FlyDSL FP8 GEMM expects E4M3 or E5M2 payloads, got A={a.dtype} and B={b.dtype}"
-        )
-
-    m, k = a.shape
-    n, kb = b.shape
-    if kb != k:
-        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
-
-    for name, scale in (
-        ("A_scale_inv", a_scale_inv),
-        ("B_scale_inv", b_scale_inv),
-    ):
-        if not isinstance(scale, torch.Tensor):
-            raise TypeError(f"{name} must be a torch.Tensor")
-        if scale.dtype != torch.float32 or scale.numel() != 1:
-            raise TypeError(
-                f"{name} must contain exactly one FP32 value, got "
-                f"dtype={scale.dtype}, shape={tuple(scale.shape)}"
-            )
-
-    if tuple(c.shape) != (m, n):
-        raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 supports only float16, bfloat16, and float32 outputs, got {c.dtype}"
-        )
-    if not c.is_contiguous():
-        raise FlyDSLUnsupportedError("FlyDSL FP8 requires contiguous output storage")
-
-    tensors = (a, b, a_scale_inv, b_scale_inv, c)
-    if any(t.device != a.device for t in tensors[1:]):
-        raise ValueError("A, B, inverse scales, and C must be on the same device")
-
     doGemm(
         a,
         b,
@@ -1355,14 +1357,16 @@ def doGemm(
     A_scale_arg = A_scale_inv.contiguous().view(-1)
     B_scale_arg = B_scale_inv.contiguous().view(-1)
     # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
+    # The placeholders are never dereferenced by the kernel, so reuse one cached
+    # buffer per (device, dtype) instead of re-allocating each call.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+        Bias_arg = _dense_placeholder(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.view(-1)
     else:
-        Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
+        Aux_arg = _dense_placeholder(A.device, C.dtype)
 
     # Grouped runtime tensors are required by the kernel signature; the dense
     # binary never dereferences them but still needs placeholder buffers.
@@ -1370,8 +1374,8 @@ def doGemm(
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
-        work_queue_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
-        work_counter_arg = torch.zeros(1, dtype=torch.int32, device=A.device)
+        work_queue_arg = _dense_placeholder(A.device, torch.int32)
+        work_counter_arg = _dense_placeholder(A.device, torch.int32)
 
     # Per-expert weight base pointers (grouped forward and dgrad -- both run on this
     # TN kernel, dgrad over host-transposed weights): compile a kernel that reads each
@@ -1382,9 +1386,10 @@ def doGemm(
     if weight_ptrs:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
-        b_data_ptrs_arg = torch.zeros(1, dtype=torch.int64, device=A.device)
+        b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
 
-    launch = _cached_launch(
+    launch_key = (
+        "fp8_gemm",
         int(K_runtime),
         A.dtype,
         B.dtype,
@@ -1396,7 +1401,7 @@ def doGemm(
         wgrad,
         weight_ptrs,
     )
-    launch(
+    launch_args = (
         A_arg,
         B_arg,
         C_arg,
@@ -1410,5 +1415,24 @@ def doGemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
-        stream=stream,
+        stream,
     )
+    # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
+    # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
+    # runtime scalars, so one compiled launcher per launch_key serves all shapes.
+    _compiled_launch(
+        launch_key,
+        _cached_launch(
+            int(K_runtime),
+            A.dtype,
+            B.dtype,
+            C.dtype,
+            bool(use_xcd_remap),
+            epilogue,
+            group,
+            sched,
+            wgrad,
+            weight_ptrs,
+        ),
+        launch_args,
+    )(*launch_args)

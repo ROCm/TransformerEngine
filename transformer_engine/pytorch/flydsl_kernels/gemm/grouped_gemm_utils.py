@@ -303,7 +303,18 @@ def uniform_pad_concat(tensors, rows):
     Used by the wgrad uniform-pad path to stack per-expert operands (or their
     scales) on the contraction/token axis. Padded rows are zero, so they
     contribute nothing to the token-axis contraction.
+
+    When no tensor actually needs padding (every leading dim already equals
+    ``rows`` -- the balanced / no-skew case, where each expert's token count is a
+    multiple of the bucket's BLOCK_M), there is nothing to zero-fill, so this
+    degenerates to a plain concat. Delegate that case to ``concat_or_view_rows``,
+    which returns a zero-copy spanning view when the per-expert payloads are
+    physically adjacent (the common bulk-allocated layout), eliminating the
+    ``torch.cat`` copy on the wgrad hot path.
     """
+    if all(t.size(0) == rows for t in tensors):
+        return concat_or_view_rows(tensors)
+
     def _pad_rows(t):
         if t.size(0) == rows:
             return t.contiguous()

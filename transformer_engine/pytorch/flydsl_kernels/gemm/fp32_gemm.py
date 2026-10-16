@@ -969,6 +969,47 @@ def _cached_launch(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"
     return _compile_kernel(K, use_xcd_remap=use_xcd_remap, epilogue=epilogue)
 
 
+@functools.lru_cache(maxsize=None)
+def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
+    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
+    placeholders.
+
+    The FP32 binary requires the Bias/Aux epilogue tensor arguments to be present
+    but never dereferences them in the DEFAULT epilogue. Re-allocating them via
+    ``torch.zeros`` on every call is pure host overhead; since the contents are
+    never read, a single shared read-only buffer per (device, dtype) is safe.
+    """
+    return torch.zeros(numel, dtype=dtype, device=device)
+
+
+# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
+# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
+# launch -- ~190us/call, which dominates wall time at small M where the kernel is
+# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
+# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
+# time so one CompiledFunction per launch_key serves every pointer/scalar/stream
+# variation. M/N are runtime scalar args (not baked), so the key excludes them --
+# identical to the MXFP8/FP8/half-precision paths.
+# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
+# this module never mutates its captured globals between launches, so it is safe.
+_COMPILED_LAUNCH_CACHE = {}
+
+
+def _compiled_launch(key, jit_fn, args):
+    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
+
+    ``key`` uniquely identifies the compiled specialization (the same tuple the
+    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
+    for the first call; used once to compile, then the cached CompiledFunction is
+    reused positionally for all later calls with the same ABI.
+    """
+    cf = _COMPILED_LAUNCH_CACHE.get(key)
+    if cf is None:
+        cf = flyc.compile(jit_fn, *args)
+        _COMPILED_LAUNCH_CACHE[key] = cf
+    return cf
+
+
 def fp32_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -989,26 +1030,15 @@ def fp32_matmul(
     The optimized core streams both operands with K contiguous and consumes B
     as [N, K] directly, so this adapter performs no internal transpose. The
     wrapper is responsible for normalizing NN/NT layouts into this contract.
+
+    Only the checks ``doGemm`` does not repeat are performed here: operand rank,
+    device agreement, and output contiguity. Inner-dim match, operand/output
+    dtype, and C shape are validated by ``doGemm`` against the runtime geometry,
+    so they are not duplicated in this shim.
     """
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
             f"FlyDSL FP32 TN expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
-
-    m, k = a.shape
-    n, kb = b.shape
-    if kb != k:
-        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
-    if a.dtype != torch.float32 or b.dtype != torch.float32:
-        raise TypeError(
-            "FlyDSL FP32 GEMM expects both operands to have torch.float32 dtype, "
-            f"got {a.dtype} and {b.dtype}"
-        )
-    if tuple(c.shape) != (m, n):
-        raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype != torch.float32:
-        raise FlyDSLUnsupportedError(
-            f"The current FlyDSL FP32 kernel stores torch.float32 output, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
@@ -1090,13 +1120,24 @@ def doGemm(
     B_arg = B.contiguous().view(torch.uint8).view(-1)
     C_arg = C.view(-1)
     # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
+    # The placeholders are never dereferenced by the kernel, so reuse one cached
+    # buffer per (device, dtype) instead of re-allocating each call.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+        Bias_arg = _dense_placeholder(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.contiguous().view(-1)
     else:
-        Aux_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
-    launch = _cached_launch(int(K_runtime), bool(use_xcd_remap), epilogue)
-    launch(A_arg, B_arg, C_arg, Bias_arg, Aux_arg, M_runtime, N_runtime, stream=stream)
+        Aux_arg = _dense_placeholder(A.device, torch.float32)
+
+    launch_key = ("fp32_gemm", int(K_runtime), bool(use_xcd_remap), epilogue)
+    launch_args = (A_arg, B_arg, C_arg, Bias_arg, Aux_arg, M_runtime, N_runtime, stream)
+    # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
+    # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
+    # runtime scalars, so one compiled launcher per launch_key serves all shapes.
+    _compiled_launch(
+        launch_key,
+        _cached_launch(int(K_runtime), bool(use_xcd_remap), epilogue),
+        launch_args,
+    )(*launch_args)
