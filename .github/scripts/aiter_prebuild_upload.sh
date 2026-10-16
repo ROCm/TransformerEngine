@@ -26,7 +26,12 @@ trap 'rm -f "${GIT_CONFIG_GLOBAL}"' EXIT
 git config --file "${GIT_CONFIG_GLOBAL}" --add safe.directory "${AITER_DIR}"
 AITER_SHA="$(GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL} git -C "${AITER_DIR}" rev-parse HEAD)"
 
-KEY="rocm-${ROCM_VER}_aiter-${AITER_SHA}"
+# The QoLA patches change the libs without changing the AITER commit, so they are part of the key.
+# Keep in sync with transformer_engine/common/ck_fused_attn/aiter_prebuilt.cmake.
+QOLA_PATCHES_HASH="$(for p in $(ls "${QOLA_DIR}"/patches/aiter/*.patch | LC_ALL=C sort); do
+  sha256sum "$p" | cut -d' ' -f1; done | tr -d '\n' | sha256sum | cut -c1-8)"
+
+KEY="rocm-${ROCM_VER}_aiter-${AITER_SHA}_qola-${QOLA_PATCHES_HASH}"
 CACHE_ROOT="${ROOT_DIR}/build/aiter-prebuilts"
 EXTRACT_DIR="${CACHE_ROOT}/${KEY}"
 OUTPUT_TGZ="/tmp/${KEY}.tar.gz"
