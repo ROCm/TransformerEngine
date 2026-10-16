@@ -21,10 +21,13 @@ ROCM_VER=`head -n1 "${ROCM_PATH}/.info/version" | cut -d. -f1`
 QOLA_DIR="${ROOT_DIR}/3rdparty/QoLA"
 AITER_DIR="${QOLA_DIR}/3rdparty/aiter"
 QOLA_MANIFEST="${ROOT_DIR}/transformer_engine/common/ck_fused_attn/qola_manifest.toml"
-GIT_CONFIG_GLOBAL="$(mktemp /tmp/gitconfig.XXXXXX)"
-trap 'rm -f "${GIT_CONFIG_GLOBAL}"' EXIT
-git config --file "${GIT_CONFIG_GLOBAL}" --add safe.directory "${AITER_DIR}"
-AITER_SHA="$(GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL} git -C "${AITER_DIR}" rev-parse HEAD)"
+# The manifest pin, as in transformer_engine/common/ck_fused_attn/CMakeLists.txt. QoLA clones AITER
+# on demand, so there is no checkout to ask before the build.
+AITER_SHA="$(sed -n 's/^[[:space:]]*aiter_commit[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${QOLA_MANIFEST}")"
+if [[ -z "${AITER_SHA}" ]]; then
+  echo "[AITER-PREBUILT] Cannot read aiter_commit from ${QOLA_MANIFEST}" >&2
+  exit 1
+fi
 
 KEY="rocm-${ROCM_VER}_aiter-${AITER_SHA}"
 CACHE_ROOT="${ROOT_DIR}/build/aiter-prebuilts"
