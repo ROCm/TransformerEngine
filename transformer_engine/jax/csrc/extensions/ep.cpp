@@ -18,6 +18,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "ffi_collectives.h"
 #include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
@@ -35,7 +36,25 @@ struct EpBootstrapParams {
   int hidden_dim = 0;
   int max_num_sms = 0;
   NVTEDType max_token_dtype = kNVTEBFloat16;
+  bool drop_on_overflow = false;
+  // When set, EP borrows XLA's comm (see below): no ncclCommInitRank at
+  // bootstrap; nvte_ep_initialize is deferred to the first executable that
+  // fetches the borrowed communicator.
+  bool borrowed_comm = false;
 };
+
+static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
+  return NVTEEpGroupConfig{.struct_size = sizeof(NVTEEpGroupConfig),
+                           .ep_size = p.ep_size,
+                           .num_experts = p.num_experts,
+                           .max_tokens_per_rank = p.max_tokens_per_rank,
+                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
+                           .hidden_dim = p.hidden_dim,
+                           .num_comm_sms = p.max_num_sms,
+                           .max_token_dtype = p.max_token_dtype,
+                           .zero_copy = 0,
+                           .drop_on_overflow = p.drop_on_overflow};
+}
 
 class EpResources {
  public:
@@ -43,17 +62,7 @@ class EpResources {
     ncclUniqueId uid;
     std::memcpy(&uid, p.uid_bytes.data(), sizeof(uid));
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
-    // zero_copy=0: JAX EP path always stages payloads; the zero-copy fast path
-    // requires NVTECommWindow-backed tensors, which JAX bindings don't expose.
-    NVTEEpGroupConfig cfg{.struct_size = sizeof(NVTEEpGroupConfig),
-                          .ep_size = p.ep_size,
-                          .num_experts = p.num_experts,
-                          .max_tokens_per_rank = p.max_tokens_per_rank,
-                          .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
-                          .hidden_dim = p.hidden_dim,
-                          .num_comm_sms = p.max_num_sms,
-                          .max_token_dtype = p.max_token_dtype,
-                          .zero_copy = 0};
+    NVTEEpGroupConfig cfg = MakeEpGroupConfig(p);
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), &cfg);
     } catch (...) {
@@ -95,6 +104,21 @@ bool g_ep_params_set = false;
 std::weak_ptr<EpResources> g_ep_resources_weak;
 // Python-held anchor so trace-time handle_mem allocs find EPBackend ready.
 std::shared_ptr<EpResources> g_ep_resources_anchor;
+// Borrowed-comm path: EPBackend is initialized once from a borrowed communicator.
+bool g_ep_xla_initialized = false;
+
+#ifdef XLA_FFI_COLLECTIVES_AVAILABLE
+// Idempotently initialize EPBackend on a borrowed communicator. Safe to call
+// from every executable that fetches the comm; only the first call initializes.
+void EnsureEpBackendFromBorrowedComm(ncclComm_t comm) {
+  std::lock_guard<std::mutex> lock(g_ep_mu);
+  if (g_ep_xla_initialized) return;
+  NVTE_CHECK(g_ep_params_set, "EP bootstrap params not set before borrowing XLA comm.");
+  NVTEEpGroupConfig cfg = MakeEpGroupConfig(g_ep_params);
+  nvte_ep_initialize(static_cast<void*>(comm), &cfg);
+  g_ep_xla_initialized = true;
+}
+#endif  // collectives header available
 
 std::shared_ptr<EpResources> AcquireEpResources() {
   std::lock_guard<std::mutex> lock(g_ep_mu);
@@ -125,14 +149,15 @@ struct EpConfig {
 // synchronize via the UID broadcast).
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int max_token_dtype) {
+                          int hidden_dim, int max_num_sms, int max_token_dtype,
+                          bool drop_on_overflow, bool borrowed_comm) {
   std::string uid_str = unique_id_bytes_obj;
   NVTE_CHECK(static_cast<int>(uid_str.size()) >= 128,
              "unique_id_bytes must be at least 128 bytes (ncclUniqueId size).");
   std::shared_ptr<EpResources> anchor;
   {
     std::lock_guard<std::mutex> lock(g_ep_mu);
-    NVTE_CHECK(!g_ep_resources_anchor,
+    NVTE_CHECK(!g_ep_resources_anchor && !g_ep_xla_initialized,
                "EP bootstrap already initialized; call release_ep_resources() before re-init.");
     std::memcpy(g_ep_params.uid_bytes.data(), uid_str.data(), 128);
     g_ep_params.ep_size = ep_size;
@@ -143,8 +168,12 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int 
     g_ep_params.hidden_dim = hidden_dim;
     g_ep_params.max_num_sms = max_num_sms;
     g_ep_params.max_token_dtype = static_cast<NVTEDType>(max_token_dtype);
+    g_ep_params.drop_on_overflow = drop_on_overflow;
+    g_ep_params.borrowed_comm = borrowed_comm;
     g_ep_params_set = true;
   }
+  // Borrowed-comm path defers NCCL init to the first executable; nothing eager.
+  if (borrowed_comm) return;
   // Acquire outside the lock: EpResources ctor runs ncclCommInitRank which is
   // a collective and may block on peer ranks.
   anchor = AcquireEpResources();
@@ -153,7 +182,30 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int 
 }
 
 // Drops the anchor; comm tears down once the last executable also releases.
+// For the borrowed-comm path, tears down EPBackend while the borrowed comm is
+// still alive (call from ep_finalize, not atexit).
 void ReleaseEpResources() {
+  std::shared_ptr<EpResources> to_drop;
+  {
+    std::lock_guard<std::mutex> lock(g_ep_mu);
+    to_drop = std::move(g_ep_resources_anchor);
+    if (g_ep_xla_initialized) {
+      nvte_ep_shutdown();
+      g_ep_xla_initialized = false;
+    }
+  }
+  // to_drop dtor runs outside the lock.
+}
+
+// Atexit-only variant: drops the self-hosted anchor (its destructor safely
+// tears down its own NCCL comm while the process is still alive) but never
+// touches a borrowed backend. Ep bootstrap/finalize can switch comm paths
+// mid-process (e.g. tests), so by the time atexit fires the live backend may
+// be borrowed-comm; XLA may already be tearing down that comm, and calling
+// nvte_ep_shutdown() on it here would race that teardown. A borrowed backend
+// left live at process exit is handled separately by EPBackend's own
+// atexit-safe static destructor (skips NCCL calls).
+void ReleaseEpResourcesAtExit() {
   std::shared_ptr<EpResources> to_drop;
   {
     std::lock_guard<std::mutex> lock(g_ep_mu);
@@ -182,11 +234,16 @@ pybind11::capsule GetEpInstanceStateTypeInfoCapsule() {
 
 static ::xla::ffi::ErrorOr<std::unique_ptr<EpInstanceState>> EpInstantiateImpl() {
   auto state = std::make_unique<EpInstanceState>();
+  {
+    // Borrowed-comm path: XLA owns the comm, so there is nothing self-hosted to
+    // acquire or pin per-executable; EPBackend is initialized by the bootstrap op.
+    std::lock_guard<std::mutex> lock(g_ep_mu);
+    if (g_ep_params.borrowed_comm) return state;
+  }
   try {
     state->resources = AcquireEpResources();
   } catch (const std::exception& e) {
-    return ::xla::ffi::Unexpected(
-        ::xla::ffi::Error::Internal(std::string("EP instantiate failed: ") + e.what()));
+    return ::xla::ffi::Unexpected(ffi_internal_error("EP instantiate failed: ", e));
   }
   return state;
 }
@@ -196,8 +253,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 // ── ep_prepare ────────────────────────────────────────────────────────────────
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
-                        Result_Type recv_tokens_per_expert, Result_Type handle_mem,
-                        EpConfig config) {
+                        Result_Type recv_tokens_per_expert, Result_Type total_recv_tokens,
+                        Result_Type handle_mem, EpConfig config) {
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -215,6 +272,10 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   auto recv_tokens_per_expert_ =
       TensorWrapper(recv_tokens_per_expert->untyped_data(), tc_shape, DType::kInt32);
 
+  std::vector<size_t> trt_shape = {static_cast<size_t>(total_recv_tokens->element_count())};
+  auto total_recv_tokens_ =
+      TensorWrapper(total_recv_tokens->untyped_data(), trt_shape, DType::kInt32);
+
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
@@ -223,7 +284,7 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
-                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
+                  total_recv_tokens_.data(), &layer_cfg, stream);
   return ffi_with_cuda_error_check();
 }
 
@@ -233,6 +294,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Ret<Buffer_Type>()  // recv_tokens_per_expert
+                                  .Ret<Buffer_Type>()  // total_recv_tokens
                                   .Ret<Buffer_Type>()  // handle_mem
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
@@ -469,6 +531,57 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
                                   .Ret<Buffer_Type>()  // grad_expert_out
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
+
+// -- Borrowed-comm path -------------------------------------------------------
+//
+// Instead of a self-hosted ncclCommInitRank, EPBackend borrows the communicator
+// XLA already owns for the EP replica groups. A one-shot bootstrap op fetches it
+// and initializes the backend once; the per-step ops then share the same FFI
+// targets as the self-hosted path (see EpInstantiateImpl). Auto-selected from
+// Python (see tex.ep.use_nccl_comm_from_xla). The prepare stage is the generic
+// FfiRequestCliqueHandler (see ffi_collectives.cpp); only the EP-specific
+// execute stage lives here.
+#ifdef XLA_FFI_COLLECTIVES_AVAILABLE
+
+// Execute stage: fetch the borrowed comm and initialize EPBackend once. The
+// token buffer is copied straight through only to give the op an input->output
+// data dependency, so it stays ordered on the borrowed comm's stream.
+Error_Type EpBootstrapBorrowedCommFFI(cudaStream_t stream, EpInstanceState* ep_state,
+                                      FfiCollectivesCtx coll, Buffer_Type token, Result_Type out,
+                                      Span_Type<int64_t> replica_groups, int64_t group_size,
+                                      int64_t communication_id) {
+  (void)ep_state;
+  auto groups = ffi_collectives::ReplicaGroupsFromFlat(replica_groups.begin(),
+                                                       replica_groups.size(), group_size);
+  auto comm_or = ffi_collectives::GetComm(coll, groups, communication_id);
+  if (comm_or.has_error()) return comm_or.error();
+  ncclComm_t comm = comm_or.value();
+  NVTE_CHECK(comm != nullptr, "XLA returned a null EP communicator.");
+  try {
+    EnsureEpBackendFromBorrowedComm(comm);
+  } catch (const std::exception& e) {
+    return ffi_internal_error("EP borrowed-comm bootstrap failed: ", e);
+  }
+  const size_t bytes = token.size_bytes();
+  if (bytes > 0) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(out->untyped_data(), token.untyped_data(), bytes,
+                                    cudaMemcpyDeviceToDevice, stream));
+  }
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler, EpBootstrapBorrowedCommFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Ctx<::xla::ffi::Extension<FfiCollectives>>()
+                                  .Arg<Buffer_Type>()  // token (identity in)
+                                  .Ret<Buffer_Type>()  // token (identity out)
+                                  .Attr<Span_Type<int64_t>>("replica_groups")
+                                  .Attr<int64_t>("group_size")
+                                  .Attr<int64_t>("communication_id"));
+
+#endif  // collectives header available
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -19,6 +19,11 @@ from transformer_engine.pytorch.triton_kernels.common import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+from transformer_engine.pytorch.tensor.mxfp4_tensor import (
+    MXFP4_BLOCK_SCALING_SIZE,
+    MXFP4Quantizer,
+    MXFP4Tensor,
+)
 from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_layernorm_bwd_triton,
     te_layernorm_fwd_triton,
@@ -31,6 +36,7 @@ from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+mxfp4_available, reason_for_no_mxfp4 = FP8GlobalStateManager.is_mxfp4_available()
 
 def _make_test_dtype_pairs(test_types):
     for i, o in product(test_types, test_types):
@@ -88,7 +94,7 @@ test_shapes_by_norm = (
 test_quantizations = ((None, False, None),)
 test_quantizations += tuple(
     product(
-        ('fp8', 'mxfp8'),
+        ('fp8', 'mxfp8', 'mxfp4'),
         (True, False),
         (None, 'quantized')
     )
@@ -174,6 +180,19 @@ def rmsnorm_fwd_ref(
     return out, None, rsigma.squeeze(1)
 
 
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+def _dequantize_mxfp4(data, scale_inv, rows, cols):
+    """Dequantize unswizzled MXFP4 data; also returns the per-element block scale."""
+    lut = torch.tensor(_E2M1_VALUES, device=data.device)
+    data = data.view(rows, cols // 2)
+    codes = torch.stack((data & 0xF, data >> 4), dim=-1).reshape(rows, cols).long()
+    mag = lut[codes & 0x7]
+    scale = torch.exp2(scale_inv[:rows, :cols // MXFP4_BLOCK_SCALING_SIZE].float() - 127)
+    scale = scale.repeat_interleave(MXFP4_BLOCK_SCALING_SIZE, dim=1)
+    return torch.where(codes >= 8, -mag, mag) * scale, scale
+
+
 @pytest.fixture
 def autotune():
     return bool(int(os.environ.get("NVTE_TEST_TRITON_AUTOTUNE", "0")))
@@ -225,7 +244,9 @@ class TestNorms:
         gamma_tensor = fill_uniform(N, in_dtype)
         bias_tensor = fill_uniform(N, in_dtype)
 
-        self._check_skips(quantization=quantization, shape=(M, N), colwise=columnwise)
+        self._check_skips(
+            quantization=quantization, shape=(M, N), colwise=columnwise, out_dtype=out_dtype
+        )
 
         epsilon = 1e-5
 
@@ -261,6 +282,8 @@ class TestNorms:
 
         # run the triton path
         ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if quantization == "mxfp4" and ln_out_mode is not None:
+            assert ln_out_triton is fwd_args["triton"]["ln_out"], "Expected the preallocated ln_out to be returned."
 
         # run the reference hipified kernel path
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
@@ -413,6 +436,10 @@ class TestNorms:
         out_triton, out_hip,
         quantization, fp8_dtype
         ):
+        if quantization == "mxfp4":
+            self._compare_mxfp4_output_tensors(out_triton=out_triton, out_hip=out_hip)
+            return
+
         tols = dtype_tols(out_triton.dtype if quantization is None else fp8_dtype)
         compare_func = partial(te_compare_results, **tols, use_torch_semantics=True)
 
@@ -494,6 +521,40 @@ class TestNorms:
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
+    def _compare_mxfp4_output_tensors(self, out_triton, out_hip):
+        if not isinstance(out_triton, MXFP4Tensor):
+            raise ValueError(f"Expected a MXFP4Tensor but got {type(out_triton)} instead.")
+        # The scale_inv exponents may differ by one, like MXFP8.
+        compare_scales = partial(te_compare_results, atol=1, rtol=0, use_torch_semantics=True)
+        M, N = out_hip.shape
+        for usage, rows, cols in (("rowwise", M, N), ("columnwise", N, M)):
+            data_triton = getattr(out_triton, f"_{usage}_data")
+            data_hip = getattr(out_hip, f"_{usage}_data")
+            if (data_triton is None) != (data_hip is None):
+                raise ValueError(f"Expected {usage} data to {'' if data_hip is None else 'not '}be None.")
+            if data_hip is None:
+                continue
+            scale_inv_triton = getattr(out_triton, f"_{usage}_scale_inv")
+            scale_inv_hip = getattr(out_hip, f"_{usage}_scale_inv")
+            n_scales = cols // MXFP4_BLOCK_SCALING_SIZE
+            compare_scales(
+                actual=scale_inv_triton[:rows, :n_scales],
+                expected=scale_inv_hip[:rows, :n_scales],
+                msg=lambda msg: f"Output {usage} scale inverse does not match triton <-> hip\n\n{msg}\n",
+            )
+            dq_triton, scale_triton = _dequantize_mxfp4(data_triton, scale_inv_triton, rows, cols)
+            dq_hip, scale_hip = _dequantize_mxfp4(data_hip, scale_inv_hip, rows, cols)
+            # Norm rounding differences may move a few values to the neighbouring E2M1 code.
+            scale = torch.maximum(scale_triton, scale_hip)
+            mag = torch.maximum(dq_triton.abs(), dq_hip.abs()) / scale
+            step = torch.where(mag > 4, 2.0, torch.where(mag > 2, 1.0, 0.5)) * scale
+            n_bad = int(((dq_triton - dq_hip).abs() > step).sum())
+            assert n_bad == 0, (
+                f"{n_bad} {usage} MXFP4 values differ by more than one E2M1 step triton <-> hip"
+            )
+            frac = (dq_triton != dq_hip).float().mean().item()
+            assert frac <= 1e-3, f"{frac:.2e} of {usage} MXFP4 values differ triton <-> hip"
+
     def _compare_quantizers(
         self,
         quantizer_triton, quantizer_hip,
@@ -546,7 +607,7 @@ class TestNorms:
                 msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
             )
 
-    def _check_skips(self, quantization, shape, colwise):
+    def _check_skips(self, quantization, shape, colwise, out_dtype=None):
         # Check if quantization scheme is supported
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
@@ -557,6 +618,13 @@ class TestNorms:
                 pytest.skip("MXFP8 quantization requires row dimensions divisible by 32.")
             if colwise and shape[1] % 32:
                 pytest.skip("Colwise MXFP8 quantization requires col dimensions divisible by 32.") 
+        if quantization == "mxfp4":
+            if not mxfp4_available:
+                pytest.skip(reason_for_no_mxfp4)
+            if shape[0] % MXFP4_BLOCK_SCALING_SIZE or shape[1] % MXFP4_BLOCK_SCALING_SIZE:
+                pytest.skip("MXFP4 quantization requires dimensions divisible by 32.")
+            if out_dtype != torch.bfloat16:
+                pytest.skip("The C++ MXFP4 cast kernel only reads bf16 input.")
 
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):
@@ -572,6 +640,9 @@ class TestNorms:
         elif quantization == "mxfp8":
             quantizer_triton = MXFP8Quantizer(fp8_dtype, columnwise=columnwise)
             quantizer_hip = MXFP8Quantizer(fp8_dtype, columnwise=columnwise)
+        elif quantization == "mxfp4":
+            quantizer_triton = MXFP4Quantizer(rowwise=True, columnwise=columnwise)
+            quantizer_hip = MXFP4Quantizer(rowwise=True, columnwise=columnwise)
         else:
             quantizer_triton = None
             quantizer_hip = None

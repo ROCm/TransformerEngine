@@ -7,6 +7,16 @@
 SCRIPT_NAMES="${SCRIPT_NAMES:-test_multi_process_ep.py}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 
+# Each communicator mode needs a fresh process group.
+if [ -z "${NVTE_TEST_EP_CLASSES:-}" ]; then
+  RET=0
+  NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop,TestEpDomainGrouping" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  exit "$RET"
+fi
+
 
 XLA_BASE_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
                 --xla_gpu_graph_min_graph_size=1"
@@ -17,8 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${TE_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Editable installs don't embed rpath; libtransformer_engine.so needs
-# libnccl_ep.so.0 from the TE editable location at dlopen time.
+# Editable installs don't embed rpath; the TE JAX extension needs
+# libtransformer_engine.so from the TE editable location at dlopen time.
 TE_LIB_PATH=$(pip3 show transformer-engine 2>/dev/null \
     | grep -E "Location:|Editable project location:" \
     | tail -n 1 | awk '{print $NF}')

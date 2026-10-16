@@ -14,13 +14,18 @@ Coverage:
   - ``ep_dispatch`` custom_vjp: exact per-(t, k) ``grad_topk_weights`` under
     skewed upstream gradients (no k-axis averaging).
   - HLO reshard guard: compile-only, no XLA collectives outside the EP FFI.
+  - Drop-on-overflow: ``ep_finalize`` + re-bootstrap with a small recv capacity
+    drops the overflow instead of trapping; ``total_recv_tokens`` reports the
+    pre-drop demand.
 
 Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
 """
 
 import os
+import re
 import sys
 import unittest
+from unittest import mock
 
 import jax
 import jax.experimental.multihost_utils as jmu
@@ -28,13 +33,27 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from utils import is_devices_enough
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-from transformer_engine.jax.ep import EpLayerConfig, ep_bootstrap, ep_dispatch, ep_combine
+from transformer_engine.jax.ep import (
+    EpLayerConfig,
+    ep_bootstrap,
+    ep_finalize,
+    ep_dispatch,
+    ep_combine,
+    _ep_domain_for_rank,
+)
 from transformer_engine.jax.cpp_extensions.ep import (
     ep_prepare,
     ep_dispatch_fwd,
     ep_combine_fwd,
     get_ep_config,
+    is_ep_borrowed_comm_built,
+    use_nccl_comm_from_xla,
+)
+from transformer_engine.jax.version_utils import (
+    is_collective_stream_supported,
+    is_xla_ffi_collectives_supported,
 )
 
 
@@ -94,11 +113,23 @@ def _local_device_sm():
 
 
 class TestEP(unittest.TestCase):
+    # Selects the EP comm path for this class. False forces the self-hosted NCCL
+    # comm; the TestEPBorrowedComm subclass flips it to exercise the borrowed path.
+    USE_BORROWED_COMM = False
+
     @classmethod
     def setUpClass(cls):
         sm = _local_device_sm()
         if sm is not None and sm < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        if cls.USE_BORROWED_COMM and not (
+            is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
+        ):
+            raise unittest.SkipTest("EP borrowed-comm path needs a newer JAX/XLA build")
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "1" if cls.USE_BORROWED_COMM else "0"
+        # Drop any communicator a prior class left so we bootstrap on a clean slate.
+        ep_finalize()
         cls.num_procs = jax.process_count()
         cls.rank = jax.process_index()
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
@@ -130,6 +161,15 @@ class TestEP(unittest.TestCase):
         # One layer config shared by all single-layer tests below; non-zero
         # alignment exercises dispatch_output_per_expert_alignment end-to-end.
         cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Leave a clean slate for the next class and restore the env override.
+        ep_finalize()
+        if cls._prev_comm_env is None:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        else:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = cls._prev_comm_env
 
     # ── Bootstrap precondition ────────────────────────────────────────────
 
@@ -230,8 +270,8 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx):
-                _tc_a, ha = ep_prepare(ka, idx)
-                _tc_b, hb = ep_prepare(kb, idx)
+                _tc_a, _trt_a, ha = ep_prepare(ka, idx)
+                _tc_b, _trt_b, hb = ep_prepare(kb, idx)
                 return ha, hb
 
             hm_a, hm_b = run(idx_s)
@@ -258,7 +298,9 @@ class TestEP(unittest.TestCase):
             w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
 
             def one_layer(hk, idx, toks, w_):
-                recv_t, recv_w, hm, tc = ep_dispatch(hk, idx, toks, w_, self.recv_capacity_per_rank)
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
+                    hk, idx, toks, w_, self.recv_capacity_per_rank
+                )
                 recv_t = jax.lax.with_sharding_constraint(
                     recv_t, NamedSharding(self.mesh, ep_spec_3d)
                 )
@@ -296,23 +338,33 @@ class TestEP(unittest.TestCase):
             )
 
     def test_primitive_prepare(self):
-        """ep_prepare returns token_counts and handle_mem of the expected shapes."""
+        """ep_prepare returns token_counts, total_recv_tokens and handle_mem.
+
+        total_recv_tokens is the per-rank pre-drop recv-slot total; with no
+        overflow it equals the padded per-expert count sum that dispatch fills.
+        """
         T_global, topk_idx, _tokens, _w = self._make_identity_inputs()
         del T_global
         dp_spec = PartitionSpec(("dp", "ep"), None)
+        align = max(int(self.hk.dispatch_output_per_expert_alignment), 1)
         with self.mesh, global_shard_guard(self.mr):
             idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
 
             @jax.jit
             def run(idx):
-                tc, hm = ep_prepare(self.hk, idx)
-                return tc, hm
+                tc, trt, hm = ep_prepare(self.hk, idx)
+                return tc, trt, hm
 
-            tc, hm = run(idx_s)
-            tc.block_until_ready()
+            tc, trt, hm = run(idx_s)
+            trt.block_until_ready()
         self.assertEqual(tc.shape, (self.dp * self.ep, NUM_LOCAL_EXPERTS))
         self.assertEqual(hm.shape[0], self.dp * self.ep)
         self.assertGreater(hm.shape[1], 0)
+        self.assertEqual(trt.shape, (self.dp * self.ep, 1))
+        self.assertEqual(trt.dtype, jnp.int32)
+        padded = ((np.asarray(tc).astype(np.int64) + align - 1) // align) * align
+        expected = padded.sum(axis=-1, keepdims=True)
+        np.testing.assert_array_equal(np.asarray(trt).astype(np.int64), expected)
 
     def _run_identity_round_trip(self, nonuniform):
         T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=nonuniform)
@@ -327,7 +379,7 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx, toks, w):
-                _tc, hm = ep_prepare(self.hk, idx)
+                _tc, _trt, hm = ep_prepare(self.hk, idx)
                 recv_t, recv_w = ep_dispatch_fwd(
                     self.hk, hm, idx, toks, w, self.recv_capacity_per_rank
                 )
@@ -393,7 +445,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                recv_t, recv_w, hm, tc = ep_dispatch(
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(
@@ -444,7 +496,7 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx, toks, w):
-                recv_t, recv_w, hm, _tc = ep_dispatch(
+                recv_t, recv_w, hm, _tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_t))
@@ -495,7 +547,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                recv_tokens, _recv_w, _hm, tc = ep_dispatch(
+                recv_tokens, _recv_w, _hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_tokens = jax.lax.with_sharding_constraint(
@@ -549,7 +601,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                _recv_tokens, recv_w, hm, tc = ep_dispatch(
+                _recv_tokens, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_w = jax.lax.with_sharding_constraint(
@@ -595,7 +647,7 @@ class TestEP(unittest.TestCase):
                 idx_in = jax.lax.with_sharding_constraint(idx_in, NamedSharding(self.mesh, dp_spec))
                 tok_in = jax.lax.with_sharding_constraint(tok_in, NamedSharding(self.mesh, dp_spec))
                 w_in = jax.lax.with_sharding_constraint(w_in, NamedSharding(self.mesh, dp_spec))
-                _recv_t, recv_w, _h, _tc = ep_dispatch(
+                _recv_t, recv_w, _h, _tc, _trt = ep_dispatch(
                     self.hk, idx_in, tok_in, w_in, self.recv_capacity_per_rank
                 )
                 # Per-slot index scale ⇒ each slot's contribution differs.
@@ -636,7 +688,7 @@ class TestEP(unittest.TestCase):
                 idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
-                recv_t, recv_w, hm, tc = ep_dispatch(
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(
@@ -660,6 +712,87 @@ class TestEP(unittest.TestCase):
             expected = (("dp", "ep"),) if self.dp > 1 else ("ep",)
             self.assertEqual(tuple(compiled.output_shardings.spec), expected)
 
+    @unittest.skipUnless(
+        is_collective_stream_supported(),
+        "JAX/XLA lacks the gpu_stream:collective annotation (openxla/xla#39604)",
+    )
+    def test_z_dispatch_combine_on_collective_stream(self):
+        """Every EP FFI custom call must run on the collective stream. compute_on
+        puts the annotation on the async wrapper XLA generates, so assert each EP
+        call is reachable from a wrapper that carries it."""
+        T_dp, tokens, topk_idx, topk_w = self._make_random_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        ep_spec_2d = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+
+            @jax.jit
+            def run(idx, toks, w):
+                idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
+                toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
+                w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
+                recv_t = jax.lax.with_sharding_constraint(
+                    recv_t, NamedSharding(self.mesh, ep_spec_3d)
+                )
+                recv_w = jax.lax.with_sharding_constraint(
+                    recv_w, NamedSharding(self.mesh, ep_spec_2d)
+                )
+                weighted = self._preweight_expert_out(recv_t, recv_w)
+                out = ep_combine(self.hk, hm, tc, weighted, T_dp, out_sharding=(("dp", "ep"), None))
+                return jax.lax.with_sharding_constraint(out, NamedSharding(self.mesh, dp_spec))
+
+            hlo = run.lower(topk_idx, tokens, topk_w).compile().as_text()
+
+        # Parse the HLO into computations and follow the call graph: a call
+        # carrying the collective-stream annotation places its callee (and every
+        # nested callee) on the collective stream.
+        comps = {}
+        cur = None
+        for line in hlo.splitlines():
+            stripped = line.strip()
+            header = re.match(r"(?:ENTRY\s+)?(%[\w.\-]+)\s*\(", stripped)
+            if header and stripped.endswith("{"):
+                cur = header.group(1)
+                comps[cur] = []
+            elif stripped == "}":
+                cur = None
+            elif cur is not None:
+                comps[cur].append(line)
+
+        callees = lambda l: re.findall(r"(?:calls|to_apply)=(%[\w.\-]+)", l)
+        edges = {c: {x for l in ls for x in callees(l)} for c, ls in comps.items()}
+
+        collective = set()
+        for ls in comps.values():
+            for l in ls:
+                if '_xla_stream_annotation="collective"' in l.replace(" ", ""):
+                    collective.update(callees(l))
+        stack = list(collective)
+        while stack:
+            for callee in edges.get(stack.pop(), ()):
+                if callee not in collective:
+                    collective.add(callee)
+                    stack.append(callee)
+
+        ep_calls = [
+            (c, l) for c, ls in comps.items() for l in ls if 'custom_call_target="te_ep_' in l
+        ]
+        self.assertTrue(ep_calls, f"no te_ep_* custom calls in compiled HLO:\n{hlo}")
+        missing = [
+            l.strip()[:200]
+            for c, l in ep_calls
+            if c not in collective
+            and '_xla_stream_annotation="collective"' not in l.replace(" ", "")
+        ]
+        self.assertFalse(
+            missing,
+            "te_ep_* custom calls not on the collective stream:\n" + "\n".join(missing),
+        )
+
     def test_z_no_unexpected_reshard_in_hlo_bwd(self):
         """Compiled bwd HLO must not insert XLA collectives outside the EP FFI."""
         T_dp, tokens, topk_idx, topk_w = self._make_random_inputs()
@@ -682,7 +815,9 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
-                _rt, rw, hm, tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
+                _rt, rw, hm, tc, _trt = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
                 rw = jax.lax.with_sharding_constraint(rw, NamedSharding(self.mesh, ep_spec_2d))
                 weighted = self._preweight_expert_out(eo, rw)
                 combined = ep_combine(
@@ -712,6 +847,243 @@ class TestEP(unittest.TestCase):
                 self.assertEqual(hlo.count(op), 0, f"unexpected XLA {op} in bwd HLO:\n{hlo}")
 
 
+# ── Borrowed-comm path ───────────────────────────────────────────────────────
+
+
+class TestEPBorrowedComm(TestEP):
+    """Re-run EP primitives on the XLA borrowed-comm path.
+
+    Skipped entirely unless the build and installed JAX both provide the
+    collectives FFI extension. To keep L0/L1 fast, only a small smoke subset
+    (_SMOKE) runs by default; the full borrowed-path suite runs at L2
+    (NVTE_JAX_UNITTEST_LEVEL=L2).
+    """
+
+    USE_BORROWED_COMM = True
+
+    # Representative cases kept outside L2: one dispatch/combine round-trip (fwd)
+    # and its gradient (bwd). Every other inherited case runs only at L2.
+    _SMOKE = frozenset(
+        {
+            "test_primitive_dispatch_combine_identity_uniform",
+            "test_primitive_dispatch_combine_identity_bwd_uniform",
+        }
+    )
+
+    def setUp(self):
+        if (
+            os.environ.get("NVTE_JAX_UNITTEST_LEVEL", "L0") != "L2"
+            and self._testMethodName not in self._SMOKE
+        ):
+            self.skipTest("borrowed-comm full suite runs at L2 (NVTE_JAX_UNITTEST_LEVEL=L2)")
+
+
+# ── Drop-on-overflow ─────────────────────────────────────────────────────────
+
+
+class TestEPOverflowDrop(unittest.TestCase):
+    """Re-bootstraps with drop_on_overflow=True and a small recv capacity.
+
+    ``ep_finalize`` tears down the default TestEP communicator so this class can
+    re-bootstrap with its own config in the same process. Every token routes its
+    top-1 slot to expert 0, so the rank owning it demands more than the recv
+    capacity; the dispatch drops the excess instead of trapping, while
+    total_recv_tokens still reports the pre-drop demand.
+    """
+
+    ALIGN = 16
+    # Each EP group routes all OVF_TOKENS_PER_DP_SHARD top-1 slots to expert 0,
+    # whose padded count then exceeds the recv capacity. HT mode requires the
+    # recv capacity to be >= the per-rank dispatch count (tokens // ep), so the
+    # capacity sits between that floor and the concentrated expert-0 demand.
+    OVF_TOKENS_PER_DP_SHARD = 48
+    OVF_RECV_CAPACITY = NUM_LOCAL_EXPERTS * ALIGN  # 32 slots per rank
+
+    @classmethod
+    def setUpClass(cls):
+        sm = _local_device_sm()
+        if sm is not None and sm < 90:
+            raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "0"
+        cls.num_procs = jax.process_count()
+        cls.rank = jax.process_index()
+        cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
+        cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
+        cls.recv_capacity_per_rank = cls.OVF_RECV_CAPACITY
+        # True per-rank dispatch count; HT mode needs recv_capacity >= this.
+        cls.max_tokens_per_rank = cls.OVF_TOKENS_PER_DP_SHARD // cls.ep
+        cls.mesh = _build_mesh(cls.dp, cls.ep)
+        cls.mr = MeshResource(dp_resource="dp", ep_resource="ep")
+        # Drop any communicator a prior test class bootstrapped, then re-init.
+        ep_finalize()
+        with cls.mesh, global_shard_guard(cls.mr):
+            ep_bootstrap(
+                world_size=cls.num_procs,
+                rank=cls.rank,
+                num_experts=cls.num_experts,
+                max_tokens_per_rank=cls.max_tokens_per_rank,
+                recv_capacity_per_rank=cls.recv_capacity_per_rank,
+                hidden_dim=HIDDEN_DIM,
+                drop_on_overflow=True,
+            )
+        cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=cls.ALIGN)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Leave a clean slate so another class can bootstrap after us.
+        ep_finalize()
+        if cls._prev_comm_env is None:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        else:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = cls._prev_comm_env
+
+    def _make_concentrated_inputs(self):
+        """All top-1 routes to expert 0; top-2 spread over the rest, so the rank
+        owning expert 0 overloads beyond recv_capacity_per_rank."""
+        T_global = self.OVF_TOKENS_PER_DP_SHARD * self.dp
+        E = self.num_experts
+        topk_idx = np.empty((T_global, TOP_K), dtype=np.int32)
+        for t in range(T_global):
+            topk_idx[t, 0] = 0
+            for k in range(1, TOP_K):
+                topk_idx[t, k] = 1 + (t % (E - 1))
+        topk_idx = jnp.asarray(topk_idx)
+        topk_w = jnp.full((T_global, TOP_K), 1.0 / TOP_K, dtype=jnp.float32)
+        tokens = jnp.asarray(
+            np.linspace(0.1, 0.9, T_global * HIDDEN_DIM, dtype=np.float32).reshape(
+                T_global, HIDDEN_DIM
+            ),
+            dtype=jnp.bfloat16,
+        )
+        return T_global, topk_idx, tokens, topk_w
+
+    def test_overflow_drops_without_trap(self):
+        """Dispatch drops the overflow instead of trapping; total_recv_tokens
+        reports the pre-drop demand, which exceeds recv_capacity_per_rank."""
+        _T, topk_idx, tokens, topk_w = self._make_concentrated_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        with self.mesh, global_shard_guard(self.mr):
+
+            @jax.jit
+            def run(idx, toks, w):
+                idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
+                toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
+                w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
+                _tc, trt_prep, _hm = ep_prepare(self.hk, idx)
+                recv_t, _rw, _hm2, _tc2, trt_disp = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
+                recv_t = jax.lax.with_sharding_constraint(
+                    recv_t, NamedSharding(self.mesh, ep_spec_3d)
+                )
+                return trt_prep, trt_disp, recv_t
+
+            trt_prep, trt_disp, recv_t = run(topk_idx, tokens, topk_w)
+            recv_t.block_until_ready()
+
+        # Reaching here means the dispatch dropped the overflow rather than
+        # trapping (an overflow trap is a device-side abort).
+        self.assertEqual(recv_t.shape[1], self.recv_capacity_per_rank)
+        # total_recv_tokens is sharded across processes; gather before host reads.
+        trt_prep = np.asarray(jmu.process_allgather(trt_prep, tiled=True)).reshape(-1)
+        trt_disp = np.asarray(jmu.process_allgather(trt_disp, tiled=True)).reshape(-1)
+        # prepare and dispatch see the same routing -> identical pre-drop totals.
+        np.testing.assert_array_equal(trt_prep, trt_disp)
+        # The rank owning expert 0 demands more than it can receive.
+        self.assertGreater(int(trt_prep.max()), self.recv_capacity_per_rank)
+
+
+# ── EP domain grouping (single-process; runs under plain pytest) ─────────────
+
+
+class TestEpDomainGrouping(unittest.TestCase):
+    """EP domains group ranks sharing all non-ep coords, so an orthogonal tp
+    axis splits the world into one EP domain per tp coordinate."""
+
+    def test_ep_tp_splits_domains(self):
+        # Gate on device count inside the test: calling jax.devices() at
+        # class-definition time would initialize the XLA backend before
+        # jax.distributed.initialize().
+        if not is_devices_enough(8):
+            self.skipTest("requires 8 devices")
+        # ep=4, tp=2: tp must yield 2 EP domains, each a fixed tp coordinate.
+        mesh = Mesh(np.asarray(jax.devices()[:8]).reshape(4, 2), ("expert", "tensor"))
+        # Single host shares one process_index; inject row-major ranks to mimic
+        # one device per process.
+        order = {int(d.id): i for i, d in enumerate(mesh.devices.reshape(-1))}
+        d2r = lambda d: order[int(d.id)]
+
+        domains = {}
+        for rank in range(8):
+            root, col, ndom = _ep_domain_for_rank(mesh, "expert", rank, device_to_rank=d2r)
+            self.assertEqual(ndom, 2)  # every rank must agree on the domain count
+            domains.setdefault(root, {})[col] = rank
+        domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
+
+        self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
+
+
+# ── Comm-path selection (single-process; no GPU needed) ──────────────────────
+
+
+class TestEpCommSelection(unittest.TestCase):
+    """use_nccl_comm_from_xla() build/version gating and NVTE_JAX_EP_NCCL_COMM_FROM_XLA override."""
+
+    @staticmethod
+    def _use(env, built, supported):
+        import transformer_engine.jax.cpp_extensions.ep as ep_mod
+
+        prev = os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        if env is not None:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = env
+        try:
+            with mock.patch.object(
+                ep_mod, "is_ep_borrowed_comm_built", return_value=built
+            ), mock.patch.object(
+                ep_mod, "is_xla_ffi_collectives_supported", return_value=supported
+            ):
+                return ep_mod.use_nccl_comm_from_xla()
+        finally:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+            if prev is not None:
+                os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = prev
+
+    def test_auto_requires_build_and_version(self):
+        # Env unset: borrowed path only when both build and JAX support it.
+        self.assertTrue(self._use(None, built=True, supported=True))
+        self.assertFalse(self._use(None, built=True, supported=False))
+        self.assertFalse(self._use(None, built=False, supported=True))
+
+    def test_env_override_wins_over_version(self):
+        self.assertTrue(self._use("1", built=True, supported=False))
+        self.assertFalse(self._use("0", built=True, supported=True))
+
+    def test_force_on_without_build_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "without the EP borrowed-comm path"):
+            self._use("1", built=False, supported=True)
+
+
+def _ep_test_cases():
+    """Select test classes for one communicator mode."""
+    all_test_cases = {
+        c.__name__: c
+        for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+    }
+    names = os.environ.get("NVTE_TEST_EP_CLASSES")
+    test_cases = (
+        tuple(all_test_cases[name.strip()] for name in names.split(","))
+        if names
+        else (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
+    )
+    if TestEPBorrowedComm in test_cases and any(
+        c in test_cases for c in (TestEP, TestEPOverflowDrop)
+    ):
+        raise ValueError("Run borrowed-comm and self-hosted EP tests in separate processes.")
+    return test_cases
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -723,6 +1095,20 @@ if __name__ == "__main__":
     coord_addr = sys.argv[1]
     proc_id = int(sys.argv[2])
     num_procs = int(sys.argv[3])
+    test_cases = _ep_test_cases()
+
+    target = os.environ.get("TARGET_TEST")
+    if target:
+        name = target.split(".")[-1]
+        if not any(
+            hasattr(c, name)
+            for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+        ):
+            raise ValueError(f"Unknown EP test: {target}")
+        test_cases = tuple(c for c in test_cases if hasattr(c, name))
+        if not test_cases:
+            unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite())
+            sys.exit(0)
 
     jax.distributed.initialize(
         coordinator_address=coord_addr,
@@ -732,12 +1118,10 @@ if __name__ == "__main__":
     )
 
     loader = unittest.TestLoader()
-    target = os.environ.get("TARGET_TEST")
     if target:
-        name = target.split(".")[-1]
-        suite = loader.loadTestsFromName(name, TestEP)
+        suite = unittest.TestSuite(loader.loadTestsFromName(name, c) for c in test_cases)
     else:
-        suite = loader.loadTestsFromTestCase(TestEP)
+        suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in test_cases)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)

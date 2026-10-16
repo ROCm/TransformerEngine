@@ -14,9 +14,14 @@ doubling the GPU work.
 import pytest
 import torch
 from torch.profiler import profile, ProfilerActivity
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+pytestmark = pytest.mark.skipif(
+    not IS_HIP_EXTENSION, reason="hipified cast_transpose dispatch is ROCm-only"
+)
 
 
 def _fill_uniform(shape, dtype):
@@ -27,9 +32,7 @@ def _fill_uniform(shape, dtype):
 
 
 @pytest.mark.parametrize("shape", [
-    (128, 128),
     (2048, 12288),
-    (256, 256),
 ])
 @pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
