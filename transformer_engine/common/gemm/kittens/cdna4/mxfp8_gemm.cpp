@@ -8,6 +8,7 @@
 #include "../kittens_kernel_common.cuh"
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 
 namespace te_kittens::cdna4::mxfp8 {
 
@@ -1249,6 +1250,46 @@ static void launch_pack_scales_fused_varying(const uint8_t *const *d_scale_ptrs,
         nullptr, ln, dim, 0, max_k_iters, tiles_per_col, d_scale_ptrs, 0, d_k_iters_arr, d_output_offsets);
 }
 
+template <int N>
+struct alignas(16) UploadChunk {
+    uint8_t bytes[N];
+};
+
+template <int N>
+__global__ void upload_chunk_kernel(uint4 *dst, const UploadChunk<N> chunk, int nvec) {
+    const auto *src = reinterpret_cast<const uint4 *>(chunk.bytes);
+    for (int i = threadIdx.x; i < nvec; i += blockDim.x) {
+        dst[i] = src[i];
+    }
+}
+
+template <int N>
+static void launch_upload_chunk(uint8_t *dst, const uint8_t *src, int nbytes, hipStream_t stream) {
+    UploadChunk<N> chunk;
+    std::memcpy(chunk.bytes, src, nbytes);
+    upload_chunk_kernel<N><<<1, 256, 0, stream>>>(reinterpret_cast<uint4 *>(dst), chunk, nbytes / 16);
+}
+
+// Copies host data to device through kernel arguments, which CUDA graph capture stores by value.
+// A hipMemcpyAsync from a host temporary would instead re-read freed memory on every graph replay.
+static void upload_to_device(void *dst, const void *src, size_t nbytes, hipStream_t stream) {
+    // Launch cost is flat up to 8 KB of arguments and grows beyond; HIP graphs fail somewhere past 64 KB.
+    constexpr int MAX_CHUNK_BYTES = 32768;
+    assert(reinterpret_cast<uintptr_t>(dst) % 16 == 0 && nbytes % 16 == 0);
+    const auto *s = static_cast<const uint8_t *>(src);
+    auto *d = static_cast<uint8_t *>(dst);
+    for (size_t off = 0; off < nbytes; off += MAX_CHUNK_BYTES) {
+        const int n = static_cast<int>(std::min<size_t>(MAX_CHUNK_BYTES, nbytes - off));
+        if (n <= 8192) {
+            launch_upload_chunk<8192>(d + off, s + off, n, stream);
+        } else if (n <= 16384) {
+            launch_upload_chunk<16384>(d + off, s + off, n, stream);
+        } else {
+            launch_upload_chunk<MAX_CHUNK_BYTES>(d + off, s + off, n, stream);
+        }
+    }
+}
+
 static bool check_tn_constraints(int M, int N, int K) {
     return M % BLOCK_ROW == 0 && N % BLOCK_COL == 0 && K % BLOCK_K == 0 && K >= 256;
 }
@@ -1419,47 +1460,46 @@ static bool grouped_mxfp8_gemm(
     auto *d_tile_offsets   = (int *)(ws + ws_off);         ws_off += offsets_bytes;
     auto *d_sb_tile_offsets = (int *)(ws + ws_off);        ws_off += sb_off_bytes;
 
-    // Upload per-expert scale_A pointers to device for fused packing
-    hipMemcpyAsync((void *)d_sa_ptrs, scale_A_array,
-                   num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
-
     int sa_expert_stride = k_iters * M;
 
-    // Pack scale_B per-expert and build sb_tile_offsets
     std::vector<int> h_sb_tile_offsets(num_experts + 1);
     int sb_tile_cursor = 0;
+    for (int g = 0; g < num_experts; g++) {
+        h_sb_tile_offsets[g] = sb_tile_cursor;
+        sb_tile_cursor += k_iters * (N_array[g] / BLOCK_COL);
+    }
+    h_sb_tile_offsets[num_experts] = sb_tile_cursor;
+
+    // Per-expert pointers and tile offsets fill the workspace from d_a_ptrs to the end; stage and
+    // upload them in one go, before the packing kernels read d_sa_ptrs.
+    const size_t tables_bytes = total_ws - sa_pk_bytes - sb_pk_bytes;
+    std::vector<uint8_t> h_tables(tables_bytes);
+    auto stage = [&](const void *d_dst, const void *src, size_t nbytes) {
+        std::memcpy(h_tables.data() + ((const uint8_t *)d_dst - (const uint8_t *)d_a_ptrs), src, nbytes);
+    };
+    stage(d_a_ptrs, A_array, num_experts * sizeof(void *));
+    stage(d_b_ptrs, B_array, num_experts * sizeof(void *));
+    stage(d_c_ptrs, C_array, num_experts * sizeof(void *));
+    stage(d_sa_ptrs, scale_A_array, num_experts * sizeof(void *));
+    stage(d_tile_offsets, h_tile_offsets.data(), (num_experts + 1) * sizeof(int));
+    stage(d_sb_tile_offsets, h_sb_tile_offsets.data(), (num_experts + 1) * sizeof(int));
+    upload_to_device(d_a_ptrs, h_tables.data(), tables_bytes, stream);
+
+    // Pack scales: weights in one fused launch for all experts, activations per expert
     uint32_t *sb_cursor = sb_pk;
     KITTENS_BOOL_SWITCH(!transa, COLWISE_A,
         KITTENS_BOOL_SWITCH(transb, COLWISE_B,
-            // Pack weight scales: single fused launch for all experts
             launch_pack_scales_fused<COLWISE_A, 64, 4>(
                 (const uint8_t *const *)d_sa_ptrs, sa_pk,
                 sa_expert_stride, num_experts,
                 M, scale_K, k_iters, stream);
-            // Pack activation scales per-expert
             for (int g = 0; g < num_experts; g++) {
                 int N_g = N_array[g];
-                h_sb_tile_offsets[g] = sb_tile_cursor;
                 launch_pack_scales<COLWISE_B, 32, 8>((const uint8_t *)scale_B_array[g], sb_cursor,
                                                      N_g, scale_K, k_iters, stream);
                 sb_cursor += (size_t)2 * k_iters * N_g;  // B: 2 lane tiles per source tile
-
-                sb_tile_cursor += k_iters * (N_g / BLOCK_COL);
             }
-            h_sb_tile_offsets[num_experts] = sb_tile_cursor;
     ))  // NOLINT(*)
-
-    // Copy per-expert pointers and tile offsets to device workspace
-    hipMemcpyAsync((void *)d_a_ptrs, A_array,
-                   num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync((void *)d_b_ptrs, B_array,
-                   num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync((void *)d_c_ptrs, C_array,
-                   num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync((void *)d_tile_offsets, h_tile_offsets.data(),
-                   (num_experts + 1) * sizeof(int), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync((void *)d_sb_tile_offsets, h_sb_tile_offsets.data(),
-                   (num_experts + 1) * sizeof(int), hipMemcpyHostToDevice, stream);
 
     // gl_A/gl_B provide stride info only; raw_ptr overridden per expert in kernel.
     int N0 = N_array[0];
@@ -1895,18 +1935,24 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     auto *d_sa_offsets  = (int *)(ws + off);               off += sa_off_bytes;
     auto *d_sb_offsets  = (int *)(ws + off);
 
-    hipMemcpyAsync(d_sa_ptrs, h_sa_ptrs.data(), num_active * sizeof(void *), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync(d_sb_ptrs, h_sb_ptrs.data(), num_active * sizeof(void *), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync(d_k_iters_arr, h_k_iters.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync(d_sa_offsets, h_sa_offsets.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
-    hipMemcpyAsync(d_sb_offsets, h_sb_offsets.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
+    // The per-expert tables fill the workspace from d_info to the end; stage and upload them in one go.
+    const size_t tables_bytes = total_ws - sa_pk_bytes - sb_pk_bytes;
+    std::vector<uint8_t> h_tables(tables_bytes);
+    auto stage = [&](const void *d_dst, const void *src, size_t nbytes) {
+        std::memcpy(h_tables.data() + ((const uint8_t *)d_dst - (const uint8_t *)d_info), src, nbytes);
+    };
+    stage(d_info, h_info.data(), num_active * sizeof(WgradExpertInfo));
+    stage(d_sa_ptrs, h_sa_ptrs.data(), num_active * sizeof(void *));
+    stage(d_sb_ptrs, h_sb_ptrs.data(), num_active * sizeof(void *));
+    stage(d_k_iters_arr, h_k_iters.data(), num_active * sizeof(int));
+    stage(d_sa_offsets, h_sa_offsets.data(), num_active * sizeof(int));
+    stage(d_sb_offsets, h_sb_offsets.data(), num_active * sizeof(int));
+    upload_to_device(d_info, h_tables.data(), tables_bytes, stream);
 
     launch_pack_scales_fused_varying<true, 64, 4>((const uint8_t *const *)d_sa_ptrs, sa_pk, d_sa_offsets,
                                                   d_k_iters_arr, max_k_iters, num_active, N, stream);
     launch_pack_scales_fused_varying<true, 32, 8>((const uint8_t *const *)d_sb_ptrs, sb_pk, d_sb_offsets,
                                                   d_k_iters_arr, max_k_iters, num_active, K, stream);
-
-    hipMemcpyAsync(d_info, h_info.data(), num_active * sizeof(WgradExpertInfo), hipMemcpyHostToDevice, stream);
 
     int grid = num_active * tiles_per_expert;
     if (grid == 0) return true;
