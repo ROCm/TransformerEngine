@@ -60,6 +60,7 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
     const int* cu_seqlens_kv,
     const int* cu_seqlens_kv_padded)
 {
+#ifndef __GFX12__ //__builtin_amdgcn_mfma_f32_16x16x16bf16_1k is for gfx90a-insts
     constexpr int head_dim    = Config::head_dim;
     constexpr int head_num    = Config::head_num;
     constexpr int max_seq_kv  = Config::max_seq_kv;
@@ -275,6 +276,9 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
             }
         }
     }
+#else
+    assert(false && "Kernel not implemented for this GPU architecture");
+#endif //__GFX12__
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +303,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
     const int* cu_seqlens_kv,
     const int* cu_seqlens_kv_padded)
 {
+#ifndef __GFX12__ //__builtin_amdgcn_mfma_f32_16x16x16bf16_1k is for gfx90a-insts
     constexpr int head_dim      = Config::head_dim;
     constexpr int head_num      = Config::head_num;
     constexpr int max_seq_kv    = Config::max_seq_kv;
@@ -647,6 +652,9 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
             }
         }
     }
+#else
+    assert(false && "Kernel not implemented for this GPU architecture");
+#endif //__GFX12__
 }
 
 // ---------------------------------------------------------------------------
