@@ -219,6 +219,27 @@ def build_wgrad_work_queue(num_groups, num_pid_m, num_pid_n, device):
     return work_queue, work_counter, num_tiles
 
 
+class _SpanCAI:
+    """Minimal ``__cuda_array_interface__`` holder for a raw uint8 device span.
+
+    Wraps ``total_bytes`` at ``data_ptr`` as a 1-D uint8 CAI so ``torch.as_tensor``
+    can build a zero-copy view over a contiguous multi-tensor run (see
+    :func:`concat_or_view_rows`). Hoisted to module scope so the class object is
+    built once at import, not reconstructed on every call.
+    """
+
+    __slots__ = ("__cuda_array_interface__",)
+
+    def __init__(self, total_bytes, data_ptr):
+        self.__cuda_array_interface__ = {
+            "shape": (total_bytes,),
+            "typestr": "|u1",
+            "data": (data_ptr, False),
+            "strides": None,
+            "version": 3,
+        }
+
+
 def concat_or_view_rows(tensors):
     """Concatenate per-expert tensors on dim 0, skipping the copy when possible.
 
@@ -279,19 +300,9 @@ def concat_or_view_rows(tensors):
     row_bytes *= elem
     total_bytes = total_rows * row_bytes
 
-    class _SpanCAI:
-        __slots__ = ("__cuda_array_interface__",)
-
-        def __init__(self):
-            self.__cuda_array_interface__ = {
-                "shape": (total_bytes,),
-                "typestr": "|u1",
-                "data": (first.data_ptr(), False),
-                "strides": None,
-                "version": 3,
-            }
-
-    byte_view = torch.as_tensor(_SpanCAI(), device=first.device)
+    byte_view = torch.as_tensor(
+        _SpanCAI(total_bytes, first.data_ptr()), device=first.device
+    )
     view = byte_view.view(first.dtype).view(total_rows, *tuple(trailing))
     view._flydsl_span_anchor = tensors
     return view
