@@ -293,7 +293,7 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
   fmha_args.qscale_type     = static_cast<int>(
-      args.dtype == DType::kFloat8E4M3
+      args.dtype == DType::kFloat8
           ? quant_scale_enum::pertensor
           : quant_scale_enum::no_scale);
   fmha_args.has_sink        = args.has_sink;
@@ -347,7 +347,7 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   // Upstream CK has an FP8 tile path, but it is not enabled here, so a failed
   // ASM probe must not fall through to an unvalidated CK launch. Enabling CK
   // tile FP8 is a separate change. 
-  if(args.dtype == DType::kFloat8E4M3){
+  if(args.dtype == DType::kFloat8){
     aiter::mha_fwd_args probe_args = fmha_args;
     probe_args.v3_api_check = true;
     ck_tile::stream_config probe_config{nullptr, false, false};

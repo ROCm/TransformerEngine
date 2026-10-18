@@ -16,10 +16,10 @@ namespace ck_fused_attn{
 
 // input qkv dtypes
 enum class DType {
-  kFloat16    = 0,  /*!< 16-bit float (E5M10) */
-  kBFloat16   = 1,  /*!< 16-bit bfloat (E8M7) */
-  kFloat8E4M3 = 2,  /*!< 8-bit float(E4M3) input */
-  kNumTypes         /*!< Number of supported types */
+  kFloat16  = 0,  /*!< 16-bit float (E5M10) */
+  kBFloat16 = 1,  /*!< 16-bit bfloat (E8M7) */
+  kFloat8   = 2,  /*!< 8-bit float (E4M3) input */
+  kNumTypes       /*!< Number of supported types */
 };
 
 // keep sync with mask_enum in mask.hpp

@@ -197,7 +197,7 @@ ck_fused_attn::DType nvte_to_ck_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return ck_fused_attn::DType::dtname
   CAST_TYPE(kFloat16, kFloat16);
   CAST_TYPE(kBFloat16, kBFloat16);
-  CAST_TYPE(kFloat8E4M3, kFloat8E4M3);
+  CAST_TYPE(kFloat8E4M3, kFloat8);
   return ck_fused_attn::DType::kNumTypes;
 #undef CAST_TYPE
 }
