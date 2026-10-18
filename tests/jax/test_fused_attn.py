@@ -59,6 +59,12 @@ _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
 # CI test level
 _TEST_LEVEL = get_test_level()
 
+# AITER FP8 fused attention is inference-only and ships only for gfx950.
+rocm_fp8_attention_support = pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) != 95,
+    reason="AITER FP8 ASM fused attention requires gfx950",
+)
+
 
 @pytest.fixture(autouse=True, scope="module")
 def init():
@@ -70,10 +76,7 @@ def init():
     yield
 
 
-@pytest.mark.skipif(
-    not is_hip_extension() or get_device_compute_capability(0) != 95,
-    reason="AITER FP8 ASM fused attention requires gfx950",
-)
+@rocm_fp8_attention_support
 @pytest.mark.parametrize("head_dim", [128, 256])
 def test_aiter_fp8_fwd_backend_selection(head_dim):
     """gfx950 fp8bf16 inference shapes select CK/AITER, while training does not."""
@@ -103,10 +106,7 @@ def test_aiter_fp8_fwd_backend_selection(head_dim):
     assert sliding_window_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
 
-@pytest.mark.skipif(
-    not is_hip_extension() or get_device_compute_capability(0) != 95,
-    reason="AITER FP8 ASM kernels require gfx950",
-)
+@rocm_fp8_attention_support
 @pytest.mark.parametrize("head_dim", [128, 256])
 def test_aiter_fp8_fwd_asm(head_dim):
     """Small dense smoke: load the fp8bf16 ASM kernel and check vs a float32 JAX reference.
@@ -2796,10 +2796,7 @@ def _fused_attn_keep_output_dtype(
     )
 
 
-@pytest.mark.skipif(
-    not is_hip_extension() or get_device_compute_capability(0) != 95,
-    reason="AITER FP8 ASM fused attention requires gfx950",
-)
+@rocm_fp8_attention_support
 @pytest.mark.parametrize(
     "attn_mask_type",
     [
