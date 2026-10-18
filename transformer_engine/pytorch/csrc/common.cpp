@@ -385,9 +385,21 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
   std::lock_guard<std::mutex> lock(amax_ws_mutex);
   auto& ws = amax_ws_cache[std::make_pair(device_id, stream)];
   if (!ws.defined()) {
+    // cudaMalloc is not allowed while the stream is being captured; use the atomic path.
+    cudaStreamCaptureStatus capture_status;
+    NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture_status));
+    if (capture_status != cudaStreamCaptureStatusNone) {
+      return at::empty(0, at::CUDA(at::kFloat));
+    }
+    // Raw device memory rather than the caching allocator, which routes a CUDA graph's stream
+    // into the graph's private pool, where a buffer outliving the graph is rejected by
+    // torch.compile's CUDA-graph trees.
     // Any N past the block cap yields the cap itself; avoid SIZE_MAX so DIVUP cannot overflow.
-    ws = at::empty(nvte_amax_workspace_num_blocks(static_cast<size_t>(1) << 40),
-                   at::CUDA(at::kFloat));
+    const size_t num_blocks = nvte_amax_workspace_num_blocks(static_cast<size_t>(1) << 40);
+    void* ptr = nullptr;
+    NVTE_CHECK_CUDA(cudaMalloc(&ptr, num_blocks * sizeof(float)));
+    ws = at::from_blob(ptr, {static_cast<int64_t>(num_blocks)},
+                       at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, device_id));
   }
   return ws;
 }

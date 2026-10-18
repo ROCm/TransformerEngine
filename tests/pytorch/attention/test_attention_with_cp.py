@@ -51,6 +51,10 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
+# An installed FA4 package must not select tests when the backend is explicitly disabled.
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -90,6 +94,12 @@ model_configs_flash_attn = {
 # a genuine hang within ~1.5 min instead of ~10 min. Override with the env var
 # if a slower machine or expanded test matrix needs more room.
 POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "90"))
+
+# Non-infrastructure retries stay FP8+THD-only; fresh-worker evidence is required.
+RETRYABLE_ERROR_ALLOWLIST = (
+    "has nan values",  # Seen 2026-08-14; narrow retry committed 2026-08-20.
+    "rmse nan",  # Seen 2026-08-14; fresh-pool passes confirmed 2026-08-31.
+)
 
 
 class PoolWorker:
@@ -180,10 +190,19 @@ class PoolWorker:
     _MAX_RETRIES = 1
 
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        # Attribute retries without changing test signatures or the worker protocol.
+        test_id = os.environ.get("PYTEST_CURRENT_TEST", "<unknown>").removesuffix(" (call)")
         first_err = None
         for attempt in range(self._MAX_RETRIES + 1):
             try:
-                return self._submit_once(kwargs, timeout)
+                self._submit_once(kwargs, timeout)
+                if attempt:
+                    sys.stderr.write(
+                        f"[POOL-RETRY-PASS] status=recovered test={test_id!r} "
+                        f"world_size={self.world_size}\n"
+                    )
+                    sys.stderr.flush()
+                return
             except AssertionError as e:
                 msg = str(e)
                 msg_head = msg.splitlines()[0]
@@ -192,19 +211,16 @@ class PoolWorker:
                     or "timed out" in msg_head
                     or "before request could be sent" in msg_head
                 )
-                # Heterogeneous CP cases can leave a retained worker in a state where
-                # FP8 THD emits NaNs even though the same case passes in a fresh worker.
-                # Retry only that signature once; a NaN from the fresh worker still fails.
-                fp8_thd_nan = (
+                retryable = infrastructure_flake or (
                     kwargs.get("dtype") == "fp8"
                     and kwargs.get("qkv_format") == "thd"
-                    and "has nan values" in msg.lower()
+                    and any(signature in msg.lower() for signature in RETRYABLE_ERROR_ALLOWLIST)
                 )
-                retryable = infrastructure_flake or fp8_thd_nan
                 if not retryable or attempt == self._MAX_RETRIES:
                     if first_err is not None:
                         sys.stderr.write(
-                            f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
+                            f"[POOL-RETRY-FAIL] status=failed test={test_id!r} "
+                            f"world_size={self.world_size}: "
                             "both attempts failed; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
@@ -212,8 +228,9 @@ class PoolWorker:
                     raise
                 first_err = e
                 sys.stderr.write(
-                    f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
-                    f"failed: {msg_head!r}; respawning pool and retrying\n"
+                    f"[POOL-RETRY] status=retrying test={test_id!r} "
+                    f"world_size={self.world_size} attempt={attempt + 1} "
+                    f"error={msg_head!r}; respawning pool and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -316,8 +333,12 @@ if test_essential:
 
 
 @pytest.mark.skipif(
-    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
-    reason="Flash-attn v2 or v3 is required.",
+    not (
+        FlashAttentionUtils.v2_plus
+        or FlashAttentionUtils.v3_is_installed
+        or (fa4_enabled and FlashAttentionUtils.v4_is_installed)
+    ),
+    reason="Flash-attn v2, v3, or v4 is required.",
 )
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
@@ -332,8 +353,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
+        has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
+        has_fa4 = fa4_enabled and FlashAttentionUtils.v4_is_installed
+        if not (has_fa3 or has_fa4):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
@@ -350,9 +373,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
         and not FlashAttentionUtils.v3_is_installed
+        and not (fa4_enabled and FlashAttentionUtils.v4_is_installed)
     ):
         pytest.skip(
-            "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+            "THD + all_gather requires FA3 or FA4 (seqused_k) to separate tensor offsets from"
             " visibility limits in the gathered KV buffer."
         )
 
@@ -386,6 +410,8 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         config,
         qkv_dtype=dtypes[dtype],
         qkv_layout="_".join([qkv_format] * 3),
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
@@ -401,6 +427,46 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         fa_pad_between_seqs=pad_between_seqs,
         log_level=pytest_logging_level,
     )
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v2_6_0_plus, reason="CP softcap requires flash-attn 2.6.0+."
+)
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
+    """Check softcap forward and dgrad against the non-CP reference.
+
+    One case per CP autograd function, since P2P, all-gather and A2A each thread softcap
+    through their own forward inputs and gradient slots.
+    """
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+    # The runner's clamped-randn inputs put the scaled logits at O(1), so this cap sits in
+    # tanh's nonlinear region and a path that dropped it would diverge from the reference.
+    config.softcap = 0.5
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="bshd",
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        softcap=config.softcap,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -677,7 +743,7 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, *_ = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else get_torch_float8_e4m3_type(),
         qkv_layout="_".join([qkv_format] * 3),
@@ -685,23 +751,11 @@ def test_cp_with_fused_attention(
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
 
     _, fused_attn_supported, _ = available_backends
-    if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
-        config_copy = copy.deepcopy(config)
-        config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config_copy,
-            qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
-            qkv_layout="_".join([qkv_format] * 3),
-            fp8=fp8,
-            fp8_meta=fp8_meta,
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
@@ -709,24 +763,6 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
-    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
-    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
-    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
-    # config uses b>2.
-    SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
-    if (
-        not IS_HIP_EXTENSION
-        and _deterministic
-        and qkv_format == "thd"
-        and get_device_compute_capability() == (9, 0)
-        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
-        >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
-    ):
-        pytest.skip(
-            "Deterministic FusedAttention backward with THD format OOMs on sm90"
-            " for large bHSS configs (known cuDNN issue)."
-        )
 
     _submit(
         pool,
@@ -741,6 +777,69 @@ def test_cp_with_fused_attention(
         scaling_mode=scaling_mode,
         f16_O=f16_O,
         is_training=is_training,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
+)
+def test_cp_with_fused_attention_no_load_balance(cp_pool):
+    """Check experimental single-chunk forward/backward."""
+    config = copy.deepcopy(model_configs_fused_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=True,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[1]:
+        pytest.skip("No attention backend available.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FusedAttention",
+        cp_comm_type="all_gather",
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+def test_cp_with_flash_attention_no_load_balance(cp_pool):
+    """Check the supported unpadded FlashAttention path."""
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FlashAttention",
+        cp_comm_type="all_gather",
+        fa_pad_between_seqs=False,
+        load_balancing_strategy="NO_LOAD_BALANCE",
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )

@@ -26,4 +26,6 @@ XLA_FLAGS="$common_xla_flags" NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c 
 XLA_FLAGS="$common_xla_flags --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_disable_async_collectives=ALLREDUCE" NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_softmax.xml $TE_PATH/tests/jax/test_distributed_softmax.py
 
 # NCCL EP multi-process suite. The launcher skips when fewer than 4 GPUs or no NVLink is detected.
+# Runs the borrowed-comm suite too (L2 only).
+export NVTE_JAX_UNITTEST_LEVEL="L2"
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/multi_process_launch_ep.sh
