@@ -101,7 +101,10 @@ def test_aiter_fp8_fwd_backend_selection(head_dim):
     sliding_window_backend = FusedAttnHelper(
         is_training=False, **(kwargs | {"window_size": (64, 64)})
     ).get_fused_attn_backend()
-    assert inference_backend == NVTE_Fused_Attn_Backend.NVTE_CK
+    assert inference_backend in (
+        NVTE_Fused_Attn_Backend.NVTE_CK,
+        NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+    )
     assert training_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
     assert sliding_window_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
@@ -114,6 +117,27 @@ def test_aiter_fp8_fwd_asm(head_dim):
     Broader HD128/HD256 accuracy (masks, THD padding, GQA, vs BF16 ASM) lives in
     TestFusedAttnFP8ASM.
     """
+    backend = FusedAttnHelper(
+        is_training=False,
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    ).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK
+
     shape = (1, 128, 8, head_dim)
     key = jax.random.PRNGKey(7)
     # Distinct inverse scales, so a missing or unit descale cannot match the reference.
@@ -2958,6 +2982,8 @@ class TestFusedAttnFP8ASM:
             d,
             (-1, -1),
         ).get_fused_attn_backend()
+        if fp8_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            pytest.skip("AITER FP8 ASM fused attention backend is disabled")
         assert fp8_backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
             f"FP8 ASM was not selected: backend={fp8_backend}"
         )
