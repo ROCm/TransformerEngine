@@ -81,6 +81,7 @@ def init():
 def test_aiter_fp8_fwd_backend_selection(head_dim):
     """gfx950 fp8bf16 inference shapes select CK/AITER, while training does not."""
     kwargs = dict(
+        batch_size=1,
         q_dtype=jnp.float8_e4m3fn,
         kv_dtype=jnp.float8_e4m3fn,
         qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
@@ -96,9 +97,9 @@ def test_aiter_fp8_fwd_backend_selection(head_dim):
         head_dim_v=head_dim,
         window_size=(-1, -1),
     )
-    inference_backend = FusedAttnHelper(is_training=False, **kwargs).get_fused_attn_backend()
-    training_backend = FusedAttnHelper(is_training=True, **kwargs).get_fused_attn_backend()
-    sliding_window_backend = FusedAttnHelper(
+    inference_backend, _ = FusedAttnHelper(is_training=False, **kwargs).get_fused_attn_backend()
+    training_backend, _ = FusedAttnHelper(is_training=True, **kwargs).get_fused_attn_backend()
+    sliding_window_backend, _ = FusedAttnHelper(
         is_training=False, **(kwargs | {"window_size": (64, 64)})
     ).get_fused_attn_backend()
     assert inference_backend in (
@@ -117,8 +118,9 @@ def test_aiter_fp8_fwd_asm(head_dim):
     Broader HD128/HD256 accuracy (masks, THD padding, GQA, vs BF16 ASM) lives in
     TestFusedAttnFP8ASM.
     """
-    backend = FusedAttnHelper(
+    backend, _ = FusedAttnHelper(
         is_training=False,
+        batch_size=1,
         q_dtype=jnp.float8_e4m3fn,
         kv_dtype=jnp.float8_e4m3fn,
         qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
@@ -2965,22 +2967,23 @@ class TestFusedAttnFP8ASM:
         k_bf16 = k_dq.astype(jnp.bfloat16)
         v_bf16 = v_dq.astype(jnp.bfloat16)
 
-        fp8_backend = FusedAttnHelper(
-            False,
-            jnp.float8_e4m3fn,
-            jnp.float8_e4m3fn,
-            qkv_layout,
-            AttnBiasType.NO_BIAS,
-            attn_mask_type,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            0.0,
-            h_q,
-            h_kv,
-            s_q,
-            s_kv,
-            d,
-            d,
-            (-1, -1),
+        fp8_backend, _ = FusedAttnHelper(
+            is_training=False,
+            batch_size=b,
+            q_dtype=jnp.float8_e4m3fn,
+            kv_dtype=jnp.float8_e4m3fn,
+            qkv_layout=qkv_layout,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            dropout_probability=0.0,
+            q_num_heads=h_q,
+            kv_num_heads=h_kv,
+            q_max_seqlen=s_q,
+            kv_max_seqlen=s_kv,
+            head_dim_qk=d,
+            head_dim_v=d,
+            window_size=(-1, -1),
         ).get_fused_attn_backend()
         if fp8_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("AITER FP8 ASM fused attention backend is disabled")
