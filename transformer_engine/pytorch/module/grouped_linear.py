@@ -117,6 +117,33 @@ def _cached_b_data_ptrs(datas, device):
     return tensor
 
 
+def _packed_wgrad_view(wgrad_list, num_gemms, n_out, k_in):
+    """Return a [num_gemms*n_out, k_in] view over ``wgrad_list`` if it is one packed run.
+
+    The non-fused grouped-wgrad destinations are ``[wgrad_packed[g] for g in range]``
+    -- adjacent ``[n_out, k_in]`` slices of a single contiguous ``[num_gemms, n_out,
+    k_in]`` buffer. When that layout holds, the grouped wgrad kernel can write its
+    ``[num_gemms*n_out, k_in]`` output directly into that storage, eliding the
+    per-expert copy-out. Return ``None`` (caller allocates a scratch buffer and
+    scatters) whenever the destinations are not a single contiguous, row-contiguous,
+    correctly-shaped run -- e.g. fused main_grad accumulation into separate params.
+    """
+    first = wgrad_list[0]
+    elem = first.element_size()
+    expected_ptr = first.data_ptr()
+    for w in wgrad_list:
+        if (
+            w.dtype != first.dtype
+            or tuple(w.shape) != (n_out, k_in)
+            or not w.is_contiguous()
+            or w.data_ptr() != expected_ptr
+        ):
+            return None
+        expected_ptr += w.numel() * elem
+    # One contiguous run anchored at first.data_ptr(); span all rows over its storage.
+    return torch.as_strided(first, (num_gemms * n_out, k_in), (k_in, 1))
+
+
 _NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
     {
         Float8Quantizer,
@@ -1585,9 +1612,18 @@ class _GroupedLinear(torch.autograd.Function):
         n_out = dyt_cols[0].size(0)  # per-expert output feature N
         k_in = xt_cols[0].size(0)  # per-expert input feature K
 
-        dW = torch.empty(
-            num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
-        )
+        # wgrad_list[g] are normally adjacent [n_out, k_in] slices of one packed
+        # [num_gemms, n_out, k_in] buffer (the non-fused ``wgrad_packed`` path). When
+        # that holds, point the kernel's [num_gemms*n_out, k_in] output straight at
+        # that storage so it writes each dW_e in place -- eliding the per-expert
+        # copy-out scatter. Fall back to a fresh buffer + scatter only when the
+        # destinations are not one contiguous run (e.g. fused main_grad accumulation).
+        dW = _packed_wgrad_view(wgrad_list, num_gemms, n_out, k_in)
+        scatter = dW is None
+        if scatter:
+            dW = torch.empty(
+                num_gemms * n_out, k_in, dtype=wgrad_list[0].dtype, device=wgrad_list[0].device
+            )
         _run_fp8_grouped_wgrad(
             dyt_cols,
             dy_scale,
@@ -1601,8 +1637,9 @@ class _GroupedLinear(torch.autograd.Function):
             x_fp8_dtype=inputmats[0]._fp8_dtype,
             output_dtype=wgrad_list[0].dtype,
         )
-        for g in range(num_gemms):
-            wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
+        if scatter:
+            for g in range(num_gemms):
+                wgrad_list[g].copy_(dW[g * n_out : (g + 1) * n_out])
 
     @classmethod
     def _flydsl_grouped_dispatch(cls, phase, kind):
