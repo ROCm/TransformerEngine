@@ -9,13 +9,13 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCK_RELEASE_VERSION=10.0.0
+ARG ROCK_RELEASE_VERSION=10.1.0
 ARG PYTHON_VERSION=3.14
 ARG TORCH_VERSION=2.13.0
 ARG TORCHVISION_VERSION=0.28.0
 # triton 3.8.0 ships as a git snapshot: triton-3.8.0+<TRITON_LOCAL>.rocm<rel>
 ARG TRITON_VERSION=3.8.0
-ARG TRITON_LOCAL=git4cff872c
+ARG TRITON_LOCAL=git669b31ac
 ARG JAX_VERSION=0.11.1
 ARG FA_VERSION=v2.8.3
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
@@ -66,11 +66,16 @@ RUN W="https://stable.repo.amd.com/rocm/whl-next" \
            "amd-torchvision-device-${arch}==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" ; \
        done
 
-# Install Jax
-RUN pip install --no-cache-dir \
+# Install Jax with the TheRock-built ROCm plugin (+rocm<rel> from the AMD index). The PyPI
+# jax-rocm7/jax-rocm10 0.11.1 plugins link librocm_smi64.so.1, which TheRock 10.1 no longer
+# ships (JAX silently falls back to CPU).
+RUN W="https://stable.repo.amd.com/rocm/whl-next" \
+    && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
+    && pip install --no-cache-dir \
+        --extra-index-url "${W}" \
         "jax==${JAX_VERSION}" \
-        "jax-rocm7-pjrt==${JAX_VERSION}" \
-        "jax-rocm7-plugin==${JAX_VERSION}"
+        "jax-rocm10-pjrt==${JAX_VERSION}+${ROCM_WHEEL_TAG}" \
+        "jax-rocm10-plugin==${JAX_VERSION}+${ROCM_WHEEL_TAG}"
 
 # Install FlyDSL to enable running FlyDSL GEMM tests.
 RUN pip install --no-cache-dir "flydsl==${FLYDSL_VERSION}"
