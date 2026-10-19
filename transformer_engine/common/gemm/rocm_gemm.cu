@@ -2214,6 +2214,18 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  hipStream_t stream, int compute_stream_offset)
 {
   NVTE_CHECK(!alpha_beta_on_device, "Device-side alpha/beta is not supported on ROCm.");
+  // As with cuBLASLt, a non-FP8/FP4 GEMM reads the bias in the output dtype; a narrower bias
+  // buffer would be reinterpreted and read out of bounds.
+  if (inputBias->data.dptr != nullptr) {
+    const bool low_precision = is_fp8_dtype(inputA->dtype()) || is_fp8_dtype(inputB->dtype()) ||
+                               is_fp4_dtype(inputA->dtype()) || is_fp4_dtype(inputB->dtype());
+    if (!low_precision) {
+      NVTE_CHECK(inputBias->data.dtype == outputD->data.dtype,
+                 "Non-FP8/FP4 GEMM bias dtype must match output dtype. Got bias=",
+                 to_string(inputBias->data.dtype), " D=", to_string(outputD->data.dtype),
+                 ". Cast bias to the output dtype before calling.");
+    }
+  }
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();
