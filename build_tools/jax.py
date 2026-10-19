@@ -29,7 +29,6 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-<<<<<<< HEAD
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         """Update requirements with current JAX version to avoid undesired update."""
@@ -38,10 +37,9 @@ def install_requirements() -> List[str]:
             return [f"jax=={jax.__version__}", "flax>=0.7.1"]
         except ImportError:
             pass
-    return ["jax", "flax>=0.7.1"]
-=======
+    if rocm_build():
+        return ["jax", "flax>=0.7.1"]
     return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 def test_requirements() -> List[str]:

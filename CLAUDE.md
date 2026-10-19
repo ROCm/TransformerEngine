@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Agent instructions for TransformerEngine (ROCm fork)
 
 ## Docker containers
@@ -131,8 +130,3 @@ When writing or updating memories in the project memory directory, follow these 
 - **CK/AITER kernel failures**: use the `ck-debugging` skill for structured triage and isolation.
 - **GPU hang or segfault in fused attention**: for hangs use `py-spy dump --pid N --native` (Python-only frames mislead — a stuck `.item()` is usually a HIP sync wait); for segfaults `rocgdb --batch -ex run --args python ...` then grep for the fault frame. Dump kernel args with `CK_FUSED_ATTN_LOG_CONFIG=1`.
 - **Stale CK code after a QoLA patch that changed CK headers/codegen** (runtime `symbol not found`, blob `no template named ...`, or nullptr-call segfault): the blob cache is keyed by CK commit and the installed header tree is no-clobber, so a rebuild reuses old code. Clear `$HOME/.cache/te_ck_jit` and `transformer_engine/lib/ck_jit/3rdparty`, then rebuild.
-=======
-# Transformer Engine Claude Instructions
-
-@AGENTS.md
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988

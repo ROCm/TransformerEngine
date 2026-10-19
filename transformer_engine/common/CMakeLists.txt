@@ -222,9 +222,6 @@ endif()
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-<<<<<<< HEAD
-if(USE_CUDA)
-=======
 option(NVTE_WITH_CUTEDSL
        "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
 if(NVTE_WITH_CUTEDSL)
@@ -238,7 +235,7 @@ if(NVTE_WITH_CUTEDSL)
   endif()
 endif()
 
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+if(USE_CUDA)
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -324,12 +321,8 @@ set(transformer_engine_cuda_arch_specific_sources)
 list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp #CUDA-only
      transformer_engine.cpp
-<<<<<<< HEAD
      fused_attn/fused_attn.cpp #CUDA-only
-=======
-     fused_attn/fused_attn.cpp
-     cast/nvfp4/rtc_dispatch.cpp
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+     cast/nvfp4/rtc_dispatch.cpp #CUDA-only
      fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
@@ -348,18 +341,17 @@ list(APPEND transformer_engine_cpp_sources
      newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
-<<<<<<< HEAD
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
+
 # Sources that only apply to CUDA builds (removed when building for ROCm)
 set(cuda_only_cpp_sources
      cudnn_utils.cpp
      fused_attn/fused_attn.cpp
+     cast/nvfp4/rtc_dispatch.cpp
      util/cuda_nvml.cpp
      newton_schulz/newton_schulz.cpp)
-=======
-if(NVTE_WITH_CUTEDSL)
-  list(APPEND transformer_engine_cpp_sources init_python.cpp)
-endif()
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -445,16 +437,10 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
      cast/fused_group_requantize.cu
-<<<<<<< HEAD
+     fused_rope/fused_mla_kv_rope_mxfp8.cu #CUDA-only
      gemm/cutlass_grouped_gemm.cu #CUDA-only
      hadamard_transform/group_hadamard_transform.cu #CUDA-only
      hadamard_transform/graph_safe_group_hadamard_transform.cu #CUDA-only
-=======
-     fused_rope/fused_mla_kv_rope_mxfp8.cu
-     gemm/cutlass_grouped_gemm.cu
-     hadamard_transform/group_hadamard_transform.cu
-     hadamard_transform/graph_safe_group_hadamard_transform.cu
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu #CUDA-only
      hadamard_transform/group_hadamard_transform_cast_fusion.cu #CUDA-only
@@ -468,6 +454,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 set(cuda_only_cuda_arch_specific_sources
+     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu

@@ -104,23 +104,7 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-<<<<<<< HEAD
     cmake_flags = []
-=======
-    cmake_flags = [
-        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
-        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
-    ]
-
-    with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
-    if with_cutedsl:
-        tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
-        cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
-        cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
-    else:
-        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
-
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
             assert (
                 os.getenv("MPI_HOME") is not None
@@ -162,6 +146,14 @@ def setup_common_extension() -> CMakeExtension:
         # CMake now expects CUDNN_FRONTEND_INCLUDE_DIR from the caller, sourced from
         # the nvidia-cudnn-frontend pip package. CUDA-only (ROCm uses a stub).
         cmake_flags.append(f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}")
+
+        with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
+        if with_cutedsl:
+            tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
+            cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
+            cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
+        else:
+            cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
             assert (
