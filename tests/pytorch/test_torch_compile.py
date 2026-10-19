@@ -1145,6 +1145,8 @@ def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_g
     wrongly is only visible in the step after -- hence comparing every step, and
     a cache of its own for each of the two runs.
     """
+    if IS_HIP_EXTENSION and paged and backend == "fused":
+        pytest.skip("Paged KV cache is not supported for FusedAttention on ROCm")
     from collections import OrderedDict
     from transformer_engine.pytorch.attention import InferenceParams
 
