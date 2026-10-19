@@ -151,13 +151,10 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   } else {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
-<<<<<<< HEAD
-#endif
-=======
   // RMSNorm shapes that are multiples of 128 use Transformer Engine's fused MXFP8 kernel
   // unless cuDNN is requested.
   nvte_enable_cudnn_norm_fwd(use_cudnn);
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -188,11 +185,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (zero_centered_gamma_in_weight_dtype) {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
-<<<<<<< HEAD
-#endif 
-=======
   nvte_enable_cudnn_norm_fwd(false);
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
 
   Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
@@ -402,16 +396,14 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
     ::testing::Values(true, false),
-<<<<<<< HEAD
+    ::testing::Values(true, false),
 #ifdef __HIP_PLATFORM_AMD__
-    ::testing::Values(false)), // HIP does not use zero_centered_gamma_in_weight_dtype
+    ::testing::Values(false), // HIP does not use zero_centered_gamma_in_weight_dtype
+    ::testing::Values(false)), // ROCm has no cuDNN normalization backend
 #else
-    ::testing::Values(true, false)),
-#endif
-=======
     ::testing::Values(true, false),
     ::testing::Values(false, true)),
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
   [](const testing::TestParamInfo<MxNormTestSuite::ParamType>& info) {
     std::string name = normToString.at(std::get<0>(info.param)) + "_" +
       test::typeName(std::get<1>(info.param)) + "X" +

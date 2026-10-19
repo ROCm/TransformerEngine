@@ -593,12 +593,7 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-<<<<<<< HEAD
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(not IS_HIP_EXTENSION and get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
-=======
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", essential_model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)

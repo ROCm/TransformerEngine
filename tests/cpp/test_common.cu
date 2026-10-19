@@ -175,7 +175,6 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
     ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
     // gfx1250 MX pre-swizzle pads MXFP8 scales to a multiple of 4 in both dims
     if (getDeviceComputeCapability() == 125) {
@@ -187,11 +186,6 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
 #endif
 
-    ret_rowwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-    ret_colwise.type = DType::kFloat8E8M0;
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-=======
     if (!scale_type) {
       scale_type = DType::kFloat8E8M0;
     }
@@ -199,7 +193,6 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
     ret_colwise.type = *scale_type;
     ret_colwise.type_size_bits = typeToNumBits(*scale_type);
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
     return {ret_rowwise, ret_colwise};
   }

@@ -737,7 +737,6 @@ def run_dpa_with_cp(
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
             )
-<<<<<<< HEAD
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
             if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
@@ -761,17 +760,8 @@ def run_dpa_with_cp(
                             ).item()
                             == 0
                         )
-            # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
-            # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
-            # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
-            # Backward dq/dk/dv CAN be pre-zeroed because FA3 marks them as mutated inputs.
-=======
-            num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
-                cu_seqlens_kv_padded - cu_seqlens_kv
-            )[:-1]
             # FA3/FA4 kernels may leave physically padded rows unwritten. The CP
             # implementation must clean them after partial-output/gradient merges.
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
             if fa_pad_between_seqs == "True":
                 out_padding_mask = get_thd_padding_mask(
                     out_.shape[0], cu_seqlens_q, cu_seqlens_q_padded

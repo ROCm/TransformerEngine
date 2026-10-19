@@ -2888,14 +2888,7 @@ class TestBasicOps:
         quantized_compute = quantization is not None
         if not quantized_compute and (quantize_forward or quantize_backward):
             pytest.skip("Quantization scheme has not been provided")
-<<<<<<< HEAD
-        if IS_HIP_EXTENSION:
-            maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
-        else:
-            maybe_skip_quantization(quantization, dims=in_shape, device=device)
-=======
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(

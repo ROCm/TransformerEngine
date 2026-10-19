@@ -250,14 +250,15 @@ float fp4_roundtrip_err_ref(const float x, const float block_scale_inverse, cons
 }
 
 // Lower round-trip error wins; ties go to map-to-6.
+template <typename ScaleType>
 NVFP4FourOverSixDecision decide_4over6_candidate(const std::vector<float>& block,
                                                  const float block_amax,
                                                  const float S_enc,
-                                                 const int e4m3_max,
+                                                 const int scale_max,
                                                  const bool use_mse) {
-    const NVFP4FourOverSixQuantization quantization =
-        compute_4over6_quantization_scales(block_amax, S_enc);
-    const float err_denom = 6.0f * static_cast<float>(e4m3_max);
+    const NVFP4FourOverSixQuantization<ScaleType> quantization =
+        compute_4over6_quantization_scales<ScaleType>(block_amax, S_enc, scale_max);
+    const float err_denom = 6.0f * get_scale_max<ScaleType>(scale_max);
     const float global_amax = err_denom / S_enc;
 
     double err_map4 = 0.0;
@@ -283,7 +284,7 @@ NVFP4FourOverSixDecision decide_4over6_candidate(const std::vector<float>& block
 }
 
 // Laid out like the scale tensor so the checker can index it by scale_idx.
-template <typename InputType>
+template <typename InputType, typename ScaleType = fp8e4m3>
 std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
     float (*OP)(const float),
     const InputType* const input,
@@ -295,7 +296,7 @@ std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
     const bool use_2d_quantization,
     const bool row_scaled_nvfp4,
     const bool use_mse,
-    const int e4m3_max) {
+    const int scale_max) {
 
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
@@ -309,8 +310,8 @@ std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
     };
 
     if (use_2d_quantization) {
-        const float S_enc = compute_global_encode_scaling_factor_FP4(*amax, use_fast_math,
-                                                                     e4m3_max);
+        const float S_enc = compute_global_encode_scaling_factor_FP4<ScaleType>(
+            *amax, use_fast_math, scale_max);
         const size_t blocks_Y = divide_round_up(rows, block_size_Y);
         for (size_t block_Y = 0; block_Y < blocks_Y; ++block_Y) {
             for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
@@ -331,7 +332,7 @@ std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
                 }
 
                 const NVFP4FourOverSixDecision decision =
-                    decide_4over6_candidate(block, block_amax, S_enc, e4m3_max, use_mse);
+                    decide_4over6_candidate<ScaleType>(block, block_amax, S_enc, scale_max, use_mse);
                 // Block scale and its candidate replicate down the block's rows.
                 for (size_t i = i_min; i < i_max; ++i) {
                     decisions[i * scales_stride + block_X] = decision;
@@ -342,8 +343,8 @@ std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
     }
 
     for (size_t i = 0; i < rows; ++i) {
-        const float S_enc = compute_global_encode_scaling_factor_FP4(
-            row_scaled_nvfp4 ? amax[i] : *amax, use_fast_math, e4m3_max);
+        const float S_enc = compute_global_encode_scaling_factor_FP4<ScaleType>(
+            row_scaled_nvfp4 ? amax[i] : *amax, use_fast_math, scale_max);
         for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
             const size_t j_min = block_X * block_size_X;
             const size_t j_max = std::min(j_min + block_size_X, cols);
@@ -358,7 +359,7 @@ std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
             }
 
             decisions[i * scales_stride + block_X] =
-                decide_4over6_candidate(block, block_amax, S_enc, e4m3_max, use_mse);
+                decide_4over6_candidate<ScaleType>(block, block_amax, S_enc, scale_max, use_mse);
         }
     }
     return decisions;
@@ -943,12 +944,8 @@ void compare_nvfp4_4over6_candidates(const std::string& name,
                                      const fp4e2m1x2* const ref_data_map4,
                                      const ScaleType* const ref_scales_map4,
                                      const fp4e2m1x2* const ref_data_map6,
-<<<<<<< HEAD
-                                     const fp8e4m3* const ref_scales_map6,
-                                     const std::vector<NVFP4FourOverSixDecision>& decisions,
-=======
                                      const ScaleType* const ref_scales_map6,
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                                     const std::vector<NVFP4FourOverSixDecision>& decisions,
                                      const size_t rows,
                                      const size_t cols,
                                      const size_t blocks_X,
@@ -1125,15 +1122,10 @@ void performTest(float (*OP)(const float),
         std::make_unique<ScaleType[]>(blocks_Y_t * blocks_X_t);
     std::unique_ptr<fp4e2m1x2[]> ref_output_map6;
     std::unique_ptr<fp4e2m1x2[]> ref_output_t_map6;
-<<<<<<< HEAD
-    std::unique_ptr<fp8e4m3[]> ref_scales_map6;
-    std::unique_ptr<fp8e4m3[]> ref_scales_t_map6;
-    std::vector<NVFP4FourOverSixDecision> expected_decisions;
-    std::vector<NVFP4FourOverSixDecision> expected_decisions_t;
-=======
     std::unique_ptr<ScaleType[]> ref_scales_map6;
     std::unique_ptr<ScaleType[]> ref_scales_t_map6;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+    std::vector<NVFP4FourOverSixDecision> expected_decisions;
+    std::vector<NVFP4FourOverSixDecision> expected_decisions_t;
 
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
@@ -1246,15 +1238,15 @@ void performTest(float (*OP)(const float),
 
         // Reference choice: the candidate with the smaller round-trip error.
         const bool use_mse = mode == kNVTENVFP44Over6MinMSE;
-        expected_decisions = compute_4over6_expected_decisions<InputType>(
+        expected_decisions = compute_4over6_expected_decisions<InputType, ScaleType>(
             OP, input.rowwise_cpu_dptr<InputType>(), rows, cols, scales_stride, ref_amax.data(),
-            use_fast_math, is_2d_quantization, row_scaled_nvfp4, use_mse, e4m3_max);
+            use_fast_math, is_2d_quantization, row_scaled_nvfp4, use_mse, scale_max);
         if (!row_scaled_nvfp4) {
             const std::vector<InputType> input_t =
                 create_transpose(input.rowwise_cpu_dptr<InputType>(), rows, cols);
-            expected_decisions_t = compute_4over6_expected_decisions<InputType>(
+            expected_decisions_t = compute_4over6_expected_decisions<InputType, ScaleType>(
                 OP, input_t.data(), cols, rows, scales_stride_t, ref_amax.data(), use_fast_math,
-                is_2d_quantization, row_scaled_nvfp4, use_mse, e4m3_max);
+                is_2d_quantization, row_scaled_nvfp4, use_mse, scale_max);
         }
     } else {
         compute_ref<InputType, ScaleType>(OP,
@@ -1366,33 +1358,17 @@ void performTest(float (*OP)(const float),
                              true, false, !row_scaled_nvfp4);
 
         size_t scale_mismatches_num = 0;
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
         std::vector<size_t> mismatches_scales_indices;
 #endif
-        compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                          ref_scales.get(),
-                                          unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-#ifdef __HIP_PLATFORM_AMD__
-                                          mismatches_scales_indices,
-#endif
-                                          scale_mismatches_num);
-
-        if (!row_scaled_nvfp4) {
-            compare_scaling_factors<fp8e4m3>("scales_t",
-                                              output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                              ref_scales_t.get(),
-                                              unpadded_blocks_Y_t, unpadded_blocks_X_t,
-                                              scales_stride_t,
-#ifdef __HIP_PLATFORM_AMD__
-                                              mismatches_scales_indices,
-#endif
-                                              scale_mismatches_num);
-=======
         if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
             compare_scaling_factors<ScaleType>(
                 "scales", output.rowwise_cpu_scale_inv_ptr<ScaleType>(), ref_scales.get(),
-                unpadded_blocks_Y, unpadded_blocks_X, scales_stride, scale_mismatches_num);
+                unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+#ifdef __HIP_PLATFORM_AMD__
+                mismatches_scales_indices,
+#endif
+                scale_mismatches_num);
         } else {
             compare_scaling_factors_exact(
                 "scales", output.rowwise_cpu_scale_inv_ptr<ScaleType>(), ref_scales.get(),
@@ -1404,14 +1380,17 @@ void performTest(float (*OP)(const float),
                 compare_scaling_factors<ScaleType>(
                     "scales_t", output.columnwise_cpu_scale_inv_ptr<ScaleType>(),
                     ref_scales_t.get(), unpadded_blocks_Y_t, unpadded_blocks_X_t,
-                    scales_stride_t, scale_mismatches_num);
+                    scales_stride_t,
+#ifdef __HIP_PLATFORM_AMD__
+                    mismatches_scales_indices,
+#endif
+                    scale_mismatches_num);
             } else {
                 compare_scaling_factors_exact(
                     "scales_t", output.columnwise_cpu_scale_inv_ptr<ScaleType>(),
                     ref_scales_t.get(), unpadded_blocks_Y_t, unpadded_blocks_X_t,
                     scales_stride_t);
             }
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         }
     }
 
@@ -1993,6 +1972,7 @@ TEST(NVFP4UE5M3ReferenceTest, Grouped) {
 }
 #endif
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
     const int sm_arch = getDeviceComputeCapability();
     if (sm_arch != 120 && sm_arch != 121) {
@@ -2014,3 +1994,4 @@ TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
                   std::string::npos);
     }
 }
+#endif  // #ifndef __HIP_PLATFORM_AMD__

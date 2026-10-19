@@ -546,18 +546,11 @@ class FusedAttnRunner:
 
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-<<<<<<< HEAD
-            if 90400 <= get_cudnn_version() < 90500:
-                return self.num_segments_per_seq
-            elif is_hip_extension() and self.use_thd_smallseq_segments:
+            if is_hip_extension() and self.use_thd_smallseq_segments:
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
                 return self.num_segments_per_seq + 1
-=======
-            # +1 for testing runtime_segments < max_segments
-            return self.num_segments_per_seq + 1
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         else:
             return 1
 
@@ -990,7 +983,8 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-<<<<<<< HEAD
+            if self.qkv_layout.is_qkvpacked() and self.is_self_attention is False:
+                raise ValueError("QKV-packed layouts only support self-attention metadata")
             if is_hip_extension() and self.use_thd_smallseq_segments:
                 (
                     self.num_segments_per_seq,
@@ -1005,34 +999,19 @@ class FusedAttnRunner:
                     self.seqlens_kv,
                     self.offsets_kv,
                 ) = self._setup_segments_ck_smallseq(generate_random_segment_ids_and_pos)
-=======
-            if self.qkv_layout.is_qkvpacked() and self.is_self_attention is False:
-                raise ValueError("QKV-packed layouts only support self-attention metadata")
-            self.segment_ids_q, self.segment_pos_q, self.pad_q = (
-                generate_random_segment_ids_and_pos(
-                    self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
-                )
-            )
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            is_self_attention = self.is_self_attention
-            if is_self_attention is None:
-                is_self_attention = (
-                    self.qkv_layout.is_qkvpacked() or self.max_seqlen_q == self.max_seqlen_kv
-                )
-            if is_self_attention:
-                self.segment_ids_kv = self.segment_ids_q
-                self.segment_pos_kv = self.segment_pos_q
-                self.pad_kv = self.pad_q
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
             else:
                 self.segment_ids_q, self.segment_pos_q, self.pad_q = (
-                generate_random_segment_ids_and_pos(
+                    generate_random_segment_ids_and_pos(
                         self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
                     )
-            )
+                )
                 self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-                # TODO(rewang): record only self attention and find the reason of cross attention
-                if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
+                is_self_attention = self.is_self_attention
+                if is_self_attention is None:
+                    is_self_attention = (
+                        self.qkv_layout.is_qkvpacked() or self.max_seqlen_q == self.max_seqlen_kv
+                    )
+                if is_self_attention:
                     self.segment_ids_kv = self.segment_ids_q
                     self.segment_pos_kv = self.segment_pos_q
                     self.pad_kv = self.pad_q
@@ -1044,16 +1023,14 @@ class FusedAttnRunner:
                     ):  # SWA or BRCM requires kv_len >= q_len
                         min_segment_len = self.seqlens_q
                     self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
-                        (
-                    generate_random_segment_ids_and_pos(
-                                self.batch_size,
-                                self.max_seqlen_kv,
-                                self.num_segments_per_seq,
-                                seed=2024,
-                                min_segment_len=min_segment_len,
+                        generate_random_segment_ids_and_pos(
+                            self.batch_size,
+                            self.max_seqlen_kv,
+                            self.num_segments_per_seq,
+                            seed=2024,
+                            min_segment_len=min_segment_len,
                         )
-                        )
-                )
+                    )
                 self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_valid_segment_ids_and_pos(
@@ -1343,13 +1320,10 @@ class FusedAttnRunner:
         HLO will be examined for the expected comms.
         """
 
-<<<<<<< HEAD
-        self.return_max_logit = return_max_logit
-=======
         if self.doutput is None:
             raise ValueError("FusedAttnRunner.test_backward requires a random doutput_seed")
 
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+        self.return_max_logit = return_max_logit
         self._setup_inputs()
 
         def grad_func(
@@ -1506,26 +1480,12 @@ class FusedAttnRunner:
         if self.dropout_prob > 0.0:
             return
 
-<<<<<<< HEAD
         # [ROCm] Verify no NaN or Inf in forward outputs
         if is_hip_extension():
             for name, out in [("Fused", primitive_out), ("Reference", reference_out)]:
                 assert not jnp.any(jnp.isnan(out)), f"{name} attention output contains NaN"
                 assert not jnp.any(jnp.isinf(out)), f"{name} attention output contains Inf"
 
-        print_debug_tensor_stats(f"primitive_out", primitive_out)
-        print_debug_tensor_stats(f"reference_grad_valid", reference_out)
-        print_debug_tensor_stats(f"diff_grad", jnp.abs(primitive_out - reference_out))
-        assert_allclose(
-            primitive_out,
-            reference_out,
-            rtol=self.rtol,
-            atol=self.atol,
-            dtype=self.dtype,
-        )
-
-=======
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         def check_dqkv(primitive, reference, pad, idx):
             primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
                 _split_valid_and_invalid(primitive, reference, pad)
@@ -2486,6 +2446,7 @@ def test_backward_bias_all_neg_inf(
         bias_shape=bias_shape,
         window_size=None,
         seq_desc_format=SeqDescFormat.Mask,
+        doutput_seed=2026,
     )
     runner._setup_inputs()
 
@@ -2750,6 +2711,7 @@ class TestFusedAttnCkSmallseq:
             window_size=None,
             seq_desc_format=SeqDescFormat.Seqlens,
             use_thd_smallseq_segments=True,
+            doutput_seed=2026,
         )
         runner.test_forward()
         runner.test_backward()

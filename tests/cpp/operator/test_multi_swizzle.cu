@@ -316,11 +316,8 @@ class MultiTensorSwizzleTestSuite
     : public ::testing::TestWithParam<std::tuple<std::tuple<int, size_t, size_t, bool>, bool>> {};
 
 TEST_P(MultiTensorSwizzleTestSuite, TestMultiTensorSwizzle) {
-<<<<<<< HEAD
-  const auto num_tensors = std::get<0>(GetParam());
-  const auto M = std::get<1>(GetParam());
-  const auto K = std::get<2>(GetParam());
-  const auto rowwise = std::get<3>(GetParam());
+  const auto& [num_tensors, M, K, rowwise] = std::get<0>(GetParam());
+  const PerTileSwizzle per_tile_swizzle(std::get<1>(GetParam()));
 #ifdef __HIP_PLATFORM_AMD__
   // Mirror SwizzleTestSuite on ROCm: skip gfx1250 (pre-swizzle layout mismatch) and
   // unaligned shapes (compact MXFP8 scales require 128-aligned M,K).
@@ -331,10 +328,6 @@ TEST_P(MultiTensorSwizzleTestSuite, TestMultiTensorSwizzle) {
   if (M % 128 != 0 || K % 128 != 0)
     GTEST_SKIP() << "ROCm uses compact MXFP8 scales; swizzle needs 128-aligned M,K";
 #endif
-=======
-  const auto& [num_tensors, M, K, rowwise] = std::get<0>(GetParam());
-  const PerTileSwizzle per_tile_swizzle(std::get<1>(GetParam()));
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
   performTestMultiTensorSwizzle(num_tensors, M, K, rowwise);
 }
 
