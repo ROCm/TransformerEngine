@@ -151,23 +151,6 @@ else:
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
-<<<<<<< HEAD
-        if not IS_HIP_EXTENSION:
-            # Should not be used on AMD GPUs
-            from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
-        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
-        )
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
-        )
-
-        # Setup Flash attention utils
-        fa_utils.set_flash_attention_version()
-=======
         # The distribution metadata can resolve to a supported version while the
         # extension itself still fails to load (missing CUDA dependency, ABI
         # mismatch, ...). Until every required symbol is bound, this backend must
@@ -175,7 +158,9 @@ else:
         # aliases at their ``None`` defaults so an unusable FlashAttention 2
         # cannot break the rest of the PyTorch interface.
         try:
-            from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+            if not IS_HIP_EXTENSION:
+                # Should not be used on AMD GPUs
+                from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
             from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
             from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
             from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
@@ -203,7 +188,6 @@ else:
         else:
             # Setup Flash attention utils
             fa_utils.set_flash_attention_version()
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
     elif (
         torch.cuda.is_available()
         and (IS_HIP_EXTENSION or get_device_compute_capability() >= (8, 0))
@@ -223,7 +207,6 @@ else:
         )
 
 # Try to import Flash Attention v3
-<<<<<<< HEAD
 if not IS_HIP_EXTENSION:
     try:
         fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
@@ -235,71 +218,44 @@ if not IS_HIP_EXTENSION:
         _flash_attn_bwd_v3 = None
         # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
     else:
-        from flash_attn_interface import flash_attn_func as flash_attn_func_v3
-        from flash_attn_interface import (
-            flash_attn_varlen_func as flash_attn_varlen_func_v3,
-        )
-        from flash_attn_interface import (
-            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-        )
-        from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-        from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-
-        fa_utils.set_flash_attention_3_params()
-
-    # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
-    # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and
-    # rejects a nonzero cap at dispatch.
-=======
-try:
-    fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
-except PackageNotFoundError:
-    flash_attn_func_v3 = None
-    flash_attn_varlen_func_v3 = None
-    flash_attn_with_kvcache_v3 = None
-    _flash_attn_fwd_v3 = None
-    _flash_attn_bwd_v3 = None
-    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
-else:
-    # Same isolation as FlashAttention 2 above: an importable-but-unusable FA3
-    # must degrade to "unavailable", not take down the module import.
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
-    try:
-        from flash_attn_interface import flash_attn_func as flash_attn_func_v3
-        from flash_attn_interface import (
-            flash_attn_varlen_func as flash_attn_varlen_func_v3,
-        )
-        from flash_attn_interface import (
-            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-        )
-        from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-        from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-    except ImportError as exc:
-        flash_attn_func_v3 = None
-        flash_attn_varlen_func_v3 = None
-        flash_attn_with_kvcache_v3 = None
-        _flash_attn_fwd_v3 = None
-        _flash_attn_bwd_v3 = None
-        warnings.warn(
-            f"FlashAttention 3 is installed (version {fa_utils.fa3_version}) but cannot be "
-            f"loaded: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    else:
-        fa_utils.set_flash_attention_3_params()
-
-        # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
-        # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and
-        # rejects a nonzero cap at dispatch.
+        # Same isolation as FlashAttention 2 above: an importable-but-unusable FA3
+        # must degrade to "unavailable", not take down the module import.
         try:
-            fa_utils.fa3_supports_softcap = (
-                "softcap" in inspect.signature(flash_attn_func_v3).parameters
-                and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
-                and "softcap" in inspect.signature(flash_attn_with_kvcache_v3).parameters
+            from flash_attn_interface import flash_attn_func as flash_attn_func_v3
+            from flash_attn_interface import (
+                flash_attn_varlen_func as flash_attn_varlen_func_v3,
             )
-        except (ValueError, TypeError):
-            fa_utils.fa3_supports_softcap = False
+            from flash_attn_interface import (
+                flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+            )
+            from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+            from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+        except ImportError as exc:
+            flash_attn_func_v3 = None
+            flash_attn_varlen_func_v3 = None
+            flash_attn_with_kvcache_v3 = None
+            _flash_attn_fwd_v3 = None
+            _flash_attn_bwd_v3 = None
+            warnings.warn(
+                f"FlashAttention 3 is installed (version {fa_utils.fa3_version}) but cannot be "
+                f"loaded: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            fa_utils.set_flash_attention_3_params()
+
+            # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
+            # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and
+            # rejects a nonzero cap at dispatch.
+            try:
+                fa_utils.fa3_supports_softcap = (
+                    "softcap" in inspect.signature(flash_attn_func_v3).parameters
+                    and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
+                    and "softcap" in inspect.signature(flash_attn_with_kvcache_v3).parameters
+                )
+            except (ValueError, TypeError):
+                fa_utils.fa3_supports_softcap = False
 
 
 def _fa4_with_none_window_sentinel(func: Callable) -> Callable:

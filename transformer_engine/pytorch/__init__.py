@@ -55,11 +55,8 @@ from transformer_engine.pytorch.quantization import is_fp8_available
 from transformer_engine.pytorch.quantization import is_mxfp8_available
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
 from transformer_engine.pytorch.quantization import is_nvfp4_available
-<<<<<<< HEAD
 from transformer_engine.pytorch.quantization import is_mxfp4_available
-=======
 from transformer_engine.pytorch.quantization import is_fp8_ue5m3_available
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 from transformer_engine.pytorch.quantization import get_default_recipe
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.quantization import QuantizerRequest

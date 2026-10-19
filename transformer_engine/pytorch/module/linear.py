@@ -1930,14 +1930,10 @@ class _Linear(torch.autograd.Function):
                 or fwd_args.weight_requires_grad
                 or fwd_args.bias_requires_grad
             ):
-<<<<<<< HEAD
-                bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
+                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
                 bwd_args.autocast_fp8_reduction_skipped = (
                     FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
                 )
-=======
-                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
             if fwd_args.backward_override is not None:
                 bwd_args.reduce_and_update_bwd_fp8_tensors = False
                 bwd_args.autocast_fp8_reduction_skipped = False

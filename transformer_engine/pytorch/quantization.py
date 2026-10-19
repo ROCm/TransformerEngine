@@ -57,11 +57,8 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
-<<<<<<< HEAD
 _MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
-=======
 _FP8_UE5M3_SUPPORT: Optional[Tuple[bool, str]] = None
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 @dataclasses.dataclass(frozen=True)
@@ -266,20 +263,22 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
 
 
 @torch.compiler.assume_constant_result
-<<<<<<< HEAD
 def check_mxfp4_support() -> Tuple[bool, str]:
     """Return if MXFP4 support is available."""
     global _MXFP4_SUPPORT
     if _MXFP4_SUPPORT is None:
         _MXFP4_SUPPORT = _compute_mxfp4_support()
     return _MXFP4_SUPPORT
-=======
+
+
 def check_fp8_ue5m3_support() -> Tuple[bool, str]:
     """Return if the FP8 UE5M3 format is available."""
     global _FP8_UE5M3_SUPPORT
     if _FP8_UE5M3_SUPPORT is None:
 
         def _check_support() -> Tuple[bool, str]:
+            if IS_HIP_EXTENSION:
+                return False, "FP8 UE5M3 is not supported on ROCm."
             if get_device_compute_capability() != (10, 7):  # Rubin
                 return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
             if float(torch.version.cuda) < 13.4:
@@ -288,7 +287,6 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
 
         _FP8_UE5M3_SUPPORT = _check_support()
     return _FP8_UE5M3_SUPPORT
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 def check_recipe_support(recipe: Recipe) -> None:

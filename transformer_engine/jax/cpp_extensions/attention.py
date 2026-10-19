@@ -549,22 +549,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             max_segments_per_seq=config.max_segments_per_seq,
         ).get_fused_attn_backend()
 
-<<<<<<< HEAD
         if not is_hip_extension():
             if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                # cuDNN 9.6 reduces the required softmax shape
-                if get_cudnn_version() >= (9, 6, 0):
-                    if config.qkv_layout.is_thd():
-                        softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-                    else:
-                        softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                if config.qkv_layout.is_thd():
+                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
                 else:
-                    softmax_shape = (
-                        *batch_shape,
-                        attn_heads,
-                        q_max_seqlen,
-                        config.max_segments_per_seq,
-                    )
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported backend: {message}")
@@ -580,16 +570,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported backend: {message}")
-=======
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            if config.qkv_layout.is_thd():
-                softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-            else:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-        else:
-            raise ValueError(f"Unsupported backend: {message}")
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
             # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use

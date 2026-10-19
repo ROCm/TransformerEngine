@@ -59,13 +59,10 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
-<<<<<<< HEAD
+from ..tensor.utils import is_custom
 if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
     from ..triton_kernels.cast import te_quantize_triton
-=======
-from ..tensor.utils import is_custom
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
@@ -213,11 +210,7 @@ def initialize_ub(
 
                  {
                     <gemm_name> : {
-<<<<<<< HEAD
-                        "method": <"ring_exchange", "pipeline", or "fused" (ROCm only)>,
-=======
-                        "method": <"ring_exchange", "pipeline", "bulk", or "external">,
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                        "method": <"ring_exchange", "pipeline", "bulk", "external", or "fused" (ROCm only)>,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,

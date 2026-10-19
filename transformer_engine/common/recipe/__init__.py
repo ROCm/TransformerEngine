@@ -70,16 +70,10 @@ class Format(Enum):
 
     """
     E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
-<<<<<<< HEAD
     E4M3 = _FormatHelperFP8(fwd=_FormatMaxVals.E4M3.value, bwd=_FormatMaxVals.E4M3.value)
     E5M2 = _FormatHelperFP8(fwd=_FormatMaxVals.E5M2.value, bwd=_FormatMaxVals.E5M2.value)
     HYBRID = _FormatHelperFP8(fwd=E4M3.fwd, bwd=E5M2.bwd)
-=======
-    E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
-    E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
-    HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
     UE5M3 = _FormatHelper(max_fwd=114688, max_bwd=114688)
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 @dataclass(frozen=True)

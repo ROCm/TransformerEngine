@@ -196,6 +196,15 @@ def _cast_to_ue5m3(decode_scale: torch.Tensor) -> torch.Tensor:
 def _cast_to_nvfp4_scale(decode_scale: torch.Tensor, scale_dtype: DType) -> torch.Tensor:
     scale_dtype = DType.cast(scale_dtype)
     if scale_dtype == DType.kFloat8E4M3:
+        if IS_HIP_EXTENSION:
+            scale_max = torch.tensor(
+                240.0 if is_fp8_fnuz() else NVFP4_E4M3_SCALE_MAX,
+                device=decode_scale.device,
+                dtype=torch.float32,
+            )
+            return torch.clamp(decode_scale, min=-scale_max, max=scale_max).to(
+                get_torch_float8_e4m3_type()
+            )
         scale_max = torch.tensor(
             NVFP4_E4M3_SCALE_MAX, device=decode_scale.device, dtype=torch.float32
         )
@@ -225,6 +234,8 @@ def _nvfp4_scale_to_float32(scale: torch.Tensor, scale_dtype: DType) -> torch.Te
     scale_dtype = DType.cast(scale_dtype)
     if scale_dtype == DType.kFloat8E4M3:
         if scale.dtype == torch.uint8:
+            if IS_HIP_EXTENSION:
+                return scale.contiguous().view(get_torch_float8_e4m3_type()).to(torch.float32)
             return scale.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
         return scale.to(torch.float32)
     if scale_dtype == DType.kFloat8UE5M3:
@@ -823,21 +834,9 @@ class NVFP4QuantizerRef(Quantizer):
                 torch.float32
             )  # (128, 8, 1)
         x = x.view(m, n // tile_len_x, tile_len_x)
-<<<<<<< HEAD
-        FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
-        if IS_HIP_EXTENSION:
-            FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x.device, dtype=torch.float32)
-        else:
-            FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
-        global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
-        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
-            global_scale_e4m3_max, device=x.device, dtype=torch.float32
-        )
-=======
         FLOAT4_E2M1_MAX = torch.tensor(NVFP4_FP4_MAX, device=x.device, dtype=torch.float32)
         global_scale_max = _nvfp4_effective_scale_max(scale_dtype, nvfp4_e4m3_max)
         GLOBAL_SCALE_MAX = torch.tensor(global_scale_max, device=x.device, dtype=torch.float32)
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -899,15 +898,7 @@ class NVFP4QuantizerRef(Quantizer):
                     dtype=torch.float32,
                 ),
             )
-<<<<<<< HEAD
-            decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-            if IS_HIP_EXTENSION:
-                decode_scale = decode_scale.to(get_torch_float8_e4m3_type())
-            else:
-                decode_scale = decode_scale.to(torch.float8_e4m3fn)
-=======
             decode_scale = _cast_to_nvfp4_scale(decode_scale, scale_dtype)
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
             encode_scale = torch.min(
                 torch.div(
@@ -1302,18 +1293,6 @@ class NVFP4QuantizerRef(Quantizer):
                 "nvfp4_e4m3_max",
                 getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
             )
-<<<<<<< HEAD
-            default_fp8_max = 240.0 if (IS_HIP_EXTENSION and is_fp8_fnuz()) else 448.0
-            if qresult_x_nvfp4_use_4over6:
-                fp8_max_x = float(qresult_x_e4m3_max)
-            else:
-                fp8_max_x = default_fp8_max
-            if qresult_w_nvfp4_use_4over6:
-                fp8_max_w = float(qresult_w_e4m3_max)
-            else:
-                fp8_max_w = default_fp8_max
-            factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
-=======
             qresult_x_scale_dtype = DType.cast(
                 getattr(
                     qresult_x,
@@ -1334,8 +1313,13 @@ class NVFP4QuantizerRef(Quantizer):
             _validate_nvfp4_scale_max(qresult_w_e4m3_max)
             fp8_max_x = _nvfp4_effective_scale_max(qresult_x_scale_dtype, qresult_x_e4m3_max)
             fp8_max_w = _nvfp4_effective_scale_max(qresult_w_scale_dtype, qresult_w_e4m3_max)
+            if IS_HIP_EXTENSION and is_fp8_fnuz():
+                # E4M3 FNUZ scales saturate at 240 instead of 448
+                if qresult_x_e4m3_max == 0 and qresult_x_scale_dtype == DType.kFloat8E4M3:
+                    fp8_max_x = 240.0
+                if qresult_w_e4m3_max == 0 and qresult_w_scale_dtype == DType.kFloat8E4M3:
+                    fp8_max_w = 240.0
             factor = NVFP4_FP4_MAX * NVFP4_FP4_MAX * fp8_max_x * fp8_max_w
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
             if gemm_type == gemm.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col

@@ -1844,9 +1844,6 @@ def get_attention_backend(
                 head_dim_v,
             )
             use_flash_attention_3 = False
-<<<<<<< HEAD
-    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
-=======
     if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
         # eval() does not disable autograd. SM12x backward and SM100/SM110 D=256 backward
         # reject deterministic execution, so only forward-only calls can use those kernels.
@@ -1859,8 +1856,7 @@ def get_attention_backend(
                 "support deterministic execution."
             )
             use_flash_attention_4 = False
-    if use_fused_attention and deterministic:
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
         if softmax_type != "vanilla":
             logger.debug(
                 "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
@@ -1992,7 +1988,6 @@ def get_attention_backend(
         bool(available_backends[2]),
     )
 
-<<<<<<< HEAD
     # Select FusedAttention for performance
     prefer_fused_attention = (
         # On ROCm, FusedAttention (aiter asm) is much faster than flash-attn for MLA-style unequal head dims.
@@ -2000,8 +1995,6 @@ def get_attention_backend(
         if IS_HIP_EXTENSION
         else device_compute_capability >= (9, 0)
     )
-    if use_flash_attention and use_fused_attention and prefer_fused_attention:
-=======
     # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
     # performance issue. At this point use_flash_attention_2 confirms a usable installation.
     is_slow_fused_thd_dropout = (
@@ -2018,8 +2011,7 @@ def get_attention_backend(
         use_fused_attention = False
         fused_attention_backend = None
     # Select FusedAttention for performance in all other Hopper+ configurations.
-    elif use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+    elif use_flash_attention and use_fused_attention and prefer_fused_attention:
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference for performance reasons"
         )

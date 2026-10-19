@@ -15,16 +15,11 @@ import warnings
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
-<<<<<<< HEAD
-from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor, get_gemm_backend
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
+from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor, get_gemm_backend
 if IS_HIP_EXTENSION:
     from ..utils import get_device_compute_capability
     from ..utils import cast_if_needed
-=======
-from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
-from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -439,11 +434,6 @@ def _validate_native_gemm_output_quantizer(quantization_params):
         )
 
 
-<<<<<<< HEAD
-# Warn only once when NVTE_GEMM_BACKEND=FLYDSL but the flydsl package is missing,
-# so a misconfigured run is surfaced without spamming the per-GEMM hot path.
-_flydsl_import_warned = False
-=======
 def validate_or_alloc_output(
     buffer: Optional[torch.Tensor],
     shape: tuple[int, ...] | list[int],
@@ -977,7 +967,11 @@ def _cudnn_grouped_gemm_nvfp4_ue5m3(
 
     # Matches general_gemm's contract: (out, bias_grad, gelu_input, extra_output).
     return out, None, None, None
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+
+
+# Warn only once when NVTE_GEMM_BACKEND=FLYDSL but the flydsl package is missing,
+# so a misconfigured run is surfaced without spamming the per-GEMM hot path.
+_flydsl_import_warned = False
 
 
 def general_gemm(
@@ -1026,25 +1020,6 @@ def general_gemm(
 
     workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
-<<<<<<< HEAD
-    # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
-    # Compute the required extra space and extend the workspace if needed.
-    if IS_HIP_EXTENSION and (
-        isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
-    ):
-        assert ub is None, "User buffers (comm overlap) are not supported with NVFP4"
-        import math
-        bf16_size = torch.bfloat16.itemsize
-        fp4_extra = 0
-        if isinstance(A, NVFP4TensorStorage):
-            fp4_extra += math.prod(A.size()) * bf16_size
-            fp4_extra += A.size(0) * 4  # alpha vector (m floats)
-        if isinstance(B, NVFP4TensorStorage):
-            fp4_extra += math.prod(B.size()) * bf16_size
-        total_needed = fp4_extra + get_cublas_workspace_size_bytes()
-        if workspace.numel() < total_needed:
-            workspace = torch.empty(total_needed, dtype=torch.uint8, device=workspace.device)
-=======
     # Temporary hack to route NVFP4 GEMM with UE5M3 scale factors to
     # cuDNN Frontend kernels. UE5M3-specific logic should be removed
     # in its entirety once TE supports NVFP4-UE5M3 GEMMs natively.
@@ -1073,7 +1048,24 @@ def general_gemm(
             extra_output,
             bulk_overlap,
         )
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+
+    # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
+    # Compute the required extra space and extend the workspace if needed.
+    if IS_HIP_EXTENSION and (
+        isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
+    ):
+        assert ub is None, "User buffers (comm overlap) are not supported with NVFP4"
+        import math
+        bf16_size = torch.bfloat16.itemsize
+        fp4_extra = 0
+        if isinstance(A, NVFP4TensorStorage):
+            fp4_extra += math.prod(A.size()) * bf16_size
+            fp4_extra += A.size(0) * 4  # alpha vector (m floats)
+        if isinstance(B, NVFP4TensorStorage):
+            fp4_extra += math.prod(B.size()) * bf16_size
+        total_needed = fp4_extra + get_cublas_workspace_size_bytes()
+        if workspace.numel() < total_needed:
+            workspace = torch.empty(total_needed, dtype=torch.uint8, device=workspace.device)
 
     if ub_type is not None:
         assert ub is not None, (
