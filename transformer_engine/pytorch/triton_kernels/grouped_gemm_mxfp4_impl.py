@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950)."""
+"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950, gfx1250)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ BLOCK_SIZE_K = 128
 WGRAD_PAD_MULTIPLE = int(os.environ.get("NVTE_MXFP4_WGRAD_PAD", str(BLOCK_SIZE_K)))
 # One E8M0 scale per 32-element block.
 MXFP4_BLOCK = 32
+# Archs with the scaled-FP4 matrix op used by tl.dot_scaled: gfx950 (MFMA), gfx1250 (WMMA).
+MXFP4_GEMM_ARCHS = ((9, 5), (12, 5))
 
 
 def _quantizer(*, rowwise: bool, columnwise: bool) -> MXFP4Quantizer:
@@ -78,12 +80,11 @@ def _check_splits(
         )
 
 
-def _require_gfx950() -> None:
-    # The kernels use the CDNA4 scaled-FP4 MFMA (tl.dot_scaled e2m1); no other arch has it.
-    if get_device_compute_capability() != (9, 5):
+def _require_mxfp4_gemm_arch() -> None:
+    if get_device_compute_capability() not in MXFP4_GEMM_ARCHS:
         raise RuntimeError(
-            "grouped MXFP4 GEMM requires gfx950 (CDNA4); the current device lacks the"
-            " scaled-FP4 MFMA used by tl.dot_scaled(..., \"e2m1\", ...)."
+            "grouped MXFP4 GEMM requires gfx950 or gfx1250; the current device lacks the"
+            " scaled-FP4 matrix op used by tl.dot_scaled(..., \"e2m1\", ...)."
         )
 
 
@@ -106,16 +107,15 @@ def _row_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 def _col_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Col-wise MXFP4: ``x`` [M, F] -> (data [F, M/2] u8, scale [F, M/32] u8).
 
-    Requests both directions (matching the production transpose-quant path); the
-    row-wise result is discarded. Both dims are zero-padded to a 32-multiple for
-    the quantizer and sliced back (both are free/masked in the GEMM).
+    Both dims are zero-padded to a 32-multiple for the quantizer and sliced back
+    (both are free/masked in the GEMM).
     """
     M, Feat = x.shape
     M_pad = round_up_to_nearest_multiple(M, MXFP4_BLOCK)
     Feat_pad = round_up_to_nearest_multiple(Feat, MXFP4_BLOCK)
     if M_pad != M or Feat_pad != Feat:
         x = F.pad(x.contiguous(), (0, Feat_pad - Feat, 0, M_pad - M))
-    q = _quantizer(rowwise=True, columnwise=True).quantize(x.contiguous())
+    q = _quantizer(rowwise=False, columnwise=True).quantize(x.contiguous())
     data = q._columnwise_data.view(torch.uint8)[:Feat, : M // 2]
     scale = q._columnwise_scale_inv[:Feat, : M // MXFP4_BLOCK].contiguous()
     return data, scale
@@ -150,7 +150,7 @@ def _row_operand_mxfp8_torch(x: torch.Tensor, transpose_scale: bool = False) -> 
 
     Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block, with
     the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. Torch multi-pass reference;
-    :func:`_row_operand_mxfp8` uses the fused single-pass kernel on gfx950. ``K`` (the
+    :func:`_row_operand_mxfp8` uses the fused single-pass kernel on gfx950/gfx1250. ``K`` (the
     contraction) is already a 32-multiple; ``M`` needs no padding (scale is per-row).
     ``transpose_scale`` emits the scale ``[K/32, M]`` instead of ``[M, K/32]``.
     """
@@ -168,12 +168,12 @@ def _row_operand_mxfp8_torch(x: torch.Tensor, transpose_scale: bool = False) -> 
 
 
 def _row_operand_mxfp8(x: torch.Tensor, transpose_scale: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Row-wise MXFP8 (e4m3) downcast (ceil rule): fused single-pass Triton on gfx950
+    """Row-wise MXFP8 (e4m3) downcast (ceil rule): fused single-pass Triton on gfx950/gfx1250
     (:func:`mxfp8_e4m3_rowwise_downcast`), else the bit-identical torch reference
     :func:`_row_operand_mxfp8_torch`. Used by the a8w4 forward (GATE-2 fused quant).
     ``transpose_scale`` emits the scale ``[K/32, M]``.
     """
-    if get_device_compute_capability() == (9, 5):
+    if get_device_compute_capability() in MXFP4_GEMM_ARCHS:
         return mxfp8_e4m3_rowwise_downcast(x, transpose_scale=transpose_scale)
     return _row_operand_mxfp8_torch(x, transpose_scale=transpose_scale)
 
@@ -207,26 +207,24 @@ def _col_operand_grouped_padded(
 
     ``x`` [total_M, F] grouped along M -> (data [F, total_pad/2] u8,
     scale [F, total_pad/32] u8, go_pad [G+1] int64). Padding rows are zeros, so
-    they contribute nothing to the wgrad contraction over M.
+    they contribute nothing to the wgrad contraction over M. All groups are cast in
+    one quantize: the padded group boundaries are 32-aligned, so no scale block spans
+    two groups and the result equals casting each group separately.
     """
-    Feat = x.shape[1]
-    datas: List[torch.Tensor] = []
-    scales: List[torch.Tensor] = []
+    m_list = [int(m) for m in m_splits]
+    pad_list = [round_up_to_nearest_multiple(m, WGRAD_PAD_MULTIPLE) for m in m_list]
     offs = [0]
-    start = 0
-    for m in m_splits:
-        m = int(m)
-        xg = x[start : start + m]
-        start += m
-        m_pad = round_up_to_nearest_multiple(m, WGRAD_PAD_MULTIPLE)
-        if m_pad != m:
-            xg = F.pad(xg, (0, 0, 0, m_pad - m))
-        data, scale = _col_operand(xg)  # (F, m_pad/2), (F, m_pad/32)
-        datas.append(data)
-        scales.append(scale)
+    for m_pad in pad_list:
         offs.append(offs[-1] + m_pad)
-    data = torch.cat(datas, dim=1).contiguous()
-    scale = torch.cat(scales, dim=1).contiguous()
+    if pad_list == m_list:
+        xp = x
+    else:
+        xp = x.new_zeros((offs[-1], x.shape[1]))
+        start = 0
+        for m, off in zip(m_list, offs):
+            xp[off : off + m] = x[start : start + m]
+            start += m
+    data, scale = _col_operand(xp)  # (F, total_pad/2), (F, total_pad/32)
     go_pad = torch.tensor(offs, dtype=torch.int64, device=x.device)
     return data, scale, go_pad
 
@@ -254,7 +252,7 @@ def grouped_gemm_mxfp4_fprop(
         [total_M, N] output in ``out_dtype``.
     """
     K = a.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(K, "K")
 
     if weight_row is not None:
@@ -318,7 +316,7 @@ def grouped_gemm_a8w4_fprop(
         [total_M, N] output in ``out_dtype``.
     """
     K = a.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(K, "K")
 
     if weight_row is not None:
@@ -465,7 +463,7 @@ def grouped_gemm_mxfp4_fprop_prequantized(
     Returns:
         ``[total_M, N]`` output in ``out_dtype``.
     """
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     if b_data.ndim != 3:
         raise ValueError(f"b_data (weights) must be 3-D [G, N, K/2], got rank {b_data.ndim}")
     N = b_data.shape[1]
@@ -533,7 +531,7 @@ def grouped_gemm_mxfp4_dgrad(
         [total_M, K] input gradient in ``out_dtype``.
     """
     N = grad_out.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(N, "N")
 
     if weight_col is not None:
@@ -596,7 +594,7 @@ def grouped_gemm_mxfp4_wgrad(
     N = grad_out.shape[1]
     K = a.shape[1]
     G = len(m_splits)
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     if a.shape[0] != grad_out.shape[0]:
         raise ValueError(f"a rows ({a.shape[0]}) must equal grad_out rows ({grad_out.shape[0]})")
     _check_splits(m_splits, a.shape[0])

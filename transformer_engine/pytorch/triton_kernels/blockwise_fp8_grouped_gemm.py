@@ -52,17 +52,19 @@ def _amd_knob_overrides(*, is_tn: bool) -> dict:
 
 
 @contextlib.contextmanager
-def _amd_compiler_knobs(*, is_tn: bool):
+def _amd_compiler_knobs(*, is_tn: bool, overrides: dict | None = None):
     """Temporarily apply AMD Triton compiler knobs, restoring prior state on exit.
 
     Scoped rather than set once because the knobs are process-global and read at
     kernel compile time; leaving them set would leak into other kernels' codegen.
+    ``overrides`` replaces the default :func:`_amd_knob_overrides` set.
     """
     amd = getattr(getattr(triton, "knobs", None), "amd", None)
     if amd is None:
         yield
         return
-    overrides = _amd_knob_overrides(is_tn=is_tn)
+    if overrides is None:
+        overrides = _amd_knob_overrides(is_tn=is_tn)
     saved = {
         name: (name in amd.__dict__, amd.__dict__.get(name), os.environ.get(env_key))
         for name, env_key in _AMD_KNOB_ENV.items()

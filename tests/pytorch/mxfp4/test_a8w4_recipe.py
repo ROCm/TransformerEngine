@@ -16,9 +16,13 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4_grouped import
     a8w4_quantizer_factory,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import MXFP4_GEMM_ARCHS
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
-_recipe_ok, _reason = te.is_mxfp4_available(return_reason=True)
-pytestmark = pytest.mark.skipif(not _recipe_ok, reason=_reason)
+pytestmark = pytest.mark.skipif(
+    get_device_compute_capability() not in MXFP4_GEMM_ARCHS,
+    reason="a8w4 recipe requires gfx950 or gfx1250",
+)
 
 
 def _isolate():

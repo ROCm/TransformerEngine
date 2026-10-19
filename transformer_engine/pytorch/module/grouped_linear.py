@@ -772,7 +772,7 @@ class _GroupedLinear(torch.autograd.Function):
         in_features,
         out_features,
     ) -> bool:
-        """Triton grouped MXFP4 / a8w4 path: gfx950 + a ``CustomRecipe`` whose
+        """Triton grouped MXFP4 / a8w4 path: gfx950/gfx1250 + a ``CustomRecipe`` whose
         factory yields the plain-layout MXFP4 reference quantizers.
 
         a8w4 is forward-only (backward raises); a4w4 also wires the low-precision
@@ -804,7 +804,9 @@ class _GroupedLinear(torch.autograd.Function):
             or single_grouped_bias
         ):
             return False
-        if get_device_compute_capability() != (9, 5):
+        from ..triton_kernels.grouped_gemm_mxfp4_impl import MXFP4_GEMM_ARCHS
+
+        if get_device_compute_capability() not in MXFP4_GEMM_ARCHS:
             return False
         from ..custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
         from ..custom_recipes.quantization_mxfp4_grouped import MXFP8E4M3QuantizerRef
@@ -1169,18 +1171,20 @@ class _GroupedLinear(torch.autograd.Function):
         cache_weight,
         out=None,
     ):
-        """Grouped MXFP4 / a8w4 forward (ROCm Triton, gfx950).
+        """Grouped MXFP4 / a8w4 forward (ROCm Triton, gfx950/gfx1250).
 
         Selected from :meth:`forward` under a ``CustomRecipe`` whose factory yields
         the plain-layout MXFP4 reference quantizers (see
-        :meth:`_is_grouped_mxfp4_triton_supported`). The recipe's own reference
-        quantizers own the quantization; their packed E2M1/E4M3 data + E8M0 scales
-        feed straight into the persistent grouped kernel
+        :meth:`_is_grouped_mxfp4_triton_supported`). Operands are cast on the GPU with
+        the native MXFP4 / fused MXFP8 kernels, which are bit-identical to those
+        reference quantizers (non-bf16 weights fall back to the reference quantizer
+        itself), and feed the persistent grouped kernel
         (:func:`grouped_gemm_mxfp4_fprop_prequantized`), so the grouped-path numerics
         match the reference ``qgemm``. a4w4 wires the low-precision backward; a8w4
         is forward-only (see :meth:`_backward_grouped_mxfp4_triton`).
         """
         from ..triton_kernels.grouped_gemm_mxfp4_impl import (
+            _quantize_weights_row_col,
             _row_operand,
             _row_operand_mxfp8,
             grouped_gemm_mxfp4_fprop_prequantized,
@@ -1205,7 +1209,7 @@ class _GroupedLinear(torch.autograd.Function):
         input_quantizer = input_quantizers[0]
         a_is_mxfp8 = isinstance(input_quantizer, MXFP8E4M3QuantizerRef)
         if a_is_mxfp8:
-            # a8w4 activation: fused single-pass MXFP8 e4m3 downcast on gfx950; emit the
+            # a8w4 activation: fused single-pass MXFP8 e4m3 downcast; emit the
             # scale transposed ([K/32, M]) for the kernel's swizzle path.
             a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)
         else:
@@ -1242,23 +1246,34 @@ class _GroupedLinear(torch.autograd.Function):
         if reuse:
             _, b_data, b_scale, w_col_data, w_col_scale = cached
         else:
-            b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []
-            for i in range(num_gemms):
-                wq = weight_quantizers[i]
-                wq.set_usage(rowwise=True, columnwise=want_wcol)
-                wref = wq.quantize(weights[i].detach())
-                b_datas.append(wref.data)
-                b_scales.append(wref.scale)
+            if weights[0].dtype == torch.bfloat16:
+                # Native GPU cast (bf16-only), bit-identical to the plain E2M1 reference.
+                ws = [w.detach() for w in weights]
+                w_col_data = w_col_scale = None
                 if want_wcol:
-                    wcol_datas.append(wref.data_t)
-                    wcol_scales.append(wref.scale_t)
-            b_data = torch.stack(b_datas, dim=0)
-            b_scale = torch.stack(b_scales, dim=0)
+                    (b_data, b_scale), (w_col_data, w_col_scale) = _quantize_weights_row_col(ws)
+                else:
+                    rows = [_row_operand(w) for w in ws]
+                    b_data = torch.stack([d for d, _ in rows], dim=0)
+                    b_scale = torch.stack([s for _, s in rows], dim=0)
+            else:
+                b_datas, b_scales, wcol_datas, wcol_scales = [], [], [], []
+                for i in range(num_gemms):
+                    wq = weight_quantizers[i]
+                    wq.set_usage(rowwise=True, columnwise=want_wcol)
+                    wref = wq.quantize(weights[i].detach())
+                    b_datas.append(wref.data)
+                    b_scales.append(wref.scale)
+                    if want_wcol:
+                        wcol_datas.append(wref.data_t)
+                        wcol_scales.append(wref.scale_t)
+                b_data = torch.stack(b_datas, dim=0)
+                b_scale = torch.stack(b_scales, dim=0)
+                w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
+                w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
             if a_is_mxfp8:
                 # a8w4 swizzle: cache the weight scale transposed ([G, K/32, N])
                 b_scale = b_scale.transpose(1, 2).contiguous()
-            w_col_data = torch.stack(wcol_datas, dim=0) if want_wcol else None
-            w_col_scale = torch.stack(wcol_scales, dim=0) if want_wcol else None
             if cache_weight:
                 new_workspaces[0] = (a_is_mxfp8, b_data, b_scale, w_col_data, w_col_scale)
 
@@ -1284,7 +1299,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grouped_mxfp4_inp_shape = inp.shape
             ctx.grouped_mxfp4_m_splits = m_splits_list
             if not a_is_mxfp8:
-                # a4w4 low-precision backward: dgrad consumes the reference col weight;
+                # a4w4 low-precision backward: dgrad consumes the cached col weight;
                 # wgrad re-quantizes the saved hp activation + grad_out in the kernel.
                 ctx.grouped_mxfp4_requires_dgrad = inp.requires_grad
                 ctx.grouped_mxfp4_weight_requires_grad = weights[0].requires_grad
@@ -1451,7 +1466,7 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
             )
 
-        # Grouped MXFP4 / a8w4 (Triton, gfx950) under a CustomRecipe. Runs its
+        # Grouped MXFP4 / a8w4 (Triton, gfx950/gfx1250) under a CustomRecipe. Runs its
         # own reference-quantizer quantization + persistent grouped GEMM and returns
         # early. a4w4 also runs the backward; a8w4 is forward-only.
         if _GroupedLinear._is_grouped_mxfp4_triton_supported(

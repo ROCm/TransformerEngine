@@ -16,6 +16,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
+    MXFP4_GEMM_ARCHS,
     _col_operand_grouped_padded,
     _row_operand,
     _row_operand_mxfp8,
@@ -24,6 +25,7 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     grouped_gemm_mxfp4_fprop_prequantized,
 )
 from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import (
     MXFP4_BLOCK_SIZE,
     MXFP4QuantizerRef,
@@ -38,8 +40,10 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4_grouped import
     mxfp4_grouped_quantizer_factory,
 )
 
-_recipe_ok, _reason = te.is_mxfp4_available(return_reason=True)
-pytestmark = pytest.mark.skipif(not _recipe_ok, reason=_reason)
+pytestmark = pytest.mark.skipif(
+    get_device_compute_capability() not in MXFP4_GEMM_ARCHS,
+    reason="grouped MXFP4 Triton GEMM requires gfx950 or gfx1250",
+)
 
 _REL_TOL = 5e-2
 
@@ -254,6 +258,30 @@ def test_grouped_linear_a4w4_recipe_backward():
         assert _rel(w.grad, dw_ref[g]) < _REL_TOL, f"a4w4 wgrad[{g}] disagrees: {_rel(w.grad, dw_ref[g]):.4f}"
 
 
+def test_grouped_linear_weight_cast_matches_reference():
+    """The fast path's GPU weight cast is bit-identical to the recipe's reference quantizer."""
+    _isolate()
+    device, dtype = "cuda", torch.bfloat16
+    num_gemms, K, N = 4, 256, 256
+    m_splits = [128, 64, 0, 192]
+    torch.manual_seed(0)
+
+    model = te.GroupedLinear(num_gemms, K, N, bias=False, params_dtype=dtype).cuda()
+    inp = torch.randn(sum(m_splits), K, device=device, dtype=dtype, requires_grad=True)
+
+    rec = recipe.CustomRecipe(qfactory=mxfp4_grouped_quantizer_factory)
+    with te.autocast(enabled=True, recipe=rec):
+        model(inp, m_splits, is_first_microbatch=True)
+
+    _, b_data, b_scale, w_col_data, w_col_scale = model._fp8_workspaces["mxfp4_grouped_weight0"]
+    for g in range(num_gemms):
+        ref = _e2m1_ref(rowwise=True, columnwise=True).quantize(getattr(model, f"weight{g}").detach())
+        assert torch.equal(b_data[g], ref.data)
+        assert torch.equal(b_scale[g], ref.scale[:N, : K // MXFP4_BLOCK_SIZE])
+        assert torch.equal(w_col_data[g], ref.data_t)
+        assert torch.equal(w_col_scale[g], ref.scale_t[:K, : N // MXFP4_BLOCK_SIZE])
+
+
 def test_grouped_linear_a8w4_backward_raises():
     """a8w4 is forward-only QAT: the grouped-path backward must raise clearly."""
     _isolate()
@@ -303,7 +331,7 @@ def test_row_operand_mxfp8_fused_matches_torch():
     for M, K in [(384, 256), (130, 256), (293, 3584)]:
         x = torch.randn(M, K, device=device, dtype=dtype)
         d_ref, s_ref = _row_operand_mxfp8_torch(x)
-        d_fused, s_fused = _row_operand_mxfp8(x)  # fused on gfx950
+        d_fused, s_fused = _row_operand_mxfp8(x)  # fused on gfx950/gfx1250
         assert torch.equal(s_fused, s_ref), f"E8M0 scales differ at {(M, K)}"
         assert torch.equal(
             d_fused.view(torch.uint8), d_ref.view(torch.uint8)
