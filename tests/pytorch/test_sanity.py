@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,7 +6,6 @@ from typing import Optional, List
 
 import torch
 import pytest
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import os
 import copy
 
