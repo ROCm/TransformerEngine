@@ -234,7 +234,7 @@ target_link_directories(ck_fused_attn PUBLIC ${__AITER_MHA_PATH})
 list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 -l:te_libmha_fwd.so -l:te_libmha_bwd.so)
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
-set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
+te_set_rocm_rpath(ck_fused_attn "$ORIGIN")
 
 # In CK_JIT mode the AITER libs are emitted directly into AITER_MHA_INSTALL_DIR
 if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
