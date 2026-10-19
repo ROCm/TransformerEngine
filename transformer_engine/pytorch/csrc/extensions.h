@@ -747,6 +747,9 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 
+// Borrow torch's host ncclComm_t from a process group's CUDA backend.
+int64_t get_nccl_comm_ptr(c10d::ProcessGroup *process_group);
+
 #ifndef USE_ROCM
 /***************************************************************************************************
  * Expert Parallelism
@@ -787,9 +790,6 @@ void register_ep_bindings(pybind11::module_ &m);
 /***************************************************************************************************
  * Expert Parallelism
  **************************************************************************************************/
-
-// Borrow torch's host ncclComm_t from a process group's CUDA backend.
-int64_t get_nccl_comm_ptr(c10d::ProcessGroup *process_group);
 
 // Borrows torch's NCCL host comm (``comm_ptr`` from ``get_nccl_comm_ptr``).
 // ``group_name`` is the PG name used by the symm-mem window resolver.
