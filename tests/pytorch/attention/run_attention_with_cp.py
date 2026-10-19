@@ -19,7 +19,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     get_cu_seqlens_on_cp_rank,
     get_thd_partitioned_indices,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    combine_and_quantize,
+    get_thd_padding_mask,
+)
 from transformer_engine.pytorch import DType
 
 # Executed as a script, so sibling imports rely on the interpreter putting this file's
@@ -507,7 +510,7 @@ def run_dpa_with_cp(
         for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         seq_dim = qkv_format.index("s")
         q_, k_, v_, dout_ = [
             x.view(
@@ -651,7 +654,7 @@ def run_dpa_with_cp(
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         if is_training:
             dq, dk, dv, out = [
                 x.view(
@@ -734,6 +737,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
             )
+<<<<<<< HEAD
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
             if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
@@ -761,7 +765,23 @@ def run_dpa_with_cp(
             # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
             # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
             # Backward dq/dk/dv CAN be pre-zeroed because FA3 marks them as mutated inputs.
+=======
+            num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
+                cu_seqlens_kv_padded - cu_seqlens_kv
+            )[:-1]
+            # FA3/FA4 kernels may leave physically padded rows unwritten. The CP
+            # implementation must clean them after partial-output/gradient merges.
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
             if fa_pad_between_seqs == "True":
+                out_padding_mask = get_thd_padding_mask(
+                    out_.shape[0], cu_seqlens_q, cu_seqlens_q_padded
+                )
+                nnz = torch.count_nonzero(out_[out_padding_mask]).item()
+                assert nnz == 0, (
+                    f"out_ has {nnz} nonzero values in THD padding — "
+                    "context_parallel.py should zero padding positions"
+                )
+
                 # out_ is a view inside the CP custom autograd Function, so in-place
                 # zeroing is blocked by PyTorch. Clone to break the view relationship.
                 out_ = out_.clone()

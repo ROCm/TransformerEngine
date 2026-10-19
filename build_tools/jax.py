@@ -18,6 +18,7 @@ from .utils import (
     cudnn_frontend_include_path,
     all_files_in_dir,
     debug_build_enabled,
+    get_bolt_build_flags,
     setup_mpi_flags,
     nccl_include_path,
     nccl_lib_path,
@@ -28,6 +29,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
+<<<<<<< HEAD
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         """Update requirements with current JAX version to avoid undesired update."""
@@ -37,6 +39,9 @@ def install_requirements() -> List[str]:
         except ImportError:
             pass
     return ["jax", "flax>=0.7.1"]
+=======
+    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 def test_requirements() -> List[str]:
@@ -142,6 +147,9 @@ def setup_jax_extension(
     if rocm_build():
         cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-DUSE_ROCM"])
 
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
+
     setup_mpi_flags(include_dirs, cxx_flags)
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
@@ -168,5 +176,6 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
+        extra_link_args=linker_flags,
         **kwargs,
     )

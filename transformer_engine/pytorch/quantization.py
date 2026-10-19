@@ -44,6 +44,7 @@ __all__ = [
     "is_mxfp8_available",
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
+    "is_fp8_ue5m3_available",
     "get_default_recipe",
     "get_align_size_for_quantization",
     "QuantizerRole",
@@ -56,7 +57,11 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
+<<<<<<< HEAD
 _MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
+=======
+_FP8_UE5M3_SUPPORT: Optional[Tuple[bool, str]] = None
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 @dataclasses.dataclass(frozen=True)
@@ -261,12 +266,29 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
 
 
 @torch.compiler.assume_constant_result
+<<<<<<< HEAD
 def check_mxfp4_support() -> Tuple[bool, str]:
     """Return if MXFP4 support is available."""
     global _MXFP4_SUPPORT
     if _MXFP4_SUPPORT is None:
         _MXFP4_SUPPORT = _compute_mxfp4_support()
     return _MXFP4_SUPPORT
+=======
+def check_fp8_ue5m3_support() -> Tuple[bool, str]:
+    """Return if the FP8 UE5M3 format is available."""
+    global _FP8_UE5M3_SUPPORT
+    if _FP8_UE5M3_SUPPORT is None:
+
+        def _check_support() -> Tuple[bool, str]:
+            if get_device_compute_capability() != (10, 7):  # Rubin
+                return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
+            if float(torch.version.cuda) < 13.4:
+                return False, "CUDA 13.4 is required for FP8 UE5M3 support."
+            return True, ""
+
+        _FP8_UE5M3_SUPPORT = _check_support()
+    return _FP8_UE5M3_SUPPORT
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -493,6 +515,26 @@ def is_mxfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
     if return_reason:
         return check_mxfp4_support()
     return check_mxfp4_support()[0]
+
+def is_fp8_ue5m3_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for the FP8 UE5M3 data type.
+
+    This may be used for NVFP4 scaling factors.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support is available.
+
+    """
+    if return_reason:
+        return check_fp8_ue5m3_support()
+    return check_fp8_ue5m3_support()[0]
+
 
 @dataclass(slots=True)
 class FP8GlobalState:
@@ -1930,8 +1972,14 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 return self.recipe.fp4_quant_fwd_weight
             return self.recipe.fp4_quant_fwd_inp
 
+        scale_dtype = (
+            DType.kFloat8UE5M3 if self.recipe.fp8_format == Format.UE5M3 else DType.kFloat8E4M3
+        )
+
         def _make(tensor_type: str) -> NVFP4Quantizer:
             qparams = _qparams(tensor_type)
+
+            # Whether to enable 4over6
             nvfp4_use_4over6 = False
             if tensor_type not in ("grad_output", "grad_input"):
                 if self.recipe.nvfp4_4over6 == "all":
@@ -1940,16 +1988,21 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     nvfp4_use_4over6 = tensor_type == "weight"
                 elif self.recipe.nvfp4_4over6 == "activations":
                     nvfp4_use_4over6 = tensor_type != "weight"
-            nvfp4_e4m3_max = 448
+
+            # Unsupported configs
             if nvfp4_use_4over6:
-                # Current 4over6 kernels target RL and post-training quantization paths.
-                # Pre-training usage still needs a fused RHT + 4over6 quantization kernel.
                 if qparams.random_hadamard_transform:
                     raise ValueError("NVFP4 4over6 quantization does not support RHT.")
                 if qparams.stochastic_rounding:
                     raise ValueError(
                         "NVFP4 4over6 quantization does not support stochastic rounding."
                     )
+                if scale_dtype == DType.kFloat8UE5M3:
+                    raise ValueError("NVFP4 4over6 quantization is incompatible with UE5M3 scales.")
+
+            # Scale max for 4over6
+            nvfp4_e4m3_max = 0
+            if nvfp4_use_4over6:
                 if self.recipe.nvfp4_4over6_e4m3_use_256 == "all":
                     nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "weights":
@@ -1960,8 +2013,10 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                         nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
                     nvfp4_e4m3_max = 448
+
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
+                scale_dtype=scale_dtype,
                 rowwise=True,
                 columnwise=True,
                 with_rht=qparams.random_hadamard_transform,

@@ -16,6 +16,7 @@
 #include <cuda/barrier>
 #include <utility>
 
+#include "common/cast/nvfp4/core_nvfp4.cuh"
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
@@ -240,14 +241,6 @@ __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
 }
 
 template <typename ScaleType>
-__device__ __forceinline__ ScaleType
-ComputeDecodeScaleFP4(const float amax, const float global_encode_scale_multiplier) {
-  float decode_scale = amax * global_encode_scale_multiplier;
-  decode_scale = fminf(decode_scale, TypeExtrema<float>::max);
-  return static_cast<ScaleType>(decode_scale);
-}
-
-template <typename ScaleType>
 __device__ __forceinline__ float ComputeEncodeScaleFP4(ScaleType decode_scale,
                                                        const float global_decode_scale) {
   return fminf(1.0f / (static_cast<float>(decode_scale) * global_decode_scale),
@@ -332,6 +325,7 @@ __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scal
   return static_cast<float>(input) * encode_scale;
 }
 
+<<<<<<< HEAD
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax,
                                                              const float e4m3_max) {
   const float fp8_max = e4m3_max;
@@ -346,6 +340,8 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
+=======
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 __device__ __forceinline__ uint32_t get_rbits(
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>&
         rng,  // NVTE_BUILD_NUM_PHILOX_ROUNDS rounds of philox4x32
@@ -647,6 +643,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
                                         : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
 #else
   const float global_encode_scale =
+<<<<<<< HEAD
       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
 #endif
   // Mirrors the global_encode_scale guard exactly: where that falls back to 1.0f the
@@ -655,6 +652,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       (kIsE8Scaling || global_amax == nullptr) ? kFp4Max * e4m3_max : global_amax[0];
   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+=======
+      (kIsE8Scaling || global_amax == nullptr)
+          ? 1.0f
+          : dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<ScaleType>(
+                global_amax[0]);
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
   const float global_decode_scale = 1.0 / global_encode_scale;
 
   // Step 2: Cast and store to output_c
@@ -747,16 +750,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       float row_global_encode_scale = global_encode_scale;
       if constexpr (kRowScaledNVFP4) {
         row_global_encode_scale =
+<<<<<<< HEAD
             row_idx < num_rows ? ComputeGlobalEncodeScaleFP4(global_amax[row_idx], e4m3_max) : 1.0f;
       }
       float row_true_global_amax = block_true_global_amax;
       if constexpr (kRowScaledNVFP4) {
         row_true_global_amax = row_idx < num_rows ? global_amax[row_idx] : kFp4Max * e4m3_max;
+=======
+            row_idx < num_rows
+                ? dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<ScaleType>(
+                      global_amax[row_idx])
+                : 1.0f;
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
       }
-      const float row_global_encode_scale_multiplier =
-          kRowScaledNVFP4 ? row_global_encode_scale * fp4_max_inv : global_encode_scale_multiplier;
       const float row_global_decode_scale =
           kRowScaledNVFP4 ? 1.0f / row_global_encode_scale : global_decode_scale;
+<<<<<<< HEAD
       ScaleType scale_inv;
       float encode_scale;
 #ifdef __HIP_PLATFORM_AMD__
@@ -809,6 +818,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, row_global_encode_scale_multiplier);
         encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, row_global_decode_scale);
       }
+=======
+      ScaleType scale_inv = dispatch::nvfp4::core::compute_decoding_scaling_factor<ScaleType>(
+          amax, row_global_encode_scale);
+      float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, row_global_decode_scale);
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
       // Step 2.5: Write scale_inv
       bool write_scale_inv = is_src_lane;
       if constexpr (!kAligned) {
@@ -1035,6 +1049,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           amax = __shfl_sync(mask, amax, src_lane);
         }
         // Step 3.4: Compute scale
+<<<<<<< HEAD
         ScaleType scale_inv;
         float encode_scale;
 #ifdef __HIP_PLATFORM_AMD__
@@ -1068,6 +1083,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
           encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
         }
+=======
+        ScaleType scale_inv = dispatch::nvfp4::core::compute_decoding_scaling_factor<ScaleType>(
+            amax, global_encode_scale);
+        float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         // Step 3.5: Write scale_inv_t
         bool write_scale_inv = is_src_lane;
         if constexpr (!kAligned) {
@@ -1136,16 +1156,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
 namespace detail {
 
-void quantize_transpose_vector_blockwise_fp4(
+template <typename ScaleType>
+void quantize_transpose_vector_blockwise_fp4_impl(
     const SimpleTensor& input, const SimpleTensor& global_amax, SimpleTensor& scale_inv,
     SimpleTensor& scale_inv_t, SimpleTensor& output, SimpleTensor& output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
     const bool swizzled_scale, const bool use_stochastic_rounding,
     const NVTETensor rng_state_tensor, const bool use_2d_quantization, const bool row_scaled_nvfp4,
+<<<<<<< HEAD
     const SimpleTensor& noop_tensor, const int nvfp4_e4m3_max,
     const NVTENVFP44Over6Mode nvfp4_4over6_mode, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
+=======
+    const SimpleTensor& noop_tensor, cudaStream_t stream) {
+#if CUDA_VERSION >= 12080
+>>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
   // pow 2 scale is for MXFP4 since it's using E8M0 scaling
   // raise error if pow2_scale is true
@@ -1230,8 +1256,7 @@ void quantize_transpose_vector_blockwise_fp4(
 
           dim3 grid(num_blocks_x, num_blocks_y, 1);
 
-          using ScaleType = fp8e4m3; constexpr int kScaleBlockDim = 16;
-          constexpr bool kPow2Scale = false;
+          constexpr int kScaleBlockDim = 16; constexpr bool kPow2Scale = false;
 
 #ifdef __HIP_PLATFORM_AMD__
           const bool full_tile = row_length % tile_dim == 0 && num_rows % tile_dim == 0;
@@ -1312,6 +1337,32 @@ void quantize_transpose_vector_blockwise_fp4(
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
+}
+
+void quantize_transpose_vector_blockwise_fp4(
+    const SimpleTensor& input, const SimpleTensor& global_amax, SimpleTensor& scale_inv,
+    SimpleTensor& scale_inv_t, SimpleTensor& output, SimpleTensor& output_t, const float epsilon,
+    const bool return_identity, const bool return_transpose, const bool pow2_scale,
+    const bool swizzled_scale, const bool use_stochastic_rounding,
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization, const bool row_scaled_nvfp4,
+    const SimpleTensor& noop_tensor, cudaStream_t stream) {
+  NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
+
+  NVTE_CHECK(return_identity || return_transpose,
+             "At least one of return_identity or return_transpose must be true.");
+  const DType scale_dtype = return_identity ? scale_inv.dtype : scale_inv_t.dtype;
+  if (return_identity && return_transpose) {
+    NVTE_CHECK(scale_inv.dtype == scale_inv_t.dtype,
+               "Rowwise and columnwise NVFP4 scale tensors must have the same dtype (got ",
+               to_string(scale_inv.dtype), " and ", to_string(scale_inv_t.dtype), ").");
+  }
+
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      quantize_transpose_vector_blockwise_fp4_impl<ScaleType>(
+          input, global_amax, scale_inv, scale_inv_t, output, output_t, epsilon, return_identity,
+          return_transpose, pow2_scale, swizzled_scale, use_stochastic_rounding, rng_state_tensor,
+          use_2d_quantization, row_scaled_nvfp4, noop_tensor, stream);)
 }
 
 }  // namespace detail
