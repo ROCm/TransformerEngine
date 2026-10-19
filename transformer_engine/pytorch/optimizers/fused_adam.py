@@ -23,6 +23,10 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import is_fp8_fnuz
 
 
+# Bound temporary NVTETensor handles created before the CUDA launcher chunks its metadata.
+_MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL = 1024
+
+
 def get_fp8_meta(fp8_tensor):
     """FP8 metadata getter."""
     assert isinstance(fp8_tensor, Float8Tensor), "Fused optimizer supports only Float8Tensor class"
@@ -773,21 +777,37 @@ class FusedAdam(torch.optim.Optimizer):
                 # pylint: disable=cell-var-from-loop
                 inv_scale_arg = () if inv_scale is None else (inv_scale,)
                 out_dtype_arg = () if out_dtype is None else (out_dtype,)
-                multi_tensor_applier(
-                    adam_func,
-                    self._dummy_overflow_buf,
-                    tensor_lists,
-                    group["lr"],
-                    beta1,
-                    beta2,
-                    group["eps"],
-                    group["step"],
-                    self.adam_w_mode,
-                    bias_correction,
-                    group["weight_decay"],
-                    *inv_scale_arg,
-                    *out_dtype_arg,
-                )
+
+                tensor_list_chunks = (tensor_lists,)
+                if len(tensor_lists[0]) > _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL:
+                    tensor_list_chunks = (
+                        [
+                            tensors[start : start + _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL]
+                            for tensors in tensor_lists
+                        ]
+                        for start in range(
+                            0,
+                            len(tensor_lists[0]),
+                            _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL,
+                        )
+                    )
+
+                for tensor_list_chunk in tensor_list_chunks:
+                    multi_tensor_applier(
+                        adam_func,
+                        self._dummy_overflow_buf,
+                        tensor_list_chunk,
+                        group["lr"],
+                        beta1,
+                        beta2,
+                        group["eps"],
+                        group["step"],
+                        self.adam_w_mode,
+                        bias_correction,
+                        group["weight_decay"],
+                        *inv_scale_arg,
+                        *out_dtype_arg,
+                    )
 
             if self.capturable:
                 # If the optimizer is capturable, then if there's a grad scaler it works

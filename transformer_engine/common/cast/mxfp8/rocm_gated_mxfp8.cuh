@@ -39,10 +39,15 @@ __device__ inline void compute_gated_activation(
     float act_elt, float gate_elt, float grad_elt,
     const ParamOP &p, float &result_act, float &result_gate) {
 
-  bool dgate_elt_valid = true;
+  float dgate_elt = 1.0f;  // gating is ideally an identity function
   if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-    dgate_elt_valid = gate_elt <= p.limit && gate_elt >= -p.limit;
-    gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+    if (gate_elt > p.limit || gate_elt < -p.limit) {
+      dgate_elt = 0.f;
+    }
+    gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+  } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+    dgate_elt = dsitu_up<float, float>(gate_elt, p);
+    gate_elt = situ_up<float, float>(gate_elt, p);
   }
 
   if constexpr (IS_DGATED) {
@@ -53,6 +58,9 @@ __device__ inline void compute_gated_activation(
       const float s  = sigmoidf(p.alpha * cx);
       act_x  = cx * s;
       dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * cx : 0.0f;
+    } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+      act_x  = ActOP(x, p);
+      dact_x = DActOP(x, p);
     } else {
       if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
         const float s = sigmoidf(x);
@@ -64,7 +72,7 @@ __device__ inline void compute_gated_activation(
       }
     }
     result_act  = dact_x * grad_elt * gate_elt;
-    result_gate = dgate_elt_valid ? act_x * grad_elt : 0.0f;
+    result_gate = dgate_elt * act_x * grad_elt;
   } else {
     result_act  = ActOP(act_elt, p) * gate_elt;
     result_gate = 0.0f;
