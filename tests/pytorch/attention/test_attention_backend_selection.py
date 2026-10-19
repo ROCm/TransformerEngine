@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,12 +11,17 @@ from unittest.mock import Mock
 import pytest
 import torch
 from packaging.version import Version as PkgVersion
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import (
     backends as dpa_backends,
     dot_product_attention as dpa_module,
     utils as dpa_utils,
+)
+
+pytestmark = pytest.mark.skipif(
+    IS_HIP_EXTENSION, reason="FA4/cuDNN backend-selection policy is not supported on ROCm"
 )
 
 

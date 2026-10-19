@@ -342,7 +342,8 @@ namespace transformer_engine {
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void* workspace, size_t workspaceSize,
-                 const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
+                 const void* alpha_ptr, const void* beta_ptr, bool alpha_beta_on_device,
+                 bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset = -1);
 #else // Use cublasLt
@@ -1069,7 +1070,7 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
 
     cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
                 (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-                wspace->data.dptr, wspace->data.shape[0], &alpha, &beta,
+                wspace->data.dptr, wspace->data.shape[0], &alpha, &beta, false,
                 use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
                 detail::get_compute_stream(i % num_streams), i % num_streams);
 #else

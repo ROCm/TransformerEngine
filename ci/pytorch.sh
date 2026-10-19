@@ -81,6 +81,7 @@ run_test_config(){
     NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "triton" 1 triton_kernels/test_gemm_kernel.py
     run 1 test_gqa.py
     run 1 test_grouped_linear.py
+    PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 run_default_fa 1 test_module_grouped_linear_distributed_weight.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
@@ -91,6 +92,7 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
+    run_default_fa 1 test_optional_flash_attn_import.py
     run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"

@@ -399,10 +399,15 @@ static void launch_dequant_fp4_to_bf16(
 //   alpha_out[i] = alpha_in * amax_A * amax_B / (fp4_max^2 * fp8_max^2)  for i in [0, m)
 // Used with HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST, which
 // expects a device vector of length m for alpha, while beta stays on the host.
+// A null amax (second-level scale disabled) means a unit global scale: amax = fp4_max * fp8_max.
 __global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __restrict__ amax_A,
-                                                const float* __restrict__ amax_B, float factor_inv,
-                                                float* __restrict__ alpha_out, int m) {
-  const float alpha_val = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+                                                const float* __restrict__ amax_B,
+                                                float default_amax_A, float default_amax_B,
+                                                float factor_inv, float* __restrict__ alpha_out,
+                                                int m) {
+  const float amax_A_val = (amax_A != nullptr) ? *amax_A : default_amax_A;
+  const float amax_B_val = (amax_B != nullptr) ? *amax_B : default_amax_B;
+  const float alpha_val  = alpha_in * amax_A_val * amax_B_val * factor_inv;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < m; i += blockDim.x * gridDim.x) {
     alpha_out[i] = alpha_val;
   }
@@ -420,11 +425,14 @@ __global__ void nvfp4_prep_kernel(const uint8_t* __restrict__ inA, uint8_t* __re
                                   int dimA, int in_strideA, const uint8_t* __restrict__ inB,
                                   uint8_t* __restrict__ outB, int dimB, int in_strideB, int k_scale,
                                   int num_ktiles, const float* __restrict__ amax_A,
-                                  const float* __restrict__ amax_B, float alpha_in, float factor_inv,
+                                  const float* __restrict__ amax_B, float default_amax_A,
+                                  float default_amax_B, float alpha_in, float factor_inv,
                                   float* __restrict__ c0_out) {
   const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid == 0) {
-    *c0_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+    const float amax_A_val = (amax_A != nullptr) ? *amax_A : default_amax_A;
+    const float amax_B_val = (amax_B != nullptr) ? *amax_B : default_amax_B;
+    *c0_out = alpha_in * amax_A_val * amax_B_val * factor_inv;
   }
   const int64_t outA_elems = static_cast<int64_t>(num_ktiles) * dimA * 8;
   const int64_t total = outA_elems + static_cast<int64_t>(num_ktiles) * dimB * 8;
@@ -449,8 +457,8 @@ __global__ void nvfp4_prep_kernel(const uint8_t* __restrict__ inA, uint8_t* __re
 static void launch_nvfp4_prep(const void* inA, void* outA, int dimA, int in_strideA,
                               const void* inB, void* outB, int dimB, int in_strideB, int k_scale,
                               int num_ktiles, const float* amax_A, const float* amax_B,
-                              float alpha_in, float factor_inv, float* c0_out,
-                              hipStream_t stream) {
+                              float default_amax_A, float default_amax_B, float alpha_in,
+                              float factor_inv, float* c0_out, hipStream_t stream) {
   const int64_t total = (static_cast<int64_t>(dimA) + dimB) * num_ktiles * 8;
   constexpr int kBlockSize = 256;
   const int64_t blocks = (total + kBlockSize - 1) / kBlockSize;
@@ -458,7 +466,8 @@ static void launch_nvfp4_prep(const void* inA, void* outA, int dimA, int in_stri
   nvfp4_prep_kernel<<<grid, kBlockSize, 0, stream>>>(
       reinterpret_cast<const uint8_t*>(inA), reinterpret_cast<uint8_t*>(outA), dimA, in_strideA,
       reinterpret_cast<const uint8_t*>(inB), reinterpret_cast<uint8_t*>(outB), dimB, in_strideB,
-      k_scale, num_ktiles, amax_A, amax_B, alpha_in, factor_inv, c0_out);
+      k_scale, num_ktiles, amax_A, amax_B, default_amax_A, default_amax_B, alpha_in, factor_inv,
+      c0_out);
   NVTE_CHECK_CUDA(hipGetLastError());
 }
 
@@ -628,8 +637,10 @@ static void setup_nvfp4_gemm_native(
     hipStream_t stream) {
 
   const float fp4_max = 6.0f;
-  const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+  // Read the bound per operand: 4over6 tensors carry 256, not 448.
+  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.get_nvfp4_scale_max());
+  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.get_nvfp4_scale_max());
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
       ? reinterpret_cast<const float*>(inputA.amax.dptr)
@@ -637,8 +648,6 @@ static void setup_nvfp4_gemm_native(
   const float* amax_B = (transb == CUBLAS_OP_N)
       ? reinterpret_cast<const float*>(inputB.amax.dptr)
       : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
-  NVTE_CHECK(amax_A != nullptr, "NVFP4 GEMM requires amax_A");
-  NVTE_CHECK(amax_B != nullptr, "NVFP4 GEMM requires amax_B");
 
   // hipBLASLt reads the FP8 (E4M3) block scales in a K-tiled layout, not the row-major layout TE
   // emits. Source buffer selection mirrors CanonicalizeGemmInput's NVFP4 branch; TE's originals are
@@ -674,8 +683,8 @@ static void setup_nvfp4_gemm_native(
   // One fused launch swizzles both operands' scales (padding written inline, no memset) and forms
   // c0 on device; a single 4-byte copy then brings c0 to the host for the GEMM's host scalar alpha.
   launch_nvfp4_prep(a_sinv.dptr, swz_a, m, static_cast<int>(a_sinv.shape[1]), b_sinv.dptr, swz_b, n,
-                    static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B, alpha_in,
-                    factor_inv, c0_dev, stream);
+                    static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B,
+                    fp4_max * fp8_max_A, fp4_max * fp8_max_B, alpha_in, factor_inv, c0_dev, stream);
   float host_c0 = 0.0f;
   // FIXME(AIHPBLAS-3571): drop this c0 readback + sync once hipBLASLt supports NVFP4 device alpha.
   NVTE_CHECK_CUDA(hipMemcpyAsync(&host_c0, c0_dev, sizeof(float), hipMemcpyDeviceToHost, stream));
@@ -737,12 +746,11 @@ static void dequant_fp4_gemm_inputs(
   float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
   ws_ptr += alpha_vec_bytes;
 
-  NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
-  NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
   constexpr int kBlockSize = 256;
   const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
   compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-      alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
+      alpha, amax_A, amax_B, fp4_max * fp8_max_A, fp4_max * fp8_max_B, factor_inv,
+      device_alpha_vec, m);
   *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
 
   // Stage FP4 operand: dequantize to BF16 in workspace and update GEMM param.
@@ -2199,11 +2207,13 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
+                 const void* alpha_ptr, const void* beta_ptr, bool alpha_beta_on_device,
+                 bool use_split_accumulator, int math_sm_count,
                  [[maybe_unused]] int m_split, [[maybe_unused]] int n_split,
                  [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset)
 {
+  NVTE_CHECK(!alpha_beta_on_device, "Device-side alpha/beta is not supported on ROCm.");
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();

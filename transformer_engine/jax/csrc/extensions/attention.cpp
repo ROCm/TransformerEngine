@@ -8,6 +8,8 @@
 
 #ifndef USE_ROCM  // Disabled on ROCm
 #include <cudnn_frontend.h>
+
+#include "common/cudnn_utils.h"
 #endif
 
 #include <algorithm>
@@ -22,7 +24,6 @@
 #include <vector>
 
 #include "../extensions.h"
-#include "common/cudnn_utils.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 

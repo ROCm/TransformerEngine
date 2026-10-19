@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -111,6 +113,10 @@ void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
     output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
   }
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
   dispatch::nvfp4::group_compute_fused_amax(*input_tensor, /*noop=*/nullptr, output_tensors,
                                             split_sections, num_tensors, stream);
+#else
+  NVTE_ERROR("Grouped NVFP4 amax computation is not supported on ROCm.");
+#endif
 }

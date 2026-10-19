@@ -396,7 +396,6 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
     ::testing::Values(true, false),
-    ::testing::Values(true, false),
 #ifdef __HIP_PLATFORM_AMD__
     ::testing::Values(false), // HIP does not use zero_centered_gamma_in_weight_dtype
     ::testing::Values(false)), // ROCm has no cuDNN normalization backend
@@ -425,6 +424,10 @@ class MxNormSwizzledScalesTestSuite
 TEST_P(MxNormSwizzledScalesTestSuite, TestMxRMSNormSwizzledScales) {
   using namespace transformer_engine;
   using namespace test;
+
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Fused RMSNorm with GEMM-swizzled MXFP8 scales is not supported on ROCm.";
+#endif
 
   const DType input_type = std::get<0>(GetParam());
   const DType output_type = std::get<1>(GetParam());

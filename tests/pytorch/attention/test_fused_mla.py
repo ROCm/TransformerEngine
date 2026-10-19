@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +21,7 @@ import sys
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -328,7 +331,9 @@ def test_fused_mla_q_uproj_autograd() -> None:
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 sm100 = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
-if not mxfp8_available:
+if IS_HIP_EXTENSION:
+    _kv_rope_skip_reason = "The fused MLA key/value RoPE MXFP8 kernel is not supported on ROCm."
+elif not mxfp8_available:
     _kv_rope_skip_reason = reason_for_no_mxfp8
 elif not sm100:
     _kv_rope_skip_reason = "The fused kernel requires SM 10.0+."

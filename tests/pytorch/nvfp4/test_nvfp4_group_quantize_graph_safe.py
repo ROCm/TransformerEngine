@@ -44,6 +44,8 @@ def fused_grouped_quantize(
     return grouped_output
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION,
+                    reason="NVFP4 grouped quantization is not supported on ROCm platform")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "return_transpose", [False, True], ids=["rowwise", "rowwise_and_columnwise"]

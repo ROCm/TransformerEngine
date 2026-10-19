@@ -48,7 +48,16 @@ def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
     x_test, w_test = quantize(x, disable_x), quantize(w, disable_w)
 
     def gemm(w_q, x_q):
-        workspace = torch.empty(4, dtype=torch.uint8, device="cuda")
+        if IS_HIP_EXTENSION:
+            # On ROCm, FP4 is dequantized to BF16 in workspace before GEMM, so allocate enough space.
+            from transformer_engine.pytorch.cpp_extensions.gemm import (
+                get_cublas_workspace_size_bytes,
+            )
+
+            ws_bytes = 2 * 128 * 128 * torch.bfloat16.itemsize + get_cublas_workspace_size_bytes()
+            workspace = torch.empty(ws_bytes, dtype=torch.uint8, device="cuda")
+        else:
+            workspace = torch.empty(4, dtype=torch.uint8, device="cuda")
         return tex.generic_gemm(
             w_q,
             True,

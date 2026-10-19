@@ -17,7 +17,7 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
-               test_row_scaled_nvfp4_grouped_amax.cu
+               test_row_scaled_nvfp4_grouped_amax.cu #CUDA-only test
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_mxfp8.cu
@@ -53,6 +53,7 @@ if(USE_ROCM)
   # Remove CUDA-only tests and add ROCm specific ones
   list(REMOVE_ITEM test_cuda_sources
               test_grouped_gemm.cu
+              test_row_scaled_nvfp4_grouped_amax.cu
               test_cast_current_scaling_grouped.cu
               test_cast_float8blockwise_grouped.cu
               test_dequantize_float8blockwise_grouped.cu)
@@ -89,7 +90,13 @@ else()
 endif()
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
+if(USE_ROCM)
+# ci/core.sh splits ctest runs by GTest suite name (-R/-E GEMMTestSuite) with a per-test timeout
+include(GoogleTest)
+gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600)
+else()
 # Keep all operator tests in one process so CUDA initialization and, when enabled,
 # the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
 # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
 add_test(NAME test_operator COMMAND test_operator)
+endif()
