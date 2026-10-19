@@ -20,7 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
     utils as dpa_utils,
 )
 
-pytestmark = pytest.mark.skipif(
+_skip_fa4_on_rocm = pytest.mark.skipif(
     IS_HIP_EXTENSION, reason="FA4/cuDNN backend-selection policy is not supported on ROCm"
 )
 
@@ -62,6 +62,7 @@ def isolated_backends(monkeypatch):
         pytest.param((10, 0), True, True, True, (256, 256), True, False, id="sm100-d256"),
     ],
 )
+@_skip_fa4_on_rocm
 def test_fa4_deterministic_backend_selection(
     monkeypatch, capability, training, backward, deterministic, head_dims, unfused, expect_flash
 ):
@@ -100,6 +101,7 @@ def test_fa4_deterministic_backend_selection(
         pytest.param("4.0.0b33", True, True, id="b33-backward"),
     ],
 )
+@_skip_fa4_on_rocm
 @pytest.mark.parametrize("path", ["compact", "padding", "all-gather"])
 def test_fa4_d256_seqused_backend_selection(monkeypatch, version, backward, expect_flash, path):
     """FA4 D=256 eligibility follows seqused_q/k forward/backward support."""

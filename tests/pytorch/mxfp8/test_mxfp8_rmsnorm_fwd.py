@@ -38,9 +38,9 @@ _ROCM_NO_SWIZZLE_FUSION = (
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
 def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimize_for_gemm):
+    """The fused output is the MXFP8 quantization of the FP32 normalized values."""
     if IS_HIP_EXTENSION and optimize_for_gemm:
         pytest.skip(_ROCM_NO_SWIZZLE_FUSION)
-    """The fused output is the MXFP8 quantization of the FP32 normalized values."""
     torch.manual_seed(1234)
     rows, cols = shape
     eps = 1e-5
@@ -87,9 +87,9 @@ def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimiz
 )
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
 def test_rmsnorm_fwd_mxfp8_sm_margin(optimize_for_gemm):
+    """With all SMs but one reserved, the kernels run over chunks of rows with the same output."""
     if IS_HIP_EXTENSION and optimize_for_gemm:
         pytest.skip(_ROCM_NO_SWIZZLE_FUSION)
-    """With all SMs but one reserved, the kernels run over chunks of rows with the same output."""
     torch.manual_seed(1234)
     x = torch.randn(1024, 7168, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(7168, dtype=torch.bfloat16, device="cuda")

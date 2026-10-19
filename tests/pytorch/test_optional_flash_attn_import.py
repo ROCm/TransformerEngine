@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -23,6 +25,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 PROBE = textwrap.dedent(
     """
@@ -63,10 +66,17 @@ def _fake_broken_dist(root: Path, name: str, version: str, module: str, message:
 @pytest.mark.parametrize(
     "name,version,module",
     [
-        ("flash-attn", "2.7.4.post1", "flash_attn_2_cuda"),
-        ("flash-attn-3", "3.0.0b1", "flash_attn_interface"),
+        pytest.param("flash-attn", "2.7.4.post1", "flash_attn_2_cuda", id="fa2"),
+        pytest.param(
+            "flash-attn-3",
+            "3.0.0b1",
+            "flash_attn_interface",
+            id="fa3",
+            marks=pytest.mark.skipif(
+                IS_HIP_EXTENSION, reason="FlashAttention 3 is not supported on ROCm"
+            ),
+        ),
     ],
-    ids=["fa2", "fa3"],
 )
 def test_broken_flash_attn_does_not_break_te_import(name, version, module):
     with tempfile.TemporaryDirectory(prefix="te-broken-fa-") as tmp:

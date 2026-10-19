@@ -341,7 +341,7 @@ list(APPEND transformer_engine_cpp_sources
      newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
-if(NVTE_WITH_CUTEDSL)
+if(NVTE_WITH_CUTEDSL AND USE_CUDA)
   list(APPEND transformer_engine_cpp_sources init_python.cpp)
 endif()
 

@@ -271,6 +271,7 @@ def check_mxfp4_support() -> Tuple[bool, str]:
     return _MXFP4_SUPPORT
 
 
+@torch.compiler.assume_constant_result
 def check_fp8_ue5m3_support() -> Tuple[bool, str]:
     """Return if the FP8 UE5M3 format is available."""
     global _FP8_UE5M3_SUPPORT

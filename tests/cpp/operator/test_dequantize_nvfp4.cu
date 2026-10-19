@@ -214,9 +214,10 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                        finite_nonneg_e4m3_dis);
 
     // The NVFP4 Tensor helper allocates a zero-initialized amax buffer. Null it so the
-    // dequant kernel takes the HIP nullptr -> 1.0f fallback, matching the reference below.
+    // dequant kernel uses a unit global scale (amax = fp4_max * e4m3_max), matching the
+    // reference below.
     input.set_tensor_amax_nullptr();
-    const float amax = 1.0f;
+    const float amax = 6.0f * 448.0f;
 
     run_single_case<OutputType>("rowwise_1d_dequant",
                                 input,
