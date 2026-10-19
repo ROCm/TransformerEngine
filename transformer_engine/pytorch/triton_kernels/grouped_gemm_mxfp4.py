@@ -71,6 +71,12 @@ def _scoped_amd_knobs(*, is_tn):
 NUM_XCDS = 8  # gfx942/gfx950 chiplet count
 
 
+def _num_xcds():
+    """Chiplet-remap width. gfx1250 measured faster with the plain round-robin pid
+    order (up to ~15% on MoE grouped GEMMs), so the remap is skipped there."""
+    return 1 if get_arch() == "gfx1250" else NUM_XCDS
+
+
 @triton.jit
 def _chiplet_transform_chunked(
     pid,
@@ -122,6 +128,27 @@ _VARK_CONFIGS = [
     (256, 8, 2, 16, 0),
     (256, 8, 3, 16, 2),
 ]
+# gfx1250 forward configs. num_warps=16 spreads the 256x256 fp32 accumulator over
+# twice the waves, so fp4 x fp4 fits 256 VGPRs at 4 waves/SIMD (num_warps=8 needs
+# ~360 VGPRs, 2 waves/SIMD); e4m3 x e2m1 spills at num_warps=16 and is fastest at
+# num_warps=8 with BLOCK_K=256. The BLOCK_K=128 rows cover K % 256 != 0.
+_FWD_CONFIGS_GFX1250 = [
+    (256, 16, 3, 16, 0),
+    (256, 16, 2, 16, 0),
+    (256, 8, 3, 16, 0),
+    (256, 8, 2, 16, 0),
+    (512, 8, 3, 16, 0),
+    (128, 16, 2, 16, 0),
+    (128, 8, 2, 16, 0),
+]
+# gfx1250 wgrad configs (host tile 128x256 there). BLOCK_K=256 needs every padded
+# group length 256-divisible (see _wgrad_pad_multiple in grouped_gemm_mxfp4_impl.py).
+_VARK_CONFIGS_GFX1250 = [
+    (256, 16, 3, 16, 0),
+    (256, 16, 2, 16, 0),
+    (128, 16, 3, 16, 0),
+    (128, 8, 2, 16, 0),
+]
 
 
 def _make_configs(specs):
@@ -139,17 +166,34 @@ def _make_configs(specs):
     ]
 
 
+_FWD_TRITON_CONFIGS = _make_configs(_FWD_CONFIGS)
+_FWD_TRITON_CONFIGS_GFX1250 = _make_configs(_FWD_CONFIGS_GFX1250)
+_VARK_TRITON_CONFIGS = _make_configs(_VARK_CONFIGS)
+_VARK_TRITON_CONFIGS_GFX1250 = _make_configs(_VARK_CONFIGS_GFX1250)
+
+
 def _prune_fwd_by_k(configs, named_args, **kwargs):
-    """Keep only configs whose BLOCK_K divides K (the fwd reduction loop is unmasked)."""
+    """Keep only the current arch's configs whose BLOCK_K divides K (the fwd
+    reduction loop is unmasked)."""
     K = named_args["K"]
+    configs = _FWD_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _FWD_TRITON_CONFIGS
     return [c for c in configs if K % c.kwargs["BLOCK_SIZE_K"] == 0]
 
 
 def _prune_vark_by_pad(configs, named_args, **kwargs):
-    """Drop BLOCK_K=256 unless every padded group length is 256-divisible (can256)."""
+    """Keep the current arch's configs; drop BLOCK_K=256 unless every padded group
+    length is 256-divisible (can256)."""
+    configs = _VARK_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _VARK_TRITON_CONFIGS
     if named_args["can256"]:
         return list(configs)
     return [c for c in configs if c.kwargs["BLOCK_SIZE_K"] != 256]
+
+
+def _fwd_do_bench(kernel_call, quantiles):
+    if get_arch() == "gfx1250":
+        # gfx1250 downclocks under back-to-back load, which do_bench's per-launch L2 flush hides.
+        return triton.testing.do_bench_cudagraph(kernel_call, rep=100, quantiles=quantiles)
+    return triton.runtime.driver.active.get_benchmarker()(kernel_call, quantiles=quantiles)
 
 
 # ###########################################################################
@@ -160,9 +204,10 @@ def _prune_vark_by_pad(configs, named_args, **kwargs):
 
 
 @triton.autotune(
-    configs=_make_configs(_FWD_CONFIGS),
+    configs=_FWD_TRITON_CONFIGS + _FWD_TRITON_CONFIGS_GFX1250,
     key=["N", "K", "G", "A_PACK", "B_PACK"],
     prune_configs_by={"early_config_prune": _prune_fwd_by_k},
+    do_bench=_fwd_do_bench,
 )
 @triton.jit
 def _grouped_mxfp4_persistent_gemm_kernel(
@@ -354,7 +399,8 @@ def grouped_gemm_mxfp4_triton_kernel(
     GM = 8 if min((avg_m + BM - 1) // BM, tiles_n) < 16 else 4
     total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     # BLOCK_SIZE_K / num_warps / num_stages / waves_per_eu / matrix_instr_nonkdim /
     # kpack come from the @triton.autotune config; the grid and the host-chosen
@@ -386,7 +432,7 @@ def grouped_gemm_mxfp4_triton_kernel(
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
@@ -440,7 +486,8 @@ def grouped_gemm_a8w4_triton_kernel(
     GM = 8 if min((avg_m + BM - 1) // BM, tiles_n) < 16 else 4
     total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     _grouped_mxfp4_persistent_gemm_kernel[(num_sms,)](
         a_e4m3,
@@ -469,7 +516,7 @@ def grouped_gemm_a8w4_triton_kernel(
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
@@ -492,7 +539,7 @@ def grouped_gemm_a8w4_triton_kernel(
 
 
 @triton.autotune(
-    configs=_make_configs(_VARK_CONFIGS),
+    configs=_VARK_TRITON_CONFIGS + _VARK_TRITON_CONFIGS_GFX1250,
     key=["OUT_M", "OUT_N", "G", "can256"],
     prune_configs_by={"early_config_prune": _prune_vark_by_pad},
     restore_value=["C"],
@@ -626,13 +673,14 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
     l_u8 = lhs.view(torch.uint8)
     r_u8 = rhs.view(torch.uint8)
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(lhs.device).multi_processor_count
-    BM, BN = 256, 128
+    BM, BN = (128, 256) if get_arch() == "gfx1250" else (256, 128)
     tiles_m = (OUT_M + BM - 1) // BM
     tiles_n = (OUT_N + BN - 1) // BN
     GM = 8 if min(tiles_m, tiles_n) < 16 else 4
     total_tiles = G * tiles_m * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     # can256 (256-divisibility of every padded group length) is part of the
     # autotune key so a cached BLOCK_K=256 config is never reused on a shape that
@@ -669,7 +717,7 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,

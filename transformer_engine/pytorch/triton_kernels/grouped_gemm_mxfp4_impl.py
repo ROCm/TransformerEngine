@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -22,14 +21,17 @@ from .cast_transpose import mxfp8_e4m3_rowwise_downcast
 
 # Logical contraction tile the kernels step by (see grouped_gemm_mxfp4.py).
 BLOCK_SIZE_K = 128
-# Per-group wgrad M padding multiple; must be >= the largest wgrad BLOCK_K the
-# kernel may pick. 256 lets the variable-K autotune try BLOCK_K=256 (at the cost
-# of more padding for small groups). Default 128 = unchanged behavior.
-WGRAD_PAD_MULTIPLE = int(os.environ.get("NVTE_MXFP4_WGRAD_PAD", str(BLOCK_SIZE_K)))
 # One E8M0 scale per 32-element block.
 MXFP4_BLOCK = 32
 # Archs with the scaled-FP4 matrix op used by tl.dot_scaled: gfx950 (MFMA), gfx1250 (WMMA).
 MXFP4_GEMM_ARCHS = ((9, 5), (12, 5))
+
+
+def _wgrad_pad_multiple() -> int:
+    """Per-group wgrad M padding multiple; must be >= the largest wgrad BLOCK_K the
+    kernel may pick. 256 on gfx1250, where the BLOCK_K=256 wgrad is 1.2-1.6x faster
+    (padding included)."""
+    return 256 if get_device_compute_capability() == (12, 5) else BLOCK_SIZE_K
 
 
 def _quantizer(*, rowwise: bool, columnwise: bool) -> MXFP4Quantizer:
@@ -203,7 +205,7 @@ def _col_operand_grouped_padded(
     x: torch.Tensor,
     m_splits: Sequence[int],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Per-group col-wise MXFP4 with each group's M padded to WGRAD_PAD_MULTIPLE.
+    """Per-group col-wise MXFP4 with each group's M padded to ``_wgrad_pad_multiple()``.
 
     ``x`` [total_M, F] grouped along M -> (data [F, total_pad/2] u8,
     scale [F, total_pad/32] u8, go_pad [G+1] int64). Padding rows are zeros, so
@@ -212,7 +214,8 @@ def _col_operand_grouped_padded(
     two groups and the result equals casting each group separately.
     """
     m_list = [int(m) for m in m_splits]
-    pad_list = [round_up_to_nearest_multiple(m, WGRAD_PAD_MULTIPLE) for m in m_list]
+    pad = _wgrad_pad_multiple()
+    pad_list = [round_up_to_nearest_multiple(m, pad) for m in m_list]
     offs = [0]
     for m_pad in pad_list:
         offs.append(offs[-1] + m_pad)
@@ -605,9 +608,8 @@ def grouped_gemm_mxfp4_wgrad(
     # Whether every padded group length is 256-divisible; part of the wgrad autotune
     # key so a cached BLOCK_K=256 config is never reused on a shape that can't take
     # it. Computed from the Python splits, so the hot path needs no device sync.
-    can256 = int(
-        all(round_up_to_nearest_multiple(int(m), WGRAD_PAD_MULTIPLE) % 256 == 0 for m in m_splits)
-    )
+    pad = _wgrad_pad_multiple()
+    can256 = int(all(round_up_to_nearest_multiple(int(m), pad) % 256 == 0 for m in m_splits))
 
     return grouped_gemm_mxfp4_variable_k_triton_kernel(
         lhs_data,
