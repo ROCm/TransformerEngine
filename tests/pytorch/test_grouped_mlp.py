@@ -1139,6 +1139,9 @@ class TestGroupedMLPFusedOp:
         """Fuse E4M3 MXFP8 and NVFP4, but decline MXFP8 with an E5M2 backward."""
         from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
 
+        if IS_HIP_EXTENSION:
+            pytest.skip("The CuTe grouped MLP fusion (cuDNN frontend, SM 10.x) is not supported on ROCm")
+
         # Skip invalid configurations
         maybe_skip_quantization("mxfp8")
         maybe_skip_quantization("nvfp4")

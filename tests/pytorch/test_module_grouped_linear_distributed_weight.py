@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -22,6 +24,7 @@ a specific assertion rather than drifting numerically.
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import MXFP8BlockScaling
@@ -244,6 +247,11 @@ def test_single_grouped_weight_dispatches(monkeypatch):
     """
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
+    if IS_HIP_EXTENSION:
+        pytest.skip(
+            "single_grouped_weight requires the native grouped-tensor GroupedLinear path, which"
+            " is disabled on ROCm"
+        )
 
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     torch.manual_seed(0)
