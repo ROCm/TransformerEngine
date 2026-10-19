@@ -306,7 +306,8 @@ def mxfp4_gemm(
         if result is not None:
             result = result + bias_casted
 
-    if len(a_batch_shape) > 1 and result is not None:
+    # wgrad (NT) reduces over the batch dims, so only fprop/dgrad outputs carry them.
+    if layout != "NT" and len(a_batch_shape) > 1 and result is not None:
         result = result.reshape(*a_batch_shape, result.shape[-1])
 
     return result

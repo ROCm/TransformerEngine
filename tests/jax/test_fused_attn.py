@@ -1988,6 +1988,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-SELF",
         ),
         pytest.param(
@@ -2000,6 +2001,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-RAGGED_SELF",
         ),
         # non-16-multiple seqlen: exercises the atomic16 dq_acc seqlen padding (pad16(s_q)) on the bf16
@@ -2015,6 +2017,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2044-2044-12-6-128-128-BF16-GQA-RAGGED_SELF-UNALIGNED",
         ),
         pytest.param(
@@ -2027,6 +2030,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.float16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-FP16-MLA",
         ),
         pytest.param(
@@ -2039,6 +2043,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
