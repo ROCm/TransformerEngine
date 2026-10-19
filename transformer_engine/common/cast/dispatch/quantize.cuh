@@ -190,18 +190,14 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-<<<<<<< HEAD
+#ifndef __HIP_PLATFORM_AMD__
+        nvfp4::row_scaled::compute_amaxes(*input_tensor, noop_tensor, output_tensor, stream);
+#else
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
         if (output_tensor->has_columnwise_data()) {
-#ifndef __HIP_PLATFORM_AMD__
-          nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-#else
           NVTE_ERROR("Row-scaled NVFP4 columnwise output is not supported on ROCm.");
-#endif
         }
-=======
-        nvfp4::row_scaled::compute_amaxes(*input_tensor, noop_tensor, output_tensor, stream);
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
@@ -246,7 +242,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*noop_tensor=*/noop_tensor->data,
-            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
+            /*nvfp4_e4m3_max=*/output_tensor->get_nvfp4_scale_max(),
             /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
             /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__
@@ -459,7 +455,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*noop_tensor=*/noop_tensor->data,
-            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
+            /*nvfp4_e4m3_max=*/output_tensor->get_nvfp4_scale_max(),
             /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
             /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__

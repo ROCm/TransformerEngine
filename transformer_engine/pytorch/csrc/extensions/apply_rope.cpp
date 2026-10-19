@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -299,6 +301,7 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
   return qkv_grad_input;
 }
 
+#ifndef USE_ROCM  // Disabled on ROCm
 std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
     const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
     const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer) {
@@ -362,5 +365,6 @@ std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
   });
   return {key_py, value_py};
 }
+#endif
 
 }  // namespace transformer_engine::pytorch

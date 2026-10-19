@@ -373,8 +373,10 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
         impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
       } else {
+#ifndef USE_ROCM  // Disabled on ROCm
         // Transformer Engine's fused RMSNorm + MXFP8 kernel
         impl = Impl::FULLY_FUSED;
+#endif
       }
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&

@@ -420,7 +420,6 @@ void launch_fused_group_requantize(const Tensor &input, Tensor *output,
           reinterpret_cast<const int64_t *>(tensor_offsets.data.dptr), num_groups, num_cols,
           input_scale_stride);
 }
-#endif  // __HIP_PLATFORM_AMD__
 
 // ---------------------------------------------------------------------------
 // Wide-tile variant for the fast-math case without a dequantized output.
@@ -587,6 +586,7 @@ void launch_fused_group_requantize_wide(const Tensor &input, Tensor *output,
       reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
       reinterpret_cast<const int64_t *>(tensor_offsets.data.dptr), num_groups, num_cols, num_tiles);
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &tensor_offsets,
                             Tensor *dequantized, const QuantizationConfig *quant_config,
@@ -703,9 +703,9 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
     return;
   }
 
-<<<<<<< HEAD
-#ifdef __HIP_PLATFORM_AMD__
   const bool use_fast_math = quant_config != nullptr && quant_config->use_fast_math;
+
+#ifdef __HIP_PLATFORM_AMD__
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_fast_math, USE_FAST_MATH,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -716,9 +716,6 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
                   input, output, tensor_offsets, dequantized, num_groups, num_rows, num_cols,
                   input_scale_stride, stream););););  // NOLINT(*)
 #else
-=======
-  const bool use_fast_math = quant_config != nullptr && quant_config->use_fast_math;
-
   // The wide-tile kernel covers the fast-math case without a dequantized output. It loads the
   // rowwise scales and stores both scale outputs as 4-byte words.
   const int64_t num_wide_tiles =
@@ -737,7 +734,6 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
     NVTE_CHECK_CUDA(cudaGetLastError());
     return;
   }
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 
   alignas(64) CUtensorMap output_tensor_map{};
   create_2D_tensor_map(output_tensor_map, output->columnwise_data, num_rows, num_cols, kTileRows,

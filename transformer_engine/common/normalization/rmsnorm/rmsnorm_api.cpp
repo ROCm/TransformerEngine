@@ -50,6 +50,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
   // MXFP8 output: Transformer Engine's fused kernel, which alone writes GEMM-swizzled scales,
   // unless cuDNN is requested or the kernel does not support the tensors.
   if (is_mxfp8_scaling(z->scaling_mode)) {
@@ -69,6 +70,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       return;
     }
   }
+#else
+  if (is_mxfp8_scaling(z->scaling_mode)) {
+    NVTE_CHECK(!z->with_gemm_swizzled_scales,
+               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+  }
+#endif
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;

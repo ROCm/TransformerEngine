@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -19,9 +21,15 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_TYPE_EXTREMA_H_
 
 #if FP4_TYPE_SUPPORTED
+#ifndef __HIP_PLATFORM_AMD__
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
 using fp4e2m1x4 = __nv_fp4x4_e2m1;
+#else
+using fp4e2m1 = __hip_fp4_e2m1;
+using fp4e2m1x2 = __hip_fp4x2_e2m1;
+using fp4e2m1x4 = __hip_fp4x4_e2m1;
+#endif  // __HIP_PLATFORM_AMD__
 #endif  // FP4_TYPE_SUPPORTED
 
 namespace detail {
@@ -46,8 +54,16 @@ struct TypeExtrema<fp4e2m1> {
 
 template <>
 struct TypeExtrema<fp8e4m3> {
+#ifndef __HIP_PLATFORM_AMD__
   static constexpr float max = 448.0f;
   static constexpr float max_inverse = 1.0 / max;
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static constexpr float max = te_fp8_fnuz() ? 240.0f : 448.0f;
+  static constexpr float max_inverse = 1.0 / max;
+#else
+  static float max;
+  static float max_inverse;
+#endif
 };
 
 template <>

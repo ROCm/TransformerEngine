@@ -26,12 +26,9 @@
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 #include "specialized/cast_bidim.cuh"
 #include "specialized/cast_rowwise.cuh"
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 #include "specialized/quantize_mxfp8.cuh"
 #include "swizzle.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__

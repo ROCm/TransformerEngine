@@ -43,9 +43,31 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+namespace {
+
+// On the ROCm host, the FP8 E4M3 max is not a compile-time constant: it depends on the
+// FNUZ/OCP format detected at runtime, so detail::TypeExtrema<fp8e4m3>::max is not usable here.
+template <typename T>
+float host_type_max() {
+  return detail::TypeExtrema<T>::max;
+}
+
+template <>
+float host_type_max<fp8e4m3>() {
+  return te_fp8_fnuz() ? 240.0f : 448.0f;
+}
+
+}  // namespace
+#endif
+
 float typeToMax(const DType type) {
+#ifdef __HIP_PLATFORM_AMD__
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T, return host_type_max<T>(););  // NOLINT(*)
+#else
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
                                      return TypeInfo<T>::max_finite_value;);  // NOLINT(*)
+#endif
 }
 
 std::string to_string(const NVTEScalingMode &mode) {
@@ -221,41 +243,29 @@ void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_i
 #ifdef __HIP_PLATFORM_AMD__
     const DType expected_scale_dtype =
         is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+    auto is_valid_scale_dtype = [&](DType dtype) { return dtype == expected_scale_dtype; };
+    const std::string expected_scale_dtype_str = to_string(expected_scale_dtype);
 #else
-    const DType expected_scale_dtype = DType::kFloat8E4M3;
+    auto is_valid_scale_dtype = [](DType dtype) {
+      return dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3;
+    };
+    const std::string expected_scale_dtype_str = "Float8E4M3 or Float8UE5M3";
 #endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
-<<<<<<< HEAD
-      NVTE_CHECK(t.scale_inv.dtype == expected_scale_dtype, "FP4 scaling factor input ", name,
+      NVTE_CHECK(is_valid_scale_dtype(t.scale_inv.dtype), "FP4 scaling factor input ", name,
                  "_scale_inverse has invalid dtype "
-                 "(expected ", to_string(expected_scale_dtype), ", got ",
-                 to_string(t.scale_inv.dtype), ")");
-=======
-      NVTE_CHECK(
-          t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8UE5M3,
-          "FP4 scaling factor input ", name,
-          "_scale_inverse has invalid dtype "
-          "(expected Float8E4M3 or Float8UE5M3, got ",
-          to_string(t.scale_inv.dtype), ")");
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                 "(expected ", expected_scale_dtype_str, ", got ", to_string(t.scale_inv.dtype),
+                 ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_columnwise_scale_inverse must be allocated");
-<<<<<<< HEAD
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_scale_dtype,
-                 "FP4 scaling factor input ", name,
+      NVTE_CHECK(is_valid_scale_dtype(t.columnwise_scale_inv.dtype), "FP4 scaling factor input ",
+                 name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected ", to_string(expected_scale_dtype), ", got ",
-=======
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3 ||
-                     t.columnwise_scale_inv.dtype == DType::kFloat8UE5M3,
-                 "FP8 scaling factor input ", name,
-                 "_columnwise_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3 or Float8UE5M3, got ",
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                 "(expected ", expected_scale_dtype_str, ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -305,41 +315,29 @@ void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty)
 #ifdef __HIP_PLATFORM_AMD__
     const DType expected_scale_dtype =
         is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+    auto is_valid_scale_dtype = [&](DType dtype) { return dtype == expected_scale_dtype; };
+    const std::string expected_scale_dtype_str = to_string(expected_scale_dtype);
 #else
-    const DType expected_scale_dtype = DType::kFloat8E4M3;
+    auto is_valid_scale_dtype = [](DType dtype) {
+      return dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3;
+    };
+    const std::string expected_scale_dtype_str = "Float8E4M3 or Float8UE5M3";
 #endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
-<<<<<<< HEAD
-      NVTE_CHECK(t.scale_inv.dtype == expected_scale_dtype, "FP4 scaling factor output ", name,
+      NVTE_CHECK(is_valid_scale_dtype(t.scale_inv.dtype), "FP4 scaling factor output ", name,
                  "_scale_inverse has invalid dtype "
-                 "(expected ", to_string(expected_scale_dtype), ", got ",
-                 to_string(t.scale_inv.dtype), ")");
-=======
-      NVTE_CHECK(
-          t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8UE5M3,
-          "FP4 scaling factor output ", name,
-          "_scale_inverse has invalid dtype "
-          "(expected Float8E4M3 or Float8UE5M3, got ",
-          to_string(t.scale_inv.dtype), ")");
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                 "(expected ", expected_scale_dtype_str, ", got ", to_string(t.scale_inv.dtype),
+                 ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
-<<<<<<< HEAD
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_scale_dtype,
-                 "FP4 scaling factor output ", name,
+      NVTE_CHECK(is_valid_scale_dtype(t.columnwise_scale_inv.dtype), "FP4 scaling factor output ",
+                 name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected ", to_string(expected_scale_dtype), ", got ",
-=======
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3 ||
-                     t.columnwise_scale_inv.dtype == DType::kFloat8UE5M3,
-                 "FP4 scaling factor output ", name,
-                 "_columnwise_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3 or Float8UE5M3, got ",
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+                 "(expected ", expected_scale_dtype_str, ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -1111,10 +1109,10 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     case kNVTERowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
       break;
-<<<<<<< HEAD
-    case kNVTENVFP4E4M3Max:
-      std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
-      break;
+    case kNVTENVFP4E4M3Max: {
+      int val = t->get_nvfp4_scale_max();
+      std::memcpy(buf, &val, attr_size);
+    } break;
 #ifdef __HIP_PLATFORM_AMD__
     case kNVTEMXFP4ShuffleRowwiseData:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
@@ -1123,12 +1121,6 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_columnwise_data);
       break;
 #endif
-=======
-    case kNVTENVFP4E4M3Max: {
-      int val = t->get_nvfp4_scale_max();
-      std::memcpy(buf, &val, attr_size);
-    } break;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }

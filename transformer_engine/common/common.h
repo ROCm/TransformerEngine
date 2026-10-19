@@ -373,15 +373,11 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
-<<<<<<< HEAD
-    nvfp4_e4m3_max = 448;
+    nvfp4_e4m3_max = 0;
 #ifdef __HIP_PLATFORM_AMD__
     mxfp4_shuffle_rowwise_data = false;
     mxfp4_shuffle_columnwise_data = false;
 #endif
-=======
-    nvfp4_e4m3_max = 0;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -769,30 +765,15 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
-<<<<<<< HEAD
 #endif // CUDA_VERSION >= 12080
-#if FP4_TYPE_SUPPORTED
-using fp4e2m1 = __nv_fp4_e2m1;
-using fp4e2m1x2 = __nv_fp4x2_e2m1;
-using fp4e2m1x4 = __nv_fp4x4_e2m1;
-#endif //FP4_TYPE_SUPPORTED
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 #else
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
-#if FP4_TYPE_SUPPORTED
-using fp4e2m1 = __hip_fp4_e2m1;
-using fp4e2m1x2 = __hip_fp4x2_e2m1;
-using fp4e2m1x4 = __hip_fp4x4_e2m1;
-#endif //FP4_TYPE_SUPPORTED
 #endif //__HIP_PLATFORM_AMD__
-
-=======
-#endif
-#if CUDA_VERSION >= 13040
-using fp8ue5m3 = __nv_fp8_ue5m3;
-#endif
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 using e8m0_t = uint8_t;
 
 // FP4 aliases + device-safe TypeExtrema specializations (also used by NVRTC).
@@ -826,71 +807,16 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
-<<<<<<< HEAD
 #endif // CUDA_VERSION >= 12080
-=======
-#endif
 #if CUDA_VERSION >= 13040
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_ue5m3)
 #endif
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
 #endif // #ifdef __HIP_PLATFORM_AMD__
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
-<<<<<<< HEAD
-template <typename T>
-struct TypeExtrema;
-
-#if FP4_TYPE_SUPPORTED
-template <>
-struct TypeExtrema<fp4e2m1> {
-  static constexpr float max = 6.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-#endif
-
-template <>
-struct TypeExtrema<fp8e4m3> {
-#ifndef __HIP_PLATFORM_AMD__
-  static constexpr float max = 448.0f;
-  static constexpr float max_inverse = 1.0 / max;
-#elif defined(__HIP_DEVICE_COMPILE__)
-  static constexpr float max = te_fp8_fnuz() ? 240.0f : 448.0f;
-  static constexpr float max_inverse = 1.0 / max;
-#else
-  static float max;
-  static float max_inverse;
-#endif
-};
-
-template <>
-struct TypeExtrema<fp8e5m2> {
-  static constexpr float max = 57344.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-
-template <>
-struct TypeExtrema<bf16> {
-  // Hex float format of 1.(7 bits of 1) * 2 ^ 127
-  static constexpr float max = 0x1.FEp127;
-};
-
-template <>
-struct TypeExtrema<fp16> {
-  // Hex float format of 1.(10 bits of 1) * 2 ^ 15
-  static constexpr float max = 0x1.FFCp15;
-};
-
-template <typename T>
-struct TypeExtrema {
-  static constexpr float max = std::numeric_limits<T>::max();
-};
-
-=======
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 }  // namespace detail
 
 template <typename T>

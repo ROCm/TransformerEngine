@@ -660,17 +660,13 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= numel) return;
 
-<<<<<<< HEAD
-  constexpr float fp4_max = 6.0f;
-#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
-  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
-#else
-  constexpr float fp8_max = 448.0f;
-#endif
-=======
   constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+#if defined (__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+  // The FP8 E4M3 max is only a compile-time constant in ROCm device code (FNUZ vs OCP)
+  constexpr float scale_max = 448.0f;
+#else
   constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -699,17 +695,13 @@ __global__ void nvfp4_compute_global_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_params) return;
 
-<<<<<<< HEAD
-  constexpr float fp4_max = 6.0f;
-#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
-  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
-#else
-  constexpr float fp8_max = 448.0f;
-#endif
-=======
   constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+#if defined (__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+  // The FP8 E4M3 max is only a compile-time constant in ROCm device code (FNUZ vs OCP)
+  constexpr float scale_max = 448.0f;
+#else
   constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -805,17 +797,13 @@ __global__ void nvfp4_fused_scale_kernel(
   const size_t tile_row = out_row / block_len;
 
   // Compute the scale value
-<<<<<<< HEAD
-  constexpr float fp4_max = 6.0f;
-#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
-  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
-#else
-  constexpr float fp8_max = 448.0f;
-#endif
-=======
   constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+#if defined (__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+  // The FP8 E4M3 max is only a compile-time constant in ROCm device code (FNUZ vs OCP)
+  constexpr float scale_max = 448.0f;
+#else
   constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;
 

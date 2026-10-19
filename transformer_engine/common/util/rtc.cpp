@@ -29,13 +29,11 @@ namespace {
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 #include "string_code_amd_detail_hip_float8_h.h"
 #endif // __HIP_PLATFORM_AMD__
 
 #ifndef __HIP_PLATFORM_AMD__
-=======
 /*! \brief Compute capabilities that NVRTC supports */
 const std::vector<int>& supported_sm_archs() {
   static const std::vector<int> archs_ = [] {
@@ -49,7 +47,6 @@ const std::vector<int>& supported_sm_archs() {
   return archs_;
 }
 
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 /*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
@@ -208,11 +205,6 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #ifndef __HIP_PLATFORM_AMD__
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
-<<<<<<< HEAD
-  const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
-  const bool compile_ptx = sm_arch_ != compile_sm_arch;
-#endif // __HIP_PLATFORM_AMD__
-=======
   NVTE_CHECK(sm_arch_ >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label, " requires sm_",
              arch_requirement.min_sm_arch, " or newer, but the current device is sm_", sm_arch_);
 
@@ -230,7 +222,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     compile_ptx = false;
     arch_suffix = "a";
   }
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif // __HIP_PLATFORM_AMD__
 
   // Compilation flags
   std::vector<std::string> opts = {
@@ -407,20 +399,16 @@ bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) 
 
 std::string KernelManager::get_kernel_cache_key(const std::string& kernel_label,
                                                 int device_id) const {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
   return concat_strings(cuda::sm_arch_name(device_id), ",", kernel_label);
 #else
-  return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);
-#endif
-=======
   const std::string sm_arch = std::to_string(cuda::sm_arch(device_id));
   std::string key;
   key.reserve(3 + sm_arch.size() + 1 + kernel_label.size());
   key.append("sm=").append(sm_arch).push_back(',');
   key.append(kernel_label);
   return key;
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#endif
 }
 
 }  // namespace rtc

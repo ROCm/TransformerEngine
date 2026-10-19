@@ -628,10 +628,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
+#ifndef USE_ROCM  // Disabled on ROCm
   m.def("fused_mla_kv_rope_mxfp8", &transformer_engine::pytorch::fused_mla_kv_rope_mxfp8,
         "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8", py::arg("kv"),
         py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"),
         py::arg("key_quantizer"), py::arg("value_quantizer"));
+#endif
 
   // fused router
   transformer_engine::pytorch::init_router_bindings(m);
@@ -780,15 +782,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
   // Borrow torch's host ncclComm_t from a process group (used by NCCL EP and cuSolverMp).
   m.def("get_nccl_comm_ptr", &transformer_engine::pytorch::get_nccl_comm_ptr,
         "Borrow torch's host ncclComm_t from a process group's CUDA backend.",
         py::arg("process_group"));
 
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
+#ifndef USE_ROCM
   // Newton-Schulz (cuSolverMp)
   m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
         "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),

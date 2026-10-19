@@ -31,24 +31,7 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-<<<<<<< HEAD
-int get_max_dynamic_smem(int device_id = -1) {
-  static std::vector<int> cache(cuda::num_devices(), -1);
-  static std::vector<std::once_flag> flags(cuda::num_devices());
-  if (device_id < 0) {
-    device_id = cuda::current_device();
-  }
-  auto init = [&]() {
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cache[device_id],
-                                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
-  };
-  std::call_once(flags[device_id], init);
-  return cache[device_id];
-}
-
 #ifndef __HIP_PLATFORM_AMD__
-=======
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -980,62 +963,6 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
       input, output, M, K, original_M, original_K, flat_bid, grid_dim);
 }
 
-<<<<<<< HEAD
-#ifdef __HIP_PLATFORM_AMD__
-// ============================================================================
-// MX scale pre-swizzle kernel for gfx1250 — K-tiled 3D layout
-//
-// hipBLASlt Tensile kernels expect scales in a permuted 3D layout that
-// groups K_scale into tiles of 4 (= 128 / MXBlock32):
-//   Tensor({M, K_scale}).pad(K_scale to mult of 4).reshape({M, K_scale/4, 4}).permute({1, 0, 2})
-//
-// For source position (m, k) in the [M, K_scale] scale matrix:
-//   group  = k / 4
-//   within = k % 4
-//   dst    = group * (M * 4) + m * 4 + within
-//
-// Padding: K_scale to multiple of 4.  No M padding required.
-// Identity padding value: E8M0 127 = 2^0 = 1.0
-//
-// Reference: swizzle_mx_scale() in hipblaslt/clients/common/include/testing_matmul.hpp
-// ============================================================================
-
-constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
-
-// Unified MX scale pre-swizzle kernel for both row-wise and column-wise.
-// Iterates only over valid (non-padded) elements; the caller must pre-fill
-// the output buffer with identity (127) to handle padding.
-//
-// kRowwise=true:  input is [orig_M, orig_K] row-major
-// kRowwise=false: input is [orig_K, orig_M] row-major (column-wise scales)
-template <bool kRowwise>
-__global__ void __launch_bounds__(256)
-    swizzle_scaling_mx_kernel(const uint8_t* __restrict__ input,
-                              uint8_t* __restrict__ output,
-                              const int padded_M,
-                              const int input_stride,
-                              const int orig_M, const int orig_K) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const int total = orig_M * orig_K;
-  if (idx >= total) return;
-
-  const int m = idx / orig_K;
-  const int k = idx % orig_K;
-
-  uint8_t val;
-  if constexpr (kRowwise) {
-    val = input[m * input_stride + k];
-  } else {
-    val = input[k * input_stride + m];
-  }
-
-  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
-  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
-  const int dst = group * (padded_M * MX_PRESWIZZLE_GROUP_SIZE)
-                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
-
-  output[dst] = val;
-=======
 // MXFP8 scale swizzle with one thread block per scale tile, used when
 // NVTE_MXFP8_PER_TILE_SWIZZLE=1. The narrow-K / narrow-M kernels above put 32 tiles in one
 // 1024-thread block, so e.g. the scales of a 4096-row activation are swizzled by a single block.
@@ -1356,11 +1283,68 @@ inline bool launch_per_tile_swizzle(const PerTileSwizzleTensor* tensors, int num
                    : launch_columnwise_per_tile_swizzle(tensors[0], stream);
   }
   return launch_multi_tensor_per_tile_swizzle(tensors, num_tensors, rowwise, stream);
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+// ============================================================================
+// MX scale pre-swizzle kernel for gfx1250 — K-tiled 3D layout
+//
+// hipBLASlt Tensile kernels expect scales in a permuted 3D layout that
+// groups K_scale into tiles of 4 (= 128 / MXBlock32):
+//   Tensor({M, K_scale}).pad(K_scale to mult of 4).reshape({M, K_scale/4, 4}).permute({1, 0, 2})
+//
+// For source position (m, k) in the [M, K_scale] scale matrix:
+//   group  = k / 4
+//   within = k % 4
+//   dst    = group * (M * 4) + m * 4 + within
+//
+// Padding: K_scale to multiple of 4.  No M padding required.
+// Identity padding value: E8M0 127 = 2^0 = 1.0
+//
+// Reference: swizzle_mx_scale() in hipblaslt/clients/common/include/testing_matmul.hpp
+// ============================================================================
+
+constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
+
+// Unified MX scale pre-swizzle kernel for both row-wise and column-wise.
+// Iterates only over valid (non-padded) elements; the caller must pre-fill
+// the output buffer with identity (127) to handle padding.
+//
+// kRowwise=true:  input is [orig_M, orig_K] row-major
+// kRowwise=false: input is [orig_K, orig_M] row-major (column-wise scales)
+template <bool kRowwise>
+__global__ void __launch_bounds__(256)
+    swizzle_scaling_mx_kernel(const uint8_t* __restrict__ input,
+                              uint8_t* __restrict__ output,
+                              const int padded_M,
+                              const int input_stride,
+                              const int orig_M, const int orig_K) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = orig_M * orig_K;
+  if (idx >= total) return;
+
+  const int m = idx / orig_K;
+  const int k = idx % orig_K;
+
+  uint8_t val;
+  if constexpr (kRowwise) {
+    val = input[m * input_stride + k];
+  } else {
+    val = input[k * input_stride + m];
+  }
+
+  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (padded_M * MX_PRESWIZZLE_GROUP_SIZE)
+                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
+
+  output[dst] = val;
+}
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace
 
+#ifdef __HIP_PLATFORM_AMD__
 void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_t stream) {
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;

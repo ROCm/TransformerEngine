@@ -2756,9 +2756,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-<<<<<<< HEAD
 #ifdef USE_ROCM
-      if (compute_amax && rht_output_t.defined()) {
+      if (compute_amax && !this->disable_second_level_scale && rht_output_t.defined()) {
         // Fused path: compute amax AND write transposed RHT output in one kernel.
         // Create a wrapper with amax fields from out + data pointing to rht_output_t.
         TensorWrapper amax_and_transform(out.scaling_mode());
@@ -2777,10 +2776,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         });
       } else
 #endif
-      if (compute_amax) {
-=======
       if (compute_amax && !this->disable_second_level_scale) {
->>>>>>> c72db38aab633e349322f9a125ea30a0f2595988
         NVTE_SCOPED_GIL_RELEASE({
           nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                        this->rht_matrix_random_sign_mask_t, stream);
@@ -2866,7 +2862,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // unfused path also needs memory allocation for intermediate buffer for RHT output
       at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
 #endif
-      bool skip_hadamard = compute_amax && rht_output_t.defined();
+      bool skip_hadamard =
+          compute_amax && !this->disable_second_level_scale && rht_output_t.defined();
       if (this->columnwise_usage && !skip_hadamard) {
         rht_output_t =
             allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
