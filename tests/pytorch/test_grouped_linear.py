@@ -190,6 +190,7 @@ all_boolean = [True, False]
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(recipe.MXFP8BlockScaling(fp8_format=recipe.Format.HYBRID))
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
