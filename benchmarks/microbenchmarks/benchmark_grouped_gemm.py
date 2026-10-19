@@ -371,6 +371,8 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
                 if v is not None and k != _HIPBLASLT_MXFP8]
     if required and not all(te_honors_env(k) for k in required):
         pytest.skip(f"{backend} grouped GEMM backend not available in this TE build")
+    # The dense-GEMM selector also drives autocast's recipe check (TRITON rejects fp8 HYBRID).
+    monkeypatch.delenv("NVTE_GEMM_BACKEND", raising=False)
     apply_backend_env(monkeypatch, GROUPED_BACKENDS[backend])
     microbench.run(
         case,

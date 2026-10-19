@@ -178,6 +178,8 @@ def test_norm(request, microbench, case, monkeypatch):
         # Llama3.1-405B: the hip norm at hidden 16384 is a multi-CTA cooperative launch, which
         # makes HIP's exit-time teardown segfault (see pytest_unconfigure in conftest.py).
         request.config._skip_hip_teardown_session = request.session
+    # The dense-GEMM selector also drives autocast's recipe check (TRITON rejects fp8 HYBRID).
+    monkeypatch.delenv("NVTE_GEMM_BACKEND", raising=False)
     apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
     microbench.run(
         case,

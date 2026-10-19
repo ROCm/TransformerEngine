@@ -707,13 +707,15 @@ def pin_cpus():
     inherit them. The threads that already exist after HIP init (HIP/ROCr helpers, incl. a
     busy event-polling one) go to the cores' SMT siblings: the multi-stream grouped GEMM
     path runs ~1.6x slower when that helper lands on another CCD or socket than the main
-    thread, and slower still when it shares the main thread's cores.
+    thread, and slower still when it shares the main thread's cores (the fallback when the
+    process may not use the siblings).
     The cores are offset by the GPU id so runs on other GPUs of the node use different ones.
     The governor needs root; without it only the pinning is applied. Returns a namespace
     with ``description`` and ``restore()``, which puts the previous governors back; if the
     process dies first (killed, crashed), a watchdog process puts them back instead.
     """
     torch.cuda.init()
+    allowed = os.sched_getaffinity(0)
     cores = _gpu_local_cores()
     try:
         gpu = int((os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0])
@@ -727,7 +729,7 @@ def pin_cpus():
             siblings |= _parse_cpulist((_CPU_SYSFS / f"cpu{cpu}/topology/thread_siblings_list").read_text())
         except (OSError, ValueError):
             pass
-    helpers = sorted(siblings - set(cpus)) or cpus
+    helpers = sorted((siblings & allowed) - set(cpus)) or cpus
     main = threading.get_native_id()
     for tid in os.listdir("/proc/self/task"):
         if int(tid) != main:
