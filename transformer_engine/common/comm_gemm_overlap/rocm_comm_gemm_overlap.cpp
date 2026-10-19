@@ -250,6 +250,18 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
+// Matrix view of a tensor with its leading dims flattened, as the GEMM sees it: modules pass
+// N-D activations ([s, b, h]) since upstream stopped flattening them.
+static size_t flat_rows(const TensorWrapper &t) {
+  size_t rows = 1;
+  for (size_t i = 0; i + 1 < t.ndim(); ++i) {
+    rows *= t.size(i);
+  }
+  return rows;
+}
+
+static size_t flat_cols(const TensorWrapper &t) { return t.ndim() == 0 ? 1 : t.size(t.ndim() - 1); }
+
 // Fused all-gather + GEMM, launched by fused_overlap_ag below.
 static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
@@ -262,9 +274,9 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
   NVTE_CHECK(A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16,
              "fused AG+GEMM reached with a non-bf16 operand");
 
-  const size_t m       = (transa) ? A.size(0) : A.size(1);
-  const size_t k       = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const size_t m       = (transa) ? flat_rows(A) : flat_cols(A);
+  const size_t k       = (transa) ? flat_cols(A) : flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
              "fused AG+GEMM reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
@@ -296,9 +308,9 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
              "fused GEMM+RS reached with a non-bf16 operand");
   NVTE_CHECK(transa, "fused GEMM+RS is TN only");
 
-  const size_t m       = (transa) ? A.size(0) : A.size(1);
-  const size_t k       = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const size_t m       = (transa) ? flat_rows(A) : flat_cols(A);
+  const size_t k       = (transa) ? flat_cols(A) : flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   const size_t tokens  = n_chunk * tp_size;
   NVTE_CHECK(kittens_fused_rs_gemm_shape_ok(static_cast<int>(tokens), static_cast<int>(m),
                                             static_cast<int>(k), tp_size),
@@ -333,14 +345,14 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
              "fused bulk AG reached with a non-bf16 operand");
   NVTE_CHECK(ubuf.numel() != 0, "fused bulk AG reached without a gather destination");
 
-  const size_t m       = A.size(1);
-  const size_t k       = A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const size_t m       = flat_cols(A);
+  const size_t k       = flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
              "fused bulk AG reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
-  NVTE_CHECK(D.size(0) == n_chunk * tp_size,
-             "fused bulk AG: the GEMM writes ", D.size(0), " rows but the kernel grid is sized for ",
+  NVTE_CHECK(flat_rows(D) == n_chunk * tp_size,
+             "fused bulk AG: the GEMM writes ", flat_rows(D), " rows but the kernel grid is sized for ",
              n_chunk * tp_size, " from the Userbuffers region.");
 
   const int rank_round_tp = comm->myrank - tp_id;
@@ -377,19 +389,19 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
     return false;
   }
 
-  const size_t tokens = ubuf.size(0);
-  const size_t hidden = ubuf.size(1);
+  const size_t tokens = flat_rows(ubuf);
+  const size_t hidden = flat_cols(ubuf);
   if (tokens % (static_cast<size_t>(tp_size) * 256) != 0 || hidden % 256 != 0) {
     return false;
   }
 
-  const size_t m = A.size(1);
-  const size_t k = A.size(0);
-  const size_t n = B.size(1);
+  const size_t m = flat_cols(A);
+  const size_t k = flat_rows(A);
+  const size_t n = flat_cols(B);
   if (m % 256 != 0 || n % 256 != 0 || k % 128 != 0 || k < 256) {
     return false;
   }
-  if (B.size(0) != k || k != tokens || m != hidden || D.size(0) != n || D.size(1) != m) {
+  if (flat_rows(B) != k || k != tokens || m != hidden || flat_rows(D) != n || flat_cols(D) != m) {
     return false;
   }
 
