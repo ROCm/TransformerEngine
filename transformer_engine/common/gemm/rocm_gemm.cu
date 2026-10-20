@@ -609,7 +609,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 //
 // hipBLASLt applies the FP8 (E4M3) block scales. A single fused kernel swizzles both operands'
 // scales and forms
-//   c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
+//   c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max_A * fp8_max_B)
 // in device memory. c0 is then used as the GEMM alpha, so the GEMM computes c0*(A*B) + beta*C in
 // its fp32 accumulator with a single round to the output dtype (matching the reference addmm).
 // No post-GEMM scaling or C copy is needed. hipblaslt_gemm() passes c0 as a device scalar alpha
@@ -623,8 +623,10 @@ static void setup_nvfp4_gemm_native(
     hipStream_t stream) {
 
   const float fp4_max = 6.0f;
-  const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+  // 4over6 tensors carry an E4M3 bound of 256, not 448.
+  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.nvfp4_e4m3_max);
+  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.nvfp4_e4m3_max);
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
       ? reinterpret_cast<const float*>(inputA.amax.dptr)
@@ -1510,8 +1512,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   // On every other architecture hipBLASLt cannot consume the block scales, so we fall
   // back to dequantizing FP4 -> BF16 (block scales only) and running a standard BF16 GEMM.
   //
-  // The per-tensor amax correction c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2) is
-  // folded into the GEMM alpha. The native path passes c0 as a device scalar alpha
+  // The per-tensor amax correction c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max_A * fp8_max_B)
+  // is folded into the GEMM alpha. The native path passes c0 as a device scalar alpha
   // (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT) when hipBLASLt has a solution for it
   // and otherwise reads c0 back to a host scalar alpha; the BF16 dequant fallback uses a device
   // alpha vector (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST).
