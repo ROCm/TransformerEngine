@@ -590,6 +590,85 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
           &quant_config_cpp, stream);
       break;
     }
+#else
+    case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+
+      CheckNoopTensor(*noop_tensor, "cast_noop");
+      CheckInputTensor(*input_tensor, "input");
+      NVTE_CHECK(!te_fp8_fnuz(), "NVFP4 is not supported on architectures with FNUZ FP8 (gfx942).");
+
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                 "2D quantization is not supported for group quantize.");
+      NVTE_CHECK(!nvfp4_use_4over6,
+                 "NVFP4 4over6 quantization is not supported for group quantize.");
+      // Each split below draws from the same RNG state, which would correlate the rounding noise
+      // across experts.
+      NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
+                 "Stochastic rounding is not supported for NVFP4 group quantize on ROCm.");
+
+      // There is no grouped NVFP4 kernel on ROCm: quantize each split with the single-tensor
+      // kernel. As in the grouped CUDA kernel, the rowwise output uses the rowwise amax and the
+      // columnwise output the columnwise amax; a null amax (second-level scale disabled) means a
+      // unit global scale.
+      const size_t row_bytes = cols * typeToSize(input_tensor->dtype());
+      size_t row_offset = 0;
+      for (size_t i = 0; i < num_tensors; ++i) {
+        const size_t split_rows = split_sections[i];
+        Tensor *output_tensor = output_tensors[i];
+        if (split_rows == 0) {
+          continue;
+        }
+        NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
+                   "Row-scaled NVFP4 is not supported for group quantize.");
+        NVTE_CHECK(static_cast<float>(output_tensor->get_nvfp4_scale_max()) ==
+                       typeToMax(output_tensor->scale_inv.has_data()
+                                     ? output_tensor->scale_inv.dtype
+                                     : output_tensor->columnwise_scale_inv.dtype),
+                   "NVFP4 quantization with non-default scale max is only supported with 4over6.");
+        SimpleTensor input_split = input_tensor->data;
+        input_split.dptr = static_cast<char *>(input_tensor->data.dptr) + row_offset * row_bytes;
+        input_split.shape = {split_rows, cols};
+        row_offset += split_rows;
+
+        const bool has_rowwise = output_tensor->has_data();
+        const bool has_columnwise = output_tensor->has_columnwise_data();
+        // One launch covers both directions when they share an amax buffer.
+        const bool fuse_directions = has_rowwise && has_columnwise &&
+                                     output_tensor->amax.dptr == output_tensor->columnwise_amax.dptr;
+        auto quantize_split = [&](const bool rowwise, const bool columnwise) {
+          const SimpleTensor &global_amax =
+              rowwise ? output_tensor->amax : output_tensor->columnwise_amax;
+          quantize_transpose_vector_blockwise_fp4(
+              /*input=*/input_split, /*global_amax=*/global_amax,
+              /*scale_inv=*/output_tensor->scale_inv,
+              /*scale_inv_t=*/output_tensor->columnwise_scale_inv,
+              /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
+              /*epsilon=*/0.0f, /*return_identity=*/rowwise, /*return_transpose=*/columnwise,
+              /*pow2_scale=*/false, /*swizzled_scale=*/output_tensor->with_gemm_swizzled_scales,
+              /*use_stochastic_rounding=*/false, /*rng_state=*/nullptr,
+              /*use_2d_quantization=*/false, /*row_scaled_nvfp4=*/false,
+              /*noop_tensor=*/noop_tensor->data,
+              /*nvfp4_e4m3_max=*/output_tensor->get_nvfp4_scale_max(),
+              /*nvfp4_4over6_mode=*/kNVTENVFP44Over6Disabled, /*stream=*/stream);
+        };
+        if (fuse_directions) {
+          quantize_split(true, true);
+        } else {
+          if (has_rowwise) {
+            quantize_split(true, false);
+          }
+          if (has_columnwise) {
+            quantize_split(false, true);
+          }
+        }
+      }
+      NVTE_CHECK(row_offset == rows, "Sum of split sections (", row_offset,
+                 ") must equal the number of input rows (", rows, ").");
+      break;
+    }
 #endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");

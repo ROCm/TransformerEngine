@@ -1995,3 +1995,110 @@ TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
     }
 }
 #endif  // #ifndef __HIP_PLATFORM_AMD__
+
+#ifdef __HIP_PLATFORM_AMD__
+namespace {
+
+// NVFP4 view of a test tensor's buffers, with the amaxes attached only when requested.
+TensorWrapper make_nvfp4_view(Tensor &t, const bool with_amax) {
+    TensorWrapper view(NVTE_NVFP4_1D_SCALING);
+    for (const auto param : {kNVTERowwiseData, kNVTEColumnwiseData, kNVTERowwiseScaleInv,
+                             kNVTEColumnwiseScaleInv}) {
+        const NVTEBasicTensor p = nvte_get_tensor_param(t.data(), param);
+        view.set_parameter(param, p.data_ptr, static_cast<DType>(p.dtype), p.shape);
+    }
+    if (with_amax) {
+        for (const auto param : {kNVTEAmax, kNVTEColumnwiseAmax}) {
+            const NVTEBasicTensor p = nvte_get_tensor_param(t.data(), param);
+            view.set_parameter(param, p.data_ptr, static_cast<DType>(p.dtype), p.shape);
+        }
+    }
+    return view;
+}
+
+std::vector<uint8_t> nvfp4_param_bytes(Tensor &t, const NVTETensorParam param) {
+    const NVTEBasicTensor p = nvte_get_tensor_param(t.data(), param);
+    size_t numel = 1;
+    for (size_t d = 0; d < p.shape.ndim; ++d) {
+        numel *= p.shape.data[d];
+    }
+    const size_t bytes = static_cast<DType>(p.dtype) == DType::kFloat4E2M1 ? numel / 2 : numel;
+    std::vector<uint8_t> host(bytes);
+    NVTE_CHECK_CUDA(cudaMemcpy(host.data(), p.data_ptr, bytes, cudaMemcpyDeviceToHost));
+    return host;
+}
+
+}  // namespace
+
+// Grouped NVFP4 quantize with host split sections must match quantizing each split on its own,
+// with the per-split amax and with the second-level scale disabled (no amax).
+class GroupedNVFP4QuantizeTestSuite : public ::testing::TestWithParam<bool> {};
+
+TEST_P(GroupedNVFP4QuantizeTestSuite, MatchesPerSplitQuantize) {
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+    const bool with_amax = GetParam();
+    const size_t cols = 256;
+    const std::vector<size_t> splits = {128, 0, 256, 64};
+    size_t total_rows = 0;
+    for (const size_t m : splits) total_rows += m;
+
+    Tensor packed("packed_input", std::vector<size_t>{total_rows, cols}, DType::kBFloat16);
+    fillCase<fp32>(&packed, InputsFillCase::uniform);
+    packed.to_cpu();
+
+    std::vector<std::unique_ptr<Tensor>> grouped_out, ref_out;
+    std::vector<TensorWrapper> grouped_views;
+    std::vector<NVTETensor> grouped_handles;
+    size_t row_offset = 0;
+    for (size_t i = 0; i < splits.size(); ++i) {
+        const std::vector<size_t> shape{splits[i], cols};
+        grouped_out.push_back(std::make_unique<Tensor>("grouped_" + std::to_string(i), shape,
+                                                       DType::kFloat4E2M1, true, true,
+                                                       NVTE_NVFP4_1D_SCALING));
+        ref_out.push_back(std::make_unique<Tensor>("ref_" + std::to_string(i), shape,
+                                                   DType::kFloat4E2M1, true, true,
+                                                   NVTE_NVFP4_1D_SCALING));
+        if (with_amax) {
+            const float amax = 448.0f * 6.0f * (i + 1);
+            for (auto *t : {grouped_out.back().get(), ref_out.back().get()}) {
+                t->set_amax(amax);
+                *t->cpu_columnwise_amax_ptr<float>() = amax;
+                t->from_cpu();
+            }
+        }
+        grouped_views.push_back(make_nvfp4_view(*grouped_out.back(), with_amax));
+        grouped_handles.push_back(grouped_views.back().data());
+
+        if (splits[i] > 0) {
+            Tensor split_in("split_in_" + std::to_string(i), shape, DType::kBFloat16);
+            std::copy_n(packed.rowwise_cpu_dptr<bf16>() + row_offset * cols, splits[i] * cols,
+                        split_in.rowwise_cpu_dptr<bf16>());
+            split_in.from_cpu();
+            TensorWrapper ref_view = make_nvfp4_view(*ref_out.back(), with_amax);
+            nvte_quantize(split_in.data(), ref_view.data(), 0);
+            NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+        }
+        row_offset += splits[i];
+    }
+
+    QuantizationConfigWrapper config;
+    nvte_group_nvfp4_quantize_with_amax(packed.data(), grouped_handles.data(), splits.data(),
+                                        splits.size(), config, 0);
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+    for (size_t i = 0; i < splits.size(); ++i) {
+        if (splits[i] == 0) continue;
+        for (const auto param : {kNVTERowwiseData, kNVTEColumnwiseData, kNVTERowwiseScaleInv,
+                                 kNVTEColumnwiseScaleInv}) {
+            EXPECT_EQ(nvfp4_param_bytes(*grouped_out[i], param),
+                      nvfp4_param_bytes(*ref_out[i], param))
+                << "split " << i << " param " << static_cast<int>(param);
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedNVFP4QuantizeTestSuite, ::testing::Bool(),
+                         [](const testing::TestParamInfo<bool>& info) {
+                             return info.param ? "WithAmax" : "SecondLevelScaleDisabled";
+                         });
+#endif  // __HIP_PLATFORM_AMD__

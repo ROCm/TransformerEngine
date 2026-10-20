@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -128,9 +130,15 @@ void performGroupedFusedAmaxTest(const GroupedAmaxConfig& cfg) {
 class NVFP4GroupedRowScaledAmaxTestSuite : public ::testing::TestWithParam<GroupedAmaxConfig> {};
 
 TEST_P(NVFP4GroupedRowScaledAmaxTestSuite, MatchesPerExpertOracle) {
+#ifdef __HIP_PLATFORM_AMD__
+  if (te_fp8_fnuz()) {
+    GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+  }
+#else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
   performGroupedFusedAmaxTest(GetParam());
 }
 
@@ -146,9 +154,15 @@ INSTANTIATE_TEST_SUITE_P(NVFP4GroupedRowScaledAmax, NVFP4GroupedRowScaledAmaxTes
 // experts whose columnwise buffer is null (including the first one) instead of
 // dereferencing it, while still computing the direction for those that request it.
 TEST(NVFP4GroupedRowScaledAmaxTestSuite, HeterogeneousColumnwise) {
+#ifdef __HIP_PLATFORM_AMD__
+  if (te_fp8_fnuz()) {
+    GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+  }
+#else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
 
   const std::vector<size_t> Ms = {128, 128, 128};
   const size_t K = 256;
@@ -286,9 +300,15 @@ void runLoopVsGroupedBench(size_t num_tensors, size_t M, size_t K, int iters) {
 }  // namespace
 
 TEST(NVFP4GroupedRowScaledAmaxBench, DISABLED_LoopVsGrouped) {
+#ifdef __HIP_PLATFORM_AMD__
+  if (te_fp8_fnuz()) {
+    GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+  }
+#else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
   const int iters = 100;
   for (size_t M : {size_t(128), size_t(512)}) {
     for (size_t n : {size_t(2), size_t(4), size_t(8), size_t(16), size_t(32), size_t(64)}) {
