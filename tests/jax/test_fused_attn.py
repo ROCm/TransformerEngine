@@ -79,7 +79,11 @@ def init():
 @rocm_fp8_attention_support
 @pytest.mark.parametrize("head_dim", [128, 256])
 def test_aiter_fp8_fwd_backend_selection(head_dim):
-    """gfx950 fp8bf16 inference shapes select CK/AITER, while training does not."""
+    """gfx950 fp8bf16 inference selects CK/AITER.
+
+    Training stays unsupported. NVTE_CK_USES_FWD_V3=0 also selects no backend
+    until a CK tile FP8 path exists.
+    """
     kwargs = dict(
         batch_size=1,
         q_dtype=jnp.float8_e4m3fn,

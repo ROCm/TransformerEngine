@@ -140,6 +140,15 @@ bool is_ck_backend_supported(
     return false;
   }
   if(is_fp8){
+    // FP8 is wired to AITER v3 ASM only. CK tile FP8 is not enabled, so turning
+    // ASM off must report unsupported and let the caller select NVTE_No_Backend.
+    // A later PR that enables CK FP8 can fall back to that path here instead.
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 1) == 0){
+      if(nvte_log_ck_config){
+        std::cout<<"AITER FP8 ASM fwd is disabled by NVTE_CK_USES_FWD_V3=0"<<std::endl;
+      }
+      return false;
+    }
     const bool fp8_hdim_supported =
         (head_dim_qk == 128 && head_dim_v == 128) ||
         (head_dim_qk == 256 && head_dim_v == 256);
