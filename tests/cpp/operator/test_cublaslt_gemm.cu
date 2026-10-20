@@ -1362,6 +1362,102 @@ TEST(InputGenTest, FillUniform_DoesNotGetOverwrittenByFromCpu) {
   }
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// alpha/beta passed as device pointers (kNVTEMatmulConfigAlphaBetaOnDevice) must give the same
+// result as the same scalars passed on the host. (cuBLASLt only honors device alpha/beta for NVFP4.)
+TEST(GEMMAlphaBetaOnDeviceTest, MatchesHostAlphaBeta) {
+  const size_t m = 128;
+  const size_t k = 256;
+  const size_t n = 64;
+  const float alpha = 0.5f;
+  const float beta = 1.0f;
+
+  Tensor A("A", TShape{ m, k }, DType::kBFloat16);
+  Tensor B("B", TShape{ n, k }, DType::kBFloat16);
+  Tensor D_host("D_host", TShape{ n, m }, DType::kFloat32);
+  Tensor D_dev("D_dev", TShape{ n, m }, DType::kFloat32);
+  fillUniform(&A);
+  fillUniform(&B);
+  fillUniform(&D_host);
+  std::copy(D_host.rowwise_cpu_dptr<float>(), D_host.rowwise_cpu_dptr<float>() + n * m,
+            D_dev.rowwise_cpu_dptr<float>());
+  D_dev.from_cpu();
+
+  Tensor Workspace("Workspace", TShape{ 33'554'432 }, DType::kByte);
+  float *alpha_beta_dev = nullptr;
+  const float alpha_beta_host[2] = {alpha, beta};
+  NVTE_CHECK_CUDA(cudaMalloc(&alpha_beta_dev, 2 * sizeof(float)));
+  NVTE_CHECK_CUDA(cudaMemcpy(alpha_beta_dev, alpha_beta_host, 2 * sizeof(float),
+                             cudaMemcpyHostToDevice));
+
+  MatmulConfigWrapper host_config;
+  nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, D_host.data(),
+                      D_host.data(), Workspace.data(), host_config, 0);
+  MatmulConfigWrapper dev_config;
+  dev_config.set_alpha_beta_on_device(true);
+  nvte_cublas_gemm_v2(true, false, alpha_beta_dev, A.data(), B.data(), alpha_beta_dev + 1,
+                      D_dev.data(), D_dev.data(), Workspace.data(), dev_config, 0);
+
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(cudaFree(alpha_beta_dev));
+  D_host.to_cpu();
+  D_dev.to_cpu();
+  compareResults("D", D_dev, D_host.rowwise_cpu_dptr<float>(), true, 0.0, 0.0);
+}
+
+// As with cuBLASLt, a device-side alpha for an NVFP4 GEMM already carries the per-tensor scales
+// (amax_A * amax_B / (fp4_max * fp8_max)^2), so the GEMM must not fold the amaxes in again.
+TEST(GEMMAlphaBetaOnDeviceTest, NVFP4AlphaCarriesTensorScales) {
+  cudaDeviceProp prop;
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
+  if (!(prop.major == 9 && prop.minor == 5) && !(prop.major == 12 && prop.minor == 5)) {
+    GTEST_SKIP() << "NVFP4 GEMM requires gfx950 or gfx1250";
+  }
+  const size_t m = 128;
+  const size_t k = 256;
+  const size_t n = 128;
+  const float amax_A = 448.0f * 6.0f * 2.0f;
+  const float amax_B = 448.0f * 6.0f * 3.0f;
+  const float tensor_scale = amax_A * amax_B / (448.0f * 6.0f * 448.0f * 6.0f);
+
+  Tensor A_src("A_src", TShape{ m, k }, DType::kBFloat16);
+  Tensor B_src("B_src", TShape{ n, k }, DType::kBFloat16);
+  fillUniform(&A_src);
+  fillUniform(&B_src);
+  Tensor A("A", TShape{ m, k }, DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+  Tensor B("B", TShape{ n, k }, DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+  A.set_amax(amax_A);
+  B.set_amax(amax_B);
+  nvte_quantize(A_src.data(), A.data(), 0);
+  nvte_quantize(B_src.data(), B.data(), 0);
+
+  Tensor D_host("D_host", TShape{ n, m }, DType::kFloat32);
+  Tensor D_dev("D_dev", TShape{ n, m }, DType::kFloat32);
+  Tensor Workspace("Workspace", TShape{ 67'108'864 }, DType::kByte);
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  float *alpha_beta_dev = nullptr;
+  const float alpha_beta_host[2] = {tensor_scale, 0.0f};
+  NVTE_CHECK_CUDA(cudaMalloc(&alpha_beta_dev, 2 * sizeof(float)));
+  NVTE_CHECK_CUDA(cudaMemcpy(alpha_beta_dev, alpha_beta_host, 2 * sizeof(float),
+                             cudaMemcpyHostToDevice));
+
+  MatmulConfigWrapper host_config;
+  nvte_cublas_gemm_v2(true, false, &one, A.data(), B.data(), &zero, D_host.data(), D_host.data(),
+                      Workspace.data(), host_config, 0);
+  MatmulConfigWrapper dev_config;
+  dev_config.set_alpha_beta_on_device(true);
+  nvte_cublas_gemm_v2(true, false, alpha_beta_dev, A.data(), B.data(), alpha_beta_dev + 1,
+                      D_dev.data(), D_dev.data(), Workspace.data(), dev_config, 0);
+
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(cudaFree(alpha_beta_dev));
+  D_host.to_cpu();
+  D_dev.to_cpu();
+  compareResults("D", D_dev, D_host.rowwise_cpu_dptr<float>(), true, 1e-5, 1e-5);
+}
+#endif  // __HIP_PLATFORM_AMD__
+
 // ============================== Blockwise FP8 GEMM ==============================
 namespace {
 
