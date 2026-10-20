@@ -20,8 +20,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .blockwise_fp8_grouped_gemm import _amd_compiler_knobs
-from .common import get_arch
+from .common import _amd_compiler_knobs, get_arch
 
 
 # ===============================================================================
@@ -39,7 +38,7 @@ _GFX1250_KNOBS = {"use_async_copy": False}
 
 
 def _scoped_amd_knobs(*, is_tn):
-    """Decorator applying blockwise_fp8's scoped AMD compiler knobs around a
+    """Decorator applying the scoped AMD compiler knobs (common.py) around a
     launch. ``is_tn`` selects the layout-gated set (gfx942); on gfx950 the full
     async_copy / scalarize / block_pingpong set is enabled either way; on gfx1250
     only async_copy is disabled.
