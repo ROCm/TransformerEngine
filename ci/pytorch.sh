@@ -100,6 +100,7 @@ run_test_config(){
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 attention/test_cu_seqlens_cache.py
     run_default_fa 1 attention/test_mixed_thd_attention.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 attention/test_fused_mla.py
     run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py

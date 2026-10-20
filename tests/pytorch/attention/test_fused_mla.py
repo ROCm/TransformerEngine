@@ -330,10 +330,11 @@ def test_fused_mla_q_uproj_autograd() -> None:
 # --- fused_mla_kv_rope_mxfp8 ---------------------------------------------------------------------
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-sm100 = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
-if IS_HIP_EXTENSION:
-    _kv_rope_skip_reason = "The fused MLA key/value RoPE MXFP8 kernel is not supported on ROCm."
-elif not mxfp8_available:
+# On ROCm the kernel runs wherever MXFP8 is available.
+sm100 = torch.cuda.is_available() and (
+    IS_HIP_EXTENSION or torch.cuda.get_device_capability()[0] >= 10
+)
+if not mxfp8_available:
     _kv_rope_skip_reason = reason_for_no_mxfp8
 elif not sm100:
     _kv_rope_skip_reason = "The fused kernel requires SM 10.0+."

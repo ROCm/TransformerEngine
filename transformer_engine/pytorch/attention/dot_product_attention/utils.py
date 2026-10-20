@@ -3456,8 +3456,6 @@ def fused_mla_kv_rope_mxfp8(
         [s, b, h, k_dim + emb_dim] and [s, b, h, v_head_dim], data and scale_invs in SBHD
         layout; NOT yet BHSD-permuted or swizzled (see :func:`mxfp8_transpose_swizzle`).
     """
-    if IS_HIP_EXTENSION:
-        raise NotImplementedError("fused_mla_kv_rope_mxfp8 is not supported on ROCm.")
     s, b, h, kv_dim = kv.shape
     if s % (4 * MXFP8_BLOCK_SCALING_SIZE) != 0:
         raise ValueError(

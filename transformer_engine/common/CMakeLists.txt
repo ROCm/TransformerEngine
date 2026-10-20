@@ -437,7 +437,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
      cast/fused_group_requantize.cu
-     fused_rope/fused_mla_kv_rope_mxfp8.cu #CUDA-only
+     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu #CUDA-only
      hadamard_transform/group_hadamard_transform.cu #CUDA-only
      hadamard_transform/graph_safe_group_hadamard_transform.cu #CUDA-only
@@ -454,7 +454,6 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 set(cuda_only_cuda_arch_specific_sources
-     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu

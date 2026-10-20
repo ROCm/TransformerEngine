@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -33,6 +35,9 @@
 #include "../util/logging.h"
 #include "../util/ptx.cuh"
 #include "../util/ptx_arch_spec.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../util/rocm_device_utils.cuh"
+#endif
 #include "../utils.cuh"
 
 namespace transformer_engine {
@@ -74,6 +79,7 @@ struct StagedOutput {
 constexpr size_t kTileBytes = kHeadsPerCTA * kBlock * kPitch * sizeof(bf16);
 constexpr size_t kSharedMemoryBytes = kTileBytes + sizeof(StagedOutput<kKeyDim>);
 
+#ifndef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ bf16 bf16_from_bits(const uint32_t bits) {
   return __ushort_as_bfloat16(static_cast<uint16_t>(bits & 0xFFFFu));
 }
@@ -88,6 +94,26 @@ __device__ __forceinline__ float bf16x2_max(const __nv_bfloat162 m) {
 __device__ __forceinline__ __nv_bfloat162 abs_max(const __nv_bfloat162 m, const uint32_t pair) {
   return __hmax2(m, __habs2(*reinterpret_cast<const __nv_bfloat162 *>(&pair)));
 }
+#else
+// BF16 handled as raw 16-bit patterns: TE's bf16 on ROCm (hip_bfloat16) has no packed intrinsics.
+__device__ __forceinline__ float bf16_bits_to_float(const uint32_t bits) {
+  return __uint_as_float((bits & 0xFFFFu) << 16);
+}
+
+// Round-to-nearest-even FP32 -> BF16, NaNs kept quiet.
+__device__ __forceinline__ uint32_t float_to_bf16_bits(const float f) {
+  const uint32_t u = __float_as_uint(f);
+  if ((u & 0x7FFFFFFFu) > 0x7F800000u) {
+    return ((u >> 16) | 0x40u) & 0xFFFFu;
+  }
+  return ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16) & 0xFFFFu;
+}
+
+// a * b, rounded to BF16, for BF16 a and b (the FP32 product is exact).
+__device__ __forceinline__ float bf16_mul(const float a, const float b) {
+  return bf16_bits_to_float(float_to_bf16_bits(__fmul_rn(a, b)));
+}
+#endif  // __HIP_PLATFORM_AMD__
 
 // kBlock tokens x W BF16 elements without RoPE, token rows `stride` elements apart, loaded as
 // 16-byte vectors before any of them is used.
@@ -156,6 +182,31 @@ struct RopeLoads {
     const int token = threadIdx.x / kGroups, group = threadIdx.x % kGroups;
     const uint32_t words[4] = {pairs.x, pairs.y, pairs.z, pairs.w};
     uint32_t left[4], right[4];
+#ifdef __HIP_PLATFORM_AMD__
+#pragma unroll
+    for (int p = 0; p < 4; ++p) {
+      const float f1 = bf16_bits_to_float(words[p]), f2 = bf16_bits_to_float(words[p] >> 16);
+      if constexpr (kCosBf16) {
+        const uint16_t *cl = reinterpret_cast<const uint16_t *>(&cos_left);
+        const uint16_t *cr = reinterpret_cast<const uint16_t *>(&cos_right);
+        const uint16_t *sl = reinterpret_cast<const uint16_t *>(&sin_left);
+        const uint16_t *sr = reinterpret_cast<const uint16_t *>(&sin_right);
+        // Each BF16 operation rounded on its own, with no FMA contraction: what Megatron-LM's
+        // Triton MLA RoPE kernel computes on ROCm.
+        left[p] = float_to_bf16_bits(__fsub_rn(bf16_mul(f1, bf16_bits_to_float(cl[p])),
+                                               bf16_mul(f2, bf16_bits_to_float(sl[p]))));
+        right[p] = float_to_bf16_bits(__fadd_rn(bf16_mul(f2, bf16_bits_to_float(cr[p])),
+                                                bf16_mul(f1, bf16_bits_to_float(sr[p]))));
+      } else {
+        const float *cl = reinterpret_cast<const float *>(&cos_left);
+        const float *cr = reinterpret_cast<const float *>(&cos_right);
+        const float *sl = reinterpret_cast<const float *>(&sin_left);
+        const float *sr = reinterpret_cast<const float *>(&sin_right);
+        left[p] = float_to_bf16_bits(__fmaf_rn(f1, cl[p], -__fmul_rn(f2, sl[p])));
+        right[p] = float_to_bf16_bits(__fmaf_rn(f1, sr[p], __fmul_rn(f2, cr[p])));
+      }
+    }
+#else
 #pragma unroll
     for (int p = 0; p < 4; ++p) {
       const bf16 x1 = bf16_from_bits(words[p]), x2 = bf16_from_bits(words[p] >> 16);
@@ -176,6 +227,7 @@ struct RopeLoads {
         right[p] = bf16_bits(__float2bfloat16_rn(__fmaf_rn(f1, sr[p], __fmul_rn(f2, cr[p]))));
       }
     }
+#endif  // __HIP_PLATFORM_AMD__
     bf16 *dst = tile + token * kPitch + kNopeDim + 4 * group;
     *reinterpret_cast<uint2 *>(dst) =
         make_uint2(left[0] | (left[1] << 16), left[2] | (left[3] << 16));
@@ -184,6 +236,87 @@ struct RopeLoads {
   }
 };
 
+#ifdef __HIP_PLATFORM_AMD__
+// Four values scaled by an E8M0 block scale and converted to E4M3, with the same instructions as
+// the ROCm MXFP8 quantizer (rocm_quantize_mxfp8_body.inc), so the bytes match it.
+__device__ __forceinline__ uint32_t cvt_4x_e4m3(const float x0, const float x1, const float x2,
+                                                const float x3, const e8m0_t biased_exponent) {
+#ifdef HAS_CVT_4xFLOAT8
+  const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
+  return rocm_cvt_4xfloat8<fp8e4m3>(x0, x1, x2, x3, cvt_scale);
+#else
+  const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
+  const fp8e4m3 q[4] = {static_cast<fp8e4m3>(x0 * block_scale_inverse),
+                        static_cast<fp8e4m3>(x1 * block_scale_inverse),
+                        static_cast<fp8e4m3>(x2 * block_scale_inverse),
+                        static_cast<fp8e4m3>(x3 * block_scale_inverse)};
+  uint32_t packed;
+  memcpy(&packed, q, sizeof(packed));
+  return packed;
+#endif
+}
+
+// Quantizes head h of the staged tile (kBlock tokens x D) into `out`, as the ROCm MXFP8 quantizer
+// does, with the same partition of the work as the CUDA version below.
+template <int D>
+__device__ __forceinline__ void quantize_head(const bf16 *tile, StagedOutput<D> &out, const int h) {
+  constexpr int kBlocksPerToken = D / kBlock;
+  constexpr int kTokenBytes = kHeadsPerCTA * D;
+  const float max_norm_rcp = Quantized_Limits<fp8e4m3>::max_norm_rcp;
+  const uint16_t *tile_bits = reinterpret_cast<const uint16_t *>(tile);
+  if (threadIdx.x < kRowwiseThreads) {
+    for (int task = threadIdx.x; task < kBlock * kBlocksPerToken; task += kRowwiseThreads) {
+      const int token = task % kBlock, block = task / kBlock;
+      const uint16_t *src = tile_bits + token * kPitch + kBlock * block;
+      float x[kBlock];
+      float amax = 0.0f;
+#pragma unroll
+      for (int i = 0; i < kBlock; ++i) {
+        x[i] = bf16_bits_to_float(src[i]);
+        amax = fmaxf(amax, fabsf(x[i]));
+      }
+      const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * max_norm_rcp);
+      uint32_t q[kBlock / 4];
+#pragma unroll
+      for (int i = 0; i < kBlock / 4; ++i) {
+        q[i] = cvt_4x_e4m3(x[4 * i], x[4 * i + 1], x[4 * i + 2], x[4 * i + 3], biased_exponent);
+      }
+      uint4 *dst = reinterpret_cast<uint4 *>(out.rowwise_data + token * kTokenBytes + h * D +
+                                             kBlock * block);
+      dst[0] = make_uint4(q[0], q[1], q[2], q[3]);
+      dst[1] = make_uint4(q[4], q[5], q[6], q[7]);
+      out.rowwise_scale_inv[token * kHeadsPerCTA * kBlocksPerToken + h * kBlocksPerToken + block] =
+          biased_exponent;
+    }
+  } else {
+    for (int pair = threadIdx.x - kRowwiseThreads; pair < D / 2; pair += kColwiseThreads) {
+      // Columns 2 * pair and 2 * pair + 1 of all kBlock tokens.
+      float x0[kBlock], x1[kBlock];
+      float amax0 = 0.0f, amax1 = 0.0f;
+#pragma unroll
+      for (int r = 0; r < kBlock; ++r) {
+        x0[r] = bf16_bits_to_float(tile_bits[r * kPitch + 2 * pair]);
+        x1[r] = bf16_bits_to_float(tile_bits[r * kPitch + 2 * pair + 1]);
+        amax0 = fmaxf(amax0, fabsf(x0[r]));
+        amax1 = fmaxf(amax1, fabsf(x1[r]));
+      }
+      const e8m0_t exponent0 = ptx::float_to_e8m0(amax0 * max_norm_rcp);
+      const e8m0_t exponent1 = ptx::float_to_e8m0(amax1 * max_norm_rcp);
+#pragma unroll
+      for (int r = 0; r < kBlock; r += 2) {
+        const uint32_t q0 = cvt_4x_e4m3(x0[r], x0[r + 1], 0.0f, 0.0f, exponent0);
+        const uint32_t q1 = cvt_4x_e4m3(x1[r], x1[r + 1], 0.0f, 0.0f, exponent1);
+        uint8_t *dst = out.columnwise_data + r * kTokenBytes + h * D + 2 * pair;
+        *reinterpret_cast<uint16_t *>(dst) = static_cast<uint16_t>((q0 & 0xFFu) | ((q1 & 0xFFu) << 8));
+        *reinterpret_cast<uint16_t *>(dst + kTokenBytes) =
+            static_cast<uint16_t>(((q0 >> 8) & 0xFFu) | (((q1 >> 8) & 0xFFu) << 8));
+      }
+      *reinterpret_cast<uint16_t *>(out.columnwise_scale_inv + h * D + 2 * pair) =
+          static_cast<uint16_t>(exponent0 | (exponent1 << 8));
+    }
+  }
+}
+#else
 // Quantizes head h of the staged tile (kBlock tokens x D) into `out`, as the MXFP8 quantizer
 // does: row-wise one (token, 32-element block) per task on the row-wise warps, column-wise two
 // adjacent columns per task on the column-wise warps.
@@ -251,6 +384,7 @@ __device__ __forceinline__ void quantize_head(const bf16 *tile, StagedOutput<D> 
     }
   }
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 // Writes the staged tile. first_row = first_token * num_columns + first_column is the tile's
 // first (token, column) row of the [s * b * h, D] outputs; first_colwise_row is the matching
@@ -294,7 +428,7 @@ __global__ void __launch_bounds__(kThreads)
                                    const typename RopeLoads<kCosBf16>::CosType *__restrict__ sin,
                                    const MXFP8Output key, const MXFP8Output value,
                                    const int num_columns, const int heads) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__HIP_PLATFORM_AMD__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   extern __shared__ __align__(16) uint8_t shared_memory[];
   bf16 *tiles = reinterpret_cast<bf16 *>(shared_memory);  // [kHeadsPerCTA][kBlock][kPitch]
   auto &key_out = *reinterpret_cast<StagedOutput<kKeyDim> *>(shared_memory + kTileBytes);
@@ -350,7 +484,7 @@ __global__ void __launch_bounds__(kThreads)
                        token_block * columns + first_column, value);
 #else
   NVTE_DEVICE_THREAD0_ERROR("Fused MLA key/value RoPE with MXFP8 output requires SM 10.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // defined(__HIP_PLATFORM_AMD__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
 
 bool is_aligned_to(const void *ptr, const size_t alignment) {
@@ -386,8 +520,13 @@ MXFP8Output check_mxfp8_output(const Tensor &t, const char *name, const size_t r
 void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_rope, const int k_rope_stride,
                              const Tensor &cos, const Tensor &sin, Tensor *key, Tensor *value,
                              cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(!te_fp8_fnuz(),
+             "Fused MLA key/value RoPE with MXFP8 output requires OCP FP8 (not supported on gfx942).");
+#else
   NVTE_CHECK(is_supported_by_CC_100(),
              "Fused MLA key/value RoPE with MXFP8 output requires SM 10.0+.");
+#endif
   const auto &kv_shape = kv.data.shape;
   NVTE_CHECK(kv.data.dtype == DType::kBFloat16, "kv must be BF16.");
   NVTE_CHECK(kv_shape.size() == 4 && kv_shape[3] == kKVDim, "kv must have shape [s, b, h, ", kKVDim,
