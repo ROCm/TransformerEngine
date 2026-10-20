@@ -27,7 +27,7 @@ inline int fp8_code(KittensDType dt) {
     switch (dt) {
     case KITTENS_FP8E4M3: return 0;
     case KITTENS_FP8E5M2: return 1;
-    default: assert(0 && "unexpected FP8 dtype"); return 0;
+    default: assert(0 && "unexpected FP8 dtype"); return -1;
     }
 }
 
