@@ -806,7 +806,7 @@ void performTest(const TestParams& params) {
   size_t workspace_size = 33'554'432;
 #ifdef __HIP_PLATFORM_AMD__
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
-    workspace_size = 67'108'864;
+    workspace_size = 134'217'728;
   }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
