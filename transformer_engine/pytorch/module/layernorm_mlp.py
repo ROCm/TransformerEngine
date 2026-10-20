@@ -1346,6 +1346,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.fc2_grad_output_quantizer,
                     ctx.tp_group,
                 )
+                # The fc2 dgrad kernel carries this region's gather in its own grid. Armed here
+                # and consumed by the GEMM immediately below; see arm_aux_ag_region.
+                ub_obj_fc2_dgrad.arm_aux_ag_region(ub_obj_fc2_wgrad_ag)
 
             # Perform GEMM
             gemm_output, *_ = general_gemm(
@@ -1363,7 +1366,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 gelu_in=fc1_out if fc2_dgrad_gemm_gelu_fusion else None,
                 use_split_accumulator=dgrad_use_split_accumulator,
                 ub=ub_obj_fc2_dgrad,
-                ub2=ub_obj_fc2_wgrad_ag,
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
 

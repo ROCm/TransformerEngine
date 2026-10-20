@@ -453,7 +453,6 @@ def general_gemm(
     use_split_accumulator: bool = False,
     grad: bool = False,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
-    ub2: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     ub_type: tex.CommOverlapType = None,
     extra_output: Optional[torch.Tensor] = None,
     bulk_overlap: bool = False,
@@ -599,7 +598,6 @@ def general_gemm(
     )
     kwargs = {
         "comm_overlap": ub,
-        "comm_overlap2": ub2,
         "comm_type": ub_type,
         "extra_output": extra_output,
         "bulk_overlap": bulk_overlap,

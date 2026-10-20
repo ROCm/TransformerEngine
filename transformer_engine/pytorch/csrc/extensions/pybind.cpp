@@ -279,8 +279,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
-        py::arg("comm_overlap") = nullptr, py::arg("comm_overlap2") = nullptr,
-        py::arg("comm_type") = std::nullopt,
+        py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   /* GLU (sigmoid gate) */
@@ -915,10 +914,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
+#ifdef __HIP_PLATFORM_AMD__
+      // ROCm fused AG+GEMM. The second all-gather region is armed on the object rather than
+      // passed through gemm(), which stays identical to upstream.
       .def("has_scale_buffer", &CommOverlapP2P::has_scale_buffer)
       .def("copy_scales_into_buffer", &CommOverlapP2P::copy_scales_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_scale_buffer", &CommOverlapP2P::get_scale_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
+      .def("arm_aux_ag_region", &CommOverlapP2P::arm_aux_ag_region, py::arg("aux"))
+      .def("has_aux_ag_region", &CommOverlapP2P::has_aux_ag_region)
+#endif
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
 }  // NOLINT(readability/fn_size)

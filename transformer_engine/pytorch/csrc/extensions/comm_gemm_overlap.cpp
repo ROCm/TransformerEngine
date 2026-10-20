@@ -501,6 +501,7 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 void CommOverlapP2P::copy_scales_into_buffer(const at::Tensor &input, bool local_chunk) {
   NVTE_CHECK(_scale_chunk_bytes != 0,
              "Userbuffers buffer was not allocated with an MXFP8 scale region");
@@ -533,6 +534,7 @@ at::Tensor CommOverlapP2P::get_scale_buffer(bool local_chunk,
   if (local_chunk) ptr += _tp_id * _scale_chunk_bytes;
   return torch::from_blob(ptr, *shape, at::dtype(torch::kUInt8).device(torch::kCUDA));
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
   return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),

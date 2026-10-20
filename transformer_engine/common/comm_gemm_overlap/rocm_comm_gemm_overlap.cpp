@@ -508,6 +508,7 @@ void CommOverlapP2PBase::fused_overlap_bulk_rs(const TensorWrapper &A, bool tran
                                 TensorWrapper &workspace, bool grad, bool accumulate,
                                 bool use_split_accumulator, TensorWrapper &rs_output,
                                 cudaStream_t stream_main) {
+  check_no_aux_ag_region("fused bulk ReduceScatter");
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_bulk_rs_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_bulk_rs_gemm(A, transa, B, transb, D, bias, pre_gelu_out, workspace,
@@ -525,21 +526,25 @@ void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, c
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
-                                CommOverlapCore *aux_ag_comm, cudaStream_t stream_main) {
+                                cudaStream_t stream_main) {
+  // Take the region armed by arm_aux_ag_region() and clear it here: one GEMM, one use, and an
+  // NVTE_CHECK below cannot leave it attached to the next call.
+  CommOverlapP2PBase *aux = _aux_ag_comm;
+  _aux_ag_comm = nullptr;
+
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
     // The aux region's own overlap method never runs, so nothing else advances its signal.
     AuxAgSource aux_src{};
     const AuxAgSource *aux_ptr = nullptr;
-    if (aux_ag_comm != nullptr) {
-      auto *aux = static_cast<CommOverlapP2PBase *>(aux_ag_comm);
+    if (aux != nullptr) {
       aux_src.reg               = aux->_ub_reg;
       aux_src.dst               = aux->_ubuf.dptr();
       aux_src.chunk_bytes       = aux->_ubufs[0].bytes();
       aux_src.scale_base_offset = aux->_scale_base_offset;
       aux_src.scale_chunk_bytes = aux->_scale_chunk_bytes;
-      aux_src.signal            = aux->_ag_signal_base + _tp_size;
-      aux->_ag_signal_base += _tp_size;
+      aux_src.signal            = aux->_ag_signal_base + aux->_tp_size;
+      aux->_ag_signal_base += aux->_tp_size;
       aux_ptr = &aux_src;
     }
     const bool launched = hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy,
@@ -560,6 +565,7 @@ void CommOverlapP2PBase::fused_overlap_bulk_ag(const TensorWrapper &A, bool tran
                                 TensorWrapper &bias, TensorWrapper &pre_gelu_out,
                                 TensorWrapper &workspace, bool grad, bool accumulate,
                                 bool use_split_accumulator, cudaStream_t stream_main) {
+  check_no_aux_ag_region("fused bulk AllGather");
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_bulk_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, workspace,
@@ -579,6 +585,7 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator,
                                 TensorWrapper &rs_output, cudaStream_t stream_main) {
+  check_no_aux_ag_region("fused GEMM+ReduceScatter");
 #ifdef USE_HIPKITTENS_GEMM
   if (kittens_fused_rs_gemm_supported(cuda::sm_arch())) {
     const bool launched = hk_fused_rs_gemm(A, transa, B, transb, bias, pre_gelu_out, rs_output,
@@ -600,6 +607,7 @@ void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool tran
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
+  check_no_aux_ag_region("the ROCm split AllGather");
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;

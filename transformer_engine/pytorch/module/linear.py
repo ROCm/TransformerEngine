@@ -1427,6 +1427,10 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             bwd_args.requires_dgrad
             and bwd_args.requires_wgrad
             and bwd_args.ub_overlap_ag
+            # The bulk path routes to fused_overlap_bulk_ag, which carries no second region.
+            and not bwd_args.ub_bulk_dgrad
+            # The debug overrides dequantize the dgrad operand, leaving no MXFP8 GEMM to ride in.
+            and bwd_args.backward_override is None
             and isinstance(grad_output_quantizer, MXFP8Quantizer)
             and fused_wgrad_ag_eligible(bwd_args.ub_name)
         )
@@ -1505,6 +1509,10 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     grad_output_quantizer,
                     bwd_args.tp_group,
                 )
+                # The dgrad kernel carries this region's gather in its own grid. Armed here and
+                # consumed by the GEMM immediately below, so nothing that can raise may come
+                # between the two; see CommOverlapP2PBase::arm_aux_ag_region.
+                ub_obj_dgrad.arm_aux_ag_region(ub_obj_overlap_wgrad)
 
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight_fp8
@@ -1527,7 +1535,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 out_dtype=bwd_args.activation_dtype,
                 use_split_accumulator=use_split_accumulator,
                 ub=ub_obj_dgrad,
-                ub2=ub_obj_overlap_wgrad,
                 ub_type=ub_type_dgrad,
                 extra_output=reduce_scatter_out,
                 bulk_overlap=bwd_args.ub_bulk_dgrad,
