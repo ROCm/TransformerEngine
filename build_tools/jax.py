@@ -34,11 +34,11 @@ def install_requirements() -> List[str]:
         """Update requirements with current JAX version to avoid undesired update."""
         try:
             import jax
-            return [f"jax=={jax.__version__}", "flax>=0.7.1"]
+            return [f"jax=={jax.__version__}", "flax>=0.7.1", "triton"]
         except ImportError:
             pass
     if rocm_build():
-        return ["jax", "flax>=0.7.1"]
+        return ["jax", "flax>=0.7.1", "triton"]
     return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
 
 
