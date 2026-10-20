@@ -1197,19 +1197,11 @@ static void dispatch_gemm(
 
     // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes)
     auto dispatch = [&]<GemmEpilogue EPI>() {
-        if (a_fp8 == 0 && b_fp8 == 0) {
-            launch_gemm<TRANSA, TRANSB, EPI, 0, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 0 && b_fp8 == 1) {
-            launch_gemm<TRANSA, TRANSB, EPI, 0, 1, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 1 && b_fp8 == 0) {
-            launch_gemm<TRANSA, TRANSB, EPI, 1, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else {
-            launch_gemm<TRANSA, TRANSB, EPI, 1, 1, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        }
+        KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+            KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                launch_gemm<TRANSA, TRANSB, EPI, CBSZ, BLGP, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
+                    bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
+        )) // NOLINT(*)
     };
     switch (epilogue) {
         case GemmEpilogue::DEFAULT:       dispatch.template operator()<GemmEpilogue::DEFAULT>(); break;
@@ -1519,19 +1511,28 @@ static bool grouped_mxfp8_gemm(
     static float dummy_aux = 0.f;
     gl_f32_rt aux_gl(&dummy_aux, nullptr, nullptr, 1, 1);
 
+    int a_fp8 = fp8_code(a_dtype);
+    int b_fp8 = fp8_code(b_dtype);
+
     auto launch_grouped = [&](auto gl_C) {
         if (transa && !transb) {
-            mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                total_N, K, tiles_M, total_n_tiles);
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
+                        (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
+                        (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
+                        total_N, K, tiles_M, total_n_tiles);
+            )) // NOLINT(*)
         } else if (!transa && !transb) {
-            mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                total_N, K, tiles_M, total_n_tiles);
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
+                        (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
+                        (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
+                        total_N, K, tiles_M, total_n_tiles);
+            )) // NOLINT(*)
         }
     };
 
@@ -1558,7 +1559,7 @@ struct WgradExpertInfo {
 
 // Grouped variant of mxfp8_gemm_nt_kernel. Same MMA pipeline, but per-expert
 // A/B/D pointers and varying k_iters (via WgradExpertInfo), 1D grid across experts.
-template <bool ACCUMULATE, typename OutGL>
+template <int CBSZ, int BLGP, bool ACCUMULATE, typename OutGL>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_nt_kernel(
     const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
@@ -1672,7 +1673,7 @@ void mxfp8_wgrad_nt_kernel(
         kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
         kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cA, a, b0, cA, &sa_h0, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1684,7 +1685,7 @@ void mxfp8_wgrad_nt_kernel(
         __builtin_amdgcn_s_barrier();
 
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cB, a, b1, cB, &sa_h0, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1695,7 +1696,7 @@ void mxfp8_wgrad_nt_kernel(
         __builtin_amdgcn_s_barrier();
 
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cC, a, b0, cC, &sa_h1, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1705,7 +1706,7 @@ void mxfp8_wgrad_nt_kernel(
         __builtin_amdgcn_s_barrier();
 
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cD, a, b1, cD, &sa_h1, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
@@ -1732,7 +1733,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cA, a, b0, cA, &sa_h0, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1742,7 +1743,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cB, a, b1, cB, &sa_h0, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1751,7 +1752,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cC, a, b0, cC, &sa_h1, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1761,7 +1762,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cD, a, b1, cD, &sa_h1, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1784,7 +1785,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cA, a, b0, cA, &sa_h0, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1795,7 +1796,7 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cB, a, b1, cB, &sa_h0, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1804,8 +1805,8 @@ void mxfp8_wgrad_nt_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(2);
-        kittens::mma_ABt_scaled<0, 0>(cC, a, b0, cC, &sa_h1, &sb_h0);
-        kittens::mma_ABt_scaled<0, 0>(cD, a, b1, cD, &sa_h1, &sb_h1);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
+        kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
@@ -1967,11 +1968,17 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr, (size_t)max_M, (size_t)N);
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, (size_t)max_M, (size_t)K);
 
+    int a_fp8 = fp8_code(a_dtype);
+    int b_fp8 = fp8_code(b_dtype);
+
     auto launch_wgrad = [&](auto gl_D) {
         KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
-            mxfp8_wgrad_nt_kernel<ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_D, gl_SA, gl_SB,
-                d_info, tiles_M, tiles_N, tiles_per_expert);
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_D, gl_SA, gl_SB,
+                        d_info, tiles_M, tiles_N, tiles_per_expert);
+            )) // NOLINT(*)
         )
     };
 

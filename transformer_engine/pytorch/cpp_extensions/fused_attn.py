@@ -110,15 +110,17 @@ class FusedAttnBackend(IntEnum):
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python
-    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
-    cleanly and instances safely cross the ``assume_constant_result`` boundary
-    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
-    works the same way as with the dict this used to be.
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
+    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
+    the same way as with the dict this used to be.
+
+    Members do not survive a graph break, though, so ``get_attention_backend``
+    returns the sub-backend as a plain int and ``cast`` turns it back into a
+    member.
     """
 
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
     if not IS_HIP_EXTENSION:
-        F16_max512_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen)
         F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
         FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
     else:
@@ -166,7 +168,7 @@ assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(NVTE_Fused_Attn_Backe
     " Please make sure TE C++ and python are in sync."
 )
 
-BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
+BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
@@ -364,19 +366,13 @@ def fused_attn_fwd(
     if IS_HIP_EXTENSION:
         # Both CK/aiter and aotriton follow the flash-attn rng design
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-    # BF16/FP16 fused attention API from fmha_v1 apex
-    elif fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-    # BF16/FP16 fused attention API from fmha_v2
     elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
     # FP8 fused attention API from fmha_v2
     elif fused_attention_backend == FusedAttnBackend["FP8"]:
         rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+            max_seqlen_q * max_seqlen_q + BACKEND_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_FP8_THREADS_PER_CTA
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
@@ -625,13 +621,12 @@ def fused_attn_bwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
-    if not IS_HIP_EXTENSION and fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        if len(aux_ctx_tensors) < 1:
-            raise ValueError(
-                "aux_ctx_tensors must contain rng_state as its last element,"
-                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-                f" for backend={fused_attention_backend}."
-            )
+    if not IS_HIP_EXTENSION and len(aux_ctx_tensors) < 1:
+        raise ValueError(
+            "aux_ctx_tensors must contain rng_state as its last element,"
+            f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+            f" for backend={fused_attention_backend}."
+        )
 
     if not IS_HIP_EXTENSION and fused_attention_backend == FusedAttnBackend["FP8"]:
         if s_quantizer is None:

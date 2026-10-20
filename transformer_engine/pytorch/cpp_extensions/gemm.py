@@ -41,6 +41,7 @@ __all__ = [
     "general_gemm",
     "general_grouped_gemm",
     "general_grouped_gemm_for_grouped_tensor",
+    "get_cublas_workspace",
 ]
 
 
@@ -50,9 +51,9 @@ _NUM_MAX_UB_STREAMS = 3
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture."""
     if IS_HIP_EXTENSION:
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability() == (9, 5):
-            return 67_108_864
+        """Return 128 MiB for gfx950 and gfx1250, 32 MiB for all other architectures."""
+        if get_device_compute_capability() in ((9, 5), (12, 5)):
+            return 134_217_728
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:

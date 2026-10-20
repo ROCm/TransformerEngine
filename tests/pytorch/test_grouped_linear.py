@@ -606,7 +606,7 @@ def test_grouped_linear_accuracy_cutlass(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
+@pytest.mark.parametrize("recipe", fp8_recipes + ([recipe.MXFP8BlockScaling(fp8_format=recipe.Format.HYBRID)] if mxfp8_available else []) + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
@@ -2635,7 +2635,7 @@ def test_grouped_tensor_save_original_input_matches_saved_grouped_input(
         pytest.fail("save_original_input unexpectedly selected the split-quantize path")
 
     monkeypatch.setattr(
-        "transformer_engine.pytorch.module.grouped_linear._split_quantize",
+        "transformer_engine.pytorch.module._split_quantization._split_quantize",
         reject_split_fallback,
     )
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
