@@ -523,7 +523,7 @@ def compute_gbps(nbytes, ms):
 
 
 def make_metric_record(label, ms, unit, throughput,
-                       ms_precision=3, throughput_precision=2,
+                       ms_precision=4, throughput_precision=2,
                        measurement=None,
                        kernel_ms=None, kernel_throughput=None):
     """Create a structured metric record for stdout and CSV generation.
@@ -598,7 +598,7 @@ def _metric_row_from_records(metric_records):
     row = {}
     for metric in metric_records:
         row[_metric_time_key(metric)] = _format_metric_number(
-            metric["ms"], metric.get("ms_precision", 3)
+            metric["ms"], metric.get("ms_precision", 4)
         )
         row[_metric_throughput_key(metric)] = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
@@ -607,7 +607,7 @@ def _metric_row_from_records(metric_records):
         if _KERNEL_PROFILE or metric.get("kernel_ms") is not None:
             km = metric.get("kernel_ms")
             row[_metric_kernel_time_key(metric)] = (
-                _format_metric_number(km, metric.get("ms_precision", 3))
+                _format_metric_number(km, metric.get("ms_precision", 4))
                 if km is not None else ""
             )
             kt = metric.get("kernel_throughput")
@@ -623,7 +623,7 @@ def _print_metric_records(metric_records):
         return
     label_width = max(24, *(len(metric["label"]) for metric in metric_records))
     for metric in metric_records:
-        ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
+        ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 4))
         throughput_str = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
@@ -633,7 +633,7 @@ def _print_metric_records(metric_records):
         )
         kernel_ms = metric.get("kernel_ms")
         if kernel_ms is not None:
-            k_ms = _format_metric_number(kernel_ms, metric.get("ms_precision", 3))
+            k_ms = _format_metric_number(kernel_ms, metric.get("ms_precision", 4))
             kt = metric.get("kernel_throughput")
             k_thr = (_format_metric_number(kt, metric.get("throughput_precision", 2))
                      if kt is not None else "-")
