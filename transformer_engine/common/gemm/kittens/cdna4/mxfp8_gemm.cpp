@@ -1196,19 +1196,11 @@ static void dispatch_gemm(
 
     // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes)
     auto dispatch = [&]<GemmEpilogue EPI>() {
-        if (a_fp8 == 0 && b_fp8 == 0) {
-            launch_gemm<TRANSA, TRANSB, EPI, 0, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 0 && b_fp8 == 1) {
-            launch_gemm<TRANSA, TRANSB, EPI, 0, 1, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else if (a_fp8 == 1 && b_fp8 == 0) {
-            launch_gemm<TRANSA, TRANSB, EPI, 1, 0, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        } else {
-            launch_gemm<TRANSA, TRANSB, EPI, 1, 1, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
-                bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        }
+        KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+            KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                launch_gemm<TRANSA, TRANSB, EPI, CBSZ, BLGP, ACCUMULATE>(A, B, C, packed_sa, packed_sb,
+                    bias, bias_dtype, aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
+        )) // NOLINT(*)
     };
     switch (epilogue) {
         case GemmEpilogue::DEFAULT:       dispatch.template operator()<GemmEpilogue::DEFAULT>(); break;
@@ -1484,57 +1476,23 @@ static bool grouped_mxfp8_gemm(
 
     auto launch_grouped = [&](auto gl_C) {
         if (transa && !transb) {
-            if (a_fp8 == 0 && b_fp8 == 0) {
-                mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else if (a_fp8 == 0 && b_fp8 == 1) {
-                mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, 0, 1><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else if (a_fp8 == 1 && b_fp8 == 0) {
-                mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, 1, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else {
-                mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, 1, 1><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            }
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_gemm_tn_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
+                        (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
+                        (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
+                        total_N, K, tiles_M, total_n_tiles);
+            )) // NOLINT(*)
         } else if (!transa && !transb) {
-            if (a_fp8 == 0 && b_fp8 == 0) {
-                mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else if (a_fp8 == 0 && b_fp8 == 1) {
-                mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 0, 1><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else if (a_fp8 == 1 && b_fp8 == 0) {
-                mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 1, 0><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            } else {
-                mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, 1, 1><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
-                    (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
-                    (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
-                    total_N, K, tiles_M, total_n_tiles);
-            }
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_gemm_nn_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0,
+                        (const void *const *)d_a_ptrs, d_tile_offsets, num_experts,
+                        (const void *const *)d_b_ptrs, (const void *const *)d_c_ptrs, d_sb_tile_offsets,
+                        total_N, K, tiles_M, total_n_tiles);
+            )) // NOLINT(*)
         }
     };
 
@@ -1969,23 +1927,12 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
 
     auto launch_wgrad = [&](auto gl_D) {
         KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
-            if (a_fp8 == 0 && b_fp8 == 0) {
-                mxfp8_wgrad_nt_kernel<0, 0, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_D, gl_SA, gl_SB,
-                    d_info, tiles_M, tiles_N, tiles_per_expert);
-            } else if (a_fp8 == 0 && b_fp8 == 1) {
-                mxfp8_wgrad_nt_kernel<0, 1, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_D, gl_SA, gl_SB,
-                    d_info, tiles_M, tiles_N, tiles_per_expert);
-            } else if (a_fp8 == 1 && b_fp8 == 0) {
-                mxfp8_wgrad_nt_kernel<1, 0, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_D, gl_SA, gl_SB,
-                    d_info, tiles_M, tiles_N, tiles_per_expert);
-            } else {
-                mxfp8_wgrad_nt_kernel<1, 1, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_D, gl_SA, gl_SB,
-                    d_info, tiles_M, tiles_N, tiles_per_expert);
-            }
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_D, gl_SA, gl_SB,
+                        d_info, tiles_M, tiles_N, tiles_per_expert);
+            )) // NOLINT(*)
         )
     };
 
