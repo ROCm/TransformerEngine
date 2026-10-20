@@ -21,10 +21,8 @@ from mxfp8_utils import swizzle_mxfp8_scale
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
-_skip_fused_kernel_on_rocm = pytest.mark.skipif(
-    IS_HIP_EXTENSION,
-    reason="The fused RMSNorm + MXFP8 kernel is not supported on ROCm (normalized values are"
-    " rounded to the input dtype before quantization)",
+_ROCM_COMPACT_SCALES_ONLY = (
+    "ROCm's fused RMSNorm + MXFP8 kernel writes compact scales (the layout the gfx950 GEMM reads)"
 )
 
 
@@ -38,9 +36,10 @@ _skip_fused_kernel_on_rocm = pytest.mark.skipif(
 @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-@_skip_fused_kernel_on_rocm
 def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimize_for_gemm):
     """The fused output is the MXFP8 quantization of the FP32 normalized values."""
+    if IS_HIP_EXTENSION and optimize_for_gemm:
+        pytest.skip(_ROCM_COMPACT_SCALES_ONLY)
     torch.manual_seed(1234)
     rows, cols = shape
     eps = 1e-5
@@ -86,9 +85,10 @@ def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimiz
     reason="Tests Transformer Engine's fused kernel, not cuDNN",
 )
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-@_skip_fused_kernel_on_rocm
 def test_rmsnorm_fwd_mxfp8_sm_margin(optimize_for_gemm):
     """With all SMs but one reserved, the kernels run over chunks of rows with the same output."""
+    if IS_HIP_EXTENSION and optimize_for_gemm:
+        pytest.skip(_ROCM_COMPACT_SCALES_ONLY)
     torch.manual_seed(1234)
     x = torch.randn(1024, 7168, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(7168, dtype=torch.bfloat16, device="cuda")

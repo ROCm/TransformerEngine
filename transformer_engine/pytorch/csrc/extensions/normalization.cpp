@@ -370,14 +370,20 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     // The fused MXFP8 kernels quantize 1D blocks and require full 128x128 tiles
     if (!mxfp8_quantizer_cpp->with_2d_quantization && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
+#ifdef USE_ROCM
+      // ROCm's fused RMSNorm + MXFP8 kernel writes compact scales, the layout the gfx950 GEMM
+      // reads. A caller-provided output keeps the unfused path, whatever its scale layout.
+      if (out.is_none()) {
+        impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
+      }
+#else
       if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
         impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
       } else {
-#ifndef USE_ROCM  // Disabled on ROCm
         // Transformer Engine's fused RMSNorm + MXFP8 kernel
         impl = Impl::FULLY_FUSED;
-#endif
       }
+#endif
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {

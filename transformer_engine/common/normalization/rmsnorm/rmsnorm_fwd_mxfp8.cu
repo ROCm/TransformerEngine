@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -29,6 +31,9 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/ptx_arch_spec.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/rocm_device_utils.cuh"
+#endif
 #include "../../utils.cuh"
 #include "../common.h"
 
@@ -95,13 +100,45 @@ __global__ void __launch_bounds__(kRsigmaRowsPerCTA *THREADS_PER_WARP)
   }
 #pragma unroll
   for (int offset = THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
-    sum += __shfl_xor_sync(0xffffffff, sum, offset);
+    sum += warp_shuffle_xor(sum, offset);
   }
   if (lane == 0) {
     rsigma[row] = 1.0f / sqrtf(sum / static_cast<float>(cols) + epsilon);
   }
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// Four FP32 values scaled by per-value E8M0 scales and converted to four FP8 values, with the
+// instructions of the ROCm MXFP8 quantizer (rocm_quantize_mxfp8_body.inc), so the bytes match it.
+template <typename OType>
+__device__ __forceinline__ uint32_t quantize_4x(const float (&values)[kColsPerLane],
+                                                const e8m0_t (&exponents)[kColsPerLane]) {
+#ifdef HAS_CVT_4xFLOAT8
+  const auto cvt_scale = [](const e8m0_t e) { return (e == 0) ? 1.0f : ptx::exp2f(e); };
+  if (exponents[0] == exponents[1] && exponents[0] == exponents[2] &&
+      exponents[0] == exponents[3]) {
+    return rocm_cvt_4xfloat8<OType>(values[0], values[1], values[2], values[3],
+                                    cvt_scale(exponents[0]));
+  }
+  uint32_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < kColsPerLane; ++i) {
+    const uint32_t q = rocm_cvt_4xfloat8<OType>(values[i], 0.0f, 0.0f, 0.0f, cvt_scale(exponents[i]));
+    packed |= (q & 0xFFu) << (8 * i);
+  }
+  return packed;
+#else
+  OType q[kColsPerLane];
+#pragma unroll
+  for (int i = 0; i < kColsPerLane; ++i) {
+    q[i] = static_cast<OType>(values[i] * ptx::exp2f_rcp<float>(exponents[i]));
+  }
+  uint32_t packed;
+  memcpy(&packed, q, sizeof(packed));
+  return packed;
+#endif
+}
+#else
 // Four FP32 values times per-value multipliers, converted to four FP8 values.
 template <typename OType>
 __device__ __forceinline__ uint32_t quantize_4x(const float (&values)[kColsPerLane],
@@ -116,6 +153,7 @@ __device__ __forceinline__ uint32_t quantize_4x(const float (&values)[kColsPerLa
   return static_cast<uint32_t>(reinterpret_cast<const uint16_t &>(out[0])) |
          (static_cast<uint32_t>(reinterpret_cast<const uint16_t &>(out[1])) << 16);
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 struct QuantizeArgs {
   void *rowwise_data;
@@ -136,9 +174,13 @@ __global__ void __launch_bounds__(kThreads)
                                   const float *const rsigma, const QuantizeArgs args,
                                   const int cols, const bool zero_centered_gamma,
                                   const bool gamma_in_weight_dtype) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__HIP_PLATFORM_AMD__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   using dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
+#ifdef __HIP_PLATFORM_AMD__
+  const float kMaxNormRcp = Quantized_Limits<OType>::max_norm_rcp;
+#else
   constexpr float kMaxNormRcp = Quantized_Limits<OType>::max_norm_rcp;
+#endif
   __shared__ float colwise_amax[kWarps][kTileCols];
 
   const int warp = threadIdx.x / THREADS_PER_WARP;
@@ -205,12 +247,18 @@ __global__ void __launch_bounds__(kThreads)
       }
 #pragma unroll
       for (int offset = 1; offset < kLanesPerBlock; offset *= 2) {
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset));
+        amax = fmaxf(amax, warp_shuffle_xor(amax, offset));
       }
       const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * kMaxNormRcp);
+#ifdef __HIP_PLATFORM_AMD__
+      const e8m0_t exponents[kColsPerLane] = {biased_exponent, biased_exponent, biased_exponent,
+                                              biased_exponent};
+      const uint32_t quantized = quantize_4x<OType>(y[r], exponents);
+#else
       const float multiplier = ptx::exp2f_rcp<float>(biased_exponent);
       const float multipliers[kColsPerLane] = {multiplier, multiplier, multiplier, multiplier};
       const uint32_t quantized = quantize_4x<OType>(y[r], multipliers);
+#endif
       OType *const dst = data + static_cast<size_t>(row) * cols + col0;
       if constexpr (kAligned) {
         *reinterpret_cast<uint32_t *>(dst) = quantized;
@@ -258,7 +306,11 @@ __global__ void __launch_bounds__(kThreads)
     OType *const data = reinterpret_cast<OType *>(args.colwise_data);
 #pragma unroll
     for (int r = 0; r < kRowsPerWarp; ++r) {
+#ifdef __HIP_PLATFORM_AMD__
+      const uint32_t quantized = quantize_4x<OType>(y[r], biased_exponents);
+#else
       const uint32_t quantized = quantize_4x<OType>(y[r], multipliers);
+#endif
       OType *const dst = data + static_cast<size_t>(row0 + r) * cols + col0;
       if constexpr (kAligned) {
         *reinterpret_cast<uint32_t *>(dst) = quantized;
@@ -283,7 +335,7 @@ __global__ void __launch_bounds__(kThreads)
   }
 #else
   NVTE_DEVICE_THREAD0_ERROR("RMSNorm forward with MXFP8 output requires SM 10.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // defined(__HIP_PLATFORM_AMD__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
 
 bool is_aligned_to(const void *ptr, size_t alignment) {
@@ -401,9 +453,16 @@ void launch_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float 
 }  // namespace
 
 bool is_supported_by_te_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const Tensor &z) {
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm emits compact scales only: the gfx950 MXFP8 GEMM reads the compact layout.
+  if (!is_mxfp8_scaling(z.scaling_mode) || te_fp8_fnuz() || z.with_gemm_swizzled_scales) {
+    return false;
+  }
+#else
   if (!is_mxfp8_scaling(z.scaling_mode) || !is_supported_by_CC_100()) {
     return false;
   }
+#endif
   const bool rowwise = z.has_data();
   const bool colwise = z.has_columnwise_data();
   if (!rowwise && !colwise) {
@@ -440,7 +499,11 @@ void rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float epsilon
                        Tensor *rsigma, const int multiprocessorCount,
                        const bool zero_centered_gamma, cudaStream_t stream) {
   const DType otype = z->has_data() ? z->data.dtype : z->columnwise_data.dtype;
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr bool gamma_in_weight_dtype = false;
+#else
   const bool gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
+#endif
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
       x.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(

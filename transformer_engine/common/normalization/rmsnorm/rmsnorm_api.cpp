@@ -50,12 +50,19 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
-#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
   // MXFP8 output: Transformer Engine's fused kernel, which alone writes GEMM-swizzled scales,
   // unless cuDNN is requested or the kernel does not support the tensors.
   if (is_mxfp8_scaling(z->scaling_mode)) {
+#ifdef __HIP_PLATFORM_AMD__
+    // No cuDNN on ROCm, and ROCm emits compact scales only.
+    NVTE_CHECK(!z->with_gemm_swizzled_scales,
+               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+    const bool use_cudnn = false;
+#else
+    const bool use_cudnn = use_cudnn_norm_fwd();
+#endif
     const bool te_supported = is_supported_by_te_rmsnorm_fwd_mxfp8(x, gamma, *z);
-    if (z->with_gemm_swizzled_scales || (!use_cudnn_norm_fwd() && te_supported)) {
+    if (z->with_gemm_swizzled_scales || (!use_cudnn && te_supported)) {
       NVTE_CHECK(te_supported,
                  "RMSNorm forward with GEMM-swizzled MXFP8 scales requires FP32, BF16 or FP16 "
                  "input and weight, and rows and columns that are multiples of 128.");
@@ -70,12 +77,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       return;
     }
   }
-#else
-  if (is_mxfp8_scaling(z->scaling_mode)) {
-    NVTE_CHECK(!z->with_gemm_swizzled_scales,
-               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
-  }
-#endif
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
