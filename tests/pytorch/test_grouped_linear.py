@@ -596,7 +596,7 @@ def test_grouped_linear_accuracy_cutlass(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
+@pytest.mark.parametrize("recipe", fp8_recipes + ([recipe.MXFP8BlockScaling(fp8_format=recipe.Format.HYBRID)] if mxfp8_available else []) + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
