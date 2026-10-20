@@ -1418,11 +1418,19 @@ def _run_bf16_grouped_wgrad(
     return dW
 
 
+def _fp8_scale_arg(scale):
+    # int64 = per-expert scale_inv pointer array, read in place by the kernel; otherwise
+    # a length-G fp32 vector of the per-expert scales.
+    if scale.dtype == torch.int64:
+        return scale
+    return scale.to(torch.float32).contiguous()
+
+
 def _run_fp8_grouped(
     a_data,
-    a_scale_vec,      # [num_groups] fp32 per-expert inverse scales
+    a_scale_vec,      # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
     b_data,
-    b_scale_vec,      # [num_groups] fp32 per-expert inverse scales
+    b_scale_vec,      # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
     D,
     *,
     m_splits,
@@ -1432,15 +1440,20 @@ def _run_fp8_grouped(
     output_dtype: torch.dtype,
     bias=None,
     b_data_ptrs=None,
+    a_data_ptrs=None,
 ):
     """Dispatch a packed tensor-wise FP8 grouped GEMM (TN) through the persistent kernel.
 
     Tensor-wise FP8 is TN-only; grouped dgrad/wgrad reach this same TN kernel via
     host-materialized transpose backings (see the backward helpers). Experts pack on
     B's output-N axis ([G*N, K]); each expert carries one scalar inverse scale, so the
-    scales arrive as length-``num_groups`` vectors the kernel indexes by ``expert``.
+    scales arrive as length-``num_groups`` vectors the kernel indexes by ``expert``, or
+    as int64 arrays of per-expert ``scale_inv`` pointers it reads in place.
     ``m_splits`` is the host-side per-expert token list; the descriptor queue is built
-    + shape-cached from it (no GPU->CPU sync).
+    + shape-cached from it (no GPU->CPU sync). ``a_data_ptrs`` (optional) reads A per
+    expert in place: ``a_data`` is then one representative expert payload and each
+    entry is that expert's base shifted by its packed row start (see
+    ``grouped_gemm_utils.shifted_expert_ptrs``).
     """
     from .fp8_gemm import doGemm as _fp8_doGemm
 
@@ -1479,8 +1492,8 @@ def _run_fp8_grouped(
         a_data,
         b_data,
         D.view(m_total, n),
-        a_scale_vec.to(torch.float32).contiguous(),
-        b_scale_vec.to(torch.float32).contiguous(),
+        _fp8_scale_arg(a_scale_vec),
+        _fp8_scale_arg(b_scale_vec),
         epilogue=epilogue,
         bias=bias_arg,
         group=True,
@@ -1488,6 +1501,7 @@ def _run_fp8_grouped(
         work_queue=work_queue,
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
         sched=sched,
         m=m_total,
         n=n,
@@ -1498,9 +1512,9 @@ def _run_fp8_grouped(
 
 def _run_fp8_grouped_wgrad(
     dyt_cols,         # list[G] of per-expert dY^T (host-transposed) [N_out, m_e]
-    dy_scale_vec,     # [num_groups] fp32 per-expert inverse scales for dY
+    dy_scale_vec,     # [num_groups] fp32 inverse scales for dY, or list[G] of per-expert scale_inv
     xt_cols,          # list[G] of per-expert X^T (host-transposed) [K_in, m_e]
-    x_scale_vec,      # [num_groups] fp32 per-expert inverse scales for X
+    x_scale_vec,      # [num_groups] fp32 inverse scales for X, or list[G] of per-expert scale_inv
     dW,               # output [G*N_out, K_in]
     *,
     m_splits,
@@ -1552,21 +1566,54 @@ def _run_fp8_grouped_wgrad(
 
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
-    dy_scale_vec = dy_scale_vec.to(torch.float32).contiguous()
-    x_scale_vec = x_scale_vec.to(torch.float32).contiguous()
+    # Per-expert scale_inv lists are read in place through per-bucket pointer arrays.
+    scale_lists = isinstance(dy_scale_vec, (list, tuple))
+    if not scale_lists:
+        dy_scale_vec = dy_scale_vec.to(torch.float32).contiguous()
+        x_scale_vec = x_scale_vec.to(torch.float32).contiguous()
     buckets = gd.bucketize_wgrad_tokens(m_splits, _BLOCK_M, max_buckets=_wgrad_max_buckets())
+
+    # An expert with no tokens has dW_e = 0. Quantizing its empty input never writes
+    # its tensor-wise scale_inv, which can hold NaN, and a zero-padded launch would
+    # compute NaN * 0. Zero those rows directly and leave the expert out of the launches.
+    for e, m in enumerate(m_splits):
+        if int(m) == 0:
+            dW[e * n_out : (e + 1) * n_out].zero_()
+    buckets = [(k_pad, [e for e in ids if int(m_splits[e]) != 0]) for k_pad, ids in buckets]
+    buckets = [(k_pad, ids) for k_pad, ids in buckets if ids]
 
     for k_pad, ids in buckets:
         bsize = len(ids)
-        dy_data = torch.cat([_pad_cols(dyt_cols[e], k_pad) for e in ids], dim=0)
-        x_data = torch.cat([_pad_cols(xt_cols[e], k_pad) for e in ids], dim=0)
+        dy_b = [dyt_cols[e] for e in ids]
+        x_b = [xt_cols[e] for e in ids]
+        if all(t.size(1) == k_pad and t.is_contiguous() for t in dy_b + x_b):
+            # No padding needed: read each expert's transpose in place. The bases are
+            # shifted by the expert's packed row (j*N_out for dY^T, j*K_in for X^T),
+            # so the kernel's packed addressing lands in each per-expert slab.
+            dy_data, x_data = dy_b[0], x_b[0]
+            row_bytes = k_pad * dy_data.element_size()
+            dy_ptrs = gd.shifted_expert_ptrs(
+                dy_b, [j * n_out for j in range(bsize)], row_bytes, device
+            )
+            x_ptrs = gd.shifted_expert_ptrs(
+                x_b, [j * k_in for j in range(bsize)], row_bytes, device
+            )
+        else:
+            dy_data = torch.cat([_pad_cols(t, k_pad) for t in dy_b], dim=0)
+            x_data = torch.cat([_pad_cols(t, k_pad) for t in x_b], dim=0)
+            dy_ptrs = x_ptrs = None
         if dy_data.dtype == torch.uint8:
             dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
         if x_data.dtype == torch.uint8:
             x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
-        idx = torch.tensor(ids, device=device)
-        dy_scale_b = dy_scale_vec[idx]
-        x_scale_b = x_scale_vec[idx]
+
+        if scale_lists:
+            dy_scale_b = gd.expert_ptrs([dy_scale_vec[e] for e in ids], device)
+            x_scale_b = gd.expert_ptrs([x_scale_vec[e] for e in ids], device)
+        else:
+            idx = torch.tensor(ids, device=device)
+            dy_scale_b = dy_scale_vec[idx]
+            x_scale_b = x_scale_vec[idx]
 
         direct = ids == list(range(num_groups))
         dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
@@ -1592,6 +1639,8 @@ def _run_fp8_grouped_wgrad(
             m=n_out,
             n=k_in,
             k=k_pad,
+            a_data_ptrs=dy_ptrs,
+            b_data_ptrs=x_ptrs,
         )
 
         if not direct:

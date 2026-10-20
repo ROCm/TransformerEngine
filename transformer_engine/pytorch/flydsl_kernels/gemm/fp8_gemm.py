@@ -100,6 +100,8 @@ def _compile_kernel(
     sched: str = "worksteal",
     wgrad: bool = False,
     weight_ptrs: bool = False,
+    act_ptrs: bool = False,
+    scale_ptrs: bool = False,
 ):
     """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
 
@@ -218,6 +220,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -231,10 +234,14 @@ def _compile_kernel(
         gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
-        a_scale_rsrc = fx.rocdl.make_buffer_tensor(A_scale_inv, max_size=True)
-        b_scale_rsrc = fx.rocdl.make_buffer_tensor(B_scale_inv, max_size=True)
-        a_scale_div = fx.logical_divide(a_scale_rsrc, fx.make_layout(1, 1))
-        b_scale_div = fx.logical_divide(b_scale_rsrc, fx.make_layout(1, 1))
+        # scale_ptrs (grouped only): A_scale_inv / B_scale_inv are int64[G] arrays of
+        # per-expert scale_inv pointers, read in place per tile instead of from a
+        # host-gathered length-G vector.
+        if const_expr(not scale_ptrs):
+            a_scale_rsrc = fx.rocdl.make_buffer_tensor(A_scale_inv, max_size=True)
+            b_scale_rsrc = fx.rocdl.make_buffer_tensor(B_scale_inv, max_size=True)
+            a_scale_div = fx.logical_divide(a_scale_rsrc, fx.make_layout(1, 1))
+            b_scale_div = fx.logical_divide(b_scale_rsrc, fx.make_layout(1, 1))
         scale_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
         def _load_scale(scale_div, index):
@@ -261,10 +268,17 @@ def _compile_kernel(
         # addressed from a per-expert base pointer read from ``b_data_ptrs`` (reusing
         # gB's static layout) instead of an expert-shifted B row. FP8 is TN-only, so
         # both grouped forward and dgrad (dgrad feeds host-transposed weights through
-        # this same TN kernel) set this compile-time flag; wgrad keeps the packed-B
-        # fold.
+        # this same TN kernel) set this compile-time flag. wgrad sets it only with
+        # act_ptrs, for its per-expert X^T operand.
         if const_expr(weight_ptrs):
             b_ptr_layout = fx.get_layout(gB)
+        # act_ptrs: the per-expert activation operand (A; and in wgrad also B, via
+        # b_data_ptrs) stays in its own per-expert allocation instead of a host-side
+        # concat. The host passes each expert's base pointer pre-shifted by that
+        # expert's packed offset, so the packed addressing below is unchanged; only the
+        # buffer base moves per tile.
+        if const_expr(act_ptrs):
+            a_ptr_layout = fx.get_layout(gA)
 
         if const_expr(grouped):
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
@@ -290,13 +304,20 @@ def _compile_kernel(
                 return gd.read_desc_field(wq_div, desc_ld_atom, slot, field)
 
         def process_tile(pid_m, pid_n, expert):
-            # Per-expert scalar scale: dense reads index 0 (length-1 buffer);
-            # grouped reads scale[expert] from the length-num_groups vector.
-            if const_expr(grouped):
-                scale_idx = fx.Int32(expert)
+            # Per-expert scalar scale: dense reads index 0 (length-1 buffer); grouped
+            # reads scale[expert] from the length-num_groups vector, or through the
+            # expert's scale_inv pointer (scale_ptrs).
+            if const_expr(scale_ptrs):
+                a_scale = fx.Float32(gd.load_f32_at_ptr(A_scale_inv, expert))
+                b_scale = fx.Float32(gd.load_f32_at_ptr(B_scale_inv, expert))
             else:
-                scale_idx = fx.Int32(0)
-            output_scale = _load_scale(a_scale_div, scale_idx) * _load_scale(b_scale_div, scale_idx)
+                if const_expr(grouped):
+                    scale_idx = fx.Int32(expert)
+                else:
+                    scale_idx = fx.Int32(0)
+                a_scale = _load_scale(a_scale_div, scale_idx)
+                b_scale = _load_scale(b_scale_div, scale_idx)
+            output_scale = a_scale * b_scale
 
             bx_m = pid_m * BLOCK_M
             by_n = pid_n * BLOCK_N
@@ -346,14 +367,31 @@ def _compile_kernel(
             # the global K coordinate is XOR-unswizzled for the physical LDS slot.
             gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
             gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-            a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
+            # Issue both per-expert base-pointer loads before either is made uniform, so a
+            # tile waits on one memory round trip rather than two.
+            if const_expr(act_ptrs):
+                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+            if const_expr(weight_ptrs):
+                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+            if const_expr(act_ptrs):
+                a_base_i64 = gd.make_uniform_i64(a_base_raw)
+                a_div_tile = gd.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
+            else:
+                a_div_tile = a_div
+            a_g2s = G2SLoader(a_div_tile, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
             # Grouped-TN forward B-data: rebase onto this tile's expert weight slab and
             # read with a LOCAL column (base selects the expert). Other paths keep the
             # shared packed b_div / by_n_b_idx.
             if const_expr(weight_ptrs):
-                b_base_i64 = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
-                b_data_col = by_n_idx
+                # wgrad bases are pre-shifted by the packed expert offset (see act_ptrs),
+                # so keep the packed column there; forward/dgrad weight bases are the
+                # real per-expert slabs, read with a local column.
+                if const_expr(wgrad):
+                    b_data_col = by_n_b_idx
+                else:
+                    b_data_col = by_n_idx
             else:
                 b_div_tile = b_div
                 b_data_col = by_n_b_idx
@@ -1111,6 +1149,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1133,6 +1172,7 @@ def _compile_kernel(
             work_queue,
             work_counter,
             b_data_ptrs,
+            a_data_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1194,6 +1234,8 @@ def _cached_launch(
     sched: str = "worksteal",
     wgrad: bool = False,
     weight_ptrs: bool = False,
+    act_ptrs: bool = False,
+    scale_ptrs: bool = False,
 ):
     return _compile_kernel(
         K,
@@ -1206,6 +1248,8 @@ def _cached_launch(
         sched=sched,
         wgrad=wgrad,
         weight_ptrs=weight_ptrs,
+        act_ptrs=act_ptrs,
+        scale_ptrs=scale_ptrs,
     )
 
 
@@ -1269,6 +1313,7 @@ def doGemm(
     work_queue: torch.Tensor = None,
     work_counter: torch.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
+    a_data_ptrs: torch.Tensor = None,
     sched: str = "worksteal",
     wgrad: bool = False,
     m: int = None,
@@ -1308,10 +1353,14 @@ def doGemm(
         label="FP8 GEMM",
     )
     require_launch_size("FP8 GEMM", ("A", A), ("B", B), ("C", C))
-    # Dense: one scalar inverse scale per operand. Grouped: a per-expert vector.
+    # Dense: one scalar inverse scale per operand. Grouped: a per-expert vector, or
+    # (scale_ptrs) an int64[G] array of per-expert scale_inv pointers read in place.
     expected_scale_numel = num_groups if (group or wgrad) else 1
-    assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == expected_scale_numel
-    assert B_scale_inv.dtype == torch.float32 and B_scale_inv.numel() == expected_scale_numel
+    scale_ptrs = A_scale_inv.dtype == torch.int64
+    expected_scale_dtype = torch.int64 if scale_ptrs else torch.float32
+    assert not scale_ptrs or group or wgrad, "per-expert scale pointers are grouped-only"
+    assert A_scale_inv.dtype == expected_scale_dtype and A_scale_inv.numel() == expected_scale_numel
+    assert B_scale_inv.dtype == expected_scale_dtype and B_scale_inv.numel() == expected_scale_numel
     # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad/dense C is
     # the unpacked (M_runtime, N_runtime).
     expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
@@ -1387,6 +1436,12 @@ def doGemm(
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+    # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
+    act_ptrs = a_data_ptrs is not None
+    if act_ptrs:
+        a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
+    else:
+        a_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
 
     launch_key = (
         "fp8_gemm",
@@ -1400,6 +1455,8 @@ def doGemm(
         sched,
         wgrad,
         weight_ptrs,
+        act_ptrs,
+        scale_ptrs,
     )
     launch_args = (
         A_arg,
@@ -1415,6 +1472,7 @@ def doGemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
+        a_data_ptrs_arg,
         stream,
     )
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
@@ -1433,6 +1491,8 @@ def doGemm(
             sched,
             wgrad,
             weight_ptrs,
+            act_ptrs,
+            scale_ptrs,
         ),
         launch_args,
     )(*launch_args)

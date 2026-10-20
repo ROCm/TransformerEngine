@@ -118,6 +118,38 @@ def _cached_b_data_ptrs(datas, device):
     return tensor
 
 
+def _flydsl_fp8_row_operand(datas, m_splits):
+    """Address per-expert FP8 row payloads in place for the FlyDSL grouped TN kernel.
+
+    ``datas`` are the per-expert ``[m_e, K]`` rowwise payloads. Returns ``(a_data,
+    a_data_ptrs)``: a representative payload plus an int64[G] array of per-expert base
+    pointers shifted by each expert's packed row start, so the kernel reads every
+    expert where the ``[M_total, K]`` concat would have placed it, without the copy.
+    Falls back to ``(concat_or_view_rows(datas), None)`` when a payload is not a
+    row-major ``[m_e, K]`` block.
+    """
+    from ..flydsl_kernels.gemm.grouped_gemm_utils import (
+        concat_or_view_rows,
+        shifted_expert_ptrs,
+    )
+
+    k = datas[0].size(-1)
+    if not all(
+        d.dim() == 2 and d.size(0) == int(m) and d.size(1) == k and d.is_contiguous()
+        for d, m in zip(datas, m_splits)
+    ):
+        return concat_or_view_rows(datas), None
+    row_starts = []
+    start = 0
+    for m in m_splits:
+        row_starts.append(start)
+        start += int(m)
+    # Any non-empty payload serves as the kernel's A argument; its base is replaced per tile.
+    a_data = next((d for d in datas if d.numel() > 0), datas[0])
+    a_data_ptrs = shifted_expert_ptrs(datas, row_starts, k * a_data.element_size(), a_data.device)
+    return a_data, a_data_ptrs
+
+
 def _packed_wgrad_view(wgrad_list, num_gemms, n_out, k_in):
     """Return a [num_gemms*n_out, k_in] view over ``wgrad_list`` if it is one packed run.
 
@@ -1151,12 +1183,13 @@ class _GroupedLinear(torch.autograd.Function):
         """FlyDSL tensor-wise FP8 grouped forward (TN): Y_e = X_e @ W_e^T.
 
         Experts pack weights on the output-N axis ([G*N, K]); each operand carries
-        one scalar inverse scale, gathered into length-G per-expert vectors.
+        one scalar inverse scale, read in place through per-expert pointers.
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
-        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import expert_ptrs
 
-        a_data = concat_or_view_rows([im._data for im in inputmats])
+        # Activations are read in place from each expert's payload (no [M_total, K] concat).
+        a_data, a_data_ptrs = _flydsl_fp8_row_operand([im._data for im in inputmats], m_splits)
         # Weights are independent per-expert [N, K] FP8 tensors; the grouped-TN kernel
         # reads each from a per-expert base pointer, so pass an int64[G] address array
         # instead of concatenating the G weights. b_data is a per-expert representative.
@@ -1166,12 +1199,13 @@ class _GroupedLinear(torch.autograd.Function):
         b_data = weights[0]._data
         a_data._fp8_dtype = inputmats[0]._fp8_dtype
         b_data._fp8_dtype = weights[0]._fp8_dtype
-        a_scale = torch.cat([im._scale_inv.reshape(1) for im in inputmats], dim=0)
-        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights], dim=0)
+        # Per-expert scale_inv pointers, read in place by the kernel (no gather).
+        a_scale = expert_ptrs([im._scale_inv for im in inputmats], a_data.device)
+        b_scale = expert_ptrs([w._scale_inv for w in weights], a_data.device)
 
         n = weights[0]._data.size(0)
         k = weights[0]._data.size(-1)
-        m_total = a_data.size(0)
+        m_total = sum(int(m) for m in m_splits)
 
         _run_fp8_grouped(
             a_data,
@@ -1185,6 +1219,7 @@ class _GroupedLinear(torch.autograd.Function):
             k=k,
             output_dtype=out.dtype,
             b_data_ptrs=b_data_ptrs,
+            a_data_ptrs=a_data_ptrs,
         )
 
     @staticmethod
@@ -1199,25 +1234,25 @@ class _GroupedLinear(torch.autograd.Function):
         B packed on the output axis = K_in, i.e. per expert dY @ (W^T)^T = dY @ W.
         """
         from ..flydsl_kernels.gemm import _run_fp8_grouped
-        from ..flydsl_kernels.gemm.grouped_gemm_utils import concat_or_view_rows
+        from ..flydsl_kernels.gemm.grouped_gemm_utils import expert_ptrs
 
         # A = dY (rowwise fp8 data); B = W columnwise transpose, the materialized
-        # [K_in, N_out] packed on K_in (the TN GEMM output axis). The transpose
-        # backings are independent per-expert slabs, addressed via per-expert base
-        # pointers through the same TN per-expert path (no concat); dY still concats.
-        a_data = concat_or_view_rows([g._data for g in grad_output])
+        # [K_in, N_out] packed on K_in (the TN GEMM output axis). Both are independent
+        # per-expert slabs, addressed via per-expert base pointers (no concat).
+        a_data, a_data_ptrs = _flydsl_fp8_row_operand([g._data for g in grad_output], m_splits)
         b_data_ptrs = _cached_b_data_ptrs(
             [w._transpose for w in weights], a_data.device
         )
         b_data = weights[0]._transpose
         a_data._fp8_dtype = grad_output[0]._fp8_dtype
         b_data._fp8_dtype = weights[0]._fp8_dtype
-        a_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
-        b_scale = torch.cat([w._scale_inv.reshape(1) for w in weights], dim=0)
+        # Per-expert scale_inv pointers, read in place by the kernel (no gather).
+        a_scale = expert_ptrs([g._scale_inv for g in grad_output], a_data.device)
+        b_scale = expert_ptrs([w._scale_inv for w in weights], a_data.device)
 
         n_out = grad_output[0]._data.size(-1)  # per-expert contraction (N_out)
         k_in = dgrad.size(-1)  # output width (K_in)
-        m_total = a_data.size(0)
+        m_total = sum(int(m) for m in m_splits)
 
         _run_fp8_grouped(
             a_data,
@@ -1231,6 +1266,7 @@ class _GroupedLinear(torch.autograd.Function):
             k=n_out,
             output_dtype=dgrad.dtype,
             b_data_ptrs=b_data_ptrs,
+            a_data_ptrs=a_data_ptrs,
         )
 
     @staticmethod
@@ -1246,8 +1282,9 @@ class _GroupedLinear(torch.autograd.Function):
         num_gemms = len(inputmats)
         dyt_cols = [g._transpose for g in grad_output]
         xt_cols = [x._transpose for x in inputmats]
-        dy_scale = torch.cat([g._scale_inv.reshape(1) for g in grad_output], dim=0)
-        x_scale = torch.cat([x._scale_inv.reshape(1) for x in inputmats], dim=0)
+        # Per-expert scale_inv tensors; the wgrad runner reads them in place by pointer.
+        dy_scale = [g._scale_inv for g in grad_output]
+        x_scale = [x._scale_inv for x in inputmats]
 
         # Operands may carry only the columnwise (_transpose) backing. The
         # transpose is [feature, m_e]: dY^T is [N_out, m_e], X^T is [K_in, m_e].

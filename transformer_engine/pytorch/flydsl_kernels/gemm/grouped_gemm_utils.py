@@ -71,6 +71,29 @@ def read_ptr_at(ptr_array, index):
     return llvm.LoadOp(T.i64, elt_ptr).result
 
 
+def make_uniform_i64(value):
+    """Broadcast lane 0's i64 to the whole wave (``readfirstlane``).
+
+    A buffer descriptor lives in SGPRs. An address loaded by :func:`read_ptr_at` is a
+    per-lane value, so a descriptor rebased on it can make the compiler guard each
+    buffer access for divergence. Use this when every lane loaded the same address
+    (e.g. indexed by the tile's expert), so lane 0's value is every lane's value.
+    """
+    return fx.rocdl.readfirstlane(T.i64, value)
+
+
+def load_f32_at_ptr(ptr_array, index):
+    """Load the fp32 scalar that ``ptr_array[index]`` points to.
+
+    A plain global load needs no wave-uniform address, so unlike the buffer-descriptor
+    bases this skips :func:`make_uniform_i64`: nothing waits on either load until the
+    value is used, which keeps a per-tile scale fetch off the tile's critical path.
+    """
+    ptr_ty = ir.Type.parse("!llvm.ptr<1>")
+    addr = read_ptr_at(ptr_array, index)
+    return llvm.LoadOp(T.f32, llvm.IntToPtrOp(ptr_ty, addr).result).result
+
+
 def rebase_buffer_view(base_i64, elem_ir_type, layout):
     """Rebuild a buffer-tensor logical-divide view at a runtime base address.
 
@@ -306,6 +329,33 @@ def concat_or_view_rows(tensors):
     view = byte_view.view(first.dtype).view(total_rows, *tuple(trailing))
     view._flydsl_span_anchor = tensors
     return view
+
+
+@functools.lru_cache(maxsize=512)
+def _ptr_array_cached(ptrs, device):
+    return torch.tensor(ptrs, dtype=torch.int64, device=device)
+
+
+def shifted_expert_ptrs(tensors, packed_row_starts, row_bytes, device):
+    """int64[G] device array of per-expert base pointers, each shifted to its packed row.
+
+    Lets a grouped kernel read per-expert operands in place with its packed-operand
+    addressing: entry ``g`` is ``tensors[g].data_ptr() - packed_row_starts[g] *
+    row_bytes``, so ``entry + packed_row * row_bytes`` lands on row
+    ``packed_row - packed_row_starts[g]`` of ``tensors[g]``, exactly where the
+    ``torch.cat`` of the experts would have put it. Each tensor must be row-major
+    with ``row_bytes`` bytes per row. The upload runs only on a cache miss; the
+    caching allocator usually hands back the same per-expert buffers step to step.
+    """
+    ptrs = tuple(
+        t.data_ptr() - int(start) * row_bytes for t, start in zip(tensors, packed_row_starts)
+    )
+    return _ptr_array_cached(ptrs, device)
+
+
+def expert_ptrs(tensors, device):
+    """int64[G] device array of ``t.data_ptr()`` per expert (cached; see shifted_expert_ptrs)."""
+    return _ptr_array_cached(tuple(t.data_ptr() for t in tensors), device)
 
 
 def uniform_pad_concat(tensors, rows):
