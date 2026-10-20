@@ -9,6 +9,7 @@
 #include <transformer_engine/transpose.h>
 #include <transformer_engine/transformer_engine.h>
 #include <map>
+#include <set>
 #include <unistd.h>
 #include <vector>
 #include <forward_list>
@@ -1467,6 +1468,21 @@ static bool use_device_scalar_alpha(hipblasLtHandle_t handle, hipblasLtMatmulDes
         handle, operationDesc, Adesc, Bdesc, Ddesc, Ddesc, preference, 1, &result, &count);
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
     it = supported.emplace(cfg, status == HIPBLAS_STATUS_SUCCESS && count > 0).first;
+    if (!it->second) {
+      // Shapes vary with MoE routing but kernel availability does not, so warn once per shape-free config.
+      static std::set<GemmAlgoCache::Key, GemmAlgoCache::Key::Comp> warned;
+      GemmAlgoCache::Key family = cfg;
+      family.m = family.n = family.k = family.lda = family.ldb = family.ldd = 0;
+      if (warned.insert(family).second) {
+        // std::string because concat_strings would print a string_view char by char.
+        const std::string d_type(typeNameMapper.getName(cfg.d_type));
+        const std::string epilogue(cfg.epilogue == HIPBLASLT_EPILOGUE_DEFAULT
+                                       ? "none" : epilogueNameMapper.getName(cfg.epilogue));
+        NVTE_WARN("hipBLASLt has no device scalar alpha kernel for NVFP4 GEMM d_type=", d_type,
+                  " epilogue=", epilogue, " (first seen at m=", cfg.m, " n=", cfg.n, " k=", cfg.k,
+                  "); falling back to host alpha, which synchronizes the stream on every call.");
+      }
+    }
   }
 
   if (!it->second) {
