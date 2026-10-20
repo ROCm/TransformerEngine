@@ -143,6 +143,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
              "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(!te_fp8_fnuz(), "NVFP4 is not supported on architectures with FNUZ FP8 (gfx942).");
+#endif
   const int full_scale_max = static_cast<int>(typeToMax(scale_dtype));
   const bool uses_4over6_headroom = scale_dtype == DType::kFloat8E4M3 && scale_type_max == 256;
   NVTE_CHECK(scale_type_max == full_scale_max || uses_4over6_headroom, "Unsupported maximum ",

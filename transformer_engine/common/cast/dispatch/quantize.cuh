@@ -165,6 +165,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const DType scale_dtype = output_tensor->scale_inv.has_data()
                                     ? output_tensor->scale_inv.dtype
                                     : output_tensor->columnwise_scale_inv.dtype;
+#ifdef __HIP_PLATFORM_AMD__
+      // NVFP4 block scales are OCP E4M3; FNUZ E4M3 (max 240) cannot hold the 448 bound the scale
+      // max checks below and the dequantize path assume.
+      NVTE_CHECK(!te_fp8_fnuz(), "NVFP4 is not supported on architectures with FNUZ FP8 (gfx942).");
+#endif
       NVTE_CHECK(nvfp4_use_4over6 || static_cast<float>(output_tensor->get_nvfp4_scale_max()) ==
                                          typeToMax(scale_dtype),
                  "NVFP4 quantization with non-default scale max is only supported with 4over6.");
@@ -380,6 +385,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       const DType scale_dtype = output_tensor->scale_inv.has_data()
                                     ? output_tensor->scale_inv.dtype
                                     : output_tensor->columnwise_scale_inv.dtype;
+#ifdef __HIP_PLATFORM_AMD__
+      // NVFP4 block scales are OCP E4M3; FNUZ E4M3 (max 240) cannot hold the 448 bound the scale
+      // max checks below and the dequantize path assume.
+      NVTE_CHECK(!te_fp8_fnuz(), "NVFP4 is not supported on architectures with FNUZ FP8 (gfx942).");
+#endif
       NVTE_CHECK(nvfp4_use_4over6 || static_cast<float>(output_tensor->get_nvfp4_scale_max()) ==
                                          typeToMax(scale_dtype),
                  "NVFP4 quantization with non-default scale max is only supported with 4over6.");
