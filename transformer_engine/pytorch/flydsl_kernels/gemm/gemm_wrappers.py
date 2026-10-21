@@ -1032,24 +1032,26 @@ def _run_mxfp8_grouped(
 ):
     """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel.
 
-    Two layouts, both single packed launches spanning all groups:
+    Two layouts, both single launches spanning all groups. Weights are read per
+    expert through the required ``b_data_ptrs`` (``b_data`` is one representative);
+    scale shapes are those of the per-expert scales stacked on dim 0:
 
       TN (forward, C = A @ B^T):
-        a = packed activations   [M_total, K]      scales [M_total, K/32]
-        b = packed weights        [G*N,     K]      scales [G*N,     K/32]
-        output width n = N_out (per expert); experts pack on B's output-N axis.
+        a = activations          [M_total, K]      scales [M_total, K/32]
+        b = per-expert weights   [N,       K]      scales [G*N,     K/32]
+        output width n = N_out (per expert); experts stack on B's output-N axis.
 
       NN (dgrad, dX = dY @ W):
-        a = packed grad_output    [M_total, N_out]  scales [M_total, N_out/32]
-        b = packed weights        [G*N_out, K_in]   scales [G*N_out/32, K_in]
-        output width n = K_in; experts pack on B's contraction (N_out) axis.
+        a = grad_output          [M_total, N_out]  scales [M_total, N_out/32]
+        b = per-expert weights   [N_out,   K_in]   scales [G*N_out/32, K_in]
+        output width n = K_in; experts stack on B's contraction (N_out) axis.
 
     In both, ``k`` is A's per-expert contraction (TN: K_in; NN: N_out) and ``n`` is
     the output width. ``m_splits`` is the Python list of per-expert token counts
     (already host-resident); the per-tile ``(pid_m, pid_n, expert)`` descriptor
-    queue is built + shape-cached from it directly, so no device->host copy of a
-    ``group_offs`` tensor (and its blocking sync) is needed. Operands arrive already
-    MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
+    queue is built from it on the host and uploaded without blocking, so no
+    device->host copy of a ``group_offs`` tensor (and its blocking sync) is needed.
+    Operands arrive already MXFP8-quantized -- no quantization, no BLAS ownership swap.
     ``a_data_ptrs`` (optional) reads A per expert in place: ``a_data`` is then one
     representative expert payload (see ``grouped_gemm_utils.stacked_operand``).
     """
@@ -1097,7 +1099,7 @@ def _run_mxfp8_grouped(
     # token count must be BLOCK_M-aligned (enforced upstream by the tiling check),
     # so tiles never straddle a group boundary. Built + cached from the host-side
     # m_splits list (no GPU->CPU sync).
-    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+    work_queue, num_tiles = gd.build_fwd_dgrad_work_queue(
         m_splits, num_pid_n, BLOCK_M, a_data.device
     )
 
@@ -1108,15 +1110,14 @@ def _run_mxfp8_grouped(
     # the launch grid, one grid-stride sweep already balances well, so the static
     # path avoids atomic contention. NVTE_FLYDSL_GROUPED_SCHED overrides for tests.
     sched = _select_grouped_sched(num_tiles, a_data.device)
+    work_counter = gd.work_counter(sched, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
 
     # Both TN forward and NN dgrad address the weight operand from per-expert base
-    # pointers supplied by the caller (one int64 base per expert slab) when
-    # ``b_data_ptrs`` is given; the kernel reads B slab g from b_data_ptrs[g] instead
-    # of folding the expert into a packed B (an output-N column for TN, the
-    # contraction base for NN), so the host never concatenates the G per-expert
-    # weights. When ``b_data_ptrs`` is None the packed-B expert fold is used.
+    # pointers supplied by the caller (one int64 base per expert slab, required): the
+    # kernel reads B slab g from b_data_ptrs[g], so the host never concatenates the G
+    # per-expert weights.
     mxfp8_matmul(
         a_data,
         a_scale,
@@ -1132,6 +1133,7 @@ def _run_mxfp8_grouped(
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
         a_data_ptrs=a_data_ptrs,
+        num_work=num_tiles,
         a_shape=(m_total, a_data.size(-1)) if a_data_ptrs is not None else None,
         sched=sched,
     )
@@ -1155,13 +1157,13 @@ def _wgrad_operands(dy_b, x_b, unpadded, pad, device):
 
 
 def _run_mxfp8_grouped_wgrad(
-    dy_cols,          # list[G] of per-expert dY columnwise fp8 data, each [m_e, N_out]
-    dy_scales,        # list[G] of per-expert dY columnwise scale, each [m_e/32, N_out]
-    x_cols,           # list[G] of per-expert X  columnwise fp8 data, each [m_e, K_in]
-    x_scales,         # list[G] of per-expert X  columnwise scale, each [m_e/32, K_in]
-    dW,               # output [G*N_out, K_in]
+    dy_cols,  # list[G] of per-expert dY columnwise fp8 data, each [m_e, N_out]
+    dy_scales,  # list[G] of per-expert dY columnwise scale, each [m_e/32, N_out]
+    x_cols,  # list[G] of per-expert X  columnwise fp8 data, each [m_e, K_in]
+    x_scales,  # list[G] of per-expert X  columnwise scale, each [m_e/32, K_in]
+    dW,  # output [G*N_out, K_in]
     *,
-    m_splits,         # list[int] per-expert token counts
+    m_splits,  # list[int] per-expert token counts
     n_out,
     k_in,
     dy_fp8_dtype,
@@ -1235,13 +1237,11 @@ def _run_mxfp8_grouped_wgrad(
             x_data = reinterpret_as_fp8_tensor(x_data, x_fp8_dtype)
 
         direct = ids == list(range(num_groups))
-        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
-                                             device=device)
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype, device=device)
 
-        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-            bsize, num_pid_m, num_pid_n, device
-        )
+        work_queue, num_tiles = gd.build_wgrad_work_queue(bsize, num_pid_m, num_pid_n, device)
         sched = _select_grouped_sched(num_tiles, device)
+        work_counter = gd.work_counter(sched, device)
 
         mxfp8_matmul(
             dy_data,
@@ -1256,6 +1256,7 @@ def _run_mxfp8_grouped_wgrad(
             sched=sched,
             wgrad=True,
             a_data_ptrs=dy_ptrs,
+            num_work=num_tiles,
             b_data_ptrs=x_ptrs,
             a_shape=(bsize * k_pad, n_out) if dy_ptrs is not None else None,
             b_shape=(bsize * k_pad, k_in) if x_ptrs is not None else None,
@@ -1285,14 +1286,14 @@ def _run_bf16_grouped(
 ):
     """Dispatch a packed BF16 grouped GEMM through the persistent kernel.
 
-    Scaleless analog of :func:`_run_mxfp8_grouped`; the packed operand contracts
-    match the MXFP8 TN/NN layouts exactly (experts packed on B's output-N axis for
-    TN, on B's contraction axis for NN), only without E8M0 scales:
+    Scaleless analog of :func:`_run_mxfp8_grouped`, with the same TN/NN operand
+    contracts, only without E8M0 scales. Weights are read per expert through the
+    required ``b_data_ptrs``; ``b_data`` is one representative expert:
 
       TN (forward, C = A @ B^T):
-        a = packed activations [M_total, K]   b = packed weights [G*N, K]
+        a = activations [M_total, K]   b = per-expert weights [N, K]
       NN (dgrad, dX = dY @ W):
-        a = packed grad_output [M_total, N_out]   b = packed weights [G*N_out, K_in]
+        a = grad_output [M_total, N_out]   b = per-expert weights [N_out, K_in]
 
     ``m_splits`` is the Python list of per-expert token counts (already on the
     host). The descriptor queue is built + cached from it directly, so no
@@ -1301,7 +1302,9 @@ def _run_bf16_grouped(
     from .half_prec_gemm import doGemm as _half_prec_doGemm
 
     if layout not in ("TN", "NN"):
-        raise FlyDSLUnsupportedError(f"FlyDSL half-precision grouped GEMM supports TN/NN, got {layout}")
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL half-precision grouped GEMM supports TN/NN, got {layout}"
+        )
 
     # BF16 and FP16 share this kernel (the MFMA opcode is selected per operand dtype);
     # take the input dtype from the operands so both route through unchanged.
@@ -1323,10 +1326,11 @@ def _run_bf16_grouped(
 
     num_groups = len(m_splits)
     num_pid_n = n // _BLOCK_N
-    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+    work_queue, num_tiles = gd.build_fwd_dgrad_work_queue(
         m_splits, num_pid_n, _BLOCK_M, a_data.device
     )
     sched = _select_grouped_sched(num_tiles, a_data.device)
+    work_counter = gd.work_counter(sched, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
     _half_prec_doGemm(
@@ -1347,6 +1351,7 @@ def _run_bf16_grouped(
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
         a_data_ptrs=a_data_ptrs,
+        num_work=num_tiles,
         sched=sched,
     )
     return D
@@ -1361,9 +1366,9 @@ def _wgrad_max_buckets():
 
 
 def _run_bf16_grouped_wgrad(
-    dy_cols,          # list[G] of per-expert dY, each [m_e, N_out]
-    x_cols,           # list[G] of per-expert X,  each [m_e, K_in]
-    dW,               # output [G*N_out, K_in]
+    dy_cols,  # list[G] of per-expert dY, each [m_e, N_out]
+    x_cols,  # list[G] of per-expert X,  each [m_e, K_in]
+    dW,  # output [G*N_out, K_in]
     *,
     m_splits,
     n_out,
@@ -1434,13 +1439,11 @@ def _run_bf16_grouped_wgrad(
         # buffer and no scatter copy. Only multi-bucket (skewed) launches allocate a
         # bucket-local output and scatter it back into dW.
         direct = ids == list(range(num_groups))
-        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
-                                             device=device)
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype, device=device)
 
-        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-            bsize, num_pid_m, num_pid_n, device
-        )
+        work_queue, num_tiles = gd.build_wgrad_work_queue(bsize, num_pid_m, num_pid_n, device)
         sched = _select_grouped_sched(num_tiles, device)
+        work_counter = gd.work_counter(sched, device)
 
         _half_prec_doGemm(
             dy_data,
@@ -1459,6 +1462,7 @@ def _run_bf16_grouped_wgrad(
             sched=sched,
             wgrad=True,
             a_data_ptrs=dy_ptrs,
+            num_work=num_tiles,
             b_data_ptrs=x_ptrs,
         )
 
@@ -1480,9 +1484,9 @@ def _fp8_scale_arg(scale):
 
 def _run_fp8_grouped(
     a_data,
-    a_scale_vec,      # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
+    a_scale_vec,  # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
     b_data,
-    b_scale_vec,      # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
+    b_scale_vec,  # [num_groups] fp32 per-expert inverse scales, or int64 scale_inv pointers
     D,
     *,
     m_splits,
@@ -1534,10 +1538,11 @@ def _run_fp8_grouped(
     from .fp8_gemm import _BLOCK_M, _BLOCK_N
 
     num_pid_n = n // _BLOCK_N
-    work_queue, work_counter, num_tiles = gd.build_fwd_dgrad_work_queue(
+    work_queue, num_tiles = gd.build_fwd_dgrad_work_queue(
         m_splits, num_pid_n, _BLOCK_M, a_data.device
     )
     sched = _select_grouped_sched(num_tiles, a_data.device)
+    work_counter = gd.work_counter(sched, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
     _fp8_doGemm(
@@ -1554,6 +1559,7 @@ def _run_fp8_grouped(
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
         a_data_ptrs=a_data_ptrs,
+        num_work=num_tiles,
         sched=sched,
         m=m_total,
         n=n,
@@ -1563,11 +1569,11 @@ def _run_fp8_grouped(
 
 
 def _run_fp8_grouped_wgrad(
-    dyt_cols,         # list[G] of per-expert dY^T (host-transposed) [N_out, m_e]
-    dy_scale_vec,     # [num_groups] fp32 inverse scales for dY, or list[G] of per-expert scale_inv
-    xt_cols,          # list[G] of per-expert X^T (host-transposed) [K_in, m_e]
-    x_scale_vec,      # [num_groups] fp32 inverse scales for X, or list[G] of per-expert scale_inv
-    dW,               # output [G*N_out, K_in]
+    dyt_cols,  # list[G] of per-expert dY^T (host-transposed) [N_out, m_e]
+    dy_scale_vec,  # [num_groups] fp32 inverse scales for dY, or list[G] of per-expert scale_inv
+    xt_cols,  # list[G] of per-expert X^T (host-transposed) [K_in, m_e]
+    x_scale_vec,  # [num_groups] fp32 inverse scales for X, or list[G] of per-expert scale_inv
+    dW,  # output [G*N_out, K_in]
     *,
     m_splits,
     n_out,
@@ -1653,13 +1659,11 @@ def _run_fp8_grouped_wgrad(
             x_scale_b = x_scale_vec[idx]
 
         direct = ids == list(range(num_groups))
-        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype,
-                                             device=device)
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype, device=device)
 
-        work_queue, work_counter, num_tiles = gd.build_wgrad_work_queue(
-            bsize, num_pid_m, num_pid_n, device
-        )
+        work_queue, num_tiles = gd.build_wgrad_work_queue(bsize, num_pid_m, num_pid_n, device)
         sched = _select_grouped_sched(num_tiles, device)
+        work_counter = gd.work_counter(sched, device)
 
         _fp8_doGemm(
             dy_data,
@@ -1677,6 +1681,7 @@ def _run_fp8_grouped_wgrad(
             n=k_in,
             k=k_pad,
             a_data_ptrs=dy_ptrs,
+            num_work=num_tiles,
             b_data_ptrs=x_ptrs,
         )
 

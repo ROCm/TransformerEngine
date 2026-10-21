@@ -90,6 +90,9 @@ def _compiled_launch(key, jit_fn, args):
     first call; it is used once to compile, then the cached CompiledFunction is
     reused positionally for all later calls with the same ABI.
     """
+    # A compiled launcher is built for the current device; key on it so a launch on
+    # another device compiles its own instead of reusing this one.
+    key = (key, torch.cuda.current_device())
     cf = _COMPILED_LAUNCH_CACHE.get(key)
     if cf is None:
         cf = flyc.compile(jit_fn, *args)
@@ -311,7 +314,7 @@ def pack_mx32_scales_for_hk(
         device=scales_u8.device,
     )
     if stream is None:
-        stream = torch.cuda.current_stream(scales_u8.device)
+        stream = gd.current_stream_handle(scales_u8.device)
 
     stride0, stride1 = (int(x) for x in scales_u8.stride())
     pack_key = ("mx32_scale_pack", dim, qk, bool(source_colwise), stride0, stride1)
@@ -337,8 +340,9 @@ def pack_mx32_scales_for_hk_experts(
     expert in place through ``grouped_gemm_utils.stacked_operand`` pointers. Falls
     back to packing a real concat when the tensors cannot be addressed in place.
     """
-    stacked = gd.stacked_operand(scales, scales[0].device)
-    if stacked is None or any(t.dim() != 2 for t in scales):
+    # stacked_operand requires one common trailing shape, so rank 2 holds for all.
+    stacked = gd.stacked_operand(scales, scales[0].device) if scales[0].dim() == 2 else None
+    if stacked is None:
         return pack_mx32_scales_for_hk(
             torch.cat(scales, dim=0), source_colwise=source_colwise, stream=stream
         )
@@ -346,8 +350,9 @@ def pack_mx32_scales_for_hk_experts(
     if representative.dtype != torch.uint8:
         raise TypeError(f"MXFP8 scales must be torch.uint8 E8M0 bytes, got {representative.dtype}")
 
-    total = sum(t.size(0) for t in scales)
-    inner = representative.size(1)
+    extents = [t.shape[0] for t in scales]
+    total = sum(extents)
+    inner = representative.shape[1]
     if source_colwise:
         qk, dim = total, inner
         # Experts stack on K/32; each thread's bytes share one K128 block (4 rows).
@@ -356,13 +361,11 @@ def pack_mx32_scales_for_hk_experts(
         dim, qk = total, inner
         # Experts stack on dim; each thread's bytes share one 64-row tile.
         block = 64
-    expert_table = gd.block_expert_table(
-        [t.size(0) for t in scales], block, representative.device
-    )
+    expert_table = gd.block_expert_table(extents, block, representative.device)
 
     packed = torch.empty((qk // 4, dim), dtype=torch.int32, device=representative.device)
     if stream is None:
-        stream = torch.cuda.current_stream(representative.device)
+        stream = gd.current_stream_handle(representative.device)
     # The shifted pointers address the contiguous concatenation, so its strides apply.
     stride0, stride1 = inner, 1
     pack_key = ("mx32_scale_pack_experts", dim, qk, bool(source_colwise), stride0, stride1)
@@ -668,13 +671,11 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
     ):
-        # Total output tiles. Dense uses this as the grid extent; grouped uses it as
-        # the drain bound for the persistent loop. For fwd/dgrad, c_m = M_total spans
-        # all experts, so this is already the total. For wgrad, c_m = N_out is the
-        # PER-EXPERT output-row count (the packed output [G*N_out, K_in] is addressed
-        # via store_m_expert_off), so multiply by num_groups for the full count.
-        num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
+        # Grouped drain bound: the exact number of descriptors the host wrote to
+        # ``work_queue`` (``num_work``), so no slot past the queue end is ever read.
+        num_tiles = num_work
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -938,9 +939,7 @@ def _compile_kernel(
             # store_m_expert_off (grouped wgrad only) shifts the output row into this
             # tile's expert block of the packed [G*N_out, K_in] weight-gradient; the
             # a/b operands used local (per-expert) pid_m, so the store re-packs here.
-            c_tile_base_elems = (
-                (bx_m_idx + store_m_expert_off) * fx.Index(c_n) + by_n_idx
-            )
+            c_tile_base_elems = (bx_m_idx + store_m_expert_off) * fx.Index(c_n) + by_n_idx
             gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
             c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
             c_store_atom = fx.make_copy_atom(
@@ -971,7 +970,11 @@ def _compile_kernel(
                 gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
                 aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
                 aux_store_atom = fx.make_copy_atom(
-                    fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                    (
+                        fx.rocdl.BufferCopy32b()
+                        if output_element_bytes == 4
+                        else fx.rocdl.BufferCopy16b()
+                    ),
                     output_fx_dtype,
                 )
 
@@ -1137,9 +1140,7 @@ def _compile_kernel(
                 # every other path.
                 a_g2s.load_one(
                     lds_a[subtile],
-                    fx.Int32(
-                        _a_global_base(k_base + a_expert_k_off, subtile, c_m, bx_m_idx)
-                    ),
+                    fx.Int32(_a_global_base(k_base + a_expert_k_off, subtile, c_m, bx_m_idx)),
                     pass_in_subtile,
                 )
 
@@ -1150,9 +1151,7 @@ def _compile_kernel(
                 # packed column by_n_b_idx and the expert contraction shift b_k_off.
                 b_g2s.load_one(
                     lds_b[subtile],
-                    fx.Int32(
-                        _b_global_base(k_base + b_k_off, subtile, c_n, b_data_col)
-                    ),
+                    fx.Int32(_b_global_base(k_base + b_k_off, subtile, c_n, b_data_col)),
                     pass_in_subtile,
                 )
 
@@ -1214,7 +1213,9 @@ def _compile_kernel(
 
             def _acc_idx(subtile_id, mi, ni):
                 return (
-                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE
+                    + mi * MFMA_N_PER_SUBTILE
+                    + ni
                 )
 
             def pinned_mfma(acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
@@ -1527,7 +1528,9 @@ def _compile_kernel(
                 # LDS reads consume the already-ready next page, not the page being refilled.
                 rocdl.sched_barrier(0)
                 barrier(
-                    vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES,
+                    vmcnt=2 * LOAD_PASSES_A_SUBTILE
+                    + 2 * LOAD_PASSES_B_SUBTILE
+                    + LOAD_PASSES_SCALES,
                     lgkmcnt=0,
                 )
                 rocdl.sched_barrier(0)
@@ -1913,6 +1916,7 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
         stream: fx.Stream = fx.Stream(None),
     ):
         # The integration only dispatches aligned shapes; no partial-tile masking exists.
@@ -1937,6 +1941,7 @@ def _compile_kernel(
             work_counter,
             b_data_ptrs,
             a_data_ptrs,
+            num_work,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1961,6 +1966,7 @@ def do_gemm(
     work_counter: fx.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
     a_data_ptrs: torch.Tensor = None,
+    num_work: int = 0,
     a_shape=None,
     b_shape=None,
     sched: str = "worksteal",
@@ -1990,25 +1996,20 @@ def do_gemm(
     else:
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    # Grouped NN packs B along the contraction axis, so the packed B's contraction
-    # dim is G x A's (Kb_runtime = G*N_out vs K_runtime = N_out). With per-expert
-    # weight pointers B is a per-expert [N_out, K_in] representative, so its
-    # contraction already equals A's. Every other case has them equal.
-    if group and layout == "NN" and b_data_ptrs is None:
-        assert Kb_runtime == num_groups * K_runtime, (
-            f"grouped NN B.K={Kb_runtime} != num_groups*A.K={num_groups * K_runtime}"
-        )
-    else:
-        assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
+    # Grouped launches read B from per-expert weight pointers, so B is a per-expert
+    # representative whose contraction equals A's (as in the dense case).
+    if group and b_data_ptrs is None:
+        raise FlyDSLUnsupportedError("grouped MXFP8 GEMM requires per-expert weight pointers")
+    assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
 
     # Grouped wgrad (NT): both operands (dY, X) are packed on the token/contraction
     # axis to G*M_pad, but the kernel's compile-time contraction is the PER-EXPERT
     # padded token count M_pad. M_runtime (=N_out) and N_runtime (=K_in) are already
     # per-expert; only K_runtime must be de-packed.
     if wgrad:
-        assert K_runtime % num_groups == 0, (
-            f"grouped wgrad contraction {K_runtime} not divisible by num_groups={num_groups}"
-        )
+        assert (
+            K_runtime % num_groups == 0
+        ), f"grouped wgrad contraction {K_runtime} not divisible by num_groups={num_groups}"
         K_runtime = K_runtime // num_groups
 
     # Grouped fwd/dgrad launch over the per-expert output width = C's last dim (TN:
@@ -2048,13 +2049,11 @@ def do_gemm(
         expected_bs = (packed_k128, N_runtime)
     else:
         expected_as = (K_runtime // _BLOCK_K, M_runtime)
-        # TN packs B along N (column count = G*N_out); NN packs B along the
-        # contraction axis (row count on K128 = G*N_out/128). The B-scale stays packed
-        # even when the B data is addressed per-expert, so recover the packed
-        # contraction (Kb_runtime is per-expert N_out when pointers are used).
+        # TN packs the B-scale along N (column count = G*N_out); NN packs it along the
+        # contraction axis (row count on K128 = G*N_out/128). Kb_runtime is the
+        # per-expert N_out, since the B data is addressed per expert.
         if group and layout == "NN":
-            kb_packed = Kb_runtime * num_groups if b_data_ptrs is not None else Kb_runtime
-            expected_bs = (kb_packed // _BLOCK_K, N_runtime)
+            expected_bs = ((Kb_runtime * num_groups) // _BLOCK_K, N_runtime)
         else:
             n_packed = N_runtime * num_groups if group else N_runtime
             expected_bs = (K_runtime // _BLOCK_K, n_packed)
@@ -2107,7 +2106,7 @@ def do_gemm(
         raise ValueError(f"MXFP8 epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = torch.cuda.current_stream()
+        stream = gd.current_stream_handle(A.device)
 
     # A non-contiguous output cannot receive the kernel's writes: the flat
     # descriptor below would target a throwaway ``.contiguous()`` copy. Reject
@@ -2137,6 +2136,12 @@ def do_gemm(
     # binary never dereferences them but still needs placeholder buffers. wgrad
     # uses the same persistent descriptor queue as the grouped fwd/dgrad path.
     if group or wgrad:
+        # num_work is the kernel's drain bound: it must be the queue's descriptor count.
+        if work_queue.numel() != 3 * int(num_work):
+            raise ValueError(
+                f"num_work={num_work} does not match work_queue of {work_queue.numel()} "
+                "int32 (3 per descriptor)"
+            )
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
@@ -2186,6 +2191,7 @@ def do_gemm(
         work_counter_arg,
         b_data_ptrs_arg,
         a_data_ptrs_arg,
+        int(num_work),
         stream,
     )
     _compiled_launch(
@@ -2252,11 +2258,11 @@ def _validate_common_payloads(
 
 
 def _mxfp8_matmul_grouped_wgrad(
-    a,           # dY packed [G*M_pad, N_out], columnwise fp8
-    a_scale,     # [G*M_pad/32, N_out] raw E8M0 uint8, or list[G] of per-expert scales
-    b,           # X packed [G*M_pad, K_in], columnwise fp8
-    b_scale,     # [G*M_pad/32, K_in] raw E8M0 uint8, or list[G] of per-expert scales
-    D,           # dW packed [G*N_out, K_in]
+    a,  # dY packed [G*M_pad, N_out], columnwise fp8
+    a_scale,  # [G*M_pad/32, N_out] raw E8M0 uint8, or list[G] of per-expert scales
+    b,  # X packed [G*M_pad, K_in], columnwise fp8
+    b_scale,  # [G*M_pad/32, K_in] raw E8M0 uint8, or list[G] of per-expert scales
+    D,  # dW packed [G*N_out, K_in]
     *,
     stream,
     num_groups,
@@ -2265,6 +2271,7 @@ def _mxfp8_matmul_grouped_wgrad(
     sched,
     a_data_ptrs=None,
     b_data_ptrs=None,
+    num_work=0,
     a_shape=None,
     b_shape=None,
 ):
@@ -2286,13 +2293,10 @@ def _mxfp8_matmul_grouped_wgrad(
     m_pad = gm // num_groups
     if m_pad % SCALE_GROUP_SIZE != 0:
         raise FlyDSLUnsupportedError(
-            f"wgrad padded per-expert tokens M_pad={m_pad} must be divisible by "
-            f"{SCALE_GROUP_SIZE}"
+            f"wgrad padded per-expert tokens M_pad={m_pad} must be divisible by {SCALE_GROUP_SIZE}"
         )
     if tuple(D.shape) != (num_groups * n_out, k_in):
-        raise ValueError(
-            f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}"
-        )
+        raise ValueError(f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}")
     if _scale_dtype(a_scale) != torch.uint8 or _scale_dtype(b_scale) != torch.uint8:
         raise TypeError("FlyDSL MXFP8 wgrad expects raw E8M0 scales as torch.uint8")
 
@@ -2316,6 +2320,7 @@ def _mxfp8_matmul_grouped_wgrad(
         a_data_ptrs=a_data_ptrs,
         a_shape=a_shape,
         b_shape=b_shape,
+        num_work=num_work,
         sched=sched,
         wgrad=True,
     )
@@ -2340,6 +2345,7 @@ def mxfp8_matmul(
     work_counter: fx.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
     a_data_ptrs: torch.Tensor = None,
+    num_work: int = 0,
     a_shape=None,
     b_shape=None,
     sched: str = "worksteal",
@@ -2383,6 +2389,7 @@ def mxfp8_matmul(
             b_data_ptrs=b_data_ptrs,
             a_shape=a_shape,
             b_shape=b_shape,
+            num_work=num_work,
         )
 
     if group and layout not in ("TN", "NN"):
@@ -2420,42 +2427,18 @@ def mxfp8_matmul(
     #     [G*N_out, K_in] on that CONTRACTION axis. So B's first dim kb = G*N_out
     #     is G x A's per-expert contraction k = N_out (kb != k by design), and the
     #     output width n = K_in is NOT packed. D = [M_total, K_in] = (m, n).
+    if group and b_data_ptrs is None:
+        raise FlyDSLUnsupportedError("grouped MXFP8 GEMM requires per-expert weight pointers")
     if group and layout == "TN":
-        # Per-expert weight pointers: B is a per-expert [N_out, K] representative,
-        # so b.shape[0] already IS N_out. Without pointers B is the packed [G*N_out,
-        # K] and N_out unpacks. Either way n_packed = G*N_out for the B-scale, which
-        # stays packed.
-        if b_data_ptrs is not None:
-            n_out = n
-        else:
-            if n % num_groups != 0:
-                raise ValueError(
-                    f"Grouped MXFP8 TN packed N={n} is not divisible by num_groups={num_groups}"
-                )
-            n_out = n // num_groups
+        # B is a per-expert [N_out, K] representative read through b_data_ptrs, so
+        # b.shape[0] already IS N_out; the B-scale still spans G*N_out rows.
+        n_out = n
         expected_kb = k  # contraction unpacked; B rows already per-K
     elif group and layout == "NN":
-        # Per-expert weight pointers: B is a per-expert [N_out, K_in] representative,
-        # so b.shape[0] IS the per-expert contraction N_out (= k). Without pointers B
-        # is the packed [G*N_out, K_in] and the contraction unpacks.
-        if b_data_ptrs is not None:
-            if kb != k:
-                raise ValueError(
-                    f"Grouped MXFP8 NN per-expert B contraction {kb} != A contraction {k}"
-                )
-        else:
-            if kb % num_groups != 0:
-                raise ValueError(
-                    f"Grouped MXFP8 NN packed contraction={kb} not divisible by "
-                    f"num_groups={num_groups}"
-                )
-            if kb // num_groups != k:
-                raise ValueError(
-                    f"Grouped MXFP8 NN per-expert contraction {kb // num_groups} "
-                    f"!= A contraction {k}"
-                )
+        # B is a per-expert [N_out, K_in] representative read through b_data_ptrs, so
+        # b.shape[0] IS the per-expert contraction N_out (= k).
         n_out = n  # output width (K_in) is not packed
-        expected_kb = kb  # checked above (per-expert or packed)
+        expected_kb = k
     else:
         n_out = n
         expected_kb = k
@@ -2480,17 +2463,13 @@ def mxfp8_matmul(
         expected_a_scale = (m, k // SCALE_GROUP_SIZE)
 
     if layout == "TN":
-        # Grouped TN packs the B scale along N, spanning G*N_out rows. With per-expert
-        # weight pointers B is per-expert so n == N_out; scale rows are n_out*num_groups.
-        # Without pointers (packed B) n already is G*N_out.
-        b_scale_rows = n_out * num_groups if (group and b_data_ptrs is not None) else n
+        # Grouped TN packs the B scale along N, spanning G*N_out rows (n == N_out).
+        b_scale_rows = n_out * num_groups if group else n
         expected_b_scale = (b_scale_rows, k // SCALE_GROUP_SIZE)
     else:
         # NN/NT B scale is [contraction/32, N]. Grouped NN packs the scale along the
-        # contraction axis (G*N_out rows). With per-expert weight pointers kb is the
-        # per-expert N_out, so the packed scale spans kb*num_groups; without pointers
-        # kb already is G*N_out.
-        kb_packed = kb * num_groups if (group and b_data_ptrs is not None) else kb
+        # contraction axis: kb is the per-expert N_out, so it spans kb*num_groups rows.
+        kb_packed = kb * num_groups if group else kb
         expected_b_scale = (kb_packed // SCALE_GROUP_SIZE, n)
 
     if _scale_shape(a_scale) != expected_a_scale:
@@ -2573,6 +2552,7 @@ def mxfp8_matmul(
         b_data_ptrs=b_data_ptrs,
         a_data_ptrs=a_data_ptrs,
         a_shape=a_shape,
+        num_work=num_work,
         sched=sched,
     )
     return D

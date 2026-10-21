@@ -221,6 +221,7 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -258,11 +259,12 @@ def _compile_kernel(
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
-        # Total output tiles. Dense uses this as the grid extent; grouped uses it as
-        # the persistent-loop drain bound. ``grouped`` gates the shared descriptor
-        # queue / work-steal driver; const_expr folds it out of the dense binary.
+        # ``grouped`` gates the shared descriptor queue / work-steal driver;
+        # const_expr folds it out of the dense binary.
         grouped = group or wgrad
-        num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
+        # Grouped drain bound: the exact number of descriptors the host wrote to
+        # ``work_queue`` (``num_work``), so no slot past the queue end is ever read.
+        num_tiles = num_work
 
         # weight_ptrs: weights are G independently-allocated per-expert slabs,
         # addressed from a per-expert base pointer read from ``b_data_ptrs`` (reusing
@@ -437,7 +439,11 @@ def _compile_kernel(
                 gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
                 aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
                 aux_store_atom = fx.make_copy_atom(
-                    fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                    (
+                        fx.rocdl.BufferCopy32b()
+                        if output_element_bytes == 4
+                        else fx.rocdl.BufferCopy16b()
+                    ),
                     output_fx_dtype,
                 )
 
@@ -547,9 +553,8 @@ def _compile_kernel(
                 # wgrad, where A = dY^T is packed [G*N_out, m_pad] on the M-row); 0
                 # for dense and grouped fwd/dgrad (A is per-token, absolute rows).
                 global_base = (
-                    (bx_m_idx + a_expert_m_off + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K)
-                    + k_base
-                )
+                    bx_m_idx + a_expert_m_off + fx.Index(subtile * (BLOCK_M // 2))
+                ) * fx.Index(K) + k_base
                 a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
             def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
@@ -557,10 +562,8 @@ def _compile_kernel(
                 # view (b_g2s) with a LOCAL column (b_data_col). Other paths: by_n_b_idx
                 # shifts the B row to the expert block (grouped dgrad weights, grouped
                 # wgrad X^T); reduces to dense by_n for the dense path.
-                global_base = (
-                    (b_data_col + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K)
-                    + k_base
-                )
+                b_row = b_data_col + fx.Index(subtile * (BLOCK_N // 2))
+                global_base = b_row * fx.Index(K) + k_base
                 b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
             def stage_a_subtile(k_base, subtile, lds_a):
@@ -594,7 +597,9 @@ def _compile_kernel(
 
             def _acc_idx(subtile_id, mi, ni):
                 return (
-                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE
+                    + mi * MFMA_N_PER_SUBTILE
+                    + ni
                 )
 
             def pinned_mfma(acc_idx, a_frag, b_frag):
@@ -713,7 +718,9 @@ def _compile_kernel(
 
             def load_b_subtile_ni_regs(lds_b, sn, ni):
                 subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-                b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
+                b_row_addr = (
+                    subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
+                )
                 return load_b_frag(lds_b, b_row_addr, sn)
 
             def load_b_subtile_regs(lds_b, sn):
@@ -726,7 +733,9 @@ def _compile_kernel(
 
             def load_a_subtile_mi_half(lds_a, sm, mi, half):
                 subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-                a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
+                a_row_addr = (
+                    subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
+                )
                 half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
                 row_byte_base = half_row * fx.Index(BLOCK_K)
                 return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
@@ -1150,6 +1159,7 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1173,6 +1183,7 @@ def _compile_kernel(
             work_counter,
             b_data_ptrs,
             a_data_ptrs,
+            num_work,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1215,6 +1226,9 @@ def _compiled_launch(key, jit_fn, args):
     for the first call; used once to compile, then the cached CompiledFunction is
     reused positionally for all later calls with the same ABI.
     """
+    # A compiled launcher is built for the current device; key on it so a launch on
+    # another device compiles its own instead of reusing this one.
+    key = (key, torch.cuda.current_device())
     cf = _COMPILED_LAUNCH_CACHE.get(key)
     if cf is None:
         cf = flyc.compile(jit_fn, *args)
@@ -1314,6 +1328,7 @@ def doGemm(
     work_counter: torch.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
     a_data_ptrs: torch.Tensor = None,
+    num_work: int = 0,
     sched: str = "worksteal",
     wgrad: bool = False,
     m: int = None,
@@ -1398,7 +1413,7 @@ def doGemm(
         raise ValueError(f"FP8 epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = torch.cuda.current_stream()
+        stream = gd.current_stream_handle(A.device)
 
     A_arg = A.view(torch.uint8).contiguous().view(-1)
     B_arg = B.view(torch.uint8).contiguous().view(-1)
@@ -1420,6 +1435,12 @@ def doGemm(
     # Grouped runtime tensors are required by the kernel signature; the dense
     # binary never dereferences them but still needs placeholder buffers.
     if group or wgrad:
+        # num_work is the kernel's drain bound: it must be the queue's descriptor count.
+        if work_queue.numel() != 3 * int(num_work):
+            raise ValueError(
+                f"num_work={num_work} does not match work_queue of {work_queue.numel()} "
+                "int32 (3 per descriptor)"
+            )
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
@@ -1473,6 +1494,7 @@ def doGemm(
         work_counter_arg,
         b_data_ptrs_arg,
         a_data_ptrs_arg,
+        int(num_work),
         stream,
     )
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +

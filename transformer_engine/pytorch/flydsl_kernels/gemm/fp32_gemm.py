@@ -1003,6 +1003,9 @@ def _compiled_launch(key, jit_fn, args):
     for the first call; used once to compile, then the cached CompiledFunction is
     reused positionally for all later calls with the same ABI.
     """
+    # A compiled launcher is built for the current device; key on it so a launch on
+    # another device compiles its own instead of reusing this one.
+    key = (key, torch.cuda.current_device())
     cf = _COMPILED_LAUNCH_CACHE.get(key)
     if cf is None:
         cf = flyc.compile(jit_fn, *args)

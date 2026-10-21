@@ -177,7 +177,7 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5),): #TODO: enable for gfx1250 when GEMM is available
+        if gpu_arch in ((9, 5),):  # TODO: enable for gfx1250 when GEMM is available
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
@@ -343,13 +343,14 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     # alignment as the conservative fallback for context-free callers.
     if recipe.custom():
         return recipe.quantization_alignment
-    # The FlyDSL grouped GEMM (gfx950 opt-in) tiles every expert with BLOCK_M=256
-    # across all dtypes, so per-expert token counts must be 256-aligned regardless of
-    # recipe.
+    # The FlyDSL grouped GEMM (gfx950 opt-in) tiles every expert with BLOCK_M=256, so
+    # per-expert token counts must be 256-aligned for the recipes it handles (MXFP8 and
+    # tensor-wise FP8); other recipes fall back and keep their own alignment.
     if (
         IS_HIP_EXTENSION
         and get_device_compute_capability() == (9, 5)
         and os.environ.get("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+        and (recipe.mxfp8() or recipe.float8_current_scaling() or recipe.delayed())
     ):
         return 256
     if recipe.mxfp8():
@@ -360,11 +361,7 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         use_ck = os.environ.get("NVTE_USE_CK_GROUPED_GEMM", "0") == "1"
         use_cutlass = os.environ.get("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
         use_hipkittens = use_hk or (use_cutlass and not use_ck)
-        if (
-            IS_HIP_EXTENSION
-            and get_device_compute_capability() == (9, 5)
-            and use_hipkittens
-        ):
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and use_hipkittens:
             return 256
         return 32
     if recipe.nvfp4():
@@ -470,6 +467,7 @@ def is_fp8_block_scaling_available(return_reason: bool = False) -> Union[bool, T
         return check_fp8_block_scaling_support()
     return check_fp8_block_scaling_support()[0]
 
+
 def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
     Determine if support is available for the NVFP4 recipe.
@@ -487,6 +485,7 @@ def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
         return check_nvfp4_support()
     return check_nvfp4_support()[0]
 
+
 def is_mxfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
     Determine if support is available for the MXFP4 recipe.
@@ -502,6 +501,7 @@ def is_mxfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
     if return_reason:
         return check_mxfp4_support()
     return check_mxfp4_support()[0]
+
 
 @dataclass(slots=True)
 class FP8GlobalState:
@@ -923,7 +923,13 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if not cls.SKIP_FP8_REDUCTION_FOR_FSDP2 and enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
+        if (
+            not cls.SKIP_FP8_REDUCTION_FOR_FSDP2
+            and enabled
+            and qstate.autocast_depth == 0
+            and not _graph
+            and torch.is_grad_enabled()
+        ):
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)

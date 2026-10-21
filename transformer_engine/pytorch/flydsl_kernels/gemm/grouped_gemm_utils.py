@@ -15,7 +15,7 @@ kernel's own source, so that runtime-SSA control flow MUST stay inline in each
 ``kernel_gemm``. What's shared instead:
 
 * **Device-side IR emitters** (``global_i32_ptr``, ``make_claim_broadcast``,
-  ``read_desc_field``, ``num_tiles_bound``) -- control-flow-free functions that
+  ``read_desc_field``) -- control-flow-free functions that
   append IR at the current insertion point, so they emit identically whether
   defined inline or imported.
 * **Host-side builders** (descriptor-queue construction, schedule selection,
@@ -26,6 +26,7 @@ kernel's own source, so that runtime-SSA control flow MUST stay inline in each
 import functools
 import os
 
+import numpy as np
 import torch
 
 import flydsl.expr as fx
@@ -33,6 +34,8 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm
 from flydsl.expr.typing import T
+
+from .exceptions import FlyDSLUnsupportedError
 
 
 # ---------------------------------------------------------------------------
@@ -138,20 +141,6 @@ def read_desc_field(wq_div, desc_ld_atom, slot, field):
     return fx.memref_load_vec(reg)[0]
 
 
-def num_tiles_bound(c_m, c_n, block_m, block_n, num_groups, wgrad):
-    """Drain bound for the persistent loop.
-
-    For dense/grouped fwd/dgrad, ``c_m`` already spans all experts, so the tile
-    count is complete. For wgrad, ``c_m = N_out`` is the PER-EXPERT output-row
-    count (the packed ``[G*N_out, K_in]`` output is addressed via
-    ``store_m_expert_off``), so multiply by ``num_groups``.
-    """
-    num_tiles = (c_m // block_m) * (c_n // block_n)
-    if wgrad:
-        num_tiles = num_tiles * num_groups
-    return num_tiles
-
-
 # ---------------------------------------------------------------------------
 # Host-side builders (plain torch; dtype-independent)
 # ---------------------------------------------------------------------------
@@ -176,75 +165,126 @@ def select_grouped_sched(num_tiles: int, device) -> str:
         raise ValueError(
             f"NVTE_FLYDSL_GROUPED_SCHED must be auto|static|worksteal, got {override!r}"
         )
-    num_cus = torch.cuda.get_device_properties(device).multi_processor_count
-    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * num_cus else "worksteal"
+    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * _num_cus(device) else "worksteal"
 
 
-@functools.lru_cache(maxsize=512)
-def _fwd_dgrad_queue_cached(m_splits, num_pid_n, block_m, device):
-    """Cached flat ``(pid_m, pid_n, expert)`` work queue for a fwd/dgrad shape.
+@functools.lru_cache(maxsize=None)
+def _num_cus(device):
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
-    Keyed by the per-expert token counts + tiling, so repeated calls with the same
-    ``m_splits`` (every microbatch in training, every bench iteration) reuse one
-    already-uploaded queue instead of rebuilding + re-H2D-copying it each forward.
-    Built from the Python ``m_splits`` tuple directly -- NO device->host copy of
-    ``group_offs`` (that copy forced a ``hipDeviceSynchronize`` that stranded the
-    GPU idle for hundreds of microseconds before the kernel).
+
+# Per-call metadata caches. Keys include the current stream: a cached device tensor is
+# filled by a non-blocking copy on the stream that first built it, so only launches on
+# that stream are ordered after the copy. Pointer arrays and block tables are tiny
+# (<= a few KB each), so their cache is large enough to hold a training step's worth of
+# rotating per-expert buffers (each step adds several arrays); the work queues can be
+# much larger, so their cache stays small.
+_SMALL_CACHE_SIZE = 512
+_QUEUE_CACHE_SIZE = 64
+
+
+def current_stream_handle(device=None):
+    """Raw handle of the current stream on ``device`` (default: the current device).
+
+    FlyDSL launchers accept an int stream, and this is ~20x cheaper than building a
+    torch ``Stream`` object per launch.
     """
-    descriptors = []
-    off = 0
-    for g, m in enumerate(m_splits):
-        m_start_blk = off // block_m
-        m_end_blk = (off + m) // block_m
-        for pid_m in range(m_start_blk, m_end_blk):
-            for pid_n in range(num_pid_n):
-                descriptors.append((pid_m, pid_n, g))
-        off += m
-    num_tiles = len(descriptors)
-    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
-    return work_queue, num_tiles
+    index = None if device is None else device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    return torch._C._cuda_getCurrentRawStream(index)
+
+
+def upload_to_device(host, device):
+    """Copy a host CPU tensor to ``device`` without blocking the host.
+
+    ``torch.tensor(..., device="cuda")`` waits for all queued GPU work before copying,
+    which stalls the host on every call. Staging through pinned memory and copying
+    ``non_blocking`` does not; the caching host allocator keeps the pinned block alive
+    until the copy has run. The staging block comes from ``torch.empty(pin_memory=True)``
+    (the caching host allocator) rather than ``Tensor.pin_memory()``, which is ~3x slower
+    per call while GPU work is queued.
+    """
+    staging = torch.empty(host.shape, dtype=host.dtype, pin_memory=True)
+    staging.copy_(host)
+    return staging.to(device, non_blocking=True)
+
+
+@functools.lru_cache(maxsize=_QUEUE_CACHE_SIZE)
+def _fwd_dgrad_queue_cached(m_splits, num_pid_n, block_m, device, stream):
+    """Flat ``(pid_m, pid_n, expert)`` work queue for a fwd/dgrad shape.
+
+    Every expert's token count is a ``block_m`` multiple, so the expert row blocks tile
+    ``[0, M_total)`` in order: the queue is each row block repeated over the output
+    columns, tagged with its expert. Built with numpy from the host ``m_splits`` (no
+    device->host copy of ``group_offs``) and uploaded without blocking the host.
+    """
+    blocks = np.asarray(m_splits, dtype=np.int64) // block_m
+    num_blocks = int(blocks.sum())
+    queue = np.empty((num_blocks, num_pid_n, 3), dtype=np.int32)
+    queue[:, :, 0] = np.arange(num_blocks, dtype=np.int32)[:, None]
+    queue[:, :, 1] = np.arange(num_pid_n, dtype=np.int32)[None, :]
+    queue[:, :, 2] = np.repeat(np.arange(len(m_splits), dtype=np.int32), blocks)[:, None]
+    work_queue = upload_to_device(torch.from_numpy(queue.reshape(-1)), device)
+    return work_queue, num_blocks * num_pid_n
 
 
 def build_fwd_dgrad_work_queue(m_splits, num_pid_n, block_m, device):
-    """Return ``(work_queue, work_counter, num_tiles)`` for a fwd/dgrad launch.
+    """Return ``(work_queue, num_tiles)`` for a fwd/dgrad launch.
 
-    The descriptor queue is cached (shape-only, data-independent) so only the first
-    call with a given ``m_splits`` pays the build+upload; the zeroed atomic counter
-    is cheap and allocated fresh each call. ``m_splits`` is a Python list/tuple of
-    per-expert token counts -- no GPU->CPU sync.
+    Raises ``FlyDSLUnsupportedError`` when an expert's token count is not a ``block_m``
+    multiple: the kernel tiles each expert in whole ``block_m`` row blocks, so a
+    misaligned split would silently mix experts within a tile. ``num_tiles`` is the
+    exact queue length, which the kernel uses as its drain bound. ``m_splits`` is a
+    Python list/tuple of per-expert token counts -- no GPU->CPU sync.
     """
-    work_queue, num_tiles = _fwd_dgrad_queue_cached(
-        tuple(int(m) for m in m_splits), int(num_pid_n), int(block_m), device
+    m_splits = tuple(int(m) for m in m_splits)
+    for g, m in enumerate(m_splits):
+        if m % block_m != 0:
+            raise FlyDSLUnsupportedError(
+                f"m_splits[{g}]={m} is not a multiple of BLOCK_M={block_m}"
+            )
+    return _fwd_dgrad_queue_cached(
+        m_splits, int(num_pid_n), int(block_m), device, current_stream_handle(device)
     )
-    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
-    return work_queue, work_counter, num_tiles
 
 
-@functools.lru_cache(maxsize=512)
-def _wgrad_queue_cached(num_groups, num_pid_m, num_pid_n, device):
-    descriptors = [
-        (pid_m, pid_n, g)
-        for g in range(num_groups)
-        for pid_m in range(num_pid_m)
-        for pid_n in range(num_pid_n)
-    ]
-    num_tiles = len(descriptors)
-    work_queue = torch.tensor(descriptors, dtype=torch.int32, device=device).reshape(-1)
-    return work_queue, num_tiles
+@functools.lru_cache(maxsize=_QUEUE_CACHE_SIZE)
+def _wgrad_queue_cached(num_groups, num_pid_m, num_pid_n, device, stream):
+    queue = np.empty((num_groups, num_pid_m, num_pid_n, 3), dtype=np.int32)
+    queue[..., 0] = np.arange(num_pid_m, dtype=np.int32)[None, :, None]
+    queue[..., 1] = np.arange(num_pid_n, dtype=np.int32)[None, None, :]
+    queue[..., 2] = np.arange(num_groups, dtype=np.int32)[:, None, None]
+    work_queue = upload_to_device(torch.from_numpy(queue.reshape(-1)), device)
+    return work_queue, num_groups * num_pid_m * num_pid_n
 
 
 def build_wgrad_work_queue(num_groups, num_pid_m, num_pid_n, device):
-    """Return cached ``(work_queue, work_counter, num_tiles)`` for a wgrad launch.
+    """Return ``(work_queue, num_tiles)`` for a wgrad launch.
 
     The wgrad descriptor queue depends only on ``(num_groups, num_pid_m, num_pid_n)``
-    (per-expert tile geometry), so it is shape-cached and reused across calls -- no
-    per-call Python rebuild or H2D re-upload. Fresh zeroed atomic counter each call.
+    (per-expert tile geometry), so it is shape-cached and reused across calls;
+    ``num_tiles`` is the kernel's drain bound.
     """
-    work_queue, num_tiles = _wgrad_queue_cached(
-        int(num_groups), int(num_pid_m), int(num_pid_n), device
+    return _wgrad_queue_cached(
+        int(num_groups), int(num_pid_m), int(num_pid_n), device, current_stream_handle(device)
     )
-    work_counter = torch.zeros(1, dtype=torch.int32, device=device)
-    return work_queue, work_counter, num_tiles
+
+
+@functools.lru_cache(maxsize=None)
+def _unused_counter(device):
+    return torch.zeros(1, dtype=torch.int32, device=device)
+
+
+def work_counter(sched, device):
+    """The atomic tile counter a grouped launch needs for schedule ``sched``.
+
+    Work-stealing claims tiles from a freshly zeroed counter. The static schedule never
+    touches it, so it gets a shared placeholder instead of a per-launch zero fill.
+    """
+    if sched == "worksteal":
+        return torch.zeros(1, dtype=torch.int32, device=device)
+    return _unused_counter(device)
 
 
 class _SpanCAI:
@@ -328,27 +368,27 @@ def concat_or_view_rows(tensors):
     row_bytes *= elem
     total_bytes = total_rows * row_bytes
 
-    byte_view = torch.as_tensor(
-        _SpanCAI(total_bytes, first.data_ptr()), device=first.device
-    )
+    byte_view = torch.as_tensor(_SpanCAI(total_bytes, first.data_ptr()), device=first.device)
     view = byte_view.view(first.dtype).view(total_rows, *tuple(trailing))
     view._flydsl_span_anchor = tensors
     return view
 
 
-@functools.lru_cache(maxsize=512)
-def _ptr_array_cached(ptrs, device):
-    return torch.tensor(ptrs, dtype=torch.int64, device=device)
+@functools.lru_cache(maxsize=_SMALL_CACHE_SIZE)
+def _ptr_array_cached(ptrs, device, stream):
+    return upload_to_device(torch.tensor(ptrs, dtype=torch.int64), device)
 
 
 def expert_ptrs(tensors, device):
     """int64[G] device array of each per-expert tensor's ``data_ptr()``.
 
     Grouped kernels read per-expert operands (weights, FP8 scale_inv) through this
-    array instead of a host-side concat. The upload runs only on a cache miss: weights
-    and the caching allocator's per-expert buffers repeat step to step.
+    array instead of a host-side concat. Repeated pointer sets reuse the uploaded array;
+    a new set costs one non-blocking upload.
     """
-    return _ptr_array_cached(tuple(t.data_ptr() for t in tensors), device)
+    return _ptr_array_cached(
+        tuple(t.data_ptr() for t in tensors), device, current_stream_handle(device)
+    )
 
 
 def stacked_operand(tensors, device):
@@ -362,22 +402,23 @@ def stacked_operand(tensors, device):
     non-empty expert tensor standing in for the operand's dtype.
     """
     first = tensors[0]
+    dtype = first.dtype
     trailing = first.shape[1:]
     ptrs = []
     offset = 0
     for t in tensors:
-        if t.dtype != first.dtype or t.shape[1:] != trailing or not t.is_contiguous():
+        if t.dtype is not dtype or t.shape[1:] != trailing or not t.is_contiguous():
             return None
         ptrs.append(t.data_ptr() - offset)
-        offset += t.numel() * t.element_size()
+        offset += t.nbytes
     representative = next((t for t in tensors if t.numel() > 0), first)
-    return representative, _ptr_array_cached(tuple(ptrs), device)
+    return representative, _ptr_array_cached(tuple(ptrs), device, current_stream_handle(device))
 
 
-@functools.lru_cache(maxsize=512)
-def _block_expert_table_cached(blocks_per_expert, device):
-    table = [e for e, n in enumerate(blocks_per_expert) for _ in range(n)]
-    return torch.tensor(table, dtype=torch.int32, device=device)
+@functools.lru_cache(maxsize=_SMALL_CACHE_SIZE)
+def _block_expert_table_cached(blocks_per_expert, device, stream):
+    table = np.repeat(np.arange(len(blocks_per_expert), dtype=np.int32), blocks_per_expert)
+    return upload_to_device(torch.from_numpy(table), device)
 
 
 def block_expert_table(extents, block, device):
@@ -389,7 +430,9 @@ def block_expert_table(extents, block, device):
     for n in extents:
         if int(n) % block != 0:
             raise ValueError(f"per-expert extent {int(n)} is not a multiple of {block}")
-    return _block_expert_table_cached(tuple(int(n) // block for n in extents), device)
+    return _block_expert_table_cached(
+        tuple(int(n) // block for n in extents), device, current_stream_handle(device)
+    )
 
 
 def drop_empty_experts(buckets, m_splits, dW, n_out):
@@ -450,6 +493,7 @@ def bucketize_wgrad_tokens(m_splits, block_m, max_buckets=None):
     unchanged. Returns a list of ``(k_pad, [global_expert_ids])`` tuples, ordered
     by ascending ``k_pad``.
     """
+
     def _round(m):
         return max(((int(m) + block_m - 1) // block_m) * block_m, 512)
 
@@ -463,6 +507,7 @@ def bucketize_wgrad_tokens(m_splits, block_m, max_buckets=None):
         # Simple policy: collapse the sorted distinct values into `max_buckets`
         # contiguous groups, each group promoted to its group-max.
         import math
+
         per = math.ceil(len(distinct) / max_buckets)
         ladder = {}
         for i in range(0, len(distinct), per):

@@ -395,6 +395,7 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -415,12 +416,13 @@ def _compile_kernel(
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
-        # Total output tiles. Dense uses this as the grid extent; grouped uses it as
-        # the persistent-loop drain bound. ``grouped`` gates the shared descriptor
-        # queue / work-steal driver (group fwd/dgrad or the wgrad specialization);
-        # const_expr folds it all out of the dense binary.
+        # ``grouped`` gates the shared descriptor queue / work-steal driver (group
+        # fwd/dgrad or the wgrad specialization); const_expr folds it all out of the
+        # dense binary.
         grouped = group or wgrad
-        num_tiles = gd.num_tiles_bound(c_m, c_n, BLOCK_M, BLOCK_N, num_groups, const_expr(wgrad))
+        # Grouped drain bound: the exact number of descriptors the host wrote to
+        # ``work_queue`` (``num_work``), so no slot past the queue end is ever read.
+        num_tiles = num_work
 
         if const_expr(grouped):
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
@@ -600,7 +602,11 @@ def _compile_kernel(
                 gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
                 aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
                 aux_store_atom = fx.make_copy_atom(
-                    fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                    (
+                        fx.rocdl.BufferCopy32b()
+                        if output_element_bytes == 4
+                        else fx.rocdl.BufferCopy16b()
+                    ),
                     output_fx_dtype,
                 )
 
@@ -792,7 +798,9 @@ def _compile_kernel(
 
             def _acc_idx(subtile_id, mi, ni):
                 return (
-                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+                    subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE
+                    + mi * MFMA_N_PER_SUBTILE
+                    + ni
                 )
 
             def _k32_frag(full_frag, k32):
@@ -1389,6 +1397,7 @@ def _compile_kernel(
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
         a_data_ptrs: fx.Tensor = None,
+        num_work: fx.Int32 = 0,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1410,6 +1419,7 @@ def _compile_kernel(
             work_counter,
             b_data_ptrs,
             a_data_ptrs,
+            num_work,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1478,6 +1488,9 @@ def _compiled_launch(key, jit_fn, args):
     for the first call; used once to compile, then the cached CompiledFunction is
     reused positionally for all later calls with the same ABI.
     """
+    # A compiled launcher is built for the current device; key on it so a launch on
+    # another device compiles its own instead of reusing this one.
+    key = (key, torch.cuda.current_device())
     cf = _COMPILED_LAUNCH_CACHE.get(key)
     if cf is None:
         cf = flyc.compile(jit_fn, *args)
@@ -1654,6 +1667,7 @@ def doGemm(
     work_counter: torch.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
     a_data_ptrs: torch.Tensor = None,
+    num_work: int = 0,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -1671,6 +1685,8 @@ def doGemm(
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported {label} layout: {layout}")
+    if group and b_data_ptrs is None:
+        raise FlyDSLUnsupportedError(f"grouped {label} GEMM requires per-expert weight pointers")
 
     M_runtime = int(m)
     N_runtime = int(n)
@@ -1732,7 +1748,7 @@ def doGemm(
         raise ValueError(f"{label} epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = torch.cuda.current_stream()
+        stream = gd.current_stream_handle(A.device)
 
     # Preserve the original validated byte-addressed G2L path. These are
     # metadata-only dtype/flatten views of the already-contiguous row-major
@@ -1755,6 +1771,12 @@ def doGemm(
     # Grouped runtime tensors are required by the kernel signature; the dense
     # binary never dereferences them but still needs placeholder buffers.
     if group or wgrad:
+        # num_work is the kernel's drain bound: it must be the queue's descriptor count.
+        if work_queue.numel() != 3 * int(num_work):
+            raise ValueError(
+                f"num_work={num_work} does not match work_queue of {work_queue.numel()} "
+                "int32 (3 per descriptor)"
+            )
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
@@ -1801,6 +1823,7 @@ def doGemm(
         work_counter_arg,
         b_data_ptrs_arg,
         a_data_ptrs_arg,
+        int(num_work),
         stream,
     )
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
