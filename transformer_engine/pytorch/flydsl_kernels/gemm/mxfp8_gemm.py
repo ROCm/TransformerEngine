@@ -777,23 +777,19 @@ def _compile_kernel(
             bx_m_idx = fx.Index(bx_m)
             by_n_idx = fx.Index(by_n)
 
-            # Per-expert offsets into the packed B operand / B-scale. Where the
-            # expert index lands depends on the layout, because the packed weight
-            # stacks experts on B's *first* logical axis, which is a different
-            # kernel axis for TN vs the transpose-read (NN/NT) case:
+            # Per-expert offsets. Grouped fwd/dgrad read B data per expert through
+            # b_data_ptrs (see b_div_tile below), so B-data addressing is local and
+            # b_expert_k_off is 0. Only the B scales stay stacked over the G experts,
+            # on B's first logical axis, which is a different kernel axis per layout:
             #
-            #   TN (forward, C = A @ B^T): B is packed [G*N, K], experts on the
-            #     OUTPUT-N axis. Expert offset folds into the B column base
-            #     (by_n_b_idx = expert*N + n) and the B-scale row stride grows to
-            #     G*N (c_n_bs). The B-scale k128 term is untouched.
+            #   TN (forward, C = A @ B^T): B-scale stacks experts on the OUTPUT-N
+            #     axis, so the scale column is by_n_b_idx = expert*N + n and the
+            #     scale row stride grows to G*N (c_n_bs).
             #
             #   NN (dgrad, C = A @ B where A=dY[M,N_out], B=W[N_out,K_in]): the
-            #     kernel contraction axis IS N_out, and B is packed [G*N_out, K_in]
-            #     with experts on that CONTRACTION axis. Expert offset instead folds
-            #     into the contraction (k_base) term as expert*N_out elements
-            #     (b_expert_k_off), and into the B-scale's k128 (contraction-128)
-            #     term as expert*(N_out/128) (bs_expert_k128_off). The B column base
-            #     and B-scale stride stay per-expert (c_n = K_in, unchanged).
+            #     kernel contraction axis is N_out, and the B-scale stacks experts
+            #     on it, so the scale k128 term shifts by expert*(N_out/128)
+            #     (bs_expert_k128_off). The scale column and stride stay per-expert.
             #
             # Dense (group is False) zeroes every expert term.
             #
@@ -817,14 +813,13 @@ def _compile_kernel(
                 store_m_expert_off = fx.Index(expert * fx.Int32(c_m))
             elif const_expr(group):
                 if const_expr(b_transpose_read):
-                    # NN: expert on the contraction axis. The kernel's compile-time
-                    # ``K`` IS the contraction dim (= N_out for dgrad), so the packed
-                    # weight [G*N_out, K_in] shifts by expert*K elements along k_base,
-                    # and its scale [G*N_out/128, K_in] by expert*NUM_K_TILES.
+                    # NN: the B-scale [G*N_out/128, K_in] stacks experts on the
+                    # contraction axis (compile-time K = N_out), so it shifts by
+                    # expert*NUM_K_TILES. B data is read per expert (no shift).
                     by_n_b_idx = by_n_idx
                     c_n_bs = c_n
                     a_expert_k_off = fx.Index(0)
-                    b_expert_k_off = fx.Index(expert * fx.Int32(K))
+                    b_expert_k_off = fx.Index(0)
                     as_expert_k128_off = fx.Int32(0)
                     bs_expert_k128_off = expert * fx.Int32(NUM_K_TILES)
                     store_m_expert_off = fx.Index(0)
@@ -898,13 +893,11 @@ def _compile_kernel(
                 a_f8_ir_t,
                 wave_id,
             )
-            # Grouped B-data source: rebase onto this tile's expert weight slab (the
-            # per-expert base pointer already selects the expert), so the in-tile
-            # addressing uses LOCAL coords. TN reads with a local column (by_n_idx);
-            # NN (dgrad, transpose-read) packs experts on the contraction axis, so the
-            # per-expert base replaces the expert*K contraction shift (b_k_off -> 0).
-            # wgrad bases are pre-shifted (act_ptrs), so they keep the packed column and
-            # contraction shift. Dense keeps the shared packed ``b_div``.
+            # Grouped B-data source: rebase onto this tile's expert weight (the
+            # per-expert base pointer already selects the expert), so in-tile
+            # addressing is local (column by_n_idx, no contraction shift) for both
+            # TN and NN. wgrad bases are pre-shifted (act_ptrs), so they keep the
+            # packed column and contraction shift. Dense keeps the shared ``b_div``.
             if const_expr(group):
                 b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)

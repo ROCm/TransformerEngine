@@ -475,28 +475,16 @@ def _compile_kernel(
             bx_m_idx = fx.Index(bx_m)
             by_n_idx = fx.Index(by_n)
 
-            # Per-expert offsets fold the expert index into the packed operands /
-            # output (const_expr-zeroed for dense, so the dense binary is unchanged):
-            #   TN fwd  -- experts on B's output-N axis (by_n_b_idx = expert*c_n + n)
-            #   NN dgrad-- experts on B's contraction axis (b_expert_k_off = expert*K)
-            #   NT wgrad-- both operands on the contraction (token) axis
-            #     (a/b_expert_k_off = expert*K); output packed on M (store_m_expert_off)
+            # Per-expert offsets into the packed operands / output. Only wgrad (NT) needs
+            # them: both operands are packed on the contraction (token) axis
+            # (a/b_expert_k_off = expert*K) and the output on M (store_m_expert_off).
+            # Grouped fwd/dgrad read B per expert through b_data_ptrs (see b_div_tile
+            # below), so they use local coordinates and zero offsets, like dense.
             if const_expr(wgrad):
                 by_n_b_idx = by_n_idx
                 a_expert_k_off = fx.Index(expert * fx.Int32(K))
                 b_expert_k_off = fx.Index(expert * fx.Int32(K))
                 store_m_expert_off = fx.Index(expert * fx.Int32(c_m))
-            elif const_expr(group):
-                if const_expr(b_transpose_read):
-                    by_n_b_idx = by_n_idx
-                    a_expert_k_off = fx.Index(0)
-                    b_expert_k_off = fx.Index(expert * fx.Int32(K))
-                    store_m_expert_off = fx.Index(0)
-                else:
-                    by_n_b_idx = fx.Index(expert * fx.Int32(c_n) + by_n)
-                    a_expert_k_off = fx.Index(0)
-                    b_expert_k_off = fx.Index(0)
-                    store_m_expert_off = fx.Index(0)
             else:
                 by_n_b_idx = by_n_idx
                 a_expert_k_off = fx.Index(0)
@@ -533,13 +521,11 @@ def _compile_kernel(
                 fx.Uint8.ir_type,
                 wave_id,
             )
-            # Grouped B-data: rebase onto this tile's expert weight slab (byte buffer);
-            # the per-expert base already selects the expert, so in-tile addressing is
-            # LOCAL. TN reads a local column (by_n_idx); NN (dgrad, transpose-read)
-            # packs experts on the contraction axis, so the base replaces the expert*K
-            # contraction shift (b_k_off -> 0). wgrad bases are pre-shifted (act_ptrs),
-            # so they keep the packed column and contraction shift. Dense keeps the
-            # shared packed view.
+            # Grouped B-data: rebase onto this tile's expert weight (byte buffer); the
+            # per-expert base already selects the expert, so in-tile addressing is
+            # local (column by_n_idx, no contraction shift) for both TN and NN.
+            # wgrad bases are pre-shifted (act_ptrs), so they keep the packed column
+            # and contraction shift. Dense keeps the shared packed view.
             if const_expr(group):
                 b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
