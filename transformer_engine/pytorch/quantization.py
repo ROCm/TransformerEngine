@@ -351,12 +351,11 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         use_ck = os.environ.get("NVTE_USE_CK_GROUPED_GEMM", "0") == "1"
         use_cutlass = os.environ.get("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
         use_hipkittens = use_hk or (use_cutlass and not use_ck)
-        if (
-            IS_HIP_EXTENSION
-            and get_device_compute_capability() == (9, 5)
-            and use_hipkittens
-        ):
-            return 256
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+            if use_hipkittens:
+                return 256
+            # All gfx950 MXFP8 GEMMs need K % 128, and the split size is K in wgrad.
+            return 128
         return 32
     if recipe.nvfp4():
         return 128
