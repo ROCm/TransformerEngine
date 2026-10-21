@@ -10,10 +10,19 @@ on:
         description: "Docker image"
         required: false
         default: ""
+  workflow_call:
+    inputs:
+      docker_image:
+        description: "Docker image URI from rocm-ci select_image.outputs.image-tag"
+        required: true
+        type: string
 
 jobs:
   upload:
     runs-on: build-only-te
+    env:
+      NVTE_AITER_PREBUILT_BASE_URL: ${{ vars.NVTE_AITER_PREBUILT_BASE_URL }}
+      NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -22,9 +31,32 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # Verify this runner can reach Artifactory for uploads
+      - name: "Preflight: Artifactory upload reachability"
+        run: |
+          set -euo pipefail
+          if bash .github/scripts/aiter_prebuild_upload.sh --preflight --upload; then
+            echo "::notice::Preflight upload reachability succeeded"
+            exit 0
+          fi
+          echo "::error::Preflight upload reachability failed"
+          exit 1
+
       - name: Resolve docker image
         id: cfg
         run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "workflow_call" ]; then
+            IMAGE="${{ inputs.docker_image }}"
+            if [ -z "$IMAGE" ]; then
+              echo "workflow_call requires non-empty docker_image." >&2
+              exit 1
+            fi
+            echo "Using docker_image from caller."
+            echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           IMAGE="${{ inputs.docker_image }}"
           if [ -z "$IMAGE" ]; then
             IMAGE="${{ vars.DEV_DOCKER_IMAGE }}"
@@ -33,7 +65,7 @@ jobs:
             echo "No docker image provided and vars.DEV_DOCKER_IMAGE is empty." >&2
             exit 1
           fi
-          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Pull docker image
         run: docker pull ${{ steps.cfg.outputs.image }}
@@ -50,19 +82,12 @@ jobs:
             ${{ steps.cfg.outputs.image }}
 
       - name: Build and upload aiter prebuilt
-        env:
-          NVTE_AITER_PREBUILT_BASE_URL: https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
-          NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
         run: |
           docker exec \
             -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
             -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
             te-aiter-upload bash -c "$(cat <<'EOF'
           set -ex
-          if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
-            echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
-            exit 1
-          fi
           export HIP_PATH=""
           git config --global --add safe.directory '*'
           bash .github/scripts/aiter_prebuild_upload.sh --build

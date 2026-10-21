@@ -7,8 +7,86 @@ set -euo pipefail
 # Inputs for upload (optional):
 #   NVTE_AITER_PREBUILT_BASE_URL - base URL for prebuilts
 #   NVTE_AITER_PREBUILT_UPLOAD_TOKEN - bearer token for Artifactory
-# Optional flag:
-#   --build : build aiter libs before packaging/uploading; default is package-only.
+# Optional flags:
+#   --preflight --upload
+#       Validate upload path: Artifactory ping, then HEAD on the probe URL with the bearer token.
+#       Use in CI before uploading prebuilts.
+#   --preflight --download
+#       Validate download path: same ping, then HEAD on the probe URL without credentials.
+#       Matches what CMake file(DOWNLOAD) sees when fetching prebuilts (no token).
+#   --build : build AITER libs before packaging/uploading; default is package-only.
+
+_aiter_set_artifactory_check_urls() {
+  if [[ -z "${NVTE_AITER_PREBUILT_BASE_URL:-}" ]]; then
+    echo "Missing vars.NVTE_AITER_PREBUILT_BASE_URL" >&2
+    exit 1
+  fi
+  local BASE="${NVTE_AITER_PREBUILT_BASE_URL%/}"
+  local ROOT_PREFIX="${BASE%%/artifactory/*}"
+  _AITER_ARTIFACTORY_SYSTEM_PING_URL="${ROOT_PREFIX}/artifactory/api/system/ping"
+  _AITER_PREBUILT_BASE_ACCESS_PROBE_URL="${BASE}/__aiter_repo_access_probe_not_a_real_artifact"
+}
+
+_aiter_curl_artifactory_system_ping() {
+  echo "[AITER-PREBUILT] Preflight: GET ${_AITER_ARTIFACTORY_SYSTEM_PING_URL} ..."
+  curl -fsS --connect-timeout 25 --max-time 60 "${_AITER_ARTIFACTORY_SYSTEM_PING_URL}" >/dev/null
+}
+
+_aiter_preflight_head_ok() {
+  local mode=$1
+  local code=$2
+  case "${code}" in
+    404|200)
+      echo "[AITER-PREBUILT] Preflight ${mode}: HTTP ${code} (success)"
+      ;;
+    *)
+      echo "[AITER-PREBUILT] Preflight ${mode}: HTTP ${code} (failed)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+_aiter_check_artifactory_upload() {
+  _aiter_set_artifactory_check_urls
+  if [[ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN:-}" ]]; then
+    echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
+    exit 1
+  fi
+  _aiter_curl_artifactory_system_ping
+  echo "[AITER-PREBUILT] Preflight (upload): HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL} (authenticated) ..."
+  local code
+  code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 25 --max-time 90 \
+    -H "Authorization: Bearer ${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" \
+    -I "${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}" || true)"
+  _aiter_preflight_head_ok upload "${code}"
+}
+
+_aiter_check_artifactory_download() {
+  _aiter_set_artifactory_check_urls
+  _aiter_curl_artifactory_system_ping
+  echo "[AITER-PREBUILT] Preflight (download): HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL} (anonymous) ..."
+  local code
+  code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 25 --max-time 90 \
+    -I "${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}" || true)"
+  _aiter_preflight_head_ok download "${code}"
+}
+
+if [[ "${1:-}" == "--preflight" ]]; then
+  shift
+  case "${1:-}" in
+    --upload)
+      _aiter_check_artifactory_upload
+      ;;
+    --download)
+      _aiter_check_artifactory_download
+      ;;
+    *)
+      echo "Usage: $(basename "$0") --preflight --upload | --preflight --download" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 
 # Derive ROCm version and aiter commit -> cache key
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
