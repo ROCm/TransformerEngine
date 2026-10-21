@@ -76,10 +76,10 @@ Execute the following commands to install Transformer Engine from source:
   git clone --recursive https://github.com/ROCm/TransformerEngine.git
 
   cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax     # Optionally set framework(s)
-  export NVTE_ROCM_ARCH="gfx942;gfx950" # Optionally set target GPU architectures; gfx942 for MI300/MI325, and gfx950 for MI350
-  export NVTE_USE_ROCM=1                # Optionally force building for ROCm, useful when both ROCm and CUDA build environments are installed. If set to 0, it will force building for CUDA.
-  pip3 install --no-build-isolation .   # Build and install
+  export NVTE_FRAMEWORK=pytorch,jax            # Optionally set framework(s)
+  export NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250  # Optionally set target GPU architecture(s);
+  export NVTE_USE_ROCM=1                       # Optionally force building for ROCm, useful when both ROCm and CUDA build environments are installed. If set to 0, it will force building for CUDA.
+  pip3 install --no-build-isolation .          # Build and install
 
 Or instead of immediate installation, create wheel file to install it later:
 

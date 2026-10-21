@@ -27,6 +27,8 @@ from .base import (
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
+    fused_bulk_rs_eligible,
+    fused_wgrad_ag_eligible,
     get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
@@ -1538,6 +1540,30 @@ def _layernorm_mlp_backward_impl(
         if args.fc2_weight_quantizer is not None and isinstance(fc2_weight, QuantizedTensorStorage):
             fc2_weight.update_usage(columnwise_usage=True)
 
+        # ROCm fused backend: the fc2 dgrad kernel can carry a second all-gather for the
+        # column-scaled grad output, so upstream's external AG on borrowed dgrad streams is
+        # not needed. It rides inside this GEMM, so the region is staged before it launches.
+        ub_obj_fc2_wgrad_ag = None
+        grad_output_wgrad = None
+        ub_fused_wgrad_ag = (
+            args.fc2_weight_requires_grad
+            and args.ub_overlap_ag
+            and isinstance(args.fc2_grad_output_quantizer, MXFP8Quantizer)
+            and fused_wgrad_ag_eligible("fc2")
+        )
+        if ub_fused_wgrad_ag:
+            ub_obj_fc2_wgrad_ag = get_ub("fc2_wgrad", args.fp8)
+            args.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+            grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                ub_obj_fc2_wgrad_ag,
+                grad_output_arg,
+                args.fc2_grad_output_quantizer,
+                args.tp_group,
+            )
+            # The fc2 dgrad kernel carries this region's gather in its own grid. Armed here
+            # and consumed by the GEMM immediately below; see arm_aux_ag_region.
+            ub_obj_fc2_dgrad.arm_aux_ag_region(ub_obj_fc2_wgrad_ag)
+
         # Perform GEMM
         gemm_output, *_ = general_gemm(
             fc2_weight,
@@ -1612,7 +1638,11 @@ def _layernorm_mlp_backward_impl(
             # Prepare grad output tensor
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
-            if (
+            if ub_fused_wgrad_ag:
+                # The fc2 dgrad kernel carried the column-scaled gather into the fc2_wgrad
+                # region, so the view staged above that GEMM is already complete.
+                grad_output = grad_output_wgrad
+            elif (
                 args.ub_overlap_ag
                 and isinstance(args.fc2_grad_output_quantizer, MXFP8Quantizer)
                 and not ub_obj_fc2_dgrad.with_cublasmp()
@@ -2826,15 +2856,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
             bias_gelu_fusion = self.bias_gelu_nvfusion and not self.fp8 and not debug
             # bias_gelu_fusion moves both epilogues out of the FC1 GEMM
+            is_mxfp8 = self.fp8 and self.fp8_meta["recipe"].mxfp8()
             if ub_overlap_ag and is_grad_enabled and not self.return_layernorm_output_gathered and not (
                 fused_ag_gemm_eligible(
                     "fc1_fprop", inp, fc1_weight, None if bias_gelu_fusion else fc1_bias,
                     self.activation_dtype, self.tp_size, self.fp8,
-                    gelu=self.activation == "gelu" and not bias_gelu_fusion,
+                    gelu=self.activation == "gelu" and not bias_gelu_fusion, mxfp8=is_mxfp8,
                 )
                 and fused_ag_gemm_eligible(
                     "fc2_dgrad", inp, fc2_weight, None,
-                    self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+                    self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, mxfp8=is_mxfp8,
                 )
             ):
                 ub_overlap_ag = False
@@ -2849,8 +2880,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 "fc1_dgrad", inp, fc1_weight, self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=is_mxfp8,
             ):
                 ub_bulk_dgrad = False
+            # The bulk reduce-scatter kernel is bf16 only and declines anything else, which trips the
+            # NVTE_CHECK in fused_overlap_bulk_rs rather than falling back. linear.py and
+            # layernorm_linear.py already gate on this; LayerNormMLP did not.
+            if ub_bulk_wgrad and not fused_bulk_rs_eligible(
+                "fc1_wgrad", inp, fc1_weight, self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_bulk_wgrad = False
             fwd_args = LayerNormMLPFwdArgs(
                 # tensors
                 inp=inp,
