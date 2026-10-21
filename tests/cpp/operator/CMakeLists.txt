@@ -17,7 +17,7 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
-               test_row_scaled_nvfp4_grouped_amax.cu
+               test_row_scaled_nvfp4_grouped_amax.cu #CUDA-only test
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_mxfp8.cu
@@ -53,6 +53,7 @@ if(USE_ROCM)
   # Remove CUDA-only tests and add ROCm specific ones
   list(REMOVE_ITEM test_cuda_sources
               test_grouped_gemm.cu
+              test_row_scaled_nvfp4_grouped_amax.cu
               test_cast_current_scaling_grouped.cu
               test_cast_float8blockwise_grouped.cu
               test_dequantize_float8blockwise_grouped.cu)

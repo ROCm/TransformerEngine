@@ -18,9 +18,6 @@
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
-#ifdef __HIP_PLATFORM_AMD__
-#include "nvfp4/rocm_group_amax_nvfp4.cuh"
-#endif
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
@@ -116,11 +113,10 @@ void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
     output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
   }
 
-#ifndef __HIP_PLATFORM_AMD__
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
   dispatch::nvfp4::group_compute_fused_amax(*input_tensor, /*noop=*/nullptr, output_tensors,
                                             split_sections, num_tensors, stream);
 #else
-  dispatch::nvfp4::group_compute_fused_amax(*input_tensor, output_tensors, split_sections,
-                                            num_tensors, stream);
+  NVTE_ERROR("Grouped NVFP4 amax computation is not supported on ROCm.");
 #endif
 }
