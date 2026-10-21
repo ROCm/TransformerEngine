@@ -209,9 +209,9 @@ def _compile_kernel(
             return c_m * ELEM_BYTES
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
-            return k_base * fx.Index(c_m * ELEM_BYTES) + (
-                bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))
-            ) * fx.Index(ELEM_BYTES)
+            return k_base * fx.Int64(c_m * ELEM_BYTES) + (
+                bx_m_idx + fx.Int64(subtile * (BLOCK_M // 2))
+            ) * fx.Int64(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -224,11 +224,11 @@ def _compile_kernel(
             lane_mod_16,
         ):
             del load_frag_half_at_byte_base, lane_mod_16
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Int64(sm * 2)
             local_m_tile = (
-                subtile_m_idx * fx.Index(SUBTILE_M)
-                + fx.Index(mi * MFMA_M)
-                - fx.Index(sm * (BLOCK_M // 2))
+                subtile_m_idx * fx.Int64(SUBTILE_M)
+                + fx.Int64(mi * MFMA_M)
+                - fx.Int64(sm * (BLOCK_M // 2))
             )
             return load_transposed_frag_half(lds_a[sm], local_m_tile, half)
 
@@ -240,9 +240,9 @@ def _compile_kernel(
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
             del c_m
-            return (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(
+            return (bx_m_idx + fx.Int64(subtile * (BLOCK_M // 2))) * fx.Int64(
                 K * ELEM_BYTES
-            ) + k_base * fx.Index(ELEM_BYTES)
+            ) + k_base * fx.Int64(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -255,12 +255,12 @@ def _compile_kernel(
             lane_mod_16,
         ):
             del load_transposed_frag_half
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
-            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Int64(sm * 2)
+            a_row_addr = subtile_m_idx * fx.Int64(SUBTILE_M) + fx.Int64(mi * MFMA_M) + lane_mod_16
+            half_row = a_row_addr - fx.Int64(sm * (BLOCK_M // 2))
             return load_frag_half_at_byte_base(
                 lds_a[sm],
-                half_row * fx.Index(BLOCK_K * ELEM_BYTES),
+                half_row * fx.Int64(BLOCK_K * ELEM_BYTES),
                 half,
             )
 
@@ -270,9 +270,9 @@ def _compile_kernel(
             return c_n * ELEM_BYTES
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
-            return k_base * fx.Index(c_n * ELEM_BYTES) + (
-                by_n_idx + fx.Index(subtile * (BLOCK_N // 2))
-            ) * fx.Index(ELEM_BYTES)
+            return k_base * fx.Int64(c_n * ELEM_BYTES) + (
+                by_n_idx + fx.Int64(subtile * (BLOCK_N // 2))
+            ) * fx.Int64(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -284,11 +284,11 @@ def _compile_kernel(
             lane_mod_16,
         ):
             del load_normal_b_frag, lane_mod_16
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Int64(sn * 2)
             local_n_tile = (
-                subtile_n_idx * fx.Index(SUBTILE_N)
-                + fx.Index(ni * MFMA_N)
-                - fx.Index(sn * (BLOCK_N // 2))
+                subtile_n_idx * fx.Int64(SUBTILE_N)
+                + fx.Int64(ni * MFMA_N)
+                - fx.Int64(sn * (BLOCK_N // 2))
             )
             return load_transposed_frag(lds_b[sn], local_n_tile)
 
@@ -300,9 +300,9 @@ def _compile_kernel(
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
             del c_n
-            return (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(
+            return (by_n_idx + fx.Int64(subtile * (BLOCK_N // 2))) * fx.Int64(
                 K * ELEM_BYTES
-            ) + k_base * fx.Index(ELEM_BYTES)
+            ) + k_base * fx.Int64(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -314,8 +314,8 @@ def _compile_kernel(
             lane_mod_16,
         ):
             del load_transposed_frag
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Int64(sn * 2)
+            b_row_addr = subtile_n_idx * fx.Int64(SUBTILE_N) + fx.Int64(ni * MFMA_N) + lane_mod_16
             return load_normal_b_frag(lds_b, b_row_addr, sn)
 
     # Resolve global staging maps before FlyDSL captures ``kernel_gemm``.
@@ -472,8 +472,8 @@ def _compile_kernel(
             # The flattened/XCD-swizzled block coordinates are i32, while global
             # address arithmetic below is expressed in MLIR index type.  Convert
             # once here and use these index-typed tile bases for every address.
-            bx_m_idx = fx.Index(bx_m)
-            by_n_idx = fx.Index(by_n)
+            bx_m_idx = fx.Int64(bx_m)
+            by_n_idx = fx.Int64(by_n)
 
             # Per-expert offsets into the packed operands / output. Only wgrad (NT) needs
             # them: both operands are packed on the contraction (token) axis
@@ -482,14 +482,14 @@ def _compile_kernel(
             # below), so they use local coordinates and zero offsets, like dense.
             if const_expr(wgrad):
                 by_n_b_idx = by_n_idx
-                a_expert_k_off = fx.Index(expert * fx.Int32(K))
-                b_expert_k_off = fx.Index(expert * fx.Int32(K))
-                store_m_expert_off = fx.Index(expert * fx.Int32(c_m))
+                a_expert_k_off = fx.Int64(expert * fx.Int32(K))
+                b_expert_k_off = fx.Int64(expert * fx.Int32(K))
+                store_m_expert_off = fx.Int64(expert * fx.Int32(c_m))
             else:
                 by_n_b_idx = by_n_idx
-                a_expert_k_off = fx.Index(0)
-                b_expert_k_off = fx.Index(0)
-                store_m_expert_off = fx.Index(0)
+                a_expert_k_off = fx.Int64(0)
+                b_expert_k_off = fx.Int64(0)
+                store_m_expert_off = fx.Int64(0)
 
             # Keep wave/lane arithmetic in i32. compute_global_swizzle() combines
             # these values with i32 constants, so Index-typed coordinates would make
@@ -530,7 +530,7 @@ def _compile_kernel(
                 b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
                 b_data_col = by_n_idx
-                b_k_off = fx.Index(0)
+                b_k_off = fx.Int64(0)
             elif const_expr(act_ptrs):
                 b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
@@ -559,7 +559,7 @@ def _compile_kernel(
             # add_offset on a dynamic Index is unsupported here). store_m_expert_off
             # (grouped wgrad only) repacks the output row to this expert's block;
             # it is 0 for dense and for grouped fwd/dgrad.
-            c_tile_base_elems = (bx_m_idx + store_m_expert_off) * fx.Index(c_n) + by_n_idx
+            c_tile_base_elems = (bx_m_idx + store_m_expert_off) * fx.Int64(c_n) + by_n_idx
             gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
             c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
             c_store_atom = fx.make_copy_atom(
@@ -743,10 +743,10 @@ def _compile_kernel(
 
             def load_b_frag(lds_b, local_row, half):
                 # B is [N, K]. Each 128-row half-page has a local row origin of 0.
-                half_row = local_row - fx.Index(half * (BLOCK_N // 2))
+                half_row = local_row - fx.Int64(half * (BLOCK_N // 2))
                 return load_frag_at_byte_base(
                     lds_b[half],
-                    half_row * fx.Index(BLOCK_K * ELEM_BYTES),
+                    half_row * fx.Int64(BLOCK_K * ELEM_BYTES),
                 )
 
             def load_transposed_frag_half(lds_page, local_x_tile, half):
@@ -870,10 +870,10 @@ def _compile_kernel(
                 mi = local_idx // MFMA_N_PER_SUBTILE
                 ni = local_idx % MFMA_N_PER_SUBTILE
 
-                subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-                subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-                row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
-                col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+                subtile_m_idx = reg_subtile_m_idx0 + fx.Int64(sm * 2)
+                subtile_n_idx = reg_subtile_n_idx0 + fx.Int64(sn * 2)
+                row_base = subtile_m_idx * SUBTILE_M + fx.Int64(mi * MFMA_M) + lane_div_16 * 4
+                col = subtile_n_idx * SUBTILE_N + fx.Int64(ni * MFMA_N) + lane_mod_16
 
                 # Bias depends only on the output-feature (N) coordinate, so read it
                 # once per column (global index by_n_idx + col) and reuse across the
@@ -882,8 +882,8 @@ def _compile_kernel(
                     bias_value = load_bias(by_n_idx + col)
 
                 for ii in range_constexpr(4):
-                    row = row_base + fx.Index(ii)
-                    c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+                    row = row_base + fx.Int64(ii)
+                    c_idx = c_tile_base_elems + row * fx.Int64(c_n) + col
 
                     # Epilogue stages run on the fp32 accumulator, in order, before
                     # the output-dtype narrowing:
@@ -1000,7 +1000,7 @@ def _compile_kernel(
                 b13 = load_b_subtile_ni_regs(cur_b, 1, 3)
 
                 # Refill the current ping-pong page with K+2, alternating A and B passes.
-                k_refill = fx.Index((k128 + 2) * BLOCK_K)
+                k_refill = fx.Int64((k128 + 2) * BLOCK_K)
 
                 # Q0: interleave the current tile's A-bottom LDS reads with K+2
                 # refills and Q0 compute. Compute is K32-major across all 16
@@ -1259,15 +1259,15 @@ def _compile_kernel(
                     store_acc_vector_for_logical_idx(drain_acc_idx, acc)
 
             # Prologue: stage K0/K1 data into ping-pong LDS pages.
-            stage_a_subtile(fx.Index(0), 0, lds_a0)
-            stage_b_subtile(fx.Index(0), 0, lds_b0)
-            stage_b_subtile(fx.Index(0), 1, lds_b0)
-            stage_a_subtile(fx.Index(0), 1, lds_a0)
+            stage_a_subtile(fx.Int64(0), 0, lds_a0)
+            stage_b_subtile(fx.Int64(0), 0, lds_b0)
+            stage_b_subtile(fx.Int64(0), 1, lds_b0)
+            stage_a_subtile(fx.Int64(0), 1, lds_a0)
 
-            stage_a_subtile(fx.Index(BLOCK_K), 0, lds_a1)
-            stage_b_subtile(fx.Index(BLOCK_K), 0, lds_b1)
-            stage_b_subtile(fx.Index(BLOCK_K), 1, lds_b1)
-            stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
+            stage_a_subtile(fx.Int64(BLOCK_K), 0, lds_a1)
+            stage_b_subtile(fx.Int64(BLOCK_K), 0, lds_b1)
+            stage_b_subtile(fx.Int64(BLOCK_K), 1, lds_b1)
+            stage_a_subtile(fx.Int64(BLOCK_K), 1, lds_a1)
 
             rocdl.sched_barrier(0)
             barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)

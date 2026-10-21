@@ -52,7 +52,7 @@ def global_i32_ptr(tensor, index):
     ptr_ty = ir.Type.parse("!llvm.ptr<1>")
     base = _fly.extract_aligned_pointer_as_index(ptr_ty, tensor)
     base = llvm.PtrToIntOp(T.i64, base).result
-    byte_off = fx.as_ir_value(fx.Int64(fx.Index(index) * fx.Index(4)))
+    byte_off = fx.as_ir_value(fx.Int64(fx.Int64(index) * fx.Int64(4)))
     addr = llvm.AddOp(base, byte_off, llvm.IntegerOverflowFlags(0)).result
     return llvm.IntToPtrOp(ptr_ty, addr).result
 
@@ -68,7 +68,7 @@ def read_ptr_at(ptr_array, index):
     ptr_ty = ir.Type.parse("!llvm.ptr<1>")
     base = _fly.extract_aligned_pointer_as_index(ptr_ty, ptr_array)
     base = llvm.PtrToIntOp(T.i64, base).result
-    byte_off = fx.as_ir_value(fx.Int64(fx.Index(index) * fx.Index(8)))
+    byte_off = fx.as_ir_value(fx.Int64(fx.Int64(index) * fx.Int64(8)))
     addr = llvm.AddOp(base, byte_off, llvm.IntegerOverflowFlags(0)).result
     elt_ptr = llvm.IntToPtrOp(ptr_ty, addr).result
     return llvm.LoadOp(T.i64, elt_ptr).result
