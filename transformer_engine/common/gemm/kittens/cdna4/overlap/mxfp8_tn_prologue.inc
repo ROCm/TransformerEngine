@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 //! Kernel setup for the TN fused AG+GEMM, mirroring upstream tn_prologue.inc. It DECLARES the
-//! names the rest of the kernel body uses (As, Bs, sw_A, b_srd, warp_m, ...), so the include site
+//! names the rest of the kernel body uses (As, Bs, a_frag0, warp_m, ...), so the include site
 //! is where those come into scope.
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N_TOTAL / BLOCK_COL;
@@ -19,34 +19,25 @@
     __shared__ ST_B Bs[2][2];
 
     // B needs 8 scale groups = 2 tiles
-    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
+    __shared__ ST_Scale scale_smem[2][3];
 
     const int warp_m = kittens::warpid() / WARPS_COL;
     const int warp_n = kittens::warpid() % WARPS_COL;
-    const int wid    = kittens::warpid() % NUM_WARPS;
 
     using T = kittens::fp8e4m3;
 
-    constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
-    constexpr int bpm = bpt * NUM_THREADS;
-    constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
-    constexpr int copies_B = HALF_COL * BLOCK_K * sizeof(T) / bpm;
-    uint32_t sw_A[copies_A], sw_B[copies_B];
     // Aliases: the AG path has no grouped variant, but the shared main loop spells its operands
     // A_local/B_local, which in mxfp8_gemm.cpp are the per-expert views.
     const auto &A_local = A;
     const auto &B_local = B;
 
-    G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
-    G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
+    const uint32_t a_row_stride = A_local.template stride<2>() * sizeof(T);
+    const uint32_t b_row_stride = B_local.template stride<2>() * sizeof(T);
 
-    const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
-    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
+    const uint32_t a_frag0 = row_frag_addr<RT_A>(As[0][0], warp_m, 0);
+    const uint32_t a_frag1 = row_frag_addr<RT_A>(As[0][0], warp_m, 1);
+    const uint32_t b_frag0 = row_frag_addr<RT_B>(Bs[0][0], warp_n, 0);
+    const uint32_t b_frag1 = row_frag_addr<RT_B>(Bs[0][0], warp_n, 1);
 
-    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
-    uint32_t b_lds[2][2];
-    for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
-        b_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-            reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
-    }
+    const int n_iters = k_iters - 2;
+    const int s0      = n_iters & 1;

@@ -58,4 +58,10 @@
             reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
     }
 
-    const int b_col_off = warp_n * REG_N;
+    const uint32_t a_frag0 = row_frag_addr<RT_A>(As[0][0], warp_m, 0);
+    const uint32_t a_frag1 = row_frag_addr<RT_A>(As[0][0], warp_m, 1);
+    uint32_t b_frag[RT_B::height];
+    col_frag_addrs<RT_B>(b_frag, Bs[0][0], warp_n * REG_N);
+
+    const int n_iters = k_iters - 2;
+    const int s0      = n_iters & 1;

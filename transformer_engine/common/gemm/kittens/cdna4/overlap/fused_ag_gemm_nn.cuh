@@ -7,6 +7,7 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "overlap_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -591,6 +592,7 @@ namespace hk_mxfp8_ag_nn {
 
 using namespace kittens;
 using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
 
 // Per-PE pointer to each peer's [M,K] A buffer.
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
@@ -758,39 +760,36 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         RT_C cA, cB, cC, cD;
         kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-        int tic = 0, toc = 1;
-        int tic_scales = 0, toc_scales = 1;
-
-        G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-        G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+        g2l_srd(Bs[s0][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[s0][0]);
+        g2l_srd(As[s0][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[s0][0]);
+        g2l_srd(Bs[s0][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[s0][1]);
+        g2l_srd(As[s0][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[s0][1]);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-        G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        g2l_srd(As[s0 ^ 1][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[s0 ^ 1][0]);
+        g2l_srd(Bs[s0 ^ 1][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[s0 ^ 1][0]);
+        g2l_srd(Bs[s0 ^ 1][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[s0 ^ 1][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
+        G::load(scale_A_smem[s0], scale_A_gl, {block_row, 0, 0, 0});
+        G::load(scale_B_lo[s0],   scale_B_gl, {2 * block_col,     0, 0, 0});
+        G::load(scale_B_hi[s0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
         if (warp_m == 1) __builtin_amdgcn_s_barrier();
 
-        // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
-        // this guard. The standalone GEMM includes the same file without defining it.
+        // The AG path opens a warp_m skew in its prologue, which the shared main loop closes, and needs the
+        // opaque peeled stages (see the .inc). The standalone GEMM includes the same file defining neither.
 
 #define MXFP8_AG_SKEW_CLOSE 1
-#define MXFP8_NN_K_UNROLL 1
+#define MXFP8_NN_OPAQUE_PEEL 1
 #include "../mxfp8_nn_mainloop.inc"
-#undef MXFP8_NN_K_UNROLL
+#undef MXFP8_NN_OPAQUE_PEEL
 #undef MXFP8_AG_SKEW_CLOSE
 
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);

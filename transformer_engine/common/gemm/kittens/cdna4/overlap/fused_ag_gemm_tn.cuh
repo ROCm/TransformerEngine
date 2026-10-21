@@ -7,6 +7,7 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "overlap_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -204,6 +205,7 @@ namespace hk_mxfp8_ag_tn {
 
 using namespace kittens;
 using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
 
 // Per-PE pointer to each peer's [N,K] B buffer (the gathered activation).
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
@@ -275,14 +277,14 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     if ((int)blockIdx.x < NGATH) {
         char *gb = (char *)&B[{0, 0, 0, 0}];
         if (interleave_scales) {
-            // scale_A_smem is untouched until this block joins the compute queue, which it cannot
+            // scale_smem is untouched until this block joins the compute queue, which it cannot
             // do before the gather finishes -- so stage the pack there rather than grow the LDS.
-            static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
-                          "scale_A_smem too small for pack_tile_scales_from staging");
+            static_assert(sizeof(scale_smem) >= 2 * 256 * sizeof(uint32_t),
+                          "scale_smem too small for pack_tile_scales_from staging");
             gather_all_plus_scales<1, true, 32, 8>(
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
                 scale_base, scale_chunk_bytes, scale_K, packed_sb_raw, tiles_N, k_iters,
-                reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
+                reinterpret_cast<uint32_t *>(&scale_smem[0][0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
         }
@@ -321,11 +323,6 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int block_row = desc.tile_m;
         int block_col = desc.tile_n;
 
-        int a_half0 = block_row * 2;
-        int a_half1 = a_half0 + 1;
-        int b_half0 = block_col * 2;
-        int b_half1 = b_half0 + 1;
-
         int sa_stride = tiles_M;
         int sb_stride = tiles_N;
         int sa_batch = block_row;
@@ -336,27 +333,33 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         RT_C cA, cB, cC, cD;
         kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-        int tic = 0, toc = 1;
-        int tic_scales = 0, toc_scales = 1;
+        const TileDma a_dma = make_tile_dma<NUM_WARPS>(&A_local[{0, 0, block_row * BLOCK_ROW, 0}],
+                                                       HALF_ROW * a_row_stride, BLOCK_K * sizeof(T),
+                                                       HALF_ROW * a_row_stride, a_row_stride, As);
+        const TileDma b_dma = make_tile_dma<NUM_WARPS>(&B_local[{0, 0, block_col * BLOCK_COL, 0}],
+                                                       HALF_COL * b_row_stride, BLOCK_K * sizeof(T),
+                                                       HALF_COL * b_row_stride, b_row_stride, Bs);
+        const ScaleDma s_dma = make_scale_dma(scale_A_gl, scale_B_gl, sa_batch, 2 * sb_batch, sa_stride,
+                                              2 * sb_stride, scale_smem);
 
-        G::load(Bs[tic][0], B_local, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A);
-        G::load(Bs[tic][1], B_local, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A);
+        tile_dma_load(b_dma, s0, 0, 0);
+        tile_dma_load(a_dma, s0, 0, 0);
+        tile_dma_load(b_dma, s0, 1, 0);
+        tile_dma_load(a_dma, s0, 1, 0);
 
-        if (warp_m == 1) __builtin_amdgcn_s_barrier();
+        if (warp_m == 1) {
+            __builtin_amdgcn_s_barrier();
+        }
         asm volatile("s_waitcnt vmcnt(4)"); // wait for tic[0] halves; tic[1] halves still in flight
         __builtin_amdgcn_s_barrier();
 
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A);
-        G::load(Bs[toc][0], B_local, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        tile_dma_load(a_dma, s0 ^ 1, 0, 1);
+        tile_dma_load(b_dma, s0 ^ 1, 0, 1);
+        tile_dma_load(b_dma, s0 ^ 1, 1, 1);
         asm volatile("s_waitcnt vmcnt(6)"); // wait for tic[1] halves; 3 toc loads + scales in flight
         __builtin_amdgcn_s_barrier();
 
-        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
+        scale_dma_load(s_dma, s0, 0);
         asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM before first MMA
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
