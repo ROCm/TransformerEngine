@@ -987,6 +987,14 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm fused AG+GEMM: MXFP8 scale region carved from the tail of the Userbuffers allocation.
+  void copy_scales_into_buffer(const at::Tensor &input, bool local_chunk = false);
+
+  at::Tensor get_scale_buffer(bool local_chunk = false,
+                              std::optional<std::vector<int64_t>> shape = std::nullopt);
+#endif
+
   std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
