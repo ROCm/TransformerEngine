@@ -28,6 +28,9 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "../../util/cuda_runtime.h"
+#include "../../util/ptx_arch_spec.cuh"
+#include "../../util/system.h"
+#include "./rocm_quantize_mxfp8_tdm.cuh"
 #include "./rocm_vectorized_2d.cuh"
 #endif
 
@@ -37,6 +40,7 @@ namespace mxfp8 {
 namespace dequantize_kernel {
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_mxfp8.cuh"
+#include "rocm_dequantize_mxfp8_tdm.cuh"
 #else
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -323,6 +327,10 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   // rows, colwise uses the columnwise-scale cols.
   const size_t mx_swizzle_padded_dim =
       use_rowwise_scaling ? input.scale_inv.shape[0] : input.columnwise_scale_inv.shape[1];
+  if (dequantize_tdm(input, input_data, output, scales_ptr, scales_stride, mx_swizzle_padded_dim,
+                     stream)) {
+    return;
+  }
 #endif
 
   TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
