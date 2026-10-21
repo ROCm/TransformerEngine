@@ -1710,12 +1710,6 @@ def doGemm(
     )
     require_launch_size(f"{label} GEMM", ("A", A), ("B", B), ("C", C))
 
-    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad/dense C is
-    # the unpacked (M_runtime, N_runtime).
-    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
-    if tuple(C.shape) != expected_c:
-        raise ValueError(f"C shape {tuple(C.shape)} != expected {expected_c}")
-
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported {label} epilogue: {epilogue}")
     needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")

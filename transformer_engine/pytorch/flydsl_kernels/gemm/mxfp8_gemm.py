@@ -1996,26 +1996,17 @@ def do_gemm(
     else:
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    # Grouped launches read B from per-expert weight pointers, so B is a per-expert
-    # representative whose contraction equals A's (as in the dense case).
-    if group and b_data_ptrs is None:
-        raise FlyDSLUnsupportedError("grouped MXFP8 GEMM requires per-expert weight pointers")
-    assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
-
-    # Grouped wgrad (NT): both operands (dY, X) are packed on the token/contraction
-    # axis to G*M_pad, but the kernel's compile-time contraction is the PER-EXPERT
-    # padded token count M_pad. M_runtime (=N_out) and N_runtime (=K_in) are already
-    # per-expert; only K_runtime must be de-packed.
+    # Grouped wgrad (NT): dY and X stack the G experts on the contraction (token)
+    # axis as G*M_pad, while the kernel's compile-time contraction is the per-expert
+    # M_pad. M_runtime (N_out) and N_runtime (K_in) are already per-expert.
     if wgrad:
         assert (
             K_runtime % num_groups == 0
         ), f"grouped wgrad contraction {K_runtime} not divisible by num_groups={num_groups}"
         K_runtime = K_runtime // num_groups
 
-    # Grouped fwd/dgrad launch over the per-expert output width = C's last dim (TN:
-    # N_out; NN: K_in); the kernel re-derives the packed stride from num_groups.
-    # wgrad keeps M_runtime/N_runtime per-expert (C is packed on the output-M axis,
-    # handled in-kernel via store_m_expert_off).
+    # Grouped fwd/dgrad: N is the per-expert output width, C's last dim (TN: N_out,
+    # NN: K_in). wgrad keeps M/N per-expert; its C stacks experts on the M axis.
     if group:
         N_runtime = C.shape[-1]
     supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -2061,10 +2052,6 @@ def do_gemm(
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
     assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
     assert tuple(Bs.shape) == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
-    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad C is the
-    # unpacked (M_runtime, N_runtime).
-    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
-    assert tuple(C.shape) == expected_c, f"C shape {tuple(C.shape)} != {expected_c}"
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
             f"C dtype must be torch.float16, torch.bfloat16, or torch.float32, got {C.dtype}"
@@ -2114,7 +2101,7 @@ def do_gemm(
     if not C.is_contiguous():
         raise FlyDSLUnsupportedError("FlyDSL MXFP8 requires contiguous output storage")
 
-    # Preserve the exact flat descriptor contract used by the passing kernels.
+    # The kernel addresses every operand through a flat 1-D buffer descriptor.
     A_arg = A.view(torch.uint8).contiguous().view(-1)
     B_arg = B.view(torch.uint8).contiguous().view(-1)
     As_arg = As.contiguous().view(-1)
@@ -2148,10 +2135,9 @@ def do_gemm(
         work_queue_arg = _dummy_arg(torch.int32, A.device)
         work_counter_arg = _dummy_arg(torch.int32, A.device)
 
-    # Per-expert B base pointers (grouped fwd TN / dgrad NN weights; wgrad's pre-shifted
-    # X with act_ptrs): an int64[G] device array read in-kernel so the operand needs no
-    # host-side concat. Dense supplies a dtype-correct placeholder to keep the
-    # flyc.compile positional ABI uniform; the kernel never dereferences it there.
+    # Per-expert B base pointers: the weights in grouped fwd/dgrad, or wgrad's
+    # pre-shifted X with act_ptrs. Dense passes an unused placeholder so the
+    # positional kernel signature stays the same.
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
@@ -2284,8 +2270,8 @@ def _mxfp8_matmul_grouped_wgrad(
     (``a_data_ptrs``/``b_data_ptrs``) as one representative expert each plus
     per-expert pointers, with ``a_shape``/``b_shape`` the packed shapes.
     """
-    gm, n_out = a_shape if a_shape is not None else a.shape  # gm = G*M_pad
-    gm_b, k_in = b_shape if b_shape is not None else b.shape
+    gm = (a_shape if a_shape is not None else a.shape)[0]  # gm = G*M_pad
+    gm_b = (b_shape if b_shape is not None else b.shape)[0]
     if gm != gm_b:
         raise ValueError(f"wgrad a/b token dims differ: {gm} vs {gm_b}")
     if gm % num_groups != 0:
@@ -2295,8 +2281,6 @@ def _mxfp8_matmul_grouped_wgrad(
         raise FlyDSLUnsupportedError(
             f"wgrad padded per-expert tokens M_pad={m_pad} must be divisible by {SCALE_GROUP_SIZE}"
         )
-    if tuple(D.shape) != (num_groups * n_out, k_in):
-        raise ValueError(f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}")
     if _scale_dtype(a_scale) != torch.uint8 or _scale_dtype(b_scale) != torch.uint8:
         raise TypeError("FlyDSL MXFP8 wgrad expects raw E8M0 scales as torch.uint8")
 
@@ -2393,7 +2377,10 @@ def mxfp8_matmul(
         )
 
     if group and layout not in ("TN", "NN"):
-        raise ValueError("FlyDSL MXFP8 Group GEMM only supports the TN and NN layouts")
+        raise ValueError(
+            "FlyDSL MXFP8 grouped fwd/dgrad supports only the TN and NN layouts "
+            "(grouped NT wgrad uses wgrad=True)"
+        )
 
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
@@ -2411,47 +2398,18 @@ def mxfp8_matmul(
         k, m = a_rows, a_cols
         kb, n = b.shape
 
-    # Grouped GEMM is G INDEPENDENT matmuls stacked into one launch, not a dense
-    # A @ B_packed. Where the packed B axis lands, and hence which operand shape
-    # unpacks, depends on the layout:
-    #
-    #   TN forward (C = A @ B^T): B is packed [G*N_out, K] on the OUTPUT-N axis.
-    #     The kernel-K contraction (K_in) matches A's K, so kb == k. The output
-    #     width unpacks: n = G*N_out -> n_out = N_out. D = [M_total, N_out].
-    #     (Per expert g: A_g[m_g,K] @ W_g^T[K,N_out] = D_g[m_g,N_out]; stacking the
-    #     rows gives [M_total, N_out] -- the packed G*N_out rows are storage only,
-    #     never the output width; a dense A@B_packed^T would give [M_total,G*N_out],
-    #     G x too much compute, which grouped GEMM avoids.)
-    #
-    #   NN dgrad (dX = dY @ W): the kernel CONTRACTION is N_out, and B=W is packed
-    #     [G*N_out, K_in] on that CONTRACTION axis. So B's first dim kb = G*N_out
-    #     is G x A's per-expert contraction k = N_out (kb != k by design), and the
-    #     output width n = K_in is NOT packed. D = [M_total, K_in] = (m, n).
+    # Grouped fwd (TN) and dgrad (NN) read B per expert through b_data_ptrs, so b is
+    # one expert's weight: its shape gives the per-expert output width (TN: N_out,
+    # NN: K_in) and contraction, exactly as in the dense case. Only the B scales are
+    # stacked over the G experts (checked below).
     if group and b_data_ptrs is None:
         raise FlyDSLUnsupportedError("grouped MXFP8 GEMM requires per-expert weight pointers")
-    if group and layout == "TN":
-        # B is a per-expert [N_out, K] representative read through b_data_ptrs, so
-        # b.shape[0] already IS N_out; the B-scale still spans G*N_out rows.
-        n_out = n
-        expected_kb = k  # contraction unpacked; B rows already per-K
-    elif group and layout == "NN":
-        # B is a per-expert [N_out, K_in] representative read through b_data_ptrs, so
-        # b.shape[0] IS the per-expert contraction N_out (= k).
-        n_out = n  # output width (K_in) is not packed
-        expected_kb = k
-    else:
-        n_out = n
-        expected_kb = k
-
-    if kb != expected_kb:
+    n_out = n
+    if kb != k:
         raise ValueError(
             f"Incompatible MXFP8 {layout} operands: A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
-    # D is the full stacked output [M_total, n_out]; expert g writes its
-    # [m_g, n_out] slice into rows [group_offs[g], group_offs[g+1]).
-    if tuple(D.shape) != (m, n_out):
-        raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n_out)}")
     if k % SCALE_GROUP_SIZE != 0:
         raise FlyDSLUnsupportedError(
             f"K={k} must be divisible by MXFP8 scale group size {SCALE_GROUP_SIZE}"

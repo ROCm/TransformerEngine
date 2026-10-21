@@ -1009,7 +1009,6 @@ def _run_mxfp8(
     return D, aux
 
 
-# Schedule selection now lives in the shared grouped driver (dtype-independent).
 _select_grouped_sched = gd.select_grouped_sched
 
 
@@ -1055,25 +1054,14 @@ def _run_mxfp8_grouped(
     ``a_data_ptrs`` (optional) reads A per expert in place: ``a_data`` is then one
     representative expert payload (see ``grouped_gemm_utils.stacked_operand``).
     """
-    if layout not in ("TN", "NN"):
-        raise FlyDSLUnsupportedError(f"FlyDSL MXFP8 grouped GEMM supports TN/NN, got {layout}")
-    if k % 32 != 0:
-        raise FlyDSLUnsupportedError(f"K={k} must be divisible by MXFP8 scale group size 32")
-    if n % 128 != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 grouped GEMM requires output width N divisible by 128, got N={n}"
-        )
-
+    # Layout, K/32, tile alignment and scale dtype are validated by mxfp8_matmul /
+    # do_gemm, which every launch goes through.
     a_fp8_dtype = getattr(a_data, "_fp8_dtype", None)
     b_fp8_dtype = getattr(b_data, "_fp8_dtype", None)
     if a_data.dtype == torch.uint8:
         a_data = reinterpret_as_fp8_tensor(a_data, a_fp8_dtype)
     if b_data.dtype == torch.uint8:
         b_data = reinterpret_as_fp8_tensor(b_data, b_fp8_dtype)
-
-    scale_dtypes = [(s[0] if isinstance(s, (list, tuple)) else s).dtype for s in (a_scale, b_scale)]
-    if any(d != torch.uint8 for d in scale_dtypes):
-        raise TypeError("FlyDSL MXFP8 grouped GEMM expects raw E8M0 scales as torch.uint8")
 
     D = _validate_or_allocate_output(
         D,
@@ -1084,40 +1072,32 @@ def _run_mxfp8_grouped(
     )
 
     # Persistent-kernel work distribution:
-    #   work_queue   [num_tiles, 3] int32 -- one precomputed (pid_m, pid_n, expert)
-    #                descriptor per output tile. The host bakes the tile->expert
-    #                mapping here so the kernel needs no in-kernel search, and may
-    #                permute the rows (XCD-aware, group-balanced) freely.
-    #   work_counter [1] int32 -- shared atomic slot dispenser, zeroed per launch.
-    # A workgroup claims slot = atomicAdd(work_counter, 1), reads work_queue[slot],
-    # and repeats until slot >= num_tiles.
+    #   work_queue   one (pid_m, pid_n, expert) int32 descriptor per output tile, so
+    #                the kernel needs no tile-to-expert search.
+    #   work_counter atomic slot counter, used only by the work-stealing schedule.
+    # Workgroups take queue slots until slot >= num_work (the queue length).
     from .mxfp8_gemm import BLOCK_M, BLOCK_N
 
     num_groups = len(m_splits)
     num_pid_n = n // BLOCK_N
-    # Per-expert M-block ranges over the packed [M_total, N] output. Each expert's
-    # token count must be BLOCK_M-aligned (enforced upstream by the tiling check),
-    # so tiles never straddle a group boundary. Built + cached from the host-side
-    # m_splits list (no GPU->CPU sync).
+    # Tiles cover each expert's rows of the packed [M_total, N] output. Expert token
+    # counts must be BLOCK_M multiples (the queue builder raises otherwise), so no
+    # tile spans two experts. Built from the host-side m_splits (no GPU->CPU sync).
     work_queue, num_tiles = gd.build_fwd_dgrad_work_queue(
         m_splits, num_pid_n, BLOCK_M, a_data.device
     )
 
-    # Schedule selection (compile-time specialization on the kernel side):
-    #   "worksteal": persistent atomic tile-claiming, best for imbalanced experts.
-    #   "static":    grid-stride slot ownership, no atomic; deadlock-proof.
-    # Heuristic mirrors the HK reference: when the tile count is small relative to
-    # the launch grid, one grid-stride sweep already balances well, so the static
-    # path avoids atomic contention. NVTE_FLYDSL_GROUPED_SCHED overrides for tests.
+    # Schedule (a compile-time kernel variant): "static" walks the queue with a grid
+    # stride and no atomics; "worksteal" claims tiles atomically, which balances
+    # uneven experts. Static is chosen when there are at most a few tiles per CU.
+    # NVTE_FLYDSL_GROUPED_SCHED overrides the choice.
     sched = _select_grouped_sched(num_tiles, a_data.device)
     work_counter = gd.work_counter(sched, a_data.device)
 
     epilogue, bias_arg = _resolve_epilogue(bias, n)
 
-    # Both TN forward and NN dgrad address the weight operand from per-expert base
-    # pointers supplied by the caller (one int64 base per expert slab, required): the
-    # kernel reads B slab g from b_data_ptrs[g], so the host never concatenates the G
-    # per-expert weights.
+    # TN forward and NN dgrad read expert g's weight from b_data_ptrs[g] (required),
+    # so the weights are never concatenated.
     mxfp8_matmul(
         a_data,
         a_scale,
@@ -1185,14 +1165,6 @@ def _run_mxfp8_grouped_wgrad(
 
     num_groups = len(m_splits)
     device = dW.device
-    if n_out % BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"wgrad requires N_out divisible by BLOCK_M={BLOCK_M}, got {n_out}"
-        )
-    if k_in % BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"wgrad requires K_in divisible by BLOCK_N={BLOCK_N}, got {k_in}"
-        )
 
     dW = _validate_or_allocate_output(
         dW,
@@ -1202,9 +1174,9 @@ def _run_mxfp8_grouped_wgrad(
         backend_name="MXFP8 grouped wgrad NT",
     )
 
-    # Descriptor queue: one (pid_m, pid_n, expert) per output tile of every expert's
-    # [N_out, K_in] weight-gradient block. pid_m/pid_n are LOCAL (per-expert); the
-    # kernel re-packs the output row via expert*N_out.
+    # One (pid_m, pid_n, expert) descriptor per tile of each expert's [N_out, K_in]
+    # weight gradient. pid_m/pid_n are per-expert; the kernel offsets the output row
+    # by expert*N_out.
     num_pid_m = n_out // BLOCK_M
     num_pid_n = k_in // BLOCK_N
     buckets = gd.bucketize_wgrad_tokens(m_splits, BLOCK_M, max_buckets=_wgrad_max_buckets())
@@ -1303,7 +1275,8 @@ def _run_bf16_grouped(
 
     if layout not in ("TN", "NN"):
         raise FlyDSLUnsupportedError(
-            f"FlyDSL half-precision grouped GEMM supports TN/NN, got {layout}"
+            f"FlyDSL half-precision grouped fwd/dgrad supports TN/NN, got {layout} "
+            "(grouped NT wgrad goes through _run_bf16_grouped_wgrad)"
         )
 
     # BF16 and FP16 share this kernel (the MFMA opcode is selected per operand dtype);
@@ -1403,10 +1376,6 @@ def _run_bf16_grouped_wgrad(
         raise FlyDSLUnsupportedError(
             f"FlyDSL half-precision grouped wgrad requires bf16/fp16 operands, got {input_dtype}"
         )
-    if n_out % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
-    if k_in % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
 
     dW = _validate_or_allocate_output(
         dW,
@@ -1433,11 +1402,9 @@ def _run_bf16_grouped_wgrad(
             device,
         )
 
-        # Fast path: when this bucket's experts are exactly rows 0..G-1 in order
-        # (the single-bucket / balanced case), the bucket-local expert index equals
-        # the global index, so the kernel writes straight into dW -- no bucket-local
-        # buffer and no scatter copy. Only multi-bucket (skewed) launches allocate a
-        # bucket-local output and scatter it back into dW.
+        # When the bucket holds all experts in order (the balanced case), bucket-local
+        # and global expert indices match, so the kernel writes dW directly. Otherwise
+        # it writes a bucket-local buffer that is copied into dW below.
         direct = ids == list(range(num_groups))
         dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=output_dtype, device=device)
 
@@ -1514,11 +1481,6 @@ def _run_fp8_grouped(
     from .fp8_gemm import doGemm as _fp8_doGemm
 
     num_groups = len(m_splits)
-    if a_scale_vec.numel() != num_groups or b_scale_vec.numel() != num_groups:
-        raise ValueError(
-            f"FP8 grouped expects length-{num_groups} scale vectors, got "
-            f"A={a_scale_vec.numel()}, B={b_scale_vec.numel()}"
-        )
 
     a_fp8_dtype = getattr(a_data, "_fp8_dtype", None)
     b_fp8_dtype = getattr(b_data, "_fp8_dtype", None)
@@ -1601,10 +1563,6 @@ def _run_fp8_grouped_wgrad(
 
     num_groups = len(m_splits)
     device = dW.device
-    if n_out % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(f"wgrad requires N_out divisible by {_BLOCK_M}, got {n_out}")
-    if k_in % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(f"wgrad requires K_in divisible by {_BLOCK_N}, got {k_in}")
 
     dW = _validate_or_allocate_output(
         dW,
