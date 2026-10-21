@@ -2015,10 +2015,13 @@ def do_gemm(
         block_k=_BLOCK_K,
         label=f"MXFP8 {layout} GEMM",
     )
+    # With per-expert pointers, A (and wgrad's B) is one representative expert, but
+    # the kernel addresses the packed operand (a_shape/b_shape) through 32-bit
+    # offsets, so the bound is on the packed extent.
     require_launch_size(
         f"MXFP8 {layout} GEMM",
-        ("A", A),
-        ("B", B),
+        ("A", A, a_rows * a_cols * A.element_size()),
+        ("B", B, b_rows * b_cols * B.element_size()),
         ("As", As),
         ("Bs", Bs),
         ("C", C),
@@ -2045,6 +2048,10 @@ def do_gemm(
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
     assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
     assert tuple(Bs.shape) == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
+    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad C is the
+    # unpacked (M_runtime, N_runtime).
+    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
+    assert tuple(C.shape) == expected_c, f"C shape {tuple(C.shape)} != {expected_c}"
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
             f"C dtype must be torch.float16, torch.bfloat16, or torch.float32, got {C.dtype}"
@@ -2135,6 +2142,13 @@ def do_gemm(
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
+    # act_ptrs also selects how the kernel reads B: outside grouped fwd/dgrad, B is
+    # read through b_data_ptrs only when act_ptrs is set. So activation pointers are
+    # grouped-only, and wgrad takes the dY and X pointer arrays together or not at all.
+    if a_data_ptrs is not None and not (group or wgrad):
+        raise ValueError("MXFP8: per-expert activation pointers require a grouped launch")
+    if wgrad and (a_data_ptrs is None) != (b_data_ptrs is None):
+        raise ValueError("MXFP8 wgrad: a_data_ptrs and b_data_ptrs must be given together")
     # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
     act_ptrs = a_data_ptrs is not None
     if act_ptrs:

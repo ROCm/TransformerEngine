@@ -1694,7 +1694,23 @@ def doGemm(
         block_k=_BLOCK_K,
         label=f"{label} GEMM",
     )
-    require_launch_size(f"{label} GEMM", ("A", A), ("B", B), ("C", C))
+    # With per-expert pointers, A (and wgrad's B) is one representative expert, but
+    # the kernel addresses the whole packed operand through 32-bit offsets: grouped A
+    # is [M_total, K]; wgrad's A and B stack the G experts' padded tokens ([G*K, M],
+    # [G*K, N]). Grouped fwd/dgrad weights use local offsets, so B's own size holds.
+    a_extent = b_extent = ()
+    if a_data_ptrs is not None:
+        a_numel = num_groups * K_runtime * M_runtime if wgrad else M_runtime * K_runtime
+        a_extent = (a_numel * A.element_size(),)
+    if wgrad and b_data_ptrs is not None:
+        b_extent = (num_groups * K_runtime * N_runtime * B.element_size(),)
+    require_launch_size(f"{label} GEMM", ("A", A, *a_extent), ("B", B, *b_extent), ("C", C))
+
+    # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad/dense C is
+    # the unpacked (M_runtime, N_runtime).
+    expected_c = (num_groups * M_runtime, N_runtime) if wgrad else (M_runtime, N_runtime)
+    if tuple(C.shape) != expected_c:
+        raise ValueError(f"C shape {tuple(C.shape)} != expected {expected_c}")
 
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported {label} epilogue: {epilogue}")
@@ -1770,6 +1786,13 @@ def doGemm(
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+    # act_ptrs also selects how the kernel reads B: outside grouped fwd/dgrad, B is
+    # read through b_data_ptrs only when act_ptrs is set. So activation pointers are
+    # grouped-only, and wgrad takes the dY and X pointer arrays together or not at all.
+    if a_data_ptrs is not None and not (group or wgrad):
+        raise ValueError(f"{label}: per-expert activation pointers require a grouped launch")
+    if wgrad and (a_data_ptrs is None) != (b_data_ptrs is None):
+        raise ValueError(f"{label} wgrad: a_data_ptrs and b_data_ptrs must be given together")
     # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
     act_ptrs = a_data_ptrs is not None
     if act_ptrs:

@@ -63,15 +63,17 @@ _MAX_LAUNCH_BYTES = 2**31 - 1
 def require_launch_size(label, *tensors):
     """Reject operands whose byte size exceeds the int32 launch-argument limit.
 
-    ``tensors`` is an iterable of ``(name, tensor)`` pairs. Raises
-    ``FlyDSLUnsupportedError`` (so ``general_gemm`` falls back to the C++
-    backend) for the first operand at or above ``_MAX_LAUNCH_BYTES``; skips
-    ``None`` tensors (e.g. an absent bias/aux).
+    ``tensors`` is an iterable of ``(name, tensor)`` or ``(name, tensor, nbytes)``
+    entries. ``nbytes`` overrides the tensor's own size: a grouped operand read
+    through per-expert pointers is passed as one representative expert, while the
+    kernel addresses the whole packed operand. Raises ``FlyDSLUnsupportedError``
+    (so ``general_gemm`` falls back to the C++ backend) for the first operand at or
+    above ``_MAX_LAUNCH_BYTES``; skips ``None`` tensors (e.g. an absent bias/aux).
     """
-    for name, t in tensors:
+    for name, t, *override in tensors:
         if t is None:
             continue
-        nbytes = t.numel() * t.element_size()
+        nbytes = override[0] if override else t.numel() * t.element_size()
         if nbytes > _MAX_LAUNCH_BYTES:
             raise FlyDSLUnsupportedError(
                 f"FlyDSL {label} operand {name} is {nbytes} bytes, which exceeds "

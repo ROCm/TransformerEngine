@@ -1367,7 +1367,17 @@ def doGemm(
         block_k=_BLOCK_K,
         label="FP8 GEMM",
     )
-    require_launch_size("FP8 GEMM", ("A", A), ("B", B), ("C", C))
+    # With per-expert pointers, A (and wgrad's B) is one representative expert, but
+    # the kernel addresses the whole packed operand through 32-bit offsets: grouped A
+    # is [M_total, K]; wgrad's A and B stack the G experts' padded tokens ([G*K, M],
+    # [G*K, N]). Grouped fwd/dgrad weights use local offsets, so B's own size holds.
+    a_extent = b_extent = ()
+    if a_data_ptrs is not None:
+        a_numel = num_groups * K_runtime * M_runtime if wgrad else M_runtime * K_runtime
+        a_extent = (a_numel * A.element_size(),)
+    if wgrad and b_data_ptrs is not None:
+        b_extent = (num_groups * K_runtime * N_runtime * B.element_size(),)
+    require_launch_size("FP8 GEMM", ("A", A, *a_extent), ("B", B, *b_extent), ("C", C))
     # Dense: one scalar inverse scale per operand. Grouped: a per-expert vector, or
     # (scale_ptrs) an int64[G] array of per-expert scale_inv pointers read in place.
     expected_scale_numel = num_groups if (group or wgrad) else 1

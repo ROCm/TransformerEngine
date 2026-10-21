@@ -4,8 +4,10 @@
 #
 # See LICENSE for license information.
 
+import contextlib
 import os
 import random
+import warnings
 from typing import Dict, List, Optional, Sequence
 
 import pytest
@@ -672,20 +674,42 @@ def test_grouped_linear_accuracy_rocm_backends(
     if expect_ck_no_fallback:
         monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
-    test_grouped_linear_accuracy(
-        dtype,
-        num_gemms,
-        bs,
-        model,
-        recipe,
-        fp8_model_params,
-        fuse_wgrad_accumulation,
-        False,
-        delay_wgrad_compute,
-        use_triton=False,
-        parallel_mode=None,
-        use_cutlass=True,
+    # FlyDSL falls back to the default grouped GEMM silently on any config it rejects
+    # past the gate skipped above, which would compare the default backend against
+    # itself. Enable its fallback warning and assert none was emitted.
+    expect_flydsl_ran = grouped_gemm_backend == "flydsl"
+    if expect_flydsl_ran:
+        monkeypatch.setenv("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "1")
+    capture = (
+        warnings.catch_warnings(record=True) if expect_flydsl_ran else contextlib.nullcontext()
     )
+
+    with capture as caught:
+        if expect_flydsl_ran:
+            warnings.simplefilter("always")
+        test_grouped_linear_accuracy(
+            dtype,
+            num_gemms,
+            bs,
+            model,
+            recipe,
+            fp8_model_params,
+            fuse_wgrad_accumulation,
+            False,
+            delay_wgrad_compute,
+            use_triton=False,
+            parallel_mode=None,
+            use_cutlass=True,
+        )
+
+    if expect_flydsl_ran:
+        fallbacks = sorted({str(w.message) for w in caught if "[FLYDSL WARNING]" in str(w.message)})
+        assert not fallbacks, (
+            "FlyDSL grouped GEMM fell back to the default backend, so it never ran "
+            f"(dtype={dtype}, recipe={recipe_id(recipe)}, fp8_model_params={fp8_model_params}, "
+            f"fuse_wgrad={fuse_wgrad_accumulation}, delay_wgrad={delay_wgrad_compute}):\n"
+            + "\n".join(fallbacks)
+        )
 
     if expect_ck_no_fallback:
         # NVTE_WARN writes to std::cerr; capfd captures file-descriptor-level
