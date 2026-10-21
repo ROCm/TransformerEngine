@@ -628,13 +628,10 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 // exists because hipBLASLt has no NVFP4 device-alpha solution. Once
 // https://amd-hub.atlassian.net/browse/AIHPBLAS-3571 is fixed, pass c0 as a device scalar alpha and
 // drop the c0 readback / hipStreamSynchronize below.
-//
-// When apply_tensor_scale is false the caller's alpha already carries the per-tensor correction
-// (device-side alpha/beta, as set by the JAX NVFP4 path), so c0 = alpha_in.
 static void setup_nvfp4_gemm_native(
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
-    int m, int n, int k, float alpha_in, bool apply_tensor_scale,
+    int m, int n, int k, float alpha_in,
     void* workspace, size_t& workspaceSize, float* alpha_out,
     const void** a_scale_swz_out, const void** b_scale_swz_out,
     hipStream_t stream) {
@@ -643,17 +640,14 @@ static void setup_nvfp4_gemm_native(
   // Read the bound per operand: 4over6 tensors carry 256, not 448.
   const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.get_nvfp4_scale_max());
   const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.get_nvfp4_scale_max());
-  const float factor_inv =
-      apply_tensor_scale ? 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B) : 1.0f;
-  const float default_amax_A = apply_tensor_scale ? fp4_max * fp8_max_A : 1.0f;
-  const float default_amax_B = apply_tensor_scale ? fp4_max * fp8_max_B : 1.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
-  const float* amax_A = !apply_tensor_scale ? nullptr
-      : (transa == CUBLAS_OP_T) ? reinterpret_cast<const float*>(inputA.amax.dptr)
-                                : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
-  const float* amax_B = !apply_tensor_scale ? nullptr
-      : (transb == CUBLAS_OP_N) ? reinterpret_cast<const float*>(inputB.amax.dptr)
-                                : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
+  const float* amax_A = (transa == CUBLAS_OP_T)
+      ? reinterpret_cast<const float*>(inputA.amax.dptr)
+      : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
+  const float* amax_B = (transb == CUBLAS_OP_N)
+      ? reinterpret_cast<const float*>(inputB.amax.dptr)
+      : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
 
   // hipBLASLt reads the FP8 (E4M3) block scales in a K-tiled layout, not the row-major layout TE
   // emits. Source buffer selection mirrors CanonicalizeGemmInput's NVFP4 branch; TE's originals are
@@ -690,7 +684,7 @@ static void setup_nvfp4_gemm_native(
   // c0 on device; a single 4-byte copy then brings c0 to the host for the GEMM's host scalar alpha.
   launch_nvfp4_prep(a_sinv.dptr, swz_a, m, static_cast<int>(a_sinv.shape[1]), b_sinv.dptr, swz_b, n,
                     static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B,
-                    default_amax_A, default_amax_B, alpha_in, factor_inv, c0_dev, stream);
+                    fp4_max * fp8_max_A, fp4_max * fp8_max_B, alpha_in, factor_inv, c0_dev, stream);
   float host_c0 = 0.0f;
   // FIXME(AIHPBLAS-3571): drop this c0 readback + sync once hipBLASLt supports NVFP4 device alpha.
   NVTE_CHECK_CUDA(hipMemcpyAsync(&host_c0, c0_dev, sizeof(float), hipMemcpyDeviceToHost, stream));
@@ -707,12 +701,11 @@ static void setup_nvfp4_gemm_native(
 //
 // This is the fallback path used on every architecture except gfx1250, where
 // hipBLASLt cannot consume NVFP4 block scales natively; see hipblaslt_gemm().
-// apply_tensor_scale has the same meaning as in setup_nvfp4_gemm_native().
 static void dequant_fp4_gemm_inputs(
     GemmParam& param,
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
-    int m, int n, int k, float alpha, bool apply_tensor_scale,
+    int m, int n, int k, float alpha,
     void* workspace, size_t& workspaceSize,
     const void** alpha_ptr_out, hipStream_t stream) {
 
@@ -720,17 +713,14 @@ static void dequant_fp4_gemm_inputs(
   // Read the bound per operand as upstream does: 4over6 tensors carry 256, not 448.
   const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.get_nvfp4_scale_max());
   const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.get_nvfp4_scale_max());
-  const float factor_inv =
-      apply_tensor_scale ? 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B) : 1.0f;
-  const float default_amax_A = apply_tensor_scale ? fp4_max * fp8_max_A : 1.0f;
-  const float default_amax_B = apply_tensor_scale ? fp4_max * fp8_max_B : 1.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
-  const float* amax_A = !apply_tensor_scale ? nullptr
-      : (transa == CUBLAS_OP_T) ? reinterpret_cast<const float*>(inputA.amax.dptr)
-                                : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
-  const float* amax_B = !apply_tensor_scale ? nullptr
-      : (transb == CUBLAS_OP_N) ? reinterpret_cast<const float*>(inputB.amax.dptr)
-                                : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
+  const float* amax_A = (transa == CUBLAS_OP_T)
+      ? reinterpret_cast<const float*>(inputA.amax.dptr)
+      : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
+  const float* amax_B = (transb == CUBLAS_OP_N)
+      ? reinterpret_cast<const float*>(inputB.amax.dptr)
+      : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
 
   // Compute total extra bytes needed from the workspace:
   //   alpha vector:  m * sizeof(float)
@@ -759,7 +749,8 @@ static void dequant_fp4_gemm_inputs(
   constexpr int kBlockSize = 256;
   const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
   compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-      alpha, amax_A, amax_B, default_amax_A, default_amax_B, factor_inv, device_alpha_vec, m);
+      alpha, amax_A, amax_B, fp4_max * fp8_max_A, fp4_max * fp8_max_B, factor_inv,
+      device_alpha_vec, m);
   *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
 
   // Stage FP4 operand: dequantize to BF16 in workspace and update GEMM param.
@@ -1481,8 +1472,7 @@ void hipblaslt_gemm(const Tensor *inputA,
                     bool use_split_accumulator,
                     int math_sm_count,
                     hipStream_t stream,
-                    hipblasLtHandle_t handle,
-                    bool nvfp4_apply_tensor_scale = true
+                    hipblasLtHandle_t handle
 ) {
   // Return immediately if GEMM is trivial
   if (m <= 0 || n <= 0) {
@@ -1527,13 +1517,13 @@ void hipblaslt_gemm(const Tensor *inputA,
   const void* nvfp4_scaleB_swz = nullptr;
   if (use_nvfp4_native) {
     setup_nvfp4_gemm_native(*inputA, transa, *inputB, transb, m, n, k, alpha,
-                            nvfp4_apply_tensor_scale, workspace, workspaceSize, &nvfp4_c0,
+                            workspace, workspaceSize, &nvfp4_c0,
                             &nvfp4_scaleA_swz, &nvfp4_scaleB_swz, stream);
     alpha_ptr = static_cast<const void*>(&nvfp4_c0);
     beta_ptr = static_cast<const void*>(&beta);
   } else if (use_nvfp4) {
     dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
-                            m, n, k, alpha, nvfp4_apply_tensor_scale, workspace, workspaceSize,
+                            m, n, k, alpha, workspace, workspaceSize,
                             &alpha_ptr, stream);
   }
 
@@ -2223,20 +2213,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  [[maybe_unused]] bool gemm_producer, [[maybe_unused]] const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset)
 {
-  // Every ROCm GEMM backend takes alpha/beta as host scalars, and hipBLASLt has no NVFP4 solution
-  // that accepts a device alpha (AIHPBLAS-3571), so read device-side alpha/beta back to the host.
-  // The JAX GEMM FFI (the only caller that sets this) is not graph-captured on ROCm.
-  // As with cuBLASLt, a device-side alpha already carries the NVFP4 per-tensor scales.
-  float alpha;
-  float beta;
-  if (alpha_beta_on_device) {
-    NVTE_CHECK_CUDA(hipMemcpyAsync(&alpha, alpha_ptr, sizeof(float), hipMemcpyDeviceToHost, stream));
-    NVTE_CHECK_CUDA(hipMemcpyAsync(&beta, beta_ptr, sizeof(float), hipMemcpyDeviceToHost, stream));
-    NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-  } else {
-    alpha = *reinterpret_cast<const float *>(alpha_ptr);
-    beta  = *reinterpret_cast<const float *>(beta_ptr);
-  }
+  NVTE_CHECK(!alpha_beta_on_device, "Device-side alpha/beta is not supported by hipBLASLt.");
   // As with cuBLASLt, a non-FP8/FP4 GEMM reads the bias in the output dtype; a narrower bias
   // buffer would be reinterpreted and read out of bounds.
   if (inputBias->data.dptr != nullptr) {
@@ -2304,7 +2281,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                "hipBLASLt MXFP4 GEMM does not support fused bias");
     NVTE_CHECK(outputPreGelu->data.dptr == nullptr,
                "hipBLASLt MXFP4 GEMM does not support fused GELU");
-    NVTE_CHECK(beta == 0.0f,
+    NVTE_CHECK(*reinterpret_cast<const float *>(beta_ptr) == 0.0f,
                "hipBLASLt MXFP4 GEMM does not support accumulate (beta != 0)");
 #else
     NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
@@ -2314,6 +2291,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const int lda = is_transa ? k : m;
   const int ldb = is_transb ? n : k;
   const int ldd = m;
+
+  float alpha = *reinterpret_cast<const float *>(alpha_ptr);  // Assumed to be on CPU
+  float beta = *reinterpret_cast<const float *>(beta_ptr);  // Assumed to be on CPU
 
   ServiceStreamCtl ss_ctl;
   bool use_service_stream =
@@ -2444,7 +2424,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     if (!handled) {
       hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
                      transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                     math_sm_count, gemm_stream, handle, !alpha_beta_on_device);
+                     math_sm_count, gemm_stream, handle);
     }
 #ifdef USE_HIPKITTENS_GEMM
   }
