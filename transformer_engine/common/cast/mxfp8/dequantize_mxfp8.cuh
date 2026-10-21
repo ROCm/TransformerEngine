@@ -28,6 +28,8 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "../../util/cuda_runtime.h"
+#include "../../util/rocm_tdm.cuh"
+#include "../../util/system.h"
 #include "./rocm_vectorized_2d.cuh"
 #endif
 
@@ -323,6 +325,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   // rows, colwise uses the columnwise-scale cols.
   const size_t mx_swizzle_padded_dim =
       use_rowwise_scaling ? input.scale_inv.shape[0] : input.columnwise_scale_inv.shape[1];
+  const bool use_tdm = use_tdm_dequantize(input_data.dptr, output->data.dptr, rows, cols);
 #endif
 
   TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
@@ -336,12 +339,19 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 #ifdef __HIP_PLATFORM_AMD__
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+              if (use_tdm) {
+                  dequantize_mxfp8_tdm_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                                              WITH_GEMM_SWIZZLED_SCALES>
+                  <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
+                                               rows, cols, scales_stride, mx_swizzle_padded_dim);
+              } else {
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(OType))), IS_ALIGNED,
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
                                           WITH_GEMM_SWIZZLED_SCALES>
                   <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
-                                               rows, cols, scales_stride, mx_swizzle_padded_dim);););  // NOLINT(*)
+                                               rows, cols, scales_stride, mx_swizzle_padded_dim););
+              });  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                       with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
