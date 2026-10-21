@@ -729,6 +729,10 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
              "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
              mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
 
+  if (mxfp8::multi_quantize_tdm(input_list, output_list, stream)) {
+    return;
+  }
+
   DType itype = input_list[0]->data.dtype;
   DType otype = output_list[0]->dtype();
   const bool use_rowwise = output_list[0]->has_data();

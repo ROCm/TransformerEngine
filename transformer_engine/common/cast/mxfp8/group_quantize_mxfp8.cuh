@@ -1193,6 +1193,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     }
   }
 
+  if (group_quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, activations, noop, output,
+                                                                 dbias, workspace, stream)) {
+    return;
+  }
+
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
     use_large_chunks, USE_LARGE_CHUNKS,
 
