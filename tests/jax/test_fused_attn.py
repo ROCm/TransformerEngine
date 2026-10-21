@@ -188,6 +188,79 @@ def test_aiter_fp8_fwd_asm(head_dim):
     assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
 
 
+@rocm_fp8_attention_support
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_asm_jit_scales(head_dim):
+    """Inference jit must accept scale inverses as traced arguments.
+
+    Binding them with partial outside jit hides the custom_vjp nondiff check.
+    """
+    backend, _ = FusedAttnHelper(
+        is_training=False,
+        batch_size=1,
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    ).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK
+
+    shape = (1, 128, 8, head_dim)
+    key = jax.random.PRNGKey(7)
+    q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+    k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+    v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+    q = (jax.random.normal(key, shape) * 0.2 / q_scale_inv).astype(jnp.float8_e4m3fn)
+    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2 / k_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2 / v_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    sequence_descriptor = SequenceDescriptor.from_seqlens(jnp.array([128], dtype=jnp.int32))
+    scale = head_dim**-0.5
+
+    @jax.jit
+    def run(q, k, v, q_scale_inv, k_scale_inv, v_scale_inv):
+        return fused_attn(
+            (q, k, v),
+            None,
+            sequence_descriptor,
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.NO_MASK,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=scale,
+            dropout_probability=0.0,
+            is_training=False,
+            q_scale_inv=q_scale_inv,
+            k_scale_inv=k_scale_inv,
+            v_scale_inv=v_scale_inv,
+        )
+
+    output = run(q, k, v, q_scale_inv, k_scale_inv, v_scale_inv)
+    q_dq = q.astype(jnp.float32) * q_scale_inv
+    k_dq = k.astype(jnp.float32) * k_scale_inv
+    v_dq = v.astype(jnp.float32) * v_scale_inv
+    scores = jnp.einsum("bqhd,bkhd->bhqk", q_dq, k_dq) * scale
+    reference = jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v_dq)
+    assert output.dtype == jnp.bfloat16
+    assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
+
+
 @partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12, 13))
 def general_dot_product_attention(
     query: ArrayLike,
