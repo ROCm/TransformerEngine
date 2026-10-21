@@ -114,6 +114,7 @@ def _compile_kernel(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    act_ptrs: bool = False,
 ):
     """Build one compile-time-specialized TN, NN, or NT half-precision kernel.
 
@@ -393,6 +394,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -428,9 +430,16 @@ def _compile_kernel(
             # Grouped fwd/dgrad: weights arrive as G independently-allocated per-expert
             # slabs, so B is addressed from a per-expert base pointer read from
             # ``b_data_ptrs`` (byte-addressed, reusing gB's static layout) rather than
-            # an expert-shifted offset into one packed B. wgrad keeps the packed-B
-            # folds; dense never enters here.
+            # an expert-shifted offset into one packed B. wgrad reads B by pointer only
+            # with act_ptrs; dense never enters here.
             b_ptr_layout = fx.get_layout(gB)
+            # act_ptrs: the per-expert activation operand (A; and in wgrad also B, via
+            # b_data_ptrs) stays in its own per-expert allocation instead of a host-side
+            # concat. The host passes each expert's base pointer pre-shifted by that
+            # expert's packed offset, so the packed addressing below is unchanged; only
+            # the buffer base moves per tile.
+            if const_expr(act_ptrs):
+                a_ptr_layout = fx.get_layout(gA)
 
             # LDS broadcast scratch (one int32): thread 0 writes the atomically
             # claimed slot, a barrier broadcasts it to the whole workgroup. The
@@ -504,8 +513,19 @@ def _compile_kernel(
             gl_off_a = _a_global_offsets(lane, wave_id, c_m)
             gl_off_b = _b_global_offsets(lane, wave_id, c_n)
 
+            # Issue both per-expert base-pointer loads before either is made uniform, so a
+            # tile waits on one memory round trip rather than two.
+            if const_expr(act_ptrs):
+                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+            if const_expr(group or act_ptrs):
+                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+            if const_expr(act_ptrs):
+                a_base_i64 = gd.make_uniform_i64(a_base_raw)
+                a_div_tile = gd.rebase_buffer_view(a_base_i64, fx.Uint8.ir_type, a_ptr_layout)
+            else:
+                a_div_tile = a_div
             a_g2s = G2SLoader(
-                a_div,
+                a_div_tile,
                 gl_off_a,
                 LOAD_PASSES_HALF,
                 fx.Uint8.ir_type,
@@ -515,12 +535,19 @@ def _compile_kernel(
             # the per-expert base already selects the expert, so in-tile addressing is
             # LOCAL. TN reads a local column (by_n_idx); NN (dgrad, transpose-read)
             # packs experts on the contraction axis, so the base replaces the expert*K
-            # contraction shift (b_k_off -> 0). Dense/wgrad keep the shared packed view.
+            # contraction shift (b_k_off -> 0). wgrad bases are pre-shifted (act_ptrs),
+            # so they keep the packed column and contraction shift. Dense keeps the
+            # shared packed view.
             if const_expr(group):
-                b_base_i64 = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
                 b_data_col = by_n_idx
                 b_k_off = fx.Index(0)
+            elif const_expr(act_ptrs):
+                b_base_i64 = gd.make_uniform_i64(b_base_raw)
+                b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
+                b_data_col = by_n_b_idx
+                b_k_off = b_expert_k_off
             else:
                 b_div_tile = b_div
                 b_data_col = by_n_b_idx
@@ -1361,6 +1388,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Dense: one workgroup per output tile. Grouped/wgrad: a fixed num-CU
@@ -1381,6 +1409,7 @@ def _compile_kernel(
             work_queue,
             work_counter,
             b_data_ptrs,
+            a_data_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1398,6 +1427,7 @@ def _cached_launch(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    act_ptrs: bool = False,
 ):
     return _compile_kernel(
         K,
@@ -1409,6 +1439,7 @@ def _cached_launch(
         group=group,
         sched=sched,
         wgrad=wgrad,
+        act_ptrs=act_ptrs,
     )
 
 
@@ -1622,6 +1653,7 @@ def doGemm(
     work_queue: torch.Tensor = None,
     work_counter: torch.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
+    a_data_ptrs: torch.Tensor = None,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -1729,13 +1761,19 @@ def doGemm(
         work_queue_arg = _dense_placeholder(A.device, torch.int32)
         work_counter_arg = _dense_placeholder(A.device, torch.int32)
 
-    # Per-expert weight base pointers (grouped TN only): an int64[G] device array of
-    # each expert's weight-slab base address, read in-kernel so the weight operand
-    # needs no host-side concat. Dense/NN/wgrad pass a placeholder never read there.
+    # Per-expert weight base pointers (grouped TN/NN; wgrad's pre-shifted X with
+    # act_ptrs): an int64[G] device array read in-kernel so the operand needs no
+    # host-side concat. Dense passes a placeholder that is never read.
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+    # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
+    act_ptrs = a_data_ptrs is not None
+    if act_ptrs:
+        a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
+    else:
+        a_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
 
     launch_key = (
         "half_prec_gemm",
@@ -1748,6 +1786,7 @@ def doGemm(
         group,
         sched,
         wgrad,
+        act_ptrs,
     )
     launch_args = (
         A_arg,
@@ -1761,6 +1800,7 @@ def doGemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
+        a_data_ptrs_arg,
         stream,
     )
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
@@ -1778,6 +1818,7 @@ def doGemm(
             group,
             sched,
             wgrad,
+            act_ptrs,
         ),
         launch_args,
     )(*launch_args)

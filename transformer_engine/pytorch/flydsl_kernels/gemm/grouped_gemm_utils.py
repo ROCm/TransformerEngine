@@ -71,6 +71,11 @@ def read_ptr_at(ptr_array, index):
     return llvm.LoadOp(T.i64, elt_ptr).result
 
 
+def load_i32_at(tensor, index):
+    """Load ``tensor[index]`` (int32) with a plain per-lane global load."""
+    return llvm.LoadOp(T.i32, global_i32_ptr(tensor, index)).result
+
+
 def make_uniform_i64(value):
     """Broadcast lane 0's i64 to the whole wave (``readfirstlane``).
 
@@ -336,26 +341,69 @@ def _ptr_array_cached(ptrs, device):
     return torch.tensor(ptrs, dtype=torch.int64, device=device)
 
 
-def shifted_expert_ptrs(tensors, packed_row_starts, row_bytes, device):
-    """int64[G] device array of per-expert base pointers, each shifted to its packed row.
-
-    Lets a grouped kernel read per-expert operands in place with its packed-operand
-    addressing: entry ``g`` is ``tensors[g].data_ptr() - packed_row_starts[g] *
-    row_bytes``, so ``entry + packed_row * row_bytes`` lands on row
-    ``packed_row - packed_row_starts[g]`` of ``tensors[g]``, exactly where the
-    ``torch.cat`` of the experts would have put it. Each tensor must be row-major
-    with ``row_bytes`` bytes per row. The upload runs only on a cache miss; the
-    caching allocator usually hands back the same per-expert buffers step to step.
-    """
-    ptrs = tuple(
-        t.data_ptr() - int(start) * row_bytes for t, start in zip(tensors, packed_row_starts)
-    )
-    return _ptr_array_cached(ptrs, device)
-
-
 def expert_ptrs(tensors, device):
-    """int64[G] device array of ``t.data_ptr()`` per expert (cached; see shifted_expert_ptrs)."""
+    """int64[G] device array of each per-expert tensor's ``data_ptr()``.
+
+    Grouped kernels read per-expert operands (weights, FP8 scale_inv) through this
+    array instead of a host-side concat. The upload runs only on a cache miss: weights
+    and the caching allocator's per-expert buffers repeat step to step.
+    """
     return _ptr_array_cached(tuple(t.data_ptr() for t in tensors), device)
+
+
+def stacked_operand(tensors, device):
+    """Address per-expert tensors stacked on dim 0 in place, as one packed operand.
+
+    Returns ``(representative, ptrs)``, or ``None`` when the tensors are not
+    contiguous with a common trailing shape and dtype. Entry ``g`` of the int64[G]
+    ``ptrs`` is ``tensors[g].data_ptr()`` minus the byte offset where expert ``g``
+    starts in the ``torch.cat(tensors)`` layout, so a kernel keeps its packed
+    addressing and only swaps the buffer base per tile. ``representative`` is a
+    non-empty expert tensor standing in for the operand's dtype.
+    """
+    first = tensors[0]
+    trailing = first.shape[1:]
+    ptrs = []
+    offset = 0
+    for t in tensors:
+        if t.dtype != first.dtype or t.shape[1:] != trailing or not t.is_contiguous():
+            return None
+        ptrs.append(t.data_ptr() - offset)
+        offset += t.numel() * t.element_size()
+    representative = next((t for t in tensors if t.numel() > 0), first)
+    return representative, _ptr_array_cached(tuple(ptrs), device)
+
+
+@functools.lru_cache(maxsize=512)
+def _block_expert_table_cached(blocks_per_expert, device):
+    table = [e for e, n in enumerate(blocks_per_expert) for _ in range(n)]
+    return torch.tensor(table, dtype=torch.int32, device=device)
+
+
+def block_expert_table(extents, block, device):
+    """int32 table mapping each ``block``-sized slice of a stacked axis to its expert.
+
+    ``extents`` are the per-expert lengths along the stacked axis; each must be a
+    multiple of ``block``, so no block straddles two experts.
+    """
+    for n in extents:
+        if int(n) % block != 0:
+            raise ValueError(f"per-expert extent {int(n)} is not a multiple of {block}")
+    return _block_expert_table_cached(tuple(int(n) // block for n in extents), device)
+
+
+def drop_empty_experts(buckets, m_splits, dW, n_out):
+    """Zero the ``dW`` rows of zero-token experts and drop them from the wgrad buckets.
+
+    An expert with no tokens has ``dW_e = 0``; launching it anyway contracts a zero
+    padding that a non-finite scale (FP8 never writes an empty tensor's scale_inv)
+    would turn into NaN.
+    """
+    for e, m in enumerate(m_splits):
+        if int(m) == 0:
+            dW[e * n_out : (e + 1) * n_out].zero_()
+    buckets = [(k_pad, [e for e in ids if int(m_splits[e]) != 0]) for k_pad, ids in buckets]
+    return [(k_pad, ids) for k_pad, ids in buckets if ids]
 
 
 def uniform_pad_concat(tensors, rows):

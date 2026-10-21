@@ -1028,6 +1028,7 @@ def _run_mxfp8_grouped(
     layout: str = "TN",
     bias=None,
     b_data_ptrs=None,
+    a_data_ptrs=None,
 ):
     """Dispatch a packed MXFP8 grouped GEMM through the persistent kernel.
 
@@ -1049,6 +1050,8 @@ def _run_mxfp8_grouped(
     queue is built + shape-cached from it directly, so no device->host copy of a
     ``group_offs`` tensor (and its blocking sync) is needed. Operands arrive already
     MXFP8-quantized and packed -- no quantization, no BLAS ownership swap.
+    ``a_data_ptrs`` (optional) reads A per expert in place: ``a_data`` is then one
+    representative expert payload (see ``grouped_gemm_utils.stacked_operand``).
     """
     if layout not in ("TN", "NN"):
         raise FlyDSLUnsupportedError(f"FlyDSL MXFP8 grouped GEMM supports TN/NN, got {layout}")
@@ -1066,7 +1069,8 @@ def _run_mxfp8_grouped(
     if b_data.dtype == torch.uint8:
         b_data = reinterpret_as_fp8_tensor(b_data, b_fp8_dtype)
 
-    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+    scale_dtypes = [(s[0] if isinstance(s, (list, tuple)) else s).dtype for s in (a_scale, b_scale)]
+    if any(d != torch.uint8 for d in scale_dtypes):
         raise TypeError("FlyDSL MXFP8 grouped GEMM expects raw E8M0 scales as torch.uint8")
 
     D = _validate_or_allocate_output(
@@ -1127,9 +1131,27 @@ def _run_mxfp8_grouped(
         work_queue=work_queue,
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
+        a_shape=(m_total, a_data.size(-1)) if a_data_ptrs is not None else None,
         sched=sched,
     )
     return D
+
+
+def _wgrad_operands(dy_b, x_b, unpadded, pad, device):
+    """One wgrad bucket's (dy, dy_ptrs, x, x_ptrs), shared by every dtype.
+
+    When no expert in the bucket needs padding (``unpadded``), both operands are read
+    in place from their per-expert tensors (``gd.stacked_operand``), so the kernel
+    sees the packed layout without a host-side concat. Otherwise ``pad`` builds the
+    padded packed operand and the pointers are ``None``.
+    """
+    if unpadded:
+        dy = gd.stacked_operand(dy_b, device)
+        x = gd.stacked_operand(x_b, device)
+        if dy is not None and x is not None:
+            return dy[0], dy[1], x[0], x[1]
+    return pad(dy_b), None, pad(x_b), None
 
 
 def _run_mxfp8_grouped_wgrad(
@@ -1184,14 +1206,28 @@ def _run_mxfp8_grouped_wgrad(
     num_pid_m = n_out // BLOCK_M
     num_pid_n = k_in // BLOCK_N
     buckets = gd.bucketize_wgrad_tokens(m_splits, BLOCK_M, max_buckets=_wgrad_max_buckets())
+    buckets = gd.drop_empty_experts(buckets, m_splits, dW, n_out)
 
     for k_pad, ids in buckets:
         bsize = len(ids)
         scale_rows = k_pad // SCALE_GROUP_SIZE
-        dy_data = gd.uniform_pad_concat([dy_cols[e] for e in ids], k_pad)
-        dy_scale = gd.uniform_pad_concat([dy_scales[e] for e in ids], scale_rows)
-        x_data = gd.uniform_pad_concat([x_cols[e] for e in ids], k_pad)
-        x_scale = gd.uniform_pad_concat([x_scales[e] for e in ids], scale_rows)
+        dy_b = [dy_cols[e] for e in ids]
+        x_b = [x_cols[e] for e in ids]
+        dy_data, dy_ptrs, x_data, x_ptrs = _wgrad_operands(
+            dy_b,
+            x_b,
+            all(t.size(0) == k_pad for t in dy_b + x_b),
+            lambda ts: gd.uniform_pad_concat(ts, k_pad),
+            device,
+        )
+        dy_scale_b = [dy_scales[e] for e in ids]
+        x_scale_b = [x_scales[e] for e in ids]
+        if dy_ptrs is not None:
+            # Unpadded bucket: the scale packer reads the per-expert scales in place.
+            dy_scale, x_scale = dy_scale_b, x_scale_b
+        else:
+            dy_scale = gd.uniform_pad_concat(dy_scale_b, scale_rows)
+            x_scale = gd.uniform_pad_concat(x_scale_b, scale_rows)
 
         if dy_data.dtype == torch.uint8:
             dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
@@ -1219,6 +1255,10 @@ def _run_mxfp8_grouped_wgrad(
             work_counter=work_counter,
             sched=sched,
             wgrad=True,
+            a_data_ptrs=dy_ptrs,
+            b_data_ptrs=x_ptrs,
+            a_shape=(bsize * k_pad, n_out) if dy_ptrs is not None else None,
+            b_shape=(bsize * k_pad, k_in) if x_ptrs is not None else None,
         )
 
         if not direct:
@@ -1241,6 +1281,7 @@ def _run_bf16_grouped(
     layout: str = "TN",
     bias=None,
     b_data_ptrs=None,
+    a_data_ptrs=None,
 ):
     """Dispatch a packed BF16 grouped GEMM through the persistent kernel.
 
@@ -1305,6 +1346,7 @@ def _run_bf16_grouped(
         work_queue=work_queue,
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
         sched=sched,
     )
     return D
@@ -1372,11 +1414,19 @@ def _run_bf16_grouped_wgrad(
     num_pid_m = n_out // _BLOCK_M
     num_pid_n = k_in // _BLOCK_N
     buckets = gd.bucketize_wgrad_tokens(m_splits, _BLOCK_M, max_buckets=_wgrad_max_buckets())
+    buckets = gd.drop_empty_experts(buckets, m_splits, dW, n_out)
 
     for k_pad, ids in buckets:
         bsize = len(ids)
-        dy_data = gd.uniform_pad_concat([dy_cols[e] for e in ids], k_pad)
-        x_data = gd.uniform_pad_concat([x_cols[e] for e in ids], k_pad)
+        dy_b = [dy_cols[e] for e in ids]
+        x_b = [x_cols[e] for e in ids]
+        dy_data, dy_ptrs, x_data, x_ptrs = _wgrad_operands(
+            dy_b,
+            x_b,
+            all(t.size(0) == k_pad for t in dy_b + x_b),
+            lambda ts: gd.uniform_pad_concat(ts, k_pad),
+            device,
+        )
 
         # Fast path: when this bucket's experts are exactly rows 0..G-1 in order
         # (the single-bucket / balanced case), the bucket-local expert index equals
@@ -1408,6 +1458,8 @@ def _run_bf16_grouped_wgrad(
             work_counter=work_counter,
             sched=sched,
             wgrad=True,
+            a_data_ptrs=dy_ptrs,
+            b_data_ptrs=x_ptrs,
         )
 
         if not direct:
@@ -1453,7 +1505,7 @@ def _run_fp8_grouped(
     + shape-cached from it (no GPU->CPU sync). ``a_data_ptrs`` (optional) reads A per
     expert in place: ``a_data`` is then one representative expert payload and each
     entry is that expert's base shifted by its packed row start (see
-    ``grouped_gemm_utils.shifted_expert_ptrs``).
+    ``grouped_gemm_utils.stacked_operand``).
     """
     from .fp8_gemm import doGemm as _fp8_doGemm
 
@@ -1573,35 +1625,20 @@ def _run_fp8_grouped_wgrad(
         x_scale_vec = x_scale_vec.to(torch.float32).contiguous()
     buckets = gd.bucketize_wgrad_tokens(m_splits, _BLOCK_M, max_buckets=_wgrad_max_buckets())
 
-    # An expert with no tokens has dW_e = 0. Quantizing its empty input never writes
-    # its tensor-wise scale_inv, which can hold NaN, and a zero-padded launch would
-    # compute NaN * 0. Zero those rows directly and leave the expert out of the launches.
-    for e, m in enumerate(m_splits):
-        if int(m) == 0:
-            dW[e * n_out : (e + 1) * n_out].zero_()
-    buckets = [(k_pad, [e for e in ids if int(m_splits[e]) != 0]) for k_pad, ids in buckets]
-    buckets = [(k_pad, ids) for k_pad, ids in buckets if ids]
+    buckets = gd.drop_empty_experts(buckets, m_splits, dW, n_out)
 
     for k_pad, ids in buckets:
         bsize = len(ids)
         dy_b = [dyt_cols[e] for e in ids]
         x_b = [xt_cols[e] for e in ids]
-        if all(t.size(1) == k_pad and t.is_contiguous() for t in dy_b + x_b):
-            # No padding needed: read each expert's transpose in place. The bases are
-            # shifted by the expert's packed row (j*N_out for dY^T, j*K_in for X^T),
-            # so the kernel's packed addressing lands in each per-expert slab.
-            dy_data, x_data = dy_b[0], x_b[0]
-            row_bytes = k_pad * dy_data.element_size()
-            dy_ptrs = gd.shifted_expert_ptrs(
-                dy_b, [j * n_out for j in range(bsize)], row_bytes, device
-            )
-            x_ptrs = gd.shifted_expert_ptrs(
-                x_b, [j * k_in for j in range(bsize)], row_bytes, device
-            )
-        else:
-            dy_data = torch.cat([_pad_cols(t, k_pad) for t in dy_b], dim=0)
-            x_data = torch.cat([_pad_cols(t, k_pad) for t in x_b], dim=0)
-            dy_ptrs = x_ptrs = None
+        # FP8 operands are [feature, m_e] transposes, so tokens pad on the trailing axis.
+        dy_data, dy_ptrs, x_data, x_ptrs = _wgrad_operands(
+            dy_b,
+            x_b,
+            all(t.size(1) == k_pad for t in dy_b + x_b),
+            lambda ts: torch.cat([_pad_cols(t, k_pad) for t in ts], dim=0),
+            device,
+        )
         if dy_data.dtype == torch.uint8:
             dy_data = reinterpret_as_fp8_tensor(dy_data, dy_fp8_dtype)
         if x_data.dtype == torch.uint8:

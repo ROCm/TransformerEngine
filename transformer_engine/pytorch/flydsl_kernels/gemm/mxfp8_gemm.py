@@ -116,12 +116,19 @@ def _compile_mx32_scale_pack_kernel(
     source_colwise: bool,
     stride0: int,
     stride1: int,
+    per_expert: bool = False,
 ):
     """Build one fused scale packing kernel.
 
     One GPU thread produces one final ``uint32`` word in the GEMM-consumed
     ``[K/128, dim]`` layout.  There is no intermediate ``scale_iter`` tensor
     and no eager PyTorch shift/index/OR kernels.
+
+    ``per_expert`` packs the concatenation of per-expert scale tensors without
+    building it: the source is an int64[G] array of per-expert base pointers, each
+    shifted to its expert's offset in the concatenated layout (so the offsets below
+    are unchanged), plus an int32 table mapping each 64-row tile (rowwise) or K128
+    block (columnwise) to its expert.
     """
     if dim % 64 != 0:
         raise FlyDSLUnsupportedError(f"Scale outer dimension={dim} must be a multiple of 64")
@@ -150,25 +157,8 @@ def _compile_mx32_scale_pack_kernel(
             # Logical source is [dim, K/32], with arbitrary positive strides.
             return source_row * fx.Index(stride0) + source_k32 * fx.Index(stride1)
 
-    @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
-    def kernel_pack_mx32_scales(src: fx.Tensor, dst: fx.Tensor):
-        # Address both buffers as flat 1-D arrays so a linear slice coordinate
-        # maps to base+off, matching the legacy buffer_load semantics. Building
-        # buffer tensors directly from the 2-D src/dst would make logical_divide
-        # walk the layout column-major and corrupt every strided access.
-        src_flat = fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.get_iter(src), fx.make_layout(dim * qk, 1))),
-            max_size=True,
-        )
-        dst_flat = fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.get_iter(dst), fx.make_layout(total_words, 1))),
-            max_size=True,
-        )
-        src_div = fx.logical_divide(src_flat, fx.make_layout(1, 1))
-        dst_div = fx.logical_divide(dst_flat, fx.make_layout(1, 1))
-        scale_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy8b(), fx.Uint8)
-        scale_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
-
+    def _word_coords():
+        # This thread's output word and the source coordinates of its four bytes.
         linear = fx.Index(fx.block_idx.x) * fx.Index(_SCALE_PACK_THREADS) + fx.Index(
             gpu.thread_id("x")
         )
@@ -179,25 +169,79 @@ def _compile_mx32_scale_pack_kernel(
         k_subgroup = (dst_row // fx.Index(16)) % fx.Index(4)
         tile = dst_row // fx.Index(64)
         source_k32 = k128 * fx.Index(4) + k_subgroup
+        return linear, k128, tile, row_within_16, source_k32
 
-        def load_scale_byte(group):
-            source_row = tile * fx.Index(64) + fx.Index(group * 16) + row_within_16
-            off = _source_offset(source_k32, source_row)
-            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Uint8)
-            fx.copy(scale_load_atom, fx.slice(src_div, (None, fx.Int32(off))), reg)
-            value_u8 = fx.memref_load_vec(reg)[0]
-            # The byte load widens via sext, so mask to the low 8 bits to
-            # preserve the raw E8M0 byte for scales >= 0x80 before packing.
-            return fx.Int32(value_u8) & fx.Int32(0xFF)
+    def _load_scale_byte(src_div, coords, group):
+        _, _, tile, row_within_16, source_k32 = coords
+        source_row = tile * fx.Index(64) + fx.Index(group * 16) + row_within_16
+        off = _source_offset(source_k32, source_row)
+        scale_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy8b(), fx.Uint8)
+        reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Uint8)
+        fx.copy(scale_load_atom, fx.slice(src_div, (None, fx.Int32(off))), reg)
+        value_u8 = fx.memref_load_vec(reg)[0]
+        # The byte load widens via sext, so mask to the low 8 bits to
+        # preserve the raw E8M0 byte for scales >= 0x80 before packing.
+        return fx.Int32(value_u8) & fx.Int32(0xFF)
 
-        b0 = load_scale_byte(0)
-        b1 = load_scale_byte(1)
-        b2 = load_scale_byte(2)
-        b3 = load_scale_byte(3)
+    def _store_word(dst, src_div, coords):
+        dst_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(dst), fx.make_layout(total_words, 1))),
+            max_size=True,
+        )
+        dst_div = fx.logical_divide(dst_flat, fx.make_layout(1, 1))
+        scale_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+        b0 = _load_scale_byte(src_div, coords, 0)
+        b1 = _load_scale_byte(src_div, coords, 1)
+        b2 = _load_scale_byte(src_div, coords, 2)
+        b3 = _load_scale_byte(src_div, coords, 3)
         packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         reg_i32 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
         fx.memref_store_vec(Vec.filled(1, packed, fx.Int32), reg_i32)
+        linear = coords[0]
         fx.copy(scale_store_atom, reg_i32, fx.slice(dst_div, (None, fx.Int32(linear))))
+
+    if per_expert:
+
+        @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
+        def kernel_pack_mx32_scales(src_ptrs: fx.Tensor, expert_table: fx.Tensor, dst: fx.Tensor):
+            coords = _word_coords()
+            _, k128, tile, _, _ = coords
+            # A wave's 64 consecutive words share one 64-row tile (dim % 64 == 0) and one
+            # K128 block, so one expert: make its base wave-uniform and rebase a buffer
+            # view, keeping the buffer loads of the packed path.
+            block = k128 if source_colwise else tile
+            expert = fx.Int32(gd.load_i32_at(expert_table, block))
+            base = gd.make_uniform_i64(gd.read_ptr_at(src_ptrs, expert))
+            src_div = gd.rebase_buffer_view(base, fx.Uint8.ir_type, fx.make_layout(dim * qk, 1))
+            _store_word(dst, src_div, coords)
+
+        @flyc.jit
+        def launch_pack_mx32_scales(
+            src_ptrs: fx.Tensor,
+            expert_table: fx.Tensor,
+            dst: fx.Tensor,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            kernel_pack_mx32_scales(src_ptrs, expert_table, dst).launch(
+                grid=(total_words // _SCALE_PACK_THREADS, 1, 1),
+                block=(_SCALE_PACK_THREADS, 1, 1),
+                stream=stream,
+            )
+
+        return launch_pack_mx32_scales
+
+    @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
+    def kernel_pack_mx32_scales(src: fx.Tensor, dst: fx.Tensor):
+        # Address both buffers as flat 1-D arrays so a linear slice coordinate
+        # maps to base+off, matching the legacy buffer_load semantics. Building
+        # buffer tensors directly from the 2-D src/dst would make logical_divide
+        # walk the layout column-major and corrupt every strided access.
+        src_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(src), fx.make_layout(dim * qk, 1))),
+            max_size=True,
+        )
+        src_div = fx.logical_divide(src_flat, fx.make_layout(1, 1))
+        _store_word(dst, src_div, _word_coords())
 
     @flyc.jit
     def launch_pack_mx32_scales(
@@ -221,9 +265,10 @@ def _cached_mx32_scale_pack_launch(
     source_colwise: bool,
     stride0: int,
     stride1: int,
+    per_expert: bool = False,
 ):
     """Cache orientation-and-stride-specialized fused pack binaries."""
-    return _compile_mx32_scale_pack_kernel(dim, qk, source_colwise, stride0, stride1)
+    return _compile_mx32_scale_pack_kernel(dim, qk, source_colwise, stride0, stride1, per_expert)
 
 
 def pack_mx32_scales_for_hk(
@@ -279,6 +324,80 @@ def pack_mx32_scales_for_hk(
     return packed
 
 
+def pack_mx32_scales_for_hk_experts(
+    scales,
+    *,
+    source_colwise: bool = False,
+    stream=None,
+) -> torch.Tensor:
+    """:func:`pack_mx32_scales_for_hk` of ``torch.cat(scales)``, without the concat.
+
+    ``scales`` are per-expert uint8 E8M0 tensors stacked on dim 0: rowwise
+    ``[rows_e, K/32]`` or columnwise ``[K32_e, dim]``. The packing kernel reads each
+    expert in place through ``grouped_gemm_utils.stacked_operand`` pointers. Falls
+    back to packing a real concat when the tensors cannot be addressed in place.
+    """
+    stacked = gd.stacked_operand(scales, scales[0].device)
+    if stacked is None or any(t.dim() != 2 for t in scales):
+        return pack_mx32_scales_for_hk(
+            torch.cat(scales, dim=0), source_colwise=source_colwise, stream=stream
+        )
+    representative, src_ptrs = stacked
+    if representative.dtype != torch.uint8:
+        raise TypeError(f"MXFP8 scales must be torch.uint8 E8M0 bytes, got {representative.dtype}")
+
+    total = sum(t.size(0) for t in scales)
+    inner = representative.size(1)
+    if source_colwise:
+        qk, dim = total, inner
+        # Experts stack on K/32; each thread's bytes share one K128 block (4 rows).
+        block = 4
+    else:
+        dim, qk = total, inner
+        # Experts stack on dim; each thread's bytes share one 64-row tile.
+        block = 64
+    expert_table = gd.block_expert_table(
+        [t.size(0) for t in scales], block, representative.device
+    )
+
+    packed = torch.empty((qk // 4, dim), dtype=torch.int32, device=representative.device)
+    if stream is None:
+        stream = torch.cuda.current_stream(representative.device)
+    # The shifted pointers address the contiguous concatenation, so its strides apply.
+    stride0, stride1 = inner, 1
+    pack_key = ("mx32_scale_pack_experts", dim, qk, bool(source_colwise), stride0, stride1)
+    pack_args = (src_ptrs, expert_table, packed, stream)
+    _compiled_launch(
+        pack_key,
+        _cached_mx32_scale_pack_launch(
+            dim, qk, bool(source_colwise), stride0, stride1, per_expert=True
+        ),
+        pack_args,
+    )(*pack_args)
+    return packed
+
+
+def _scale_shape(scale):
+    # A scale operand is one tensor or a list of per-expert tensors stacked on dim 0.
+    if isinstance(scale, (list, tuple)):
+        return (sum(t.size(0) for t in scale), scale[0].size(1))
+    return tuple(scale.shape)
+
+
+def _pack_scales(scale, *, source_colwise, stream):
+    if isinstance(scale, (list, tuple)):
+        return pack_mx32_scales_for_hk_experts(scale, source_colwise=source_colwise, stream=stream)
+    return pack_mx32_scales_for_hk(scale, source_colwise=source_colwise, stream=stream)
+
+
+def _scale_dtype(scale):
+    return scale[0].dtype if isinstance(scale, (list, tuple)) else scale.dtype
+
+
+def _scale_device(scale):
+    return scale[0].device if isinstance(scale, (list, tuple)) else scale.device
+
+
 def _compile_kernel(
     K: int,
     a_fp8_dtype: torch.dtype,
@@ -289,6 +408,7 @@ def _compile_kernel(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    act_ptrs: bool = False,
 ):
     """Build one compile-time-specialized TN, NN, or NT kernel.
 
@@ -547,6 +667,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
     ):
         # Total output tiles. Dense uses this as the grid extent; grouped uses it as
         # the drain bound for the persistent loop. For fwd/dgrad, c_m = M_total spans
@@ -606,9 +727,16 @@ def _compile_kernel(
             # per-expert slabs (not one packed buffer), so B is addressed from a
             # per-expert base pointer read from ``b_data_ptrs`` rather than an
             # expert-shifted offset into a packed B. Reuse ``gB``'s static layout
-            # (compile-time cosize) and swap only the base per tile. wgrad keeps the
-            # packed-B expert-offset folds; dense never enters here.
+            # (compile-time cosize) and swap only the base per tile. wgrad reads B by
+            # pointer only with act_ptrs; dense never enters here.
             b_ptr_layout = fx.get_layout(gB)
+            # act_ptrs: the per-expert activation operand (A; and in wgrad also B, via
+            # b_data_ptrs) stays in its own per-expert allocation instead of a host-side
+            # concat. The host passes each expert's base pointer pre-shifted by that
+            # expert's packed offset, so the packed addressing below is unchanged; only
+            # the buffer base moves per tile.
+            if const_expr(act_ptrs):
+                a_ptr_layout = fx.get_layout(gA)
 
             # LDS broadcast scratch (one int32), following the persistent-kernel
             # idiom in mega_moe_stage1: recast the LDS slot to an int32 iterator and
@@ -751,8 +879,19 @@ def _compile_kernel(
                 LOAD_PASSES_HALF,
                 preshuffled=False,
             )
+            # Issue both per-expert base-pointer loads before either is made uniform, so a
+            # tile waits on one memory round trip rather than two.
+            if const_expr(act_ptrs):
+                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+            if const_expr(group or act_ptrs):
+                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+            if const_expr(act_ptrs):
+                a_base_i64 = gd.make_uniform_i64(a_base_raw)
+                a_div_tile = gd.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
+            else:
+                a_div_tile = a_div
             a_g2s = G2SLoader(
-                a_div,
+                a_div_tile,
                 gl_off_a,
                 LOAD_PASSES_HALF,
                 a_f8_ir_t,
@@ -763,12 +902,18 @@ def _compile_kernel(
             # addressing uses LOCAL coords. TN reads with a local column (by_n_idx);
             # NN (dgrad, transpose-read) packs experts on the contraction axis, so the
             # per-expert base replaces the expert*K contraction shift (b_k_off -> 0).
-            # Dense/wgrad keep the shared packed ``b_div`` and its expert folds.
+            # wgrad bases are pre-shifted (act_ptrs), so they keep the packed column and
+            # contraction shift. Dense keeps the shared packed ``b_div``.
             if const_expr(group):
-                b_base_i64 = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_i64 = gd.make_uniform_i64(b_base_raw)
                 b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
                 b_data_col = by_n_idx
                 b_k_off = fx.Index(0)
+            elif const_expr(act_ptrs):
+                b_base_i64 = gd.make_uniform_i64(b_base_raw)
+                b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
+                b_data_col = by_n_b_idx
+                b_k_off = b_expert_k_off
             else:
                 b_div_tile = b_div
                 b_data_col = by_n_b_idx
@@ -1767,6 +1912,7 @@ def _compile_kernel(
         work_queue: fx.Tensor = None,
         work_counter: fx.Tensor = None,
         b_data_ptrs: fx.Tensor = None,
+        a_data_ptrs: fx.Tensor = None,
         stream: fx.Stream = fx.Stream(None),
     ):
         # The integration only dispatches aligned shapes; no partial-tile masking exists.
@@ -1790,6 +1936,7 @@ def _compile_kernel(
             work_queue,
             work_counter,
             b_data_ptrs,
+            a_data_ptrs,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -1813,6 +1960,9 @@ def do_gemm(
     work_queue: fx.Tensor = None,
     work_counter: fx.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
+    a_data_ptrs: torch.Tensor = None,
+    a_shape=None,
+    b_shape=None,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -1820,16 +1970,23 @@ def do_gemm(
 
     The GELU epilogues require a caller-allocated ``aux`` output (M x N, same
     dtype as C), filled in place with the pre-activation values for backward.
+
+    With ``a_data_ptrs`` the per-expert A operand is read in place (see act_ptrs in
+    ``_compile_kernel``): ``A`` is then one representative expert and ``a_shape`` the
+    packed operand shape. ``b_shape`` likewise gives wgrad's packed B shape when B
+    is read through ``b_data_ptrs``.
     """
+    a_rows, a_cols = a_shape if a_shape is not None else A.shape
+    b_rows, b_cols = b_shape if b_shape is not None else B.shape
     if layout == "TN":
-        M_runtime, K_runtime = A.shape
-        N_runtime, Kb_runtime = B.shape
+        M_runtime, K_runtime = a_rows, a_cols
+        N_runtime, Kb_runtime = b_rows, b_cols
     elif layout == "NN":
-        M_runtime, K_runtime = A.shape
-        Kb_runtime, N_runtime = B.shape
+        M_runtime, K_runtime = a_rows, a_cols
+        Kb_runtime, N_runtime = b_rows, b_cols
     elif layout == "NT":
-        K_runtime, M_runtime = A.shape
-        Kb_runtime, N_runtime = B.shape
+        K_runtime, M_runtime = a_rows, a_cols
+        Kb_runtime, N_runtime = b_rows, b_cols
     else:
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
@@ -1986,15 +2143,20 @@ def do_gemm(
         work_queue_arg = _dummy_arg(torch.int32, A.device)
         work_counter_arg = _dummy_arg(torch.int32, A.device)
 
-    # Per-expert weight base pointers (grouped fwd TN / dgrad NN): an int64[G] device
-    # array of each expert's B-data base address, read in-kernel so the weight operand
-    # needs no host-side concat. Dense and wgrad supply a dtype-correct placeholder to
-    # keep the flyc.compile positional ABI uniform; the kernel never dereferences it
-    # there. (The B-scale stays packed -- no per-expert scale pointers.)
+    # Per-expert B base pointers (grouped fwd TN / dgrad NN weights; wgrad's pre-shifted
+    # X with act_ptrs): an int64[G] device array read in-kernel so the operand needs no
+    # host-side concat. Dense supplies a dtype-correct placeholder to keep the
+    # flyc.compile positional ABI uniform; the kernel never dereferences it there.
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
         b_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
+    # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
+    act_ptrs = a_data_ptrs is not None
+    if act_ptrs:
+        a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
+    else:
+        a_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
 
     launch_key = (
         "mxfp8_gemm",
@@ -2007,6 +2169,7 @@ def do_gemm(
         group,
         sched,
         wgrad,
+        act_ptrs,
     )
     launch_args = (
         A_arg,
@@ -2022,12 +2185,13 @@ def do_gemm(
         work_queue_arg,
         work_counter_arg,
         b_data_ptrs_arg,
+        a_data_ptrs_arg,
         stream,
     )
     _compiled_launch(
         launch_key,
         _cached_launch(
-            K_runtime, A.dtype, B.dtype, C.dtype, layout, epilogue, group, sched, wgrad
+            K_runtime, A.dtype, B.dtype, C.dtype, layout, epilogue, group, sched, wgrad, act_ptrs
         ),
         launch_args,
     )(*launch_args)
@@ -2044,6 +2208,7 @@ def _cached_launch(
     group: bool = False,
     sched: str = "worksteal",
     wgrad: bool = False,
+    act_ptrs: bool = False,
 ):
     """Cache independent TN/NN/NT binaries with no runtime layout argument."""
     return _compile_kernel(
@@ -2056,6 +2221,7 @@ def _cached_launch(
         group,
         sched,
         wgrad,
+        act_ptrs,
     )
 
 
@@ -2087,9 +2253,9 @@ def _validate_common_payloads(
 
 def _mxfp8_matmul_grouped_wgrad(
     a,           # dY packed [G*M_pad, N_out], columnwise fp8
-    a_scale,     # [G*M_pad/32, N_out] raw E8M0 uint8
+    a_scale,     # [G*M_pad/32, N_out] raw E8M0 uint8, or list[G] of per-expert scales
     b,           # X packed [G*M_pad, K_in], columnwise fp8
-    b_scale,     # [G*M_pad/32, K_in] raw E8M0 uint8
+    b_scale,     # [G*M_pad/32, K_in] raw E8M0 uint8, or list[G] of per-expert scales
     D,           # dW packed [G*N_out, K_in]
     *,
     stream,
@@ -2097,16 +2263,22 @@ def _mxfp8_matmul_grouped_wgrad(
     work_queue,
     work_counter,
     sched,
+    a_data_ptrs=None,
+    b_data_ptrs=None,
+    a_shape=None,
+    b_shape=None,
 ):
     """Grouped wgrad (NT) launch: dW = dY^T @ X, contracting over padded tokens.
 
     Both operands transpose-read (columnwise) and contract over the token axis; the
     kernel's compile-time contraction is the per-expert padded token count
     M_pad = (G*M_pad)/G. Experts are packed on the contraction axis for a/b and on
-    the output-M axis for D. Operands arrive already packed + MXFP8-quantized.
+    the output-M axis for D. Operands arrive already packed + MXFP8-quantized, or
+    (``a_data_ptrs``/``b_data_ptrs``) as one representative expert each plus
+    per-expert pointers, with ``a_shape``/``b_shape`` the packed shapes.
     """
-    gm, n_out = a.shape          # gm = G*M_pad, n_out = per-expert N_out
-    gm_b, k_in = b.shape
+    gm, n_out = a_shape if a_shape is not None else a.shape  # gm = G*M_pad
+    gm_b, k_in = b_shape if b_shape is not None else b.shape
     if gm != gm_b:
         raise ValueError(f"wgrad a/b token dims differ: {gm} vs {gm_b}")
     if gm % num_groups != 0:
@@ -2121,13 +2293,13 @@ def _mxfp8_matmul_grouped_wgrad(
         raise ValueError(
             f"wgrad D shape {tuple(D.shape)} != expected {(num_groups * n_out, k_in)}"
         )
-    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+    if _scale_dtype(a_scale) != torch.uint8 or _scale_dtype(b_scale) != torch.uint8:
         raise TypeError("FlyDSL MXFP8 wgrad expects raw E8M0 scales as torch.uint8")
 
     # NT transpose-read: both scales are packed from their columnwise (K-major)
     # source into the kernel's [K/128, dim] int32 layout.
-    a_scale_hk = pack_mx32_scales_for_hk(a_scale, source_colwise=True, stream=stream)
-    b_scale_hk = pack_mx32_scales_for_hk(b_scale, source_colwise=True, stream=stream)
+    a_scale_hk = _pack_scales(a_scale, source_colwise=True, stream=stream)
+    b_scale_hk = _pack_scales(b_scale, source_colwise=True, stream=stream)
 
     do_gemm(
         a,
@@ -2140,6 +2312,10 @@ def _mxfp8_matmul_grouped_wgrad(
         num_groups=num_groups,
         work_queue=work_queue,
         work_counter=work_counter,
+        b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
+        a_shape=a_shape,
+        b_shape=b_shape,
         sched=sched,
         wgrad=True,
     )
@@ -2163,6 +2339,9 @@ def mxfp8_matmul(
     work_queue: fx.Tensor = None,
     work_counter: fx.Tensor = None,
     b_data_ptrs: torch.Tensor = None,
+    a_data_ptrs: torch.Tensor = None,
+    a_shape=None,
+    b_shape=None,
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
@@ -2181,6 +2360,11 @@ def mxfp8_matmul(
     TN consumes the selected rowwise payloads directly. NN and NT preserve
     K-major payloads and use ``ds_read_b64_tr_b8`` inside their
     compile-time-specialized kernels.
+
+    ``a_data_ptrs`` reads the grouped A operand per expert in place: ``a`` is then one
+    representative expert and ``a_shape`` the packed shape (see ``do_gemm``). A scale
+    may be a list of per-expert tensors stacked on dim 0, packed in place
+    (:func:`pack_mx32_scales_for_hk_experts`).
     """
 
     if wgrad:
@@ -2195,6 +2379,10 @@ def mxfp8_matmul(
             work_queue=work_queue,
             work_counter=work_counter,
             sched=sched,
+            a_data_ptrs=a_data_ptrs,
+            b_data_ptrs=b_data_ptrs,
+            a_shape=a_shape,
+            b_shape=b_shape,
         )
 
     if group and layout not in ("TN", "NN"):
@@ -2205,14 +2393,15 @@ def mxfp8_matmul(
 
     _validate_common_payloads(a, b, D, layout=layout)
 
+    a_rows, a_cols = a_shape if a_shape is not None else a.shape
     if layout == "TN":
-        m, k = a.shape
+        m, k = a_rows, a_cols
         n, kb = b.shape
     elif layout == "NN":
-        m, k = a.shape
+        m, k = a_rows, a_cols
         kb, n = b.shape
     else:
-        k, m = a.shape
+        k, m = a_rows, a_cols
         kb, n = b.shape
 
     # Grouped GEMM is G INDEPENDENT matmuls stacked into one launch, not a dense
@@ -2304,17 +2493,17 @@ def mxfp8_matmul(
         kb_packed = kb * num_groups if (group and b_data_ptrs is not None) else kb
         expected_b_scale = (kb_packed // SCALE_GROUP_SIZE, n)
 
-    if tuple(a_scale.shape) != expected_a_scale:
+    if _scale_shape(a_scale) != expected_a_scale:
         raise ValueError(
-            f"a_scale shape {tuple(a_scale.shape)} != expected {expected_a_scale} for {layout}"
+            f"a_scale shape {_scale_shape(a_scale)} != expected {expected_a_scale} for {layout}"
         )
-    if tuple(b_scale.shape) != expected_b_scale:
+    if _scale_shape(b_scale) != expected_b_scale:
         raise ValueError(
-            f"b_scale shape {tuple(b_scale.shape)} != expected {expected_b_scale} for {layout}"
+            f"b_scale shape {_scale_shape(b_scale)} != expected {expected_b_scale} for {layout}"
         )
-    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+    if _scale_dtype(a_scale) != torch.uint8 or _scale_dtype(b_scale) != torch.uint8:
         raise TypeError("FlyDSL MXFP8 expects raw E8M0 scales as torch.uint8")
-    if a_scale.device != a.device or b_scale.device != a.device:
+    if _scale_device(a_scale) != a.device or _scale_device(b_scale) != a.device:
         raise ValueError("A, B, scales, and D must be on the same device")
 
     if layout == "TN":
@@ -2322,12 +2511,12 @@ def mxfp8_matmul(
         #   a [M,K], b [N,K]
         a_kernel = a
         b_kernel = b
-        a_scale_hk = pack_mx32_scales_for_hk(
+        a_scale_hk = _pack_scales(
             a_scale,
             source_colwise=False,
             stream=stream,
         )
-        b_scale_hk = pack_mx32_scales_for_hk(
+        b_scale_hk = _pack_scales(
             b_scale,
             source_colwise=False,
             stream=stream,
@@ -2335,12 +2524,12 @@ def mxfp8_matmul(
     elif layout == "NN":
         a_kernel = a
         b_kernel = b
-        a_scale_hk = pack_mx32_scales_for_hk(
+        a_scale_hk = _pack_scales(
             a_scale,
             source_colwise=False,
             stream=stream,
         )
-        b_scale_hk = pack_mx32_scales_for_hk(
+        b_scale_hk = _pack_scales(
             b_scale,
             source_colwise=True,
             stream=stream,
@@ -2348,12 +2537,12 @@ def mxfp8_matmul(
     else:
         a_kernel = a
         b_kernel = b
-        a_scale_hk = pack_mx32_scales_for_hk(
+        a_scale_hk = _pack_scales(
             a_scale,
             source_colwise=True,
             stream=stream,
         )
-        b_scale_hk = pack_mx32_scales_for_hk(
+        b_scale_hk = _pack_scales(
             b_scale,
             source_colwise=True,
             stream=stream,
@@ -2382,6 +2571,8 @@ def mxfp8_matmul(
         work_queue=work_queue,
         work_counter=work_counter,
         b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
+        a_shape=a_shape,
         sched=sched,
     )
     return D
