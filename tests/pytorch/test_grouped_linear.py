@@ -4,10 +4,8 @@
 #
 # See LICENSE for license information.
 
-import contextlib
 import os
 import random
-import warnings
 from typing import Dict, List, Optional, Sequence
 
 import pytest
@@ -675,40 +673,51 @@ def test_grouped_linear_accuracy_rocm_backends(
         monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
     # FlyDSL falls back to the default grouped GEMM silently on any config it rejects
-    # past the gate skipped above, which would compare the default backend against
-    # itself. Enable its fallback warning and assert none was emitted.
-    expect_flydsl_ran = grouped_gemm_backend == "flydsl"
-    if expect_flydsl_ran:
+    # past the gate skipped above, and wgrad is not attempted at all with fused or
+    # delayed wgrad, so a missing fallback warning does not show that FlyDSL ran.
+    # Record each FlyDSL dispatch and assert on the phases that actually ran; the
+    # fallback warning stays on so a failure shows the reason.
+    flydsl_dispatches = []
+    if grouped_gemm_backend == "flydsl":
         monkeypatch.setenv("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "1")
-    capture = (
-        warnings.catch_warnings(record=True) if expect_flydsl_ran else contextlib.nullcontext()
-    )
+        try_flydsl_grouped = _GroupedLinear._try_flydsl_grouped
 
-    with capture as caught:
-        if expect_flydsl_ran:
-            warnings.simplefilter("always")
-        test_grouped_linear_accuracy(
-            dtype,
-            num_gemms,
-            bs,
-            model,
-            recipe,
-            fp8_model_params,
-            fuse_wgrad_accumulation,
-            False,
-            delay_wgrad_compute,
-            use_triton=False,
-            parallel_mode=None,
-            use_cutlass=True,
+        def recording_try_flydsl_grouped(cls, phase, kind, **kwargs):
+            ran = try_flydsl_grouped(phase, kind, **kwargs)
+            flydsl_dispatches.append((phase, ran))
+            return ran
+
+        monkeypatch.setattr(
+            _GroupedLinear, "_try_flydsl_grouped", classmethod(recording_try_flydsl_grouped)
         )
 
-    if expect_flydsl_ran:
-        fallbacks = sorted({str(w.message) for w in caught if "[FLYDSL WARNING]" in str(w.message)})
-        assert not fallbacks, (
-            "FlyDSL grouped GEMM fell back to the default backend, so it never ran "
-            f"(dtype={dtype}, recipe={recipe_id(recipe)}, fp8_model_params={fp8_model_params}, "
-            f"fuse_wgrad={fuse_wgrad_accumulation}, delay_wgrad={delay_wgrad_compute}):\n"
-            + "\n".join(fallbacks)
+    test_grouped_linear_accuracy(
+        dtype,
+        num_gemms,
+        bs,
+        model,
+        recipe,
+        fp8_model_params,
+        fuse_wgrad_accumulation,
+        False,
+        delay_wgrad_compute,
+        use_triton=False,
+        parallel_mode=None,
+        use_cutlass=True,
+    )
+
+    if grouped_gemm_backend == "flydsl":
+        expected = {"fwd", "dgrad"}
+        if not fuse_wgrad_accumulation and not delay_wgrad_compute:
+            expected.add("wgrad")
+        ran = {phase for phase, ok in flydsl_dispatches if ok}
+        fell_back = sorted({phase for phase, ok in flydsl_dispatches if not ok})
+        assert not fell_back and expected <= ran, (
+            f"FlyDSL grouped GEMM did not run every expected phase: expected {sorted(expected)}, "
+            f"ran {sorted(ran)}, fell back in {fell_back} (dtype={dtype}, "
+            f"recipe={recipe_id(recipe)}, fp8_model_params={fp8_model_params}, "
+            f"fuse_wgrad={fuse_wgrad_accumulation}, delay_wgrad={delay_wgrad_compute}). "
+            "See the [FLYDSL WARNING] for the fallback reason."
         )
 
     if expect_ck_no_fallback:

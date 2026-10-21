@@ -1656,6 +1656,8 @@ def doGemm(
     num_work: int = 0,
     sched: str = "worksteal",
     wgrad: bool = False,
+    a_shape=None,
+    b_shape=None,
 ):
     """Launch one cached K/output/layout-specialized half-precision core.
 
@@ -1667,7 +1669,9 @@ def doGemm(
       NT: A backing [K,M], B backing [K,N]
 
     NN/NT orientation is implemented by compile-time global addressing and
-    ``ds_read_b64_tr_b16`` only.
+    ``ds_read_b64_tr_b16`` only. With ``a_data_ptrs`` (``b_data_ptrs`` in wgrad) the
+    operand is one representative expert and ``a_shape`` (``b_shape``) the packed
+    operand shape.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported {label} layout: {layout}")
@@ -1695,16 +1699,16 @@ def doGemm(
         label=f"{label} GEMM",
     )
     # With per-expert pointers, A (and wgrad's B) is one representative expert, but
-    # the kernel addresses the whole packed operand through 32-bit offsets: grouped A
-    # is [M_total, K]; wgrad's A and B stack the G experts' padded tokens ([G*K, M],
-    # [G*K, N]). Grouped fwd/dgrad weights use local offsets, so B's own size holds.
-    a_extent = b_extent = ()
-    if a_data_ptrs is not None:
-        a_numel = num_groups * K_runtime * M_runtime if wgrad else M_runtime * K_runtime
-        a_extent = (a_numel * A.element_size(),)
-    if wgrad and b_data_ptrs is not None:
-        b_extent = (num_groups * K_runtime * N_runtime * B.element_size(),)
-    require_launch_size(f"{label} GEMM", ("A", A, *a_extent), ("B", B, *b_extent), ("C", C))
+    # the kernel addresses the packed operand (a_shape/b_shape) through 32-bit
+    # offsets, so the bound is on the packed extent.
+    a_rows, a_cols = a_shape if a_shape is not None else A.shape
+    b_rows, b_cols = b_shape if b_shape is not None else B.shape
+    require_launch_size(
+        f"{label} GEMM",
+        ("A", A, a_rows * a_cols * A.element_size()),
+        ("B", B, b_rows * b_cols * B.element_size()),
+        ("C", C),
+    )
 
     # wgrad's C is packed [G*N_out, K_in] on the output-M axis; fwd/dgrad/dense C is
     # the unpacked (M_runtime, N_runtime).

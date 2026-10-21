@@ -1334,12 +1334,16 @@ def doGemm(
     m: int = None,
     n: int = None,
     k: int = None,
+    a_shape=None,
+    b_shape=None,
 ):
     """Launch tensor-wise FP8 GEMM with TE-style inverse input scales.
 
     Dense derives M/N/K from operand shapes. Grouped/wgrad pass explicit per-expert
     ``m``/``n``/``k`` (the packed operands do not reveal the per-expert geometry),
     a length-``num_groups`` scale vector for each operand, and the descriptor queue.
+    With ``a_data_ptrs`` (``b_data_ptrs`` in wgrad) the operand is one representative
+    expert and ``a_shape`` (``b_shape``) the packed operand shape.
     """
     if group or wgrad:
         M_runtime, N_runtime, K_runtime = int(m), int(n), int(k)
@@ -1368,16 +1372,16 @@ def doGemm(
         label="FP8 GEMM",
     )
     # With per-expert pointers, A (and wgrad's B) is one representative expert, but
-    # the kernel addresses the whole packed operand through 32-bit offsets: grouped A
-    # is [M_total, K]; wgrad's A and B stack the G experts' padded tokens ([G*K, M],
-    # [G*K, N]). Grouped fwd/dgrad weights use local offsets, so B's own size holds.
-    a_extent = b_extent = ()
-    if a_data_ptrs is not None:
-        a_numel = num_groups * K_runtime * M_runtime if wgrad else M_runtime * K_runtime
-        a_extent = (a_numel * A.element_size(),)
-    if wgrad and b_data_ptrs is not None:
-        b_extent = (num_groups * K_runtime * N_runtime * B.element_size(),)
-    require_launch_size("FP8 GEMM", ("A", A, *a_extent), ("B", B, *b_extent), ("C", C))
+    # the kernel addresses the packed operand (a_shape/b_shape) through 32-bit
+    # offsets, so the bound is on the packed extent.
+    a_rows, a_cols = a_shape if a_shape is not None else A.shape
+    b_rows, b_cols = b_shape if b_shape is not None else B.shape
+    require_launch_size(
+        "FP8 GEMM",
+        ("A", A, a_rows * a_cols * A.element_size()),
+        ("B", B, b_rows * b_cols * B.element_size()),
+        ("C", C),
+    )
     # Dense: one scalar inverse scale per operand. Grouped: a per-expert vector, or
     # (scale_ptrs) an int64[G] array of per-expert scale_inv pointers read in place.
     expected_scale_numel = num_groups if (group or wgrad) else 1

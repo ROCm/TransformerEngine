@@ -1326,6 +1326,7 @@ def _run_bf16_grouped(
         a_data_ptrs=a_data_ptrs,
         num_work=num_tiles,
         sched=sched,
+        a_shape=(m_total, a_data.size(-1)) if a_data_ptrs is not None else None,
     )
     return D
 
@@ -1431,6 +1432,8 @@ def _run_bf16_grouped_wgrad(
             a_data_ptrs=dy_ptrs,
             num_work=num_tiles,
             b_data_ptrs=x_ptrs,
+            a_shape=(bsize * k_pad, n_out) if dy_ptrs is not None else None,
+            b_shape=(bsize * k_pad, k_in) if x_ptrs is not None else None,
         )
 
         if not direct:
@@ -1526,6 +1529,7 @@ def _run_fp8_grouped(
         m=m_total,
         n=n,
         k=k,
+        a_shape=(m_total, a_data.size(-1)) if a_data_ptrs is not None else None,
     )
     return D
 
@@ -1641,6 +1645,9 @@ def _run_fp8_grouped_wgrad(
             a_data_ptrs=dy_ptrs,
             num_work=num_tiles,
             b_data_ptrs=x_ptrs,
+            # TN over transposes: the bucket's experts stack on the feature axis.
+            a_shape=(bsize * n_out, k_pad) if dy_ptrs is not None else None,
+            b_shape=(bsize * k_in, k_pad) if x_ptrs is not None else None,
         )
 
         if not direct:
