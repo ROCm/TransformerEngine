@@ -709,12 +709,16 @@ def fused_ag_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether the fused AG+GEMM backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
+    if gelu or bias is not None:
+        return False
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    if fp8 and not mxfp8:
         return False
     if dtype != torch.bfloat16:
         return False
@@ -763,11 +767,13 @@ def fused_bulk_ag_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether this call may use the bulk all-gather overlap."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    eligible = _ub_is_fused(name) and (not fp8 or mxfp8) and dtype == torch.bfloat16
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
@@ -794,6 +800,17 @@ def fused_bulk_rs_eligible(
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
     _ub_fused_bulk_decisions[name] = eligible
     return eligible
+
+
+def fused_wgrad_ag_eligible(name: Optional[str]) -> bool:
+    """Whether the fused AG+GEMM kernel can carry the wgrad grad-output all-gather.
+
+    The gather rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
+    False off ROCm, where there is no fused backend and upstream's external-AG path is unchanged.
+    """
+    if not IS_HIP_EXTENSION or name is None:
+        return False
+    return _ub_is_fused(name + "_dgrad") and _ub_is_fused(name + "_wgrad")
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -940,16 +957,28 @@ def fill_userbuffers_buffer_for_all_gather(
             else local_tensor._columnwise_scale_inv
         )
         local_scale_inv_size = list(local_scale_inv.size())
-        global_scale_inv = torch.empty(
-            [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
-            dtype=local_scale_inv.dtype,
-            device=local_scale_inv.device,
-        )
-        torch.distributed.all_gather_into_tensor(
-            global_scale_inv,
-            local_scale_inv,
-            group=process_group,
-        )
+        if (
+            IS_HIP_EXTENSION
+            and isinstance(comm, tex.CommOverlapP2P)
+            and comm.has_scale_buffer()
+        ):
+            # Scales live in the Userbuffers allocation; the fused kernel gathers them
+            # alongside the data, so no separate collective is needed here.
+            comm.copy_scales_into_buffer(local_scale_inv, local_chunk=True)
+            global_scale_inv = comm.get_scale_buffer(
+                shape=[process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
+            )
+        else:
+            global_scale_inv = torch.empty(
+                [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
+                dtype=local_scale_inv.dtype,
+                device=local_scale_inv.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                global_scale_inv,
+                local_scale_inv,
+                group=process_group,
+            )
 
         # Construct MXFP8 tensor with Userbuffers buffer
         rowwise_data, rowwise_scale_inv = None, None
@@ -1867,7 +1896,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
@@ -2342,7 +2371,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 weight_tensor.grad = wgrad.to(weight_tensor.dtype)
-            if self.use_bias:
+            if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
