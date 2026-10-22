@@ -150,11 +150,7 @@ run_test_config_mgpu(){
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
     #TE_CI_GPUS=N tells the mGPU queue this item needs only N GPUs, so it can
-    #share the box. Declare the smallest N that runs every case the full box
-    #does; leave it off -- whole box -- for a test that sizes its world to
-    #torch.cuda.device_count(), where fewer GPUs silently shrinks coverage:
-    #test_rocm_fused_overlap (4 and 8 ranks), distributed/test_fusible_ops,
-    #test_torch_fsdp2 and test_torch_fsdp2_fp8.
+    #share the box. If nothing is mentioned it assigns all available GPUs.
     TE_CI_GPUS=2 run_default_fa_lbl "mgpu" 3 test_sanity_import.py
     TE_CI_GPUS=2 run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 3 distributed/test_rocm_fused_overlap.py
@@ -162,7 +158,7 @@ run_test_config_mgpu(){
     TE_CI_GPUS=4 run_default_fa 2 distributed/test_numerics.py
     TE_CI_GPUS=2 run_default_fa 2 distributed/test_sanity.py
     TE_CI_GPUS=4 run_default_fa 2 distributed/test_numerics_exact.py
-    run_default_fa 1 distributed/test_parallel_cross_entropy.py
+    TE_CI_GPUS=2 run_default_fa 1 distributed/test_parallel_cross_entropy.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then
