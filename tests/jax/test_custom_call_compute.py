@@ -567,9 +567,7 @@ class TestNorm:
 
         precise_comparison = True
 
-        if (
-            is_hip_extension()
-        ) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if is_hip_extension() and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
             precise_comparison = False
