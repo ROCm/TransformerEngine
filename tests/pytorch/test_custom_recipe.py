@@ -152,6 +152,13 @@ def test_custom_recipe_linear_preserves_logical_shape():
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
+    if IS_HIP_EXTENSION:
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+        if get_device_compute_capability() < (9, 5):
+            pytest.skip(
+                "torch._scaled_mm (used by CurrentScalingQuantizerRef.qgemm) is not supported "
+                "by hipBLASLt on this GPU (requires gfx950 or newer)."
+            )
 
     torch.manual_seed(0)
     input_shape = (2, 4, 4, 64)
