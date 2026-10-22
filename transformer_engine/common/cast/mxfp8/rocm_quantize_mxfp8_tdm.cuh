@@ -12,16 +12,17 @@
 // leaving the work to the generic kernels. Like the other rocm_ headers, this expects its includer
 // to have included the common headers.
 
-#include <algorithm>
-#include <initializer_list>
-
 #include "../../util/rocm_device_utils.cuh"
 #include "../../util/rocm_tdm.cuh"
+#include "../core/rocm_tdm_common.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace tdm_kernel {
+
+using common::reduce_dbias_tdm;
+using common::use_tdm;
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -30,20 +31,12 @@ constexpr size_t WAVE_SIZE = 32;
 constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
 constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
 constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
-constexpr size_t DBIAS_WAVES = 8;
 constexpr size_t MULTI_MAX_TENSORS = 1024;
+static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
+              "A dbias partial row covers a chunk");
 
 template <typename T>
 using band_t = T[BAND_Y][CHUNK_DIM_X];
-
-// TDM tiles need 16-byte aligned rows and 32-bit tensor extents.
-inline bool use_tdm(const size_t rows, const size_t cols,
-                    const std::initializer_list<const void *> tensors) {
-  static const bool enabled = getenv<bool>("NVTE_USE_TDM", true);
-  const auto aligned = [](const void *ptr) { return reinterpret_cast<uintptr_t>(ptr) % 16 == 0; };
-  return enabled && cuda::sm_arch() == 125 && cols % 16 == 0 && rows <= UINT32_MAX &&
-         cols <= UINT32_MAX && std::all_of(tensors.begin(), tensors.end(), aligned);
-}
 
 #ifdef __gfx1250__
 // hip_bfloat16 rounds with per-element branches; __bf16 converts with one instruction.
@@ -423,84 +416,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       nullptr, args.amax[t], rows, cols, DIVUP(cols, SCALE_DIM_X), cols, chunk_Y, blockIdx.x, 0);
 }
 
-// Sums each tensor's dbias partials, one row per chunk, into its row of dbias. A block covers
-// DBIAS_WAVES / waves_per_slab 128-column slabs, whose waves split the BAND_Y-row bands.
-template <typename OType>
-__global__ void __launch_bounds__(DBIAS_WAVES * WAVE_SIZE)
-    reduce_dbias_tdm_kernel(OType *const dbias, const float *const partial, const size_t cols,
-                            const size_t partial_rows, const int64_t *const offsets_ptr,
-                            const int64_t *const first_dims_ptr, const int waves_per_slab) {
-#ifdef __gfx1250__
-  __shared__ alignas(128) band_t<float> band_sh[DBIAS_WAVES];
-
-  const size_t tensor_id = blockIdx.y;
-  size_t tensor_rows = partial_rows / gridDim.y;
-  size_t tensor_offset_Y = tensor_id * tensor_rows;
-  if (offsets_ptr != nullptr) {
-    tensor_rows = static_cast<size_t>(first_dims_ptr[tensor_id]) / CHUNK_DIM_Y;
-    tensor_offset_Y = static_cast<size_t>(offsets_ptr[tensor_id]) / cols / CHUNK_DIM_Y;
-  }
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
-  const size_t block_cols = DBIAS_WAVES / waves_per_slab * CHUNK_DIM_X;
-  const size_t block_offset_X = blockIdx.x * block_cols;
-  const size_t slab_offset_X = block_offset_X + wave / waves_per_slab * CHUNK_DIM_X;
-  const int lane_offset_X = (threadIdx.x % WAVE_SIZE) * COLS_PER_LANE;
-  const float *const tensor_partial = partial + tensor_offset_Y * cols;
-  auto &band = band_sh[wave];
-
-  Vec<float, COLS_PER_LANE> sum;
-  sum.clear();
-  if (slab_offset_X < cols) {
-    for (size_t band_offset_Y = wave % waves_per_slab * BAND_Y; band_offset_Y < tensor_rows;
-         band_offset_Y += waves_per_slab * BAND_Y) {
-      tdm::load_2d(band, tensor_partial, tensor_rows, cols, cols, band_offset_Y, slab_offset_X);
-      tdm::wait<0>();
-#pragma unroll
-      for (int y = 0; y < BAND_Y; y++) {
-        Vec<float, COLS_PER_LANE> x;
-        x.load_from(&band[y][lane_offset_X]);
-#pragma unroll
-        for (int i = 0; i < COLS_PER_LANE; i++) {
-          sum.data.elt[i] += x.data.elt[i];
-        }
-      }
-    }
-  }
-  sum.store_to(&band[0][lane_offset_X]);
-  __syncthreads();
-  for (size_t x = threadIdx.x; x < block_cols; x += blockDim.x) {
-    const size_t col = block_offset_X + x;
-    if (col < cols) {
-      const int first_wave = x / CHUNK_DIM_X * waves_per_slab;
-      float dbias_sum = 0;
-      for (int w = first_wave; w < first_wave + waves_per_slab; w++) {
-        dbias_sum += band_sh[w][0][x % CHUNK_DIM_X];
-      }
-      dbias[tensor_id * cols + col] = static_cast<OType>(dbias_sum);
-    }
-  }
-#endif  // __gfx1250__
-}
-
-// partial_rows counts the partials of all num_tensors tensors. Without offsets, the tensors share
-// them equally; otherwise tensor t has first_dims[t] / CHUNK_DIM_Y of them.
-template <typename OType>
-void reduce_dbias(OType *dbias, const float *partial, const size_t cols, const size_t num_tensors,
-                  const size_t partial_rows, const int64_t *offsets_ptr,
-                  const int64_t *first_dims_ptr, hipStream_t stream) {
-  // About one band per wave; short tensors leave the spare waves to more slabs.
-  const size_t bands = DIVUP(partial_rows / num_tensors, BAND_Y);
-  size_t waves_per_slab = 1;
-  while (waves_per_slab < DBIAS_WAVES && waves_per_slab < bands) {
-    waves_per_slab *= 2;
-  }
-  const dim3 grid(DIVUP(cols, DBIAS_WAVES / waves_per_slab * CHUNK_DIM_X), num_tensors);
-  reduce_dbias_tdm_kernel<OType><<<grid, DBIAS_WAVES * WAVE_SIZE, 0, stream>>>(
-      dbias, partial, cols, partial_rows, offsets_ptr, first_dims_ptr,
-      static_cast<int>(waves_per_slab));
-  NVTE_CHECK_CUDA(hipGetLastError());
-}
-
 }  // namespace tdm_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -550,8 +465,8 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input.dtype(), IType,
-        reduce_dbias<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, cols, 1,
-                            grid.y, nullptr, nullptr, stream););
+        reduce_dbias_tdm<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, cols,
+                                1, grid.y, nullptr, nullptr, stream););
   }
   return true;
 }
@@ -607,9 +522,9 @@ bool group_quantize_tdm(const GroupedTensor *input, const GroupedTensor *activat
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input->dtype(), IType,
-        reduce_dbias<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, cols,
-                            num_tensors, grid.y, same_shape ? nullptr : offsets_ptr,
-                            same_shape ? nullptr : first_dims_ptr, stream););
+        reduce_dbias_tdm<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, cols,
+                                num_tensors, grid.y, same_shape ? nullptr : offsets_ptr,
+                                same_shape ? nullptr : first_dims_ptr, stream););
   }
   return true;
 }
