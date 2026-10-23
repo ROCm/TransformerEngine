@@ -195,8 +195,9 @@ jobs:
         run: |
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
-          # exists in both the torch and jax suites and runs in parallel).
-          rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
+          # exists in both the torch and jax suites and runs in parallel). The
+          # examples suite emits its own one-testcase XML per script invocation.
+          rm -rf test-results && mkdir -p test-results/examples test-results/torch test-results/jax test-results/core
 
           docker exec \
             -e TEST_SGPU=1 \
@@ -216,6 +217,8 @@ jobs:
           # One report per suite; each appends its own section to the job summary.
           # An empty subdir (suite crashed before writing XML) yields an explicit
           # "no results" warning attributable to that suite.
+          python3 ci/junit_report.py test-results/examples \
+            --title "sGPU Examples (${{ matrix.arch_label }})"
           python3 ci/junit_report.py test-results/torch \
             --title "sGPU PyTorch (${{ matrix.arch_label }})"
           python3 ci/junit_report.py test-results/jax \
