@@ -20,11 +20,6 @@ on:
         type: boolean
         required: false
         default: true
-      use_prebuilt_aiter:
-        description: 'Use precompiled aiter instead of building from source.'
-        type: boolean
-        required: false
-        default: true
       rocm_repo_url:
         description: 'ROCm TheRock repository URL used inside the Docker image.'
         type: string
@@ -55,9 +50,6 @@ on:
   workflow_call:
     inputs:
       use_local_version:
-        type: boolean
-        default: true
-      use_prebuilt_aiter:
         type: boolean
         default: true
       rocm_repo_url:
@@ -200,14 +192,12 @@ jobs:
       # The container writes all wheels and logs under /wheelhouse.
       - name: Build TransformerEngine wheels
         run: |
-          NVTE_AITER_PREBUILT_BASE_URL="https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts"
           docker run --rm \
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
             --env TARGET_BRANCH="${{ github.ref_name }}" \
             --env NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250 \
             ${{ inputs.use_local_version && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
-            ${{ inputs.use_prebuilt_aiter && '--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}"' || '' }} \
             --volume "${{ github.workspace }}:/TransformerEngine" \
             --volume "${{ runner.temp }}/wheelhouse:/wheelhouse" \
             "${{ steps.set-tag.outputs.image_tag }}"
