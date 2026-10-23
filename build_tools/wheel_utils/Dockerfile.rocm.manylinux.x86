@@ -8,7 +8,7 @@
 # Build args:
 # BASE_IMAGE - Base manylinux image to use. Default: quay.io/pypa/manylinux_2_28_x86_64
 # ROCM_REPO_URL - ROCm TheRock repository URL. Default: https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/
-# ROCM_DEVEL_PACKAGE - ROCm devel package to install. Default: amdrocm-core-devel10.0-gfx950
+# ROCM_DEVEL_PACKAGE - ROCm devel package to install. Default: amdrocm-core-devel10.1-gfx950
 # GPU_TARGETS - Semicolon separated list of target GPU architectures. Default: "gfx942;gfx950"
 # TARGET_BRANCH - Target branch for TransformerEngine. Default: none (use git default)
 # GPU_TARGETS and TARGET_BRANCH can be overriden when start a container with NVTE_ROCM_ARCH and TARGET_BRANCH environment variables.
@@ -18,7 +18,7 @@ ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
 FROM $BASE_IMAGE
 
 ARG ROCM_REPO_URL=https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/
-ARG ROCM_DEVEL_PACKAGE=amdrocm-core-devel10.0-gfx950
+ARG ROCM_DEVEL_PACKAGE=amdrocm-core-devel10.1-gfx950
 
 # Set up ROCm repo
 RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0" > /etc/yum.repos.d/rocm.repo
