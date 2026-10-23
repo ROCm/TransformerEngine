@@ -1091,7 +1091,7 @@ static void warn_fallback(const char *tag, const char *reason) {
     }
 }
 
-static bool grouped_mxfp8_gemm(
+static bool grouped_mxfp8_gemm_launch(
     const void *const *A_array, const void *const *B_array, void *const *C_array,
     const void *const *scale_A_array, const void *const *scale_B_array,
     int M, const int *N_array, int K, int num_experts,
@@ -1281,6 +1281,46 @@ static bool grouped_mxfp8_gemm(
         launch_grouped(gl_f32_rt((float *)C_array[0], nullptr, nullptr, (size_t)N0, (size_t)M));
     } else {
         return false;
+    }
+    return true;
+}
+
+// The packed weight scales grow with experts x M x K (twice that in NN's B slot), so a large
+// group can outgrow the workspace; it then runs as consecutive expert chunks that each fit.
+static bool grouped_mxfp8_gemm(
+    const void *const *A_array, const void *const *B_array, void *const *C_array,
+    const void *const *scale_A_array, const void *const *scale_B_array,
+    int M, const int *N_array, int K, int num_experts,
+    bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
+    void *workspace, size_t workspace_size, hipStream_t stream) {
+
+    const bool   nn_flip = !transa && !transb;
+    const size_t k_iters = K / BLOCK_K;
+    // Mirrors grouped_mxfp8_gemm_launch's total_ws for ne experts with n activation rows.
+    auto ws_bytes = [&](size_t ne, size_t n) {
+        size_t a_words = nn_flip ? k_iters * n : k_iters * ne * M;
+        size_t b_words = nn_flip ? 2 * k_iters * ne * M : 2 * k_iters * n;
+        return kittens_align_up(a_words * sizeof(uint32_t), 256)
+             + kittens_align_up(b_words * sizeof(uint32_t), 256)
+             + 4 * kittens_align_up(ne * sizeof(void *), 256)
+             + 2 * kittens_align_up((ne + 1) * sizeof(int), 256);
+    };
+
+    for (int e0 = 0; e0 < num_experts;) {
+        int    ne = 1;
+        size_t n  = N_array[e0];
+        while (e0 + ne < num_experts && ws_bytes(ne + 1, n + N_array[e0 + ne]) <= workspace_size) {
+            n += N_array[e0 + ne];
+            ne++;
+        }
+        if (!grouped_mxfp8_gemm_launch(A_array + e0, B_array + e0, C_array + e0,
+                                       scale_A_array + e0, scale_B_array + e0,
+                                       M, N_array + e0, K, ne, transa, transb,
+                                       a_dtype, b_dtype, out_dtype,
+                                       workspace, workspace_size, stream)) {
+            return false;
+        }
+        e0 += ne;
     }
     return true;
 }

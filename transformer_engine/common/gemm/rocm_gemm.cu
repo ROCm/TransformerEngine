@@ -2445,6 +2445,8 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream) {
     if (accumulate || num_gemms <= 1) return false;
+    // NT (wgrad) belongs to try_kittens_grouped_mxfp8_wgrad; its operands carry no rowwise shape
+    if (!transa && transb) return false;
     if (!kittens_grouped_mxfp8_enabled()) return false;
 
     const bool warn_fallback = kittens_grouped_warn_fallback();
