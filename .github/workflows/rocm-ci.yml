@@ -98,14 +98,88 @@ jobs:
           echo "Selected base image tag: $IMAGE_BASE"
           echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
+  # Which suites this run needs. Pull requests are gated by the paths they
+  # change (ci/change_scope.py); everything else -- pushes to dev and release
+  # branches, manual runs -- runs every suite, as does a PR labelled ci-skip-scope.
+  # The rules are read from the PR's base branch, not from the PR, so a PR
+  # cannot change the rules that gate it: a PR editing ci/change_scope.py is
+  # judged by the reviewed copy, which sends any ci/ change to every suite.
+  scope:
+    name: Select Test Suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_build: ${{ steps.scope.outputs.run_build }}
+      sgpu_suites: ${{ steps.scope.outputs.sgpu_suites }}
+      mgpu_suites: ${{ steps.scope.outputs.mgpu_suites }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # A PR is diffed against its base branch, which needs the history
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Select suites
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          SKIP_SCOPE: ${{ contains(github.event.pull_request.labels.*.name, 'ci-skip-scope') }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RULES_FROM_SOURCE: ${{ inputs.test_config_from_source }}
+        run: |
+          # Selecting every suite does not consult the rules, so this checkout's
+          # own copy of the script serves for it.
+          everything() {
+            python3 ci/change_scope.py --all "$1" \
+              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [[ "$EVENT" != "pull_request" ]]; then
+            everything "${EVENT} runs are not gated"
+            exit 0
+          fi
+          if [[ "$SKIP_SCOPE" == "true" ]]; then
+            everything "the PR is labelled ci-skip-scope"
+            exit 0
+          fi
+
+          # The base branch's copy of the rules; the PR's own only when asked
+          # to debug it (test_config_from_source, as for ci_config.json).
+          RULES=/tmp/change_scope.py
+          if [[ "$RULES_FROM_SOURCE" == "true" ]]; then
+            echo "::notice::Debugging mode: using ci/change_scope.py from the PR"
+            cp ci/change_scope.py "$RULES"
+          elif ! git show "origin/${BASE_REF}:ci/change_scope.py" > "$RULES" 2>/dev/null; then
+            everything "${BASE_REF} has no ci/change_scope.py yet"
+            exit 0
+          fi
+
+          # The whole PR against its merge base, not just the latest push.
+          # --no-renames lists a moved file at both its old and its new path.
+          if ! git diff --name-status --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed.txt; then
+            echo "::warning::could not list the PR's changes; running every suite"
+            everything "the PR's changes could not be listed"
+            exit 0
+          fi
+          if ! python3 "$RULES" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" \
+                < /tmp/changed.txt; then
+            echo "::warning::ci/change_scope.py failed; running every suite"
+            everything "the gating rules failed"
+          fi
+
   build:
+    needs: scope
+    if: needs.scope.outputs.run_build == 'true'
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
-    needs: [select_image, build]
+    needs: [scope, select_image, build]
+    if: needs.scope.outputs.sgpu_suites != ''
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
@@ -185,7 +259,26 @@ jobs:
           EOF
           )"
 
-      - name: Run sGPU tests in parallel (pytorch, jax, examples, core)
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of *this* run. The restore key is
+      # anchored to run_id, so it can only match an earlier attempt of the same
+      # run -- a first attempt finds nothing and the queue runs in full. That is
+      # the whole trigger: "Re-run failed jobs" already picks which jobs come
+      # back, and the presence of this file is what tells the scheduler why.
+      - name: Restore the previous attempt's failed items
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
+
+      - name: Run sGPU tests as one queue (pytorch, jax, examples, core)
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
@@ -196,52 +289,100 @@ jobs:
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
-          rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
+          rm -rf test-results
+
+          mkdir -p ci-weights
+          wc -l ci-weights/*.txt 2>/dev/null \
+            || echo "no weight table restored; this run will be unordered"
+
+          mkdir -p ci-rerun
+          wc -l ci-rerun/sgpu/*.tsv 2>/dev/null \
+            || echo "no failed-item list restored; this run queues every suite"
+          # Present only for items the last attempt could narrow to single
+          # tests; the rest of the failed list re-runs whole.
+          wc -l ci-rerun/sgpu/tests/*.txt 2>/dev/null \
+            || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
-            -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash /workspace/.github/scripts/run_parallel_sgpu.sh \
-              --first-gpu 0 \
-              --log-dir /workspace/ \
-              /workspace/.github/scripts/ci_sgpu_jobs.conf
+            -e GITHUB_ACTIONS \
+            te-runner bash /workspace/ci/run_queue.sh --queue sgpu \
+              --suites "${{ needs.scope.outputs.sgpu_suites }}" \
+              --log-dir /workspace/test-results/logs
+
+      - name: Save learned test weights
+        if: always() && hashFiles('ci-weights/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+          SUITES: ${{ needs.scope.outputs.sgpu_suites }}
         run: |
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
-          # One report per suite; each appends its own section to the job summary.
-          # An empty subdir (suite crashed before writing XML) yields an explicit
-          # "no results" warning attributable to that suite.
-          python3 ci/junit_report.py test-results/torch \
-            --title "sGPU PyTorch (${{ matrix.arch_label }})"
-          python3 ci/junit_report.py test-results/jax \
-            --title "sGPU JAX (${{ matrix.arch_label }})"
-          python3 ci/junit_report.py test-results/core \
-            --title "sGPU Core (${{ matrix.arch_label }})"
+
+          # Each attempt reports only what it ran, and nothing from an earlier
+          # one is replayed here: GitHub keeps a summary per attempt and puts a
+          # picker on the job page to move between them, so the full run's
+          # results are a click away rather than lost.
+          #
+          # One report per suite; each appends its own section. An empty subdir
+          # means the suite crashed before writing XML on a first attempt, or
+          # simply was not re-queued on a later one -- junit_report.py tells the
+          # two apart from --attempt and words the section accordingly.
+          # A suite the PR's changes did not select has nothing to report; the
+          # schedule report below names it as not selected.
+          report() {
+            [[ " $SUITES " == *" $1 "* ]] || return 0
+            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+          }
+          report torch "sGPU PyTorch (${{ matrix.arch_label }})"
+          report jax "sGPU JAX (${{ matrix.arch_label }})"
+          report core "sGPU Core (${{ matrix.arch_label }})"
+          if [ -f test-results/logs/report/schedule.md ]; then
+            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
+
+      # Saved under this attempt's number so the next one restores it by prefix.
+      # Saved even when the queue passed: the file is then empty, and restoring
+      # an empty list is what stops a third attempt re-running the second's work.
+      - name: Save this attempt's failed items
+        if: always() && hashFiles('ci-rerun/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-rerun
+          key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Check suite failure status
         if: always()
         run: |
           EXIT_STATUS=0
-          for config in .github/scripts/ci_sgpu_jobs.conf; do
-            while IFS= read -r line || [[ -n "$line" ]]; do
-              [[ "$line" =~ ^[[:space:]]*# ]] && continue
-              [[ -z "${line//[[:space:]]/}" ]] && continue
-              read -r label logfile rest <<< "$line"
-              rc=$(cat "${logfile}.rc" 2>/dev/null || echo "missing")
-              if [[ "$rc" != "0" ]]; then
-                echo "::group::[FAILED] ${label} Log (rc=${rc})"
-                cat "$logfile" 2>/dev/null || echo "(log not found)"
-                echo "::endgroup::"
-                echo "::error::${label} tests FAILED."
-                EXIT_STATUS=1
-              fi
-            done < "$config"
-          done
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < ci/ci_sgpu_queue.conf
           exit $EXIT_STATUS
 
       - name: Upload logs
@@ -250,18 +391,28 @@ jobs:
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
-            *.log
-            test-results/**/*.xml
+            test-results/**
+            ci-weights/*.txt
+            ci-rerun/sgpu/**
           if-no-files-found: ignore
           retention-days: 5
+          # A re-run uploads under a name the first attempt already used, which
+          # v4 rejects as a duplicate. Replace it: the logs of the attempt being
+          # re-run are the ones nobody wants.
+          overwrite: true
 
       - name: Cleanup container
         if: always()
         run: docker rm -f te-runner || true
 
+  # PyTorch and JAX multi-GPU tests share one 8-GPU runner as a single queue.
+  # Each item runs on the GPUs its call site declares (TE_CI_GPUS in
+  # ci/pytorch.sh and ci/jax.sh) or on the whole box, and items that fit side by
+  # side share it -- see ci/run_queue.sh.
   mgpu_tests:
-    name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
-    needs: [select_image, build]
+    name: mGPU Tests (${{ matrix.arch_label }})
+    needs: [scope, select_image, build]
+    if: needs.scope.outputs.mgpu_suites != ''
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
@@ -270,7 +421,6 @@ jobs:
       fail-fast: false
       matrix:
         arch_label: [mi30x, mi35x]
-        framework: [pytorch, jax]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -299,89 +449,138 @@ jobs:
       - *run_container
 
       - name: Install packages
-        env:
-          FRAMEWORK: ${{ matrix.framework }}
         run: |
-          docker exec -e FRAMEWORK="$FRAMEWORK" te-runner bash -c "$(cat <<'EOF'
+          docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
 
           TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          if [ "$FRAMEWORK" = "pytorch" ]; then
-            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-          else
-            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          fi
-          test -n "$TE_CORE_PKG" && test -n "$TE_FW_PKG"
+          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
+          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
           pip install --no-deps "$TE_CORE_PKG"
           pip install ninja pybind11[global]
           pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_FW_PKG"
+          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
+          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
           )"
 
-      - name: Run mGPU tests
-        id: mgpu-tests
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-weights
+          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of *this* run; see the sGPU job.
+      - name: Restore the previous attempt's failed items
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-rerun
+          key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
+
+      - name: Run mGPU tests as one queue (pytorch, jax)
+        id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
         timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          case "${{ matrix.framework }}" in
-            pytorch) TEST_SCRIPT=ci/pytorch.sh; LOG_FILE=/workspace/torch_mgpu.log; SUITE_NAME=PyTorch ;;
-            jax)     TEST_SCRIPT=ci/jax.sh;     LOG_FILE=/workspace/jax_mgpu.log;   SUITE_NAME=JAX     ;;
-            *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
-          esac
+          rm -rf test-results
 
-          rm -rf test-results && mkdir -p test-results
+          mkdir -p ci-weights
+          wc -l ci-weights/*.txt 2>/dev/null \
+            || echo "no weight table restored; this run will be unordered"
+
+          mkdir -p ci-rerun
+          wc -l ci-rerun/mgpu/*.tsv 2>/dev/null \
+            || echo "no failed-item list restored; this run queues every suite"
+          wc -l ci-rerun/mgpu/tests/*.txt 2>/dev/null \
+            || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
-            -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e TEST_SCRIPT=$TEST_SCRIPT \
-            -e LOG_FILE=$LOG_FILE \
-            -e SUITE_NAME=$SUITE_NAME \
-            -e NVTE_FRAMEWORK=${{ matrix.framework }} \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash -c "$(cat <<'EOF'
-          #!/usr/bin/bash
-          set -x -o pipefail
-          ulimit -c 0 # Disable core dumps
+            -e GITHUB_ACTIONS \
+            -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
+            te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
+              --log-dir /workspace/test-results/logs"
 
-          "$TEST_SCRIPT" > "$LOG_FILE" 2>&1
-          test_rc=$?
-
-          if [ $test_rc -ne 0 ]; then
-            echo "::group::[FAILED] ${SUITE_NAME} mGPU Log"
-            cat "$LOG_FILE"
-            echo "::endgroup::"
-            echo "::error::${SUITE_NAME} mGPU tests FAILED."
-          fi
-
-          exit $test_rc
-          EOF
-          )"
+      - name: Save learned test weights
+        if: always() && hashFiles('ci-weights/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-weights
+          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+          SUITES: ${{ needs.scope.outputs.mgpu_suites }}
         run: |
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
-          python3 ci/junit_report.py test-results \
-            --title "mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})"
+          # A suite the PR's changes did not select has nothing to report; the
+          # schedule report below names it as not selected.
+          report() {
+            [[ " $SUITES " == *" $1 "* ]] || return 0
+            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+          }
+          report torch-mgpu "mGPU PyTorch (${{ matrix.arch_label }})"
+          report jax-mgpu "mGPU JAX (${{ matrix.arch_label }})"
+          if [ -f test-results/logs/report/schedule.md ]; then
+            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
+
+      - name: Save this attempt's failed items
+        if: always() && hashFiles('ci-rerun/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-rerun
+          key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Check suite failure status
+        if: always()
+        run: |
+          EXIT_STATUS=0
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < ci/ci_mgpu_queue.conf
+          exit $EXIT_STATUS
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
+          name: logs-mgpu-${{ matrix.arch_label }}
           path: |
-            *.log
-            test-results/*.xml
+            test-results/**
+            ci-weights/*.txt
+            ci-rerun/mgpu/**
           if-no-files-found: ignore
           retention-days: 5
+          overwrite: true
 
       - name: Cleanup container
         if: always()

@@ -34,9 +34,13 @@ jobs:
 
             let dispatch = false;
             if (action === 'labeled') {
-              const addedLevel = parseLevelLabel(context.payload.label?.name);
-              // Only dispatch when the newly added label is (or ties) the highest level.
-              dispatch = addedLevel > 0 && addedLevel === currentLevel;
+              const addedName = context.payload.label?.name || '';
+              const addedLevel = parseLevelLabel(addedName);
+              // Only dispatch when the newly added label is (or ties) the highest level,
+              // or is ci-skip-scope added to a PR that already has a level: the run
+              // without it skipped suites, and this one runs them all at that level.
+              dispatch = (addedLevel > 0 && addedLevel === currentLevel)
+                || (addedName === 'ci-skip-scope' && currentLevel > 0);
             } else {
               // synchronize, reopened, opened — dispatch at whatever level is set.
               dispatch = currentLevel > 0;
@@ -52,6 +56,8 @@ jobs:
     # - A ci-level label higher than any existing ci-level label(s) was added
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
+    # - ci-skip-scope was added to a PR with existing ci-level label(s); the
+    #   run then skips ci/change_scope.py and runs every suite at that level
     if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}

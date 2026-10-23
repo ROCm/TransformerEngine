@@ -170,30 +170,55 @@ def emit(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: junit_report.py <results-dir> [--title TITLE]", file=sys.stderr)
+        print(
+            "usage: junit_report.py <results-dir> [--title TITLE] [--attempt N]",
+            file=sys.stderr,
+        )
         return 0
     results_dir = sys.argv[1]
     title = "Test Results"
     if "--title" in sys.argv:
         title = sys.argv[sys.argv.index("--title") + 1]
+    # Which attempt of the run this is. Used only to tell an empty results dir
+    # apart: on a first attempt that means the suite crashed before writing any
+    # XML, on a later one it means the suite had nothing to re-run. Absent or
+    # unparseable means attempt 1, which reports exactly as it did before this
+    # argument existed.
+    attempt = 1
+    if "--attempt" in sys.argv:
+        try:
+            attempt = max(1, int(sys.argv[sys.argv.index("--attempt") + 1]))
+        except (IndexError, ValueError):
+            attempt = 1
 
     xml_files = sorted(glob.glob(os.path.join(results_dir, "*.xml")))
     # Sidecars left behind by te_ci_result_sink when a run hard-exited before
     # writing its JUnit XML (glob.glob("*.xml") does not match "*.xml.partial").
     partial_files = sorted(glob.glob(os.path.join(results_dir, "*.xml.partial")))
 
-    lines = []
-    lines.append(f"## {title}\n")
-
     if not xml_files and not partial_files:
-        lines.append(
-            "> :warning: **No JUnit XML files were produced.** No test file "
-            "completed far enough to write results -- the run likely crashed or "
-            "hung before any suite finished. Inspect the uploaded `*.log` "
-            "artifacts to see where it stopped.\n"
-        )
+        lines = [f"## {title}\n"]
+        if attempt > 1:
+            # The ordinary case on a re-run: nothing of this suite failed, so the
+            # queue had no reason to bring any of it back. The heading still goes
+            # out -- a re-run's summary stands on its own, and a suite missing from
+            # it reads as lost rather than as passed.
+            lines.append(
+                "> :white_check_mark: **Nothing to re-run.** Every test in this "
+                "suite passed on an earlier attempt of this run.\n"
+            )
+        else:
+            lines.append(
+                "> :warning: **No JUnit XML files were produced.** No test file "
+                "completed far enough to write results -- the run likely crashed or "
+                "hung before any suite finished. Inspect the uploaded `*.log` "
+                "artifacts to see where it stopped.\n"
+            )
         emit(lines)
         return 0
+
+    lines = []
+    lines.append(f"## {title}\n")
 
     totals = defaultdict(float)  # passed/failed/error/skipped/timeout/incomplete/time
     per_file = []                # (name, counts, time)
