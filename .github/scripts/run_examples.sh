@@ -3,7 +3,8 @@
 #
 # See LICENSE for license information.
 #
-# Run TE examples on a single GPU.
+# Run TE examples on a single GPU. Every example runs even if an earlier one fails;
+# the script exits non-zero at the end if any step failed.
 # HIP_VISIBLE_DEVICES must be set by the caller (run_parallel_sgpu.sh).
 
 set -e
@@ -17,12 +18,10 @@ python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
 JAX_CONSTRAINTS=/tmp/jax-constraints.txt
 pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
 
-# Examples run as plain scripts (not pytest), so they emit no JUnit XML and their
-# failures never reach the job summary that ci/junit_report.py builds. When the
-# parallel runner provides JUNITXML_PREFIX (e.g. test-results/examples/), wrap each
-# invocation to drop a one-testcase JUnit XML there so example failures surface in
-# the summary alongside the pytest suites. Reporting is best-effort: it never masks
-# or alters the example's own exit status.
+_failed=()
+
+# Examples are plain scripts, not pytest: with JUNITXML_PREFIX set, write a one-testcase
+# JUnit XML per run so ci/junit_report.py lists them in the job summary.
 emit_junit() {
     # $1=xml-path  $2=testcase-name  $3=exit-code  $4=duration-seconds  $5=command
     python3 - "$@" <<'PY'
@@ -59,7 +58,9 @@ run_example() {
         mkdir -p "${JUNITXML_PREFIX}" 2>/dev/null || true
         emit_junit "${JUNITXML_PREFIX}${name}.xml" "$name" "$rc" "$dur" "$*" || true
     fi
-    return $rc
+    if [ $rc -ne 0 ]; then
+        _failed+=("${name} (exit code ${rc})")
+    fi
 }
 
 cd "${REPO_ROOT}/examples/pytorch/mnist"
@@ -68,12 +69,18 @@ run_example pytorch_mnist_te   python main.py --use-te
 run_example pytorch_mnist_fp8  python main.py --use-fp8
 
 cd "${REPO_ROOT}/examples/jax/mnist"
-pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
+pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt || _failed+=("jax/mnist requirements install")
 run_example jax_mnist      python test_single_gpu_mnist.py
 run_example jax_mnist_te   python test_single_gpu_mnist.py --use-te
 run_example jax_mnist_fp8  python test_single_gpu_mnist.py --use-fp8
 
 cd "${REPO_ROOT}/examples/jax/encoder"
-pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
+pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt || _failed+=("jax/encoder requirements install")
 run_example jax_encoder      python test_single_gpu_encoder.py
 run_example jax_encoder_fp8  python test_single_gpu_encoder.py --use-fp8
+
+if [ ${#_failed[@]} -ne 0 ]; then
+    echo "${#_failed[@]} example step(s) failed:" >&2
+    printf '  %s\n' "${_failed[@]}" >&2
+    exit 1
+fi
