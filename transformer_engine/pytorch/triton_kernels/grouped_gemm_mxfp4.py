@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Grouped MXFP4 GEMM Triton persistent kernels (gfx950).
+"""Grouped MXFP4 GEMM Triton persistent kernels (gfx950, gfx1250).
 
 Adapted for TransformerEngine from Primus-Turbo.
 
@@ -14,28 +14,13 @@ Adapted for TransformerEngine from Primus-Turbo.
 from __future__ import annotations
 
 import functools
+import warnings
 
 import torch
 import triton
 import triton.language as tl
 
-from .blockwise_fp8_grouped_gemm import _amd_compiler_knobs
-
-
-# ===============================================================================
-# Arch helper
-# ===============================================================================
-
-
-@functools.lru_cache(maxsize=None)
-def _is_gfx950_for(device_index: int) -> bool:
-    props = torch.cuda.get_device_properties(device_index)
-    return (props.major, props.minor) == (9, 5)
-
-
-def _is_gfx950() -> bool:
-    # Key the cache by device index so a set_device change isn't masked.
-    return _is_gfx950_for(torch.cuda.current_device())
+from .common import _amd_compiler_knobs, get_arch
 
 
 # ===============================================================================
@@ -47,16 +32,29 @@ def _is_gfx950() -> bool:
 # read at compile time and are not part of Triton's compile cache key.
 # ===============================================================================
 
+# gfx1250: Triton's async copy (on by default there) corrupts the pipelined
+# prologue K-iteration of the scaled-WMMA dot, so it is turned off.
+_GFX1250_KNOBS = {"use_async_copy": False}
+
+
 def _scoped_amd_knobs(*, is_tn):
-    """Decorator applying blockwise_fp8's scoped AMD compiler knobs around a
+    """Decorator applying the scoped AMD compiler knobs (common.py) around a
     launch. ``is_tn`` selects the layout-gated set (gfx942); on gfx950 the full
-    async_copy / scalarize / block_pingpong set is enabled either way.
+    async_copy / scalarize / block_pingpong set is enabled either way; on gfx1250
+    only async_copy is disabled.
     """
 
     def deco(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            with _amd_compiler_knobs(is_tn=is_tn):
+            overrides = None
+            if get_arch() == "gfx1250":
+                overrides = _GFX1250_KNOBS
+                warnings.warn(
+                    "Grouped MXFP4 Triton GEMM: disabling Triton async_copy on gfx1250 (it"
+                    " corrupts the pipelined scaled-WMMA dot); performance may be reduced."
+                )
+            with _amd_compiler_knobs(is_tn=is_tn, overrides=overrides):
                 return func(*args, **kwargs)
 
         return wrapper
@@ -70,6 +68,12 @@ def _scoped_amd_knobs(*, is_tn):
 # ===============================================================================
 
 NUM_XCDS = 8  # gfx942/gfx950 chiplet count
+
+
+def _num_xcds():
+    """Chiplet-remap width. gfx1250 measured faster with the plain round-robin pid
+    order (up to ~15% on MoE grouped GEMMs), so the remap is skipped there."""
+    return 1 if get_arch() == "gfx1250" else NUM_XCDS
 
 
 @triton.jit
@@ -123,6 +127,27 @@ _VARK_CONFIGS = [
     (256, 8, 2, 16, 0),
     (256, 8, 3, 16, 2),
 ]
+# gfx1250 forward configs. num_warps=16 spreads the 256x256 fp32 accumulator over
+# twice the waves, so fp4 x fp4 fits 256 VGPRs at 4 waves/SIMD (num_warps=8 needs
+# ~360 VGPRs, 2 waves/SIMD); e4m3 x e2m1 spills at num_warps=16 and is fastest at
+# num_warps=8 with BLOCK_K=256. The BLOCK_K=128 rows cover K % 256 != 0.
+_FWD_CONFIGS_GFX1250 = [
+    (256, 16, 3, 16, 0),
+    (256, 16, 2, 16, 0),
+    (256, 8, 3, 16, 0),
+    (256, 8, 2, 16, 0),
+    (512, 8, 3, 16, 0),
+    (128, 16, 2, 16, 0),
+    (128, 8, 2, 16, 0),
+]
+# gfx1250 wgrad configs (host tile 128x256 there). BLOCK_K=256 needs every padded
+# group length 256-divisible (see _wgrad_pad_multiple in grouped_gemm_mxfp4_impl.py).
+_VARK_CONFIGS_GFX1250 = [
+    (256, 16, 3, 16, 0),
+    (256, 16, 2, 16, 0),
+    (128, 16, 3, 16, 0),
+    (128, 8, 2, 16, 0),
+]
 
 
 def _make_configs(specs):
@@ -140,17 +165,34 @@ def _make_configs(specs):
     ]
 
 
+_FWD_TRITON_CONFIGS = _make_configs(_FWD_CONFIGS)
+_FWD_TRITON_CONFIGS_GFX1250 = _make_configs(_FWD_CONFIGS_GFX1250)
+_VARK_TRITON_CONFIGS = _make_configs(_VARK_CONFIGS)
+_VARK_TRITON_CONFIGS_GFX1250 = _make_configs(_VARK_CONFIGS_GFX1250)
+
+
 def _prune_fwd_by_k(configs, named_args, **kwargs):
-    """Keep only configs whose BLOCK_K divides K (the fwd reduction loop is unmasked)."""
+    """Keep only the current arch's configs whose BLOCK_K divides K (the fwd
+    reduction loop is unmasked)."""
     K = named_args["K"]
+    configs = _FWD_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _FWD_TRITON_CONFIGS
     return [c for c in configs if K % c.kwargs["BLOCK_SIZE_K"] == 0]
 
 
 def _prune_vark_by_pad(configs, named_args, **kwargs):
-    """Drop BLOCK_K=256 unless every padded group length is 256-divisible (can256)."""
+    """Keep the current arch's configs; drop BLOCK_K=256 unless every padded group
+    length is 256-divisible (can256)."""
+    configs = _VARK_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _VARK_TRITON_CONFIGS
     if named_args["can256"]:
         return list(configs)
     return [c for c in configs if c.kwargs["BLOCK_SIZE_K"] != 256]
+
+
+def _fwd_do_bench(kernel_call, quantiles):
+    if get_arch() == "gfx1250":
+        # gfx1250 downclocks under back-to-back load, which do_bench's per-launch L2 flush hides.
+        return triton.testing.do_bench_cudagraph(kernel_call, rep=100, quantiles=quantiles)
+    return triton.runtime.driver.active.get_benchmarker()(kernel_call, quantiles=quantiles)
 
 
 # ###########################################################################
@@ -161,9 +203,10 @@ def _prune_vark_by_pad(configs, named_args, **kwargs):
 
 
 @triton.autotune(
-    configs=_make_configs(_FWD_CONFIGS),
+    configs=_FWD_TRITON_CONFIGS + _FWD_TRITON_CONFIGS_GFX1250,
     key=["N", "K", "G", "A_PACK", "B_PACK"],
     prune_configs_by={"early_config_prune": _prune_fwd_by_k},
+    do_bench=_fwd_do_bench,
 )
 @triton.jit
 def _grouped_mxfp4_persistent_gemm_kernel(
@@ -202,6 +245,8 @@ def _grouped_mxfp4_persistent_gemm_kernel(
     B_PACK: tl.constexpr = 2,
     A_FMT: tl.constexpr = "e2m1",  # per-operand tl.dot_scaled format ("e2m1"/"e4m3"/"e5m2")
     B_FMT: tl.constexpr = "e2m1",
+    SCALE_TRANSPOSED: tl.constexpr = False,  # scales pre-transposed ([K/32,M]/[G,K/32,N]):
+    #                                          load (BM,BK/32)/(BN,BK/32) directly
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -259,21 +304,36 @@ def _grouped_mxfp4_persistent_gemm_kernel(
 
         A_BASE = A + (m_rd + rm[:, None]) * stride_am + rk_a[None, :] * stride_ak
         B_BASE = B + group_idx.to(tl.int64) * stride_bg + rk_b[:, None] * stride_bk + rn[None, :] * stride_bn
-        AS_BASE = A_scale + rks[:, None] * stride_ask + (m_rd + rm[None, :]) * stride_asm
-        BS_BASE = (
-            B_scale
-            + group_idx.to(tl.int64) * stride_bsg
-            + rks[:, None] * stride_bsk
-            + rn[None, :] * stride_bsn
-        )
+        if SCALE_TRANSPOSED:
+            # scales stored [K/32, M] / [G, K/32, N] -> a (BM, BK/32) / (BN, BK/32) tile loads
+            # directly (M/N contiguous)
+            AS_BASE = A_scale + (m_rd + rm[:, None]) * stride_asm + rks[None, :] * stride_ask
+            BS_BASE = (
+                B_scale
+                + group_idx.to(tl.int64) * stride_bsg
+                + rn[:, None] * stride_bsn
+                + rks[None, :] * stride_bsk
+            )
+        else:
+            AS_BASE = A_scale + rks[:, None] * stride_ask + (m_rd + rm[None, :]) * stride_asm
+            BS_BASE = (
+                B_scale
+                + group_idx.to(tl.int64) * stride_bsg
+                + rks[:, None] * stride_bsk
+                + rn[None, :] * stride_bsn
+            )
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         loop_k = K // BLOCK_SIZE_K
         for ki in range(0, loop_k):
             a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER)  # (BM, BK_A)
             b = tl.load(tl.multiple_of(B_BASE, (16, 1)), cache_modifier=CACHE_MODIFIER)  # (BK_B, BN)
-            a_s = tl.trans(tl.load(AS_BASE))  # (BK/32, BM) -> (BM, BK/32)
-            b_s = tl.trans(tl.load(BS_BASE))  # (BK/32, BN) -> (BN, BK/32)
+            if SCALE_TRANSPOSED:
+                a_s = tl.load(AS_BASE)  # (BM, BK/32) directly
+                b_s = tl.load(BS_BASE)  # (BN, BK/32) directly
+            else:
+                a_s = tl.trans(tl.load(AS_BASE))  # (BK/32, BM) -> (BM, BK/32)
+                b_s = tl.trans(tl.load(BS_BASE))  # (BK/32, BN) -> (BN, BK/32)
             acc = tl.dot_scaled(a, a_s, A_FMT, b, b_s, B_FMT, acc)
             A_BASE += BK_A * stride_ak
             B_BASE += BK_B * stride_bk
@@ -289,6 +349,15 @@ def _grouped_mxfp4_persistent_gemm_kernel(
         tl.store(C_, c, c_mask)
 
 
+def _scale_strides(a_s, b_s, transposed):
+    """(stride_asm, stride_ask, stride_bsg, stride_bsn, stride_bsk) for the persistent
+    kernel. Plain scales are [M,K/32] / [G,N,K/32]; when ``transposed`` they are
+    [K/32,M] / [G,K/32,N] so the kernel loads (BM/BN, BK/32) directly."""
+    if transposed:
+        return a_s.stride(1), a_s.stride(0), b_s.stride(0), b_s.stride(2), b_s.stride(1)
+    return a_s.stride(0), a_s.stride(1), b_s.stride(0), b_s.stride(1), b_s.stride(2)
+
+
 @_scoped_amd_knobs(is_tn=False)
 def grouped_gemm_mxfp4_triton_kernel(
     a,
@@ -301,6 +370,8 @@ def grouped_gemm_mxfp4_triton_kernel(
     group_offs_out=None,
     out_dtype=torch.bfloat16,
     num_cu=None,
+    scale_transposed=False,
+    out=None,
 ):
     """A(total_M, K/2) @ B(G, N, K/2)^T -> C. FP4-packed data, e8m0 uint8 scales.
 
@@ -311,11 +382,14 @@ def grouped_gemm_mxfp4_triton_kernel(
     if group_offs_out is None:
         group_offs_out = group_offs
     G = b.shape[0]
-    c = torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
+    c = out if out is not None else torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
     a_s = a_scale.view(torch.uint8)
     b_s = b_scale.view(torch.uint8)
     a_u8 = a.view(torch.uint8)
     b_u8 = b.view(torch.uint8)
+    stride_asm, stride_ask, stride_bsg, stride_bsn, stride_bsk = _scale_strides(
+        a_s, b_s, scale_transposed
+    )
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(a.device).multi_processor_count
     BM, BN = 256, 256
     m_alloc = a.shape[0]
@@ -324,7 +398,8 @@ def grouped_gemm_mxfp4_triton_kernel(
     GM = 8 if min((avg_m + BM - 1) // BM, tiles_n) < 16 else 4
     total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     # BLOCK_SIZE_K / num_warps / num_stages / waves_per_eu / matrix_instr_nonkdim /
     # kpack come from the @triton.autotune config; the grid and the host-chosen
@@ -347,21 +422,22 @@ def grouped_gemm_mxfp4_triton_kernel(
         b_u8.stride(2),
         c.stride(0),
         c.stride(1),
-        a_s.stride(0),  # stride_asm (M);   a_s is (total_M, K/32)
-        a_s.stride(1),  # stride_ask (K/32 contiguous)
-        b_s.stride(0),  # stride_bsg
-        b_s.stride(1),  # stride_bsn (N);   b_s is (G, N, K/32)
-        b_s.stride(2),  # stride_bsk (K/32 contiguous)
+        stride_asm,  # a_s is (total_M, K/32) plain, or (K/32, total_M) transposed
+        stride_ask,
+        stride_bsg,
+        stride_bsn,  # b_s is (G, N, K/32) plain, or (G, K/32, N) transposed
+        stride_bsk,
         BLOCK_SIZE_M=BM,
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
         A_PACK=2,  # fp4 A; passed explicitly so A_PACK/B_PACK bind into the autotune key
         B_PACK=2,
+        SCALE_TRANSPOSED=scale_transposed,
     )
     return c
 
@@ -378,6 +454,8 @@ def grouped_gemm_a8w4_triton_kernel(
     group_offs_out=None,
     out_dtype=torch.bfloat16,
     num_cu=None,
+    scale_transposed=False,
+    out=None,
 ):
     """a8w4 forward: C = A(e4m3) @ B(e2m1)^T, grouped along M (routed experts).
 
@@ -391,11 +469,14 @@ def grouped_gemm_a8w4_triton_kernel(
     if group_offs_out is None:
         group_offs_out = group_offs
     G = b.shape[0]
-    c = torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
+    c = out if out is not None else torch.empty((a.shape[0], N), dtype=out_dtype, device=a.device)
     a_s = a_scale.view(torch.uint8)
     b_s = b_scale.view(torch.uint8)
     a_e4m3 = a.view(torch.float8_e4m3fn)  # e4m3 operand, unpacked (K bytes/row)
     b_u8 = b.view(torch.uint8)  # e2m1 packed (K/2 bytes/row)
+    stride_asm, stride_ask, stride_bsg, stride_bsn, stride_bsk = _scale_strides(
+        a_s, b_s, scale_transposed
+    )
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(a.device).multi_processor_count
     BM, BN = 256, 256
     m_alloc = a.shape[0]
@@ -404,7 +485,8 @@ def grouped_gemm_a8w4_triton_kernel(
     GM = 8 if min((avg_m + BM - 1) // BM, tiles_n) < 16 else 4
     total_tiles = ((m_alloc + BM - 1) // BM + G) * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     _grouped_mxfp4_persistent_gemm_kernel[(num_sms,)](
         a_e4m3,
@@ -424,16 +506,16 @@ def grouped_gemm_a8w4_triton_kernel(
         b_u8.stride(2),  # stride_bk: packed K/2 bytes
         c.stride(0),
         c.stride(1),
-        a_s.stride(0),
-        a_s.stride(1),
-        b_s.stride(0),
-        b_s.stride(1),
-        b_s.stride(2),
+        stride_asm,
+        stride_ask,
+        stride_bsg,
+        stride_bsn,
+        stride_bsk,
         BLOCK_SIZE_M=BM,
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,
@@ -441,6 +523,7 @@ def grouped_gemm_a8w4_triton_kernel(
         A_FMT="e4m3",
         B_PACK=2,  # e2m1: 2 elems/byte -> K/2 bytes
         B_FMT="e2m1",
+        SCALE_TRANSPOSED=scale_transposed,
     )
     return c
 
@@ -455,7 +538,7 @@ def grouped_gemm_a8w4_triton_kernel(
 
 
 @triton.autotune(
-    configs=_make_configs(_VARK_CONFIGS),
+    configs=_VARK_TRITON_CONFIGS + _VARK_TRITON_CONFIGS_GFX1250,
     key=["OUT_M", "OUT_N", "G", "can256"],
     prune_configs_by={"early_config_prune": _prune_vark_by_pad},
     restore_value=["C"],
@@ -589,13 +672,14 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
     l_u8 = lhs.view(torch.uint8)
     r_u8 = rhs.view(torch.uint8)
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(lhs.device).multi_processor_count
-    BM, BN = 256, 128
+    BM, BN = (128, 256) if get_arch() == "gfx1250" else (256, 128)
     tiles_m = (OUT_M + BM - 1) // BM
     tiles_n = (OUT_N + BN - 1) // BN
     GM = 8 if min(tiles_m, tiles_n) < 16 else 4
     total_tiles = G * tiles_m * tiles_n
     num_sms = min(total_tiles, cu)
-    chunk = 64 if num_sms >= NUM_XCDS * 64 else 32
+    num_xcds = _num_xcds()
+    chunk = 64 if num_sms >= num_xcds * 64 else 32
 
     # can256 (256-divisibility of every padded group length) is part of the
     # autotune key so a cached BLOCK_K=256 config is never reused on a shape that
@@ -632,7 +716,7 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
         BLOCK_SIZE_N=BN,
         GROUP_SIZE_M=GM,
         NUM_SMS=num_sms,
-        NUM_XCDS=NUM_XCDS,
+        NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk,
         CACHE_MODIFIER=".ca",
         VEC=VEC_SIZE,

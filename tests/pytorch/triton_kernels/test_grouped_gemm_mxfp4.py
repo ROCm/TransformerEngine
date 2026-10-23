@@ -1,17 +1,16 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Numeric correctness tests for the grouped MXFP4 Triton GEMM (gfx950)."""
+"""Numeric correctness tests for the grouped MXFP4 Triton GEMM (gfx950, gfx1250)."""
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from transformer_engine.pytorch.quantization import check_mxfp4_support
-
-_MXFP4_OK, _MXFP4_REASON = check_mxfp4_support()
-
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     MXFP4_BLOCK,
+    MXFP4_GEMM_ARCHS,
     _col_operand,
     _col_operand_grouped_padded,
     _row_operand,
@@ -24,7 +23,10 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
 )
 
 pytestmark = [
-    pytest.mark.skipif(not _MXFP4_OK, reason=f"MXFP4 unsupported: {_MXFP4_REASON}"),
+    pytest.mark.skipif(
+        get_device_compute_capability() not in MXFP4_GEMM_ARCHS,
+        reason="grouped MXFP4 Triton GEMM requires gfx950 or gfx1250",
+    ),
 ]
 
 DTYPE = torch.bfloat16
@@ -201,6 +203,22 @@ def test_wgrad_precise_and_padding():
         ref_true[g] = grad_out[start : start + m].float().t() @ a[start : start + m].float()
         start += m
     assert _rel_err(wgrad, ref_true) < _REL_TOL
+
+
+def test_col_operand_grouped_padded_matches_per_group():
+    """The single batched col-wise cast equals casting each zero-padded group alone."""
+    splits = [*M_SPLITS, 0, 1]
+    x = _rand(sum(splits), K)
+    data, scale, go_pad = _col_operand_grouped_padded(x, splits)
+    offs = go_pad.tolist()
+    start = 0
+    for g, m in enumerate(splits):
+        s, e = offs[g], offs[g + 1]
+        if e > s:
+            d_g, s_g = _col_operand(F.pad(x[start : start + m], (0, 0, 0, e - s - m)))
+            assert torch.equal(data[:, s // 2 : e // 2], d_g)
+            assert torch.equal(scale[:, s // MXFP4_BLOCK : e // MXFP4_BLOCK], s_g)
+        start += m
 
 
 def test_wgrad_accumulate():
