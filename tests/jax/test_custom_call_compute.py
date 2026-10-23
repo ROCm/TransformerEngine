@@ -568,7 +568,9 @@ class TestNorm:
 
         precise_comparison = True
 
-        if (get_cudnn_version() < (9, 10, 0) or is_hip_extension()) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if (
+            get_cudnn_version() < (9, 10, 0) or is_hip_extension()
+        ) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
             precise_comparison = False
@@ -1518,7 +1520,6 @@ class TestDense:
             # Check for third GEMM
             _check_mxfp8_gemm_support(with_jax_gemm, k, n, m, use_bias)
 
-
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
             primitive_out = dense(
                 x, w, bias, contracting_dims=contracting_dims, quantizer_set=quantizer_set
@@ -1563,8 +1564,8 @@ class TestDense:
 def random_inputs_fixture(shape):
     key = jax.random.PRNGKey(0)
     subkeys = jax.random.split(key, 4)
-    #FP8 SRELU+Linear activation tests cause ROCm FP8 value range overflow
-    #Decrease input values to fit  
+    # FP8 SRELU+Linear activation tests cause ROCm FP8 value range overflow
+    # Decrease input values to fit
     rng = (4, 7) if is_hip_extension() else (5, 8)
     out = jax.random.uniform(subkeys[0], shape, jnp.bfloat16, rng[0], rng[1])
     return out
@@ -1819,6 +1820,56 @@ GROUPED_DENSE_INPUT_SHAPES = [
 ]
 
 
+class TestGroupedDbias:
+    """`grouped_dbias` on a ragged buffer, i.e. sum(group_sizes) < n_rows.
+
+    `TestGroupedDense._generate_grouped_dense_input` asserts
+    `group_sizes.sum() == m`, so nothing else here exercises a padded tail. That
+    is the shape the MoE path actually passes: the routed buffer is sized for the
+    worst case, so rows past sum(group_sizes) are padding and must not be
+    reduced. It is also the only case where the out-of-range segment id matters.
+    """
+
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16, jnp.float32])
+    @pytest_parametrize_wrapper(
+        "n_rows,live_rows",
+        [
+            (2048, 768),  # padded tail, the MoE case
+            (2048, 2048),  # exactly full, no padding
+            (2048, 0),  # every row is padding
+        ],
+    )
+    def test_ragged_buffer(self, dtype, n_rows, live_rows):
+        """The reduction must agree with a reference that ignores the tail."""
+        n_groups, n = 8, 256
+        subkeys = jax.random.split(jax.random.PRNGKey(0), 2)
+
+        # Random group sizes summing to live_rows, with one deliberately empty.
+        cuts = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, live_rows + 1))
+        group_sizes = jnp.diff(
+            jnp.concatenate([jnp.array([0]), cuts, jnp.array([live_rows])])
+        ).astype(jnp.int32)
+        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1]).at[1].set(0)
+        assert int(jnp.sum(group_sizes)) == live_rows
+
+        grad = jax.random.uniform(subkeys[1], (n_rows, n), dtype=dtype)
+        out = tex.grouped_dbias(grad, group_sizes)
+
+        assert out.shape == (n_groups, n)
+        assert out.dtype == grad.dtype
+
+        # Reference: sum each group's own rows in fp32, ignore the padded tail.
+        grad_fp32 = jnp.asarray(grad, dtype=jnp.float32)
+        offsets = jnp.concatenate([jnp.array([0]), jnp.cumsum(group_sizes)])
+        ref = jnp.stack(
+            [
+                jnp.sum(grad_fp32[int(offsets[g]) : int(offsets[g + 1])], axis=0)
+                for g in range(n_groups)
+            ]
+        ).astype(dtype)
+        assert_allclose(out, ref, dtype=dtype)
+
+
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
@@ -1912,6 +1963,59 @@ class TestGroupedDense:
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
+
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
+    @pytest_parametrize_wrapper("empty_groups", ["last", "all"])
+    def test_grouped_gemm_ragged_buffer(self, dtype, input_shape, empty_groups):
+        """sum(group_sizes) < m, which the MoE routed buffer always allows.
+
+        That buffer is sized for the worst case, so the rows past
+        sum(group_sizes) are padding. The GEMM must skip them and zero the
+        matching output rows: leaving them untouched leaks whatever the
+        allocator handed back into GLU, dgrad and grouped_dbias.
+
+        `empty_groups="all"` is the sum(group_sizes) == 0 < m corner. No GEMM
+        runs at all there, so the zero-fill is the only work, and it cannot
+        borrow the multi-stream GEMM's synchronisation because that path
+        returns without forking or joining.
+        """
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            dtype, input_shape
+        )
+        m = lhs.shape[0]
+        group_sizes = (
+            jnp.zeros_like(group_sizes) if empty_groups == "all" else group_sizes.at[-1].set(0)
+        )
+        live = int(jnp.sum(group_sizes))
+        assert live < m, "this test is only meaningful with a padded tail"
+
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
+        out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs_tensor, rhs_tensor, contracting_dims=contracting_dims
+        )
+
+        assert jnp.all(out[live:] == 0), "rows past sum(group_sizes) were not zeroed"
+
+        offsets = jnp.concatenate([jnp.array([0]), jnp.cumulative_sum(group_sizes)])
+        for g in range(group_sizes.size):
+            lo, hi = int(offsets[g]), int(offsets[g + 1])
+            if lo == hi:
+                continue
+            ref_g = jnp.squeeze(
+                jax.lax.dot_general(
+                    lhs[lo:hi],
+                    rhs[g : g + 1],
+                    (contracting_dims, ((), ())),
+                    precision=jax.lax.Precision.HIGHEST,
+                ),
+                axis=1,
+            )
+            assert_allclose(out[lo:hi], ref_g, dtype=dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
@@ -2020,10 +2124,72 @@ class TestGroupedDense:
         assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
+    @pytest_parametrize_wrapper("holes", ["adjacent", "scattered"])
+    def test_grouped_dense_grad_empty_experts(self, dtype, input_shape, holes):
+        """Backward with empty experts, which is what puts holes mid-buffer.
+
+        wgrad contracts over the ragged token dimension, so every group keeps a
+        full output slot whatever its token count and an empty expert leaves a
+        gap that no GEMM writes. `_generate_grouped_dense_input` only ever empties
+        one group, which merges into a single zero-out range; these two patterns
+        reach the rest of the fill path. "adjacent" puts two empty experts side by
+        side, so the ranges merge; "scattered" separates them, so they cannot, and
+        the fill is distributed round-robin over the compute streams and joined
+        from more than one.
+
+        Group sizes stay multiples of the alignment and still sum to m, so only
+        the emptiness pattern changes.
+        """
+        n_groups = input_shape[0]
+        if n_groups < 5:
+            pytest.skip(f"need >= 5 groups to place separated holes, got {n_groups}")
+
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype, input_shape, with_bias=True
+        )
+        sizes = [int(s) for s in group_sizes]
+        empty_at = (1, 2) if holes == "adjacent" else (1, 3)
+        # Park the emptied groups' rows on group 0 so the total is unchanged.
+        for g in empty_at:
+            sizes[0] += sizes[g]
+            sizes[g] = 0
+        # "scattered" only separates the holes if the group between them is live.
+        if holes == "scattered" and sizes[2] == 0:
+            step = int(group_sizes[0]) or 1
+            sizes[0] -= step
+            sizes[2] = step
+        assert sum(sizes) == int(jnp.sum(group_sizes))
+        assert all(sizes[g] == 0 for g in empty_at)
+        group_sizes = jnp.asarray(sizes, dtype=group_sizes.dtype)
+
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
+
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
+        assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+        # An expert with no tokens gets no gradient, and that slot is one of the
+        # regions the GEMM never writes.
+        for g in empty_at:
+            assert jnp.all(prim_wgrad[g] == 0), f"wgrad of empty expert {g} is not zero"
+
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize(
         "fwd_bwd_dtype",
-        [(jnp_float8_e4m3_type, jnp_float8_e4m3_type), (jnp_float8_e4m3_type, jnp_float8_e5m2_type)],
+        [
+            (jnp_float8_e4m3_type, jnp_float8_e4m3_type),
+            (jnp_float8_e4m3_type, jnp_float8_e5m2_type),
+        ],
     )
     @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):

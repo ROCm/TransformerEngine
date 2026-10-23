@@ -853,11 +853,19 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     }
   }
 
+#ifdef USE_HIPKITTENS_GEMM
+  if (_fused && buffer_dtype == DType::kByte && comm_type == CommOverlapType::AG) {
+    _scale_chunk_bytes = buffer_chunk_bytes / 32;
+    _scale_base_offset = buffer_bytes;
+    buffer_bytes += _scale_chunk_bytes * _tp_size;
+  }
+#endif
+
 #ifdef NVTE_WITH_KOSMOS
   if (_fused && !_is_reduce_scatter && typeToSize(buffer_dtype) == 1) {
     // An MXFP8 all-gather region holds the fp8 data, then its e8m0 scales (one per 32 values); a dual region
-    // (dgrad + wgrad) holds a row- and a column-quantized part.
-    _kosmos_mx_bytes = buffer_bytes + buffer_bytes / 32;
+    // (dgrad + wgrad) holds a row- and a column-quantized part. Part 0 is the HipKittens scale region above.
+    _kosmos_mx_bytes = _scale_chunk_bytes != 0 ? buffer_bytes : buffer_bytes + buffer_bytes / 32;
     buffer_bytes     = _kosmos_mx_bytes * (_kosmos_dual ? 2 : 1);
   }
   if (_fused) {

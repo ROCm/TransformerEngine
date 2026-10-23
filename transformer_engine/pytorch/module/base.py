@@ -719,11 +719,24 @@ def _kosmos_mxfp8_fallback(name: str, op: int, what: str) -> None:
         get_ub(name, True).kosmos_log_fallback(op, what)
 
 
+def _kosmos_serves_mxfp8(name: str, fp8: bool, bulk: bool = False) -> bool:
+    """Whether the KOSMOS backend serves the MXFP8 calls of the fused communicator `name`.
+
+    Otherwise (KOSMOS not built, NVTE_USE_KOSMOS=0, or NVTE_KOSMOS_BULK=0 for a bulk op) the
+    HipKittens fused backend's MXFP8 rules apply.
+    """
+    if not (IS_HIP_EXTENSION and fp8 and _ub_is_fused(name)):
+        return False
+    if not FP8GlobalStateManager.get_fp8_recipe().mxfp8():
+        return False
+    return get_ub(name, True).kosmos_mxfp8(bulk)
+
+
 def _kosmos_mxfp8(name: str, fp8: bool, op: int, opted_in: bool, bulk: bool = False) -> bool:
     """Whether an FP8 call on the fused communicator `name` is MXFP8 that the KOSMOS backend takes.
 
-    KOSMOS is the only fused backend with MXFP8 kernels (e4m3 operands, unswizzled e8m0 scales);
-    `opted_in` says whether the calling module has the MXFP8 fused path.
+    KOSMOS MXFP8 kernels take e4m3 operands with unswizzled e8m0 scales; `opted_in` says whether
+    the calling module has the KOSMOS MXFP8 fused path.
     """
     if not (IS_HIP_EXTENSION and fp8 and _ub_is_fused(name)):
         return False
@@ -754,29 +767,36 @@ def fused_ag_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
     kosmos_mxfp8: bool = False,
 ) -> bool:
     """Whether the fused AG+GEMM backend covers this call.
 
-    `kosmos_mxfp8` opts a caller in to MXFP8 on KOSMOS; with `is_dgrad` the caller must then run the
-    dgrad all-gather as `fused_overlap_ag_dgrad_wgrad` (the row-parallel te.Linear does).
+    `mxfp8` says the caller runs an MXFP8 recipe (HipKittens MXFP8 path). `kosmos_mxfp8` opts a
+    caller in to MXFP8 on KOSMOS, which decides for buffers it serves; with `is_dgrad` the caller
+    must then run the dgrad all-gather as `fused_overlap_ag_dgrad_wgrad` (the row-parallel
+    te.Linear does).
     """
     if not _ub_is_fused(name):
         return True  # not our backend
-    if fp8:
+    kosmos = _kosmos_serves_mxfp8(name, fp8)
+    if kosmos:
         op = _KOSMOS_AG_DW if is_dgrad else _KOSMOS_AG
         if not _kosmos_mxfp8(name, fp8, op, kosmos_mxfp8):
             return False
         if is_dgrad and not get_ub(name, True).kosmos_dgrad_wgrad():
             _kosmos_mxfp8_fallback(name, op, "buffer without the dual MXFP8 region")
             return False
-    # TODO: Drop these as the kernel gains bias and gelu support.
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
     if gelu or bias is not None:
+        return False
+    # The HipKittens kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    if fp8 and not kosmos and not mxfp8:
         return False
     if dtype != torch.bfloat16:
         return False
     m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad)
-    if fp8 and is_dgrad:
+    if kosmos and is_dgrad:
         # kosmos_ag_dgrad_wgrad: tokens % (256 * tp), hidden and k_local % 256; inp holds all tokens
         return (
             tp_size in (4, 8) and n_chunk % (256 * tp_size) == 0 and k % 256 == 0 and m % 256 == 0
@@ -828,16 +848,19 @@ def fused_bulk_ag_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    mxfp8: bool = False,
     kosmos_mxfp8: bool = False,
 ) -> bool:
-    """Whether this call may use the bulk all-gather overlap (MXFP8: KOSMOS, `kosmos_mxfp8`)."""
+    """Whether this call may use the bulk all-gather overlap (MXFP8: `mxfp8` on HipKittens,
+    `kosmos_mxfp8` on KOSMOS for buffers it serves)."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = (
-        _ub_is_fused(name)
-        and (not fp8 or _kosmos_mxfp8(name, fp8, _KOSMOS_BULK_AG, kosmos_mxfp8, bulk=True))
-        and dtype == torch.bfloat16
-    )
+    if _kosmos_serves_mxfp8(name, fp8, bulk=True):
+        fp8_ok = _kosmos_mxfp8(name, fp8, _KOSMOS_BULK_AG, kosmos_mxfp8, bulk=True)
+    else:
+        # The HipKittens kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+        fp8_ok = not fp8 or mxfp8
+    eligible = _ub_is_fused(name) and fp8_ok and dtype == torch.bfloat16
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
@@ -878,6 +901,17 @@ def fused_bulk_rs_eligible(
         ).fused_bulk_rs_fp32()
     _ub_fused_bulk_decisions[name] = eligible
     return eligible
+
+
+def fused_wgrad_ag_eligible(name: Optional[str]) -> bool:
+    """Whether the fused AG+GEMM kernel can carry the wgrad grad-output all-gather.
+
+    The gather rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
+    False off ROCm, where there is no fused backend and upstream's external-AG path is unchanged.
+    """
+    if not IS_HIP_EXTENSION or name is None:
+        return False
+    return _ub_is_fused(name + "_dgrad") and _ub_is_fused(name + "_wgrad")
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -1034,6 +1068,16 @@ def fill_userbuffers_buffer_for_all_gather(
             # and the fused op leaves every rank's scales there.
             comm.copy_mxfp8_into_buffer(local_data, local_scale_inv)
             global_scale_inv = comm.get_buffer_scales(global_scale_inv_size)
+        elif (
+            IS_HIP_EXTENSION
+            and isinstance(comm, tex.CommOverlapP2P)
+            and comm.has_scale_buffer()
+        ):
+            # Scales live in the Userbuffers allocation; the fused kernel gathers them
+            # alongside the data, so no separate collective is needed here.
+            comm.copy_into_buffer(local_data, local_chunk=True)
+            comm.copy_scales_into_buffer(local_scale_inv, local_chunk=True)
+            global_scale_inv = comm.get_scale_buffer(shape=global_scale_inv_size)
         else:
             comm.copy_into_buffer(local_data, local_chunk=True)
             global_scale_inv = torch.empty(
@@ -1992,7 +2036,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
@@ -2467,7 +2511,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 weight_tensor.grad = wgrad.to(weight_tensor.dtype)
-            if self.use_bias:
+            if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
