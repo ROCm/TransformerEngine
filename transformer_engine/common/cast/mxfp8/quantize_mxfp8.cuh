@@ -32,7 +32,10 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
+#include "../../util/cuda_runtime.h"
 #include "../../util/rocm_device_utils.cuh"
+#include "../../util/system.h"
+#include "./rocm_quantize_mxfp8_tdm.cuh"
 #endif
 
 namespace transformer_engine {
@@ -691,6 +694,12 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const auto [rows, cols] = input.flat_2d_dims();
 
 #ifdef __HIP_PLATFORM_AMD__
+  if (!use_2d_quantization &&
+      quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
+                                                           workspace, stream)) {
+    return;
+  }
+
   // Choose chunk size based on tensor dimensions
   const bool use_large_chunks = (rows * cols > 32 * 1024 * 1024);
 
