@@ -112,9 +112,9 @@ def pytest_configure(config):
                     returncode=3,
                 )
         elif status == "unavailable":
-            print("WARNING: GPU interference check skipped -- could not query GPU processes via "
-                  "amdsmi (pip install amdsmi if missing, or pass --no-gpu-interference-check "
-                  "to silence).")
+            print("WARNING: GPU interference check skipped -- could not list the processes on "
+                  "the benchmark GPU via amdsmi (pip install amdsmi if missing, or pass "
+                  "--no-gpu-interference-check to silence).")
 
     # Resolve the dashboard run dir up front so pytest_report_header can show it
     # and write_dashboard_run can reuse the same metadata at session end.

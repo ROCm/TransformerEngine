@@ -656,9 +656,10 @@ _CPU_SYSFS = Path("/sys/devices/system/cpu")
 
 # Runs as a separate process: EOF on stdin without a prior message means the benchmark process
 # died without calling restore(), so put the governors ("path=old" args) back.
+# Reads one byte, not up to EOF: forked workers may hold the pipe open after restore().
 _GOVERNOR_GUARD = r"""
 import sys
-if not sys.stdin.buffer.read():
+if not sys.stdin.buffer.read(1):
     for arg in sys.argv[1:]:
         path, _, old = arg.rpartition("=")
         try:
@@ -756,10 +757,7 @@ def pin_cpus():
             previous[path] = old
         except OSError as e:
             error = e
-    # Own session, so a terminal Ctrl-C doesn't kill the guard along with the benchmark.
-    guard = subprocess.Popen(
-        [sys.executable, "-c", _GOVERNOR_GUARD, *(f"{p}={old}" for p, old in previous.items())],
-        stdin=subprocess.PIPE, start_new_session=True) if previous else None
+    guard = None
 
     def restore():
         for path, old in previous.items():
@@ -769,6 +767,16 @@ def pin_cpus():
                 pass
         if guard is not None:
             guard.communicate(b"restored")
+
+    if previous:
+        try:
+            # Own session, so a terminal Ctrl-C doesn't kill the guard along with the benchmark.
+            guard = subprocess.Popen(
+                [sys.executable, "-c", _GOVERNOR_GUARD, *(f"{p}={old}" for p, old in previous.items())],
+                stdin=subprocess.PIPE, start_new_session=True)
+        except BaseException:
+            restore()
+            raise
 
     governor = "performance governor" if error is None else f"governor unchanged: {error}"
     return SimpleNamespace(

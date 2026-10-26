@@ -144,8 +144,8 @@ def detect_gpu_interference(snapshot):
     neighbors only, no self), then maps torch's ``cuda:0`` to its amdsmi handle
     by matching PCI addresses (immune to the amdsmi<->HIP index mismatch), and 
     reports the pre-existing processes on that GPU, filtering out monitoring tools 
-    (nvtop/amd-smi/rocm-smi). If we can't locate our GPU we report nothing rather 
-    than risk a false positive.
+    (nvtop/amd-smi/rocm-smi). If we can't locate our GPU we report ``"unavailable"``
+    rather than risk a false positive.
     Returns ``(status, foreign)`` with *status* in ``"ok"`` / ``"unavailable"`` /
     ``"not_amd"`` and *foreign* a list of ``(gpu, pid, cmdline)``.
     """
@@ -166,8 +166,8 @@ def detect_gpu_interference(snapshot):
                 our_idx = idx
                 break
 
-    if our_idx is None:  # couldn't locate our GPU -> stay silent
-        return "ok", []
+    if our_idx is None:
+        return "unavailable", []
     procs = neighbors.get(our_idx, {})
     if procs is None:  # amdsmi couldn't list our GPU's processes
         return "unavailable", []
