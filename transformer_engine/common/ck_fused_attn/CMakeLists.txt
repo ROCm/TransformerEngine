@@ -144,6 +144,9 @@ if(__AITER_CACHE_DIR STREQUAL "")
     else()
       set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
     endif()
+    # ck_jit_build.py installs the CK and AITER headers next to the blobs only when they are
+    # missing, so after a QoLA patch change the runtime would compile blobs against the old ones.
+    file(REMOVE_RECURSE "${AITER_MHA_INSTALL_DIR}/ck_jit/3rdparty" "${AITER_MHA_INSTALL_DIR}/ck_jit/csrc")
     execute_process(
       COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
           --with-qola
