@@ -51,14 +51,18 @@ def _amdsmi_attr(obj, key):
 
 
 def _amdsmi_gpu_processes(amdsmi, handles):
-    """{handle_index: {pid: name}} of compute processes across *handles*."""
+    """{handle_index: {pid: name}} of compute processes across *handles*.
+
+    A GPU whose process list can't be queried maps to None (unknown), not to {}.
+    """
     out = {}
     for idx, handle in enumerate(handles):
         procs = {}
         try:
             plist = amdsmi.amdsmi_get_gpu_process_list(handle)
         except Exception:
-            plist = []
+            out[idx] = None
+            continue
         for p in plist:
             pid = _amdsmi_attr(p, "pid")
             name = _amdsmi_attr(p, "name") or _amdsmi_attr(p, "process_name")
@@ -164,8 +168,11 @@ def detect_gpu_interference(snapshot):
 
     if our_idx is None:  # couldn't locate our GPU -> stay silent
         return "ok", []
+    procs = neighbors.get(our_idx, {})
+    if procs is None:  # amdsmi couldn't list our GPU's processes
+        return "unavailable", []
     foreign = []
-    for pid, name in sorted(neighbors.get(our_idx, {}).items()):
+    for pid, name in sorted(procs.items()):
         if _is_ignored_proc(name):
             continue
         foreign.append((our_idx, pid, _proc_cmdline(pid) or name or f"pid {pid}"))

@@ -361,7 +361,7 @@ def _bwd_block_calls(fwd_func):
     fwd_out = fwd_func()
     graph_bytes = torch.cuda.memory_allocated() - before
     del fwd_out
-    return max(2, min(_BWD_BLOCK_CALLS, _BWD_BLOCK_BYTES // max(graph_bytes, 1)))
+    return max(1, min(_BWD_BLOCK_CALLS, _BWD_BLOCK_BYTES // max(graph_bytes, 1)))
 
 
 def time_backward_dual(fwd_func, bwd_func, min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
@@ -709,7 +709,8 @@ def pin_cpus():
     path runs ~1.6x slower when that helper lands on another CCD or socket than the main
     thread, and slower still when it shares the main thread's cores (the fallback when the
     process may not use the siblings).
-    The cores are offset by the GPU id so runs on other GPUs of the node use different ones.
+    The cores are split into groups of ``_PIN_CPUS`` and the GPU id picks the group, so runs
+    on other GPUs of the node use different ones (wrapping around if there are fewer groups).
     The governor needs root; without it only the pinning is applied. Returns a namespace
     with ``description`` and ``restore()``, which puts the previous governors back; if the
     process dies first (killed, crashed), a watchdog process puts them back instead.
@@ -721,8 +722,12 @@ def pin_cpus():
         gpu = int((os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0])
     except ValueError:
         gpu = 0
-    start = _PIN_CPUS * (gpu + 1) % max(len(cores) - _PIN_CPUS + 1, 1)
-    cpus = cores[start:start + _PIN_CPUS] or cores
+    groups = len(cores) // _PIN_CPUS
+    if groups < 1:
+        cpus = cores
+    else:
+        start = _PIN_CPUS * ((gpu + 1) % groups)
+        cpus = cores[start:start + _PIN_CPUS]
     siblings = set()
     for cpu in cpus:
         try:
