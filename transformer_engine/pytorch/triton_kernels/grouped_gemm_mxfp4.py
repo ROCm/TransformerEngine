@@ -14,7 +14,6 @@ Adapted for TransformerEngine from Primus-Turbo.
 from __future__ import annotations
 
 import functools
-import warnings
 
 import torch
 import triton
@@ -26,35 +25,23 @@ from .common import _amd_compiler_knobs, get_arch
 # ===============================================================================
 # AMD Triton compiler knobs
 #
-# The grouped FP4 kernels want the gfx950 knob set (async_copy,
-# scalarize_packed_fops, block_pingpong) active only while they compile/launch,
-# then restored so they never leak into other Triton kernels. These knobs are
-# read at compile time and are not part of Triton's compile cache key.
+# The grouped FP4 kernels want the arch-specific knob set (see
+# common._amd_knob_overrides) active only while they compile/launch, then
+# restored so they never leak into other Triton kernels. These knobs are read at
+# compile time and are not part of Triton's compile cache key.
 # ===============================================================================
-
-# gfx1250: Triton's async copy (on by default there) corrupts the pipelined
-# prologue K-iteration of the scaled-WMMA dot, so it is turned off.
-_GFX1250_KNOBS = {"use_async_copy": False}
 
 
 def _scoped_amd_knobs(*, is_tn):
-    """Decorator applying the scoped AMD compiler knobs (common.py) around a
-    launch. ``is_tn`` selects the layout-gated set (gfx942); on gfx950 the full
-    async_copy / scalarize / block_pingpong set is enabled either way; on gfx1250
-    only async_copy is disabled.
+    """Decorator applying the scoped, arch-specific AMD compiler knobs (common.py)
+    around a launch. ``is_tn`` selects the gfx942 layout-gated set; the gfx1250
+    async_copy override lives in :func:`common._amd_knob_overrides`.
     """
 
     def deco(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            overrides = None
-            if get_arch() == "gfx1250":
-                overrides = _GFX1250_KNOBS
-                warnings.warn(
-                    "Grouped MXFP4 Triton GEMM: disabling Triton async_copy on gfx1250 (it"
-                    " corrupts the pipelined scaled-WMMA dot); performance may be reduced."
-                )
-            with _amd_compiler_knobs(is_tn=is_tn, overrides=overrides):
+            with _amd_compiler_knobs(is_tn=is_tn):
                 return func(*args, **kwargs)
 
         return wrapper

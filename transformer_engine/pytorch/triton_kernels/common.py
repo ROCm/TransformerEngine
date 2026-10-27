@@ -36,10 +36,15 @@ def _amd_knob_overrides(*, is_tn: bool) -> dict:
     gfx950 (CDNA4): force async_copy / scalarize / block_pingpong on.
     gfx942 (CDNA3): async_copy / scalarize help NT/NN but regress TN/wgrad
     ~5-8%, so gate them on the GEMM layout (block_pingpong left at its default).
+    gfx1250 (CDNA5): Triton's async copy (default-on) corrupts the pipelined
+    prologue K-iteration of the scaled-WMMA dot, so force it off; the other knobs
+    are left at their defaults.
     """
     if is_cdna3():
         enable = not is_tn
         return {"use_async_copy": enable, "scalarize_packed_fops": enable}
+    if get_arch() == "gfx1250":
+        return {"use_async_copy": False}
     return {
         "use_async_copy": True,
         "scalarize_packed_fops": True,
