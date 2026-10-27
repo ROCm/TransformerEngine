@@ -13,12 +13,14 @@ import itertools
 import math
 import mmap
 import os
+import re
 import statistics
 import subprocess
 import sys
 import threading
 import time
 import warnings
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,6 +334,39 @@ def _kernel_time_ms(fn, warmup=100, iters=100, method=None, prepare=None, block=
     return _kernel_time_profiler_ms(fn, warmup, iters, prepare, block)
 
 
+# Tensile kernel names spell out every tuning parameter (~900 chars): keep them up to the
+# tile and matrix-instruction sizes, plus a checksum of the full name.
+_TENSILE_NAME_RE = re.compile(r"^(Cijk_.*?_MT\d+x\d+x\d+_MI\d+x\d+x\d+)_")
+
+
+def _short_kernel_name(name):
+    name = name.removesuffix(".kd")
+    m = _TENSILE_NAME_RE.match(name)
+    return f"{m.group(1)}~{zlib.crc32(name.encode()):08x}" if m else name
+
+
+def hipblaslt_kernel_names(fn, prepare=None):
+    """``;``-joined hipBLASLt GEMM kernels (Tensile ``Cijk_*``, rocRoller ``RR_GEMM_*``) that
+    one call of *fn* launches, in launch order; *prepare* is as in :func:`_kernel_time_profiler_ms`.
+    """
+    from torch.autograd import DeviceType
+    from torch.profiler import profile, ProfilerActivity
+
+    names = []
+    for _ in range(3):  # ROCm's profiler can drop the odd kernel record
+        call = _prepared_calls(fn, prepare, 1)[0]
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            call()
+            torch.cuda.synchronize()
+            time.sleep(0.05)
+        events = sorted((e for e in prof.events() if e.device_type != DeviceType.CPU),
+                        key=lambda e: e.time_range.start)
+        names = max(names, [e.name for e in events if e.name.startswith(("Cijk_", "RR_GEMM_"))],
+                    key=len)
+    return ";".join(_short_kernel_name(n) for n in names)
+
+
 def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
                    kernel_method=None):
     """Time *fn* and return ``(wall_ms, measurement, kernel_ms)``.
@@ -615,6 +650,8 @@ def _metric_row_from_records(metric_records):
                 _format_metric_number(kt, metric.get("throughput_precision", 2))
                 if kt is not None else ""
             )
+        if "kernel_names" in metric:
+            row["Kernel names"] = metric["kernel_names"]
     return row
 
 

@@ -21,7 +21,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-SKIP_COLS = {"TestID", "Label", "run_ts", "commit_sha", "commit_date"}
+SKIP_COLS = {"TestID", "Label", "run_ts", "commit_sha", "commit_date", "Kernel names"}
 DEFAULT_MIN_BASELINE_METRIC = 0.5
 
 

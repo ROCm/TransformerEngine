@@ -93,6 +93,13 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
   override (with `4`, HIP's default, the per-expert grouped GEMM path runs up to ~2x slower;
   see [HW queues](BENCHMARKING_NOTES.md#hw-queues)). The header and `run_info.txt` show the
   value used.
+- The `hipblaslt` rows of `benchmark_gemm.py` run with TE's hipBLASLt tuning
+  (`TE_HIPBLASLT_TUNING_RUN_COUNT=10`, `TE_HIPBLASLT_TUNING_ALGO_COUNT=10`), which Megatron's
+  training scripts enable for dense GEMMs. Each shape is tuned at its first call (about a
+  minute per MXFP8 shape, whose hipBLASLt kernels are compiled on the fly). Their
+  `Kernel names` CSV column lists the hipBLASLt kernels the timed direction launched
+  (`;`-separated; Tensile names are cut after the tile and matrix-instruction sizes and get a
+  `~<crc32>` of the full name).
 
 ### Kernel profiling
 

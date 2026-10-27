@@ -43,7 +43,7 @@ from utils import (
     build_recipes,
     generate_gemm_test_cases,
     apply_backend_env, compute_tflops, direction_records,
-    make_input, te_honors_env,
+    hipblaslt_kernel_names, make_input, te_honors_env,
 )
 
 BENCHMARK_LABEL = "GEMM"
@@ -63,9 +63,12 @@ _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 _HIPBLASLT_MXFP4 = "NVTE_ROCM_USE_HIPBLASLT_MXFP4"
 _GEMM_BACKEND = "NVTE_GEMM_BACKEND"
 
+_HIPBLASLT_TUNING = {"TE_HIPBLASLT_TUNING_RUN_COUNT": "10", "TE_HIPBLASLT_TUNING_ALGO_COUNT": "10"}
+
 # Triton's env is resolved at runtime by _triton_gemm_env (mechanism varies by build).
 GEMM_BACKENDS = {
-    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None},
+    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None,
+                   **_HIPBLASLT_TUNING},
     "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
     "flydsl":     {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: "FLYDSL"},
     "aiter":      {_GEMM_TRITON: None, _HIPBLASLT_MXFP4: None, _GEMM_BACKEND: None},
@@ -199,7 +202,7 @@ def _marks_for(c):
     return tuple(marks)
 
 
-def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
+def bench_gemm(Case, Precision, Direction, M, N, K, dtype, kernel_names=False):
     device = "cuda"
 
     recipe = RECIPES[Precision]
@@ -227,10 +230,13 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
         pytest.skip("FlyDSL GEMM fell back to C++ for this shape/direction")
 
     fwd_flops = 2 * M * N * K
-    return direction_records(
+    records = direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
         fwd_func, bwd_func, fwd_flops, 2 * fwd_flops,
     )
+    timed, prepare = (fwd_func, None) if Direction == "fwd" else (bwd_func, fwd_func)
+    records[0]["kernel_names"] = hipblaslt_kernel_names(timed, prepare) if kernel_names else ""
+    return records
 
 
 def pytest_generate_tests(metafunc):
@@ -280,5 +286,6 @@ def test_gemm(microbench, case, monkeypatch):
         lambda: bench_gemm(
             case["Case"], case["Precision"], case["Direction"],
             case["M"], case["N"], case["K"], case["dtype"],
+            kernel_names=case["Backend"] == "hipblaslt",
         ),
     )
