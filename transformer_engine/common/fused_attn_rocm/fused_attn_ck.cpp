@@ -499,7 +499,8 @@ void fused_attn_ck_fwd_impl(
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   // ASM v3 does not support sink; force CK tile path
-  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
+  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1) &&
+                             (cuda::sm_arch() != 125 || !cuda::sm_arch_name().starts_with("gfx1250-strict"));
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
@@ -856,7 +857,8 @@ void fused_attn_ck_bwd_impl(
   // ASM v3 bwd does not compute the sink gradient; force the CK tile path so
   // has_sink users still get a correct (if slower) d_sink, mirroring the fwd
   // ASM v3 sink guard above.
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1) && !has_sink;
+  bool nvte_ck_uses_bwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_BWD_V3", 1) &&
+                             (cuda::sm_arch() != 125 || !cuda::sm_arch_name().starts_with("gfx1250-strict"));
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
