@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../../util/math.h"
+#include "../../util/rocm_amax_slots.cuh"
 #include "../../util/rocm_device_utils.cuh"
 #include "../../util/rocm_tdm.cuh"
 #include "../core/rocm_tdm_common.cuh"
@@ -69,15 +70,16 @@ __device__ __forceinline__ uint32_t cvt_4x_to_fp8(const float x0, const float x1
 
 // Quantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor into output and, with TRANSPOSE, into
 // its cols x rows transpose output_t. The input holds the first in_rows rows; the rest are zero.
-// Writes the chunk's dbias partials to row chunk_Y of dbias_workspace.
+// Writes the chunk's dbias partials to row chunk_Y of dbias_workspace and raises the amax at its
+// rocm_amax_target.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), bool TRANSPOSE, typename IType, typename OType>
 __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *act_input,
                                                OType *output, OType *output_t, const float scale,
-                                               float *amax_ptr, float *dbias_workspace,
-                                               const size_t in_rows, const size_t rows,
-                                               const size_t cols, const size_t chunk_Y,
-                                               const size_t chunk_X) {
+                                               float *amax_ptr, float *amax_slots,
+                                               float *dbias_workspace, const size_t in_rows,
+                                               const size_t rows, const size_t cols,
+                                               const size_t chunk_Y, const size_t chunk_X) {
 #ifdef __gfx1250__
   constexpr bool FUSED = IS_DBIAS || IS_DACT || IS_ACT;
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
@@ -209,10 +211,12 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
     for (int w = 0; w < WAVES; w++) {
       block_amax = fmaxf(block_amax, reinterpret_cast<const float *>(in_sh[w])[CHUNK_DIM_X]);
     }
+    float *const amax_dst =
+        rocm_amax_target(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x);
     // Atomics on one address serialize, so only those that may raise the amax are issued. It only
     // grows during the kernel, so a stale read can only cause a redundant atomic.
-    if (block_amax > *amax_ptr) {
-      rocm_atomicMaxFloat(amax_ptr, block_amax);
+    if (block_amax > *amax_dst) {
+      rocm_atomicMaxFloat(amax_dst, block_amax);
     }
   }
   tdm::wait<0>();
@@ -224,16 +228,16 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_fp8_tdm_kernel(const IType *input, const IType *act_input, OType *output,
                             OType *output_t, const float *noop, const float *scale_ptr,
-                            float *amax_ptr, float *scale_inv_ptr, float *dbias_workspace,
-                            const size_t rows, const size_t cols) {
+                            float *amax_ptr, float *amax_slots, float *scale_inv_ptr,
+                            float *dbias_workspace, const size_t rows, const size_t cols) {
   // The launcher leaves fused quantizations with a noop flag to the generic kernels.
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
   const float scale = scale_ptr != nullptr ? *scale_ptr : 1.0f;
   quantize_chunk<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, TRANSPOSE, IType, OType>(
-      input, act_input, output, output_t, scale, amax_ptr, dbias_workspace, rows, rows, cols,
-      blockIdx.y, blockIdx.x);
+      input, act_input, output, output_t, scale, amax_ptr, amax_slots, dbias_workspace, rows, rows,
+      cols, blockIdx.y, blockIdx.x);
   if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
     *scale_inv_ptr = __frcp_rn(scale);
   }
@@ -275,8 +279,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const float scale = args.scale[t] != nullptr ? *args.scale[t] : 1.0f;
   quantize_chunk<false, false, false, Empty, nullptr, true, IType, OType>(
       static_cast<const IType *>(args.input[t]), nullptr, static_cast<OType *>(args.output[t]),
-      static_cast<OType *>(args.output_t[t]), scale, args.amax[t], nullptr, args.in_rows[t],
-      args.rows[t], cols, chunk_Y, blockIdx.x);
+      static_cast<OType *>(args.output_t[t]), scale, args.amax[t], nullptr, nullptr,
+      args.in_rows[t], args.rows[t], cols, chunk_Y, blockIdx.x);
   if (chunk_Y == 0 && blockIdx.x == 0 && threadIdx.x == 0 && args.scale_inv[t] != nullptr) {
     *args.scale_inv[t] = __frcp_rn(scale);
   }
@@ -343,7 +347,11 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
   }
 
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+  const float *const noop_ptr =
+      has_noop ? reinterpret_cast<const float *>(noop->data.dptr) : nullptr;
+  float *const amax = reinterpret_cast<float *>(output->amax.dptr);
   const dim3 grid(DIVUP(cols, CHUNK_DIM_X), chunks_Y);
+  float *const amax_slots = amax != nullptr ? rocm_amax_slots(grid.x * grid.y, stream) : nullptr;
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -355,13 +363,14 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
                   reinterpret_cast<const IType *>(input.data.dptr),
                   IS_DACT ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
                   reinterpret_cast<OType *>(output->data.dptr),
-                  reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                  has_noop ? reinterpret_cast<const float *>(noop->data.dptr) : nullptr,
-                  reinterpret_cast<const float *>(output->scale.dptr),
-                  reinterpret_cast<float *>(output->amax.dptr),
+                  reinterpret_cast<OType *>(output->columnwise_data.dptr), noop_ptr,
+                  reinterpret_cast<const float *>(output->scale.dptr), amax, amax_slots,
                   reinterpret_cast<float *>(output->scale_inv.dptr), workspace_ptr, rows,
                   cols);)));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
+  if (amax_slots != nullptr) {
+    rocm_amax_finalize(amax_slots, amax, noop_ptr, stream);
+  }
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input.dtype(), IType,
