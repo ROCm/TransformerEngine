@@ -82,8 +82,6 @@ run_test_config_mgpu() {
 
     # Workaround for some distributed tests hang/abortion
     export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
-    export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache"
-    export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS="0"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
