@@ -734,11 +734,12 @@ class FusedAttnRunner:
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
                 pytest.skip(message)
             # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
-            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
-            # produces different attention patterns than the top-left aligned reference.
+            # bottom-right diagonal alignment. For cross-attention (independent Q/KV lengths,
+            # even with equal max seqlens) this produces different attention patterns than
+            # the top-left aligned reference.
             if (
                 self.window_size is not None
-                and self.max_seqlen_q != self.max_seqlen_kv
+                and (self.is_self_attention is False or self.max_seqlen_q != self.max_seqlen_kv)
                 and not self.attn_mask_type.is_causal()
             ):
                 pytest.skip(
@@ -1552,11 +1553,14 @@ class FusedAttnRunner:
             # Distributed dBias is the result of a BF16 reduction across DP/FSDP ranks,
             # whose summation order differs from the unsharded reference. Scale only the
             # default dBias tolerance with the expected reduction-error growth.
+            # [ROCm] CK writes a BF16 dS per batch and reduces it over the full batch, so the
+            # same error growth applies to every batch, not just to every DP/FSDP rank.
             dbias_rtol = self.rtol
             dbias_atol = self.atol
-            if self.data_parallel_size > 1:
+            num_dbias_partials = self.batch_size if is_hip_extension() else self.data_parallel_size
+            if num_dbias_partials > 1:
                 default_tols = dtype_tols(self.dtype)
-                reduction_scale = sqrt(self.data_parallel_size)
+                reduction_scale = sqrt(num_dbias_partials)
                 if dbias_rtol is None:
                     dbias_rtol = default_tols["rtol"] * reduction_scale
                 if dbias_atol is None:
@@ -1987,6 +1991,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-SELF",
         ),
         pytest.param(
@@ -1999,6 +2004,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-RAGGED_SELF",
         ),
         # non-16-multiple seqlen: exercises the atomic16 dq_acc seqlen padding (pad16(s_q)) on the bf16
@@ -2014,6 +2020,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2044-2044-12-6-128-128-BF16-GQA-RAGGED_SELF-UNALIGNED",
         ),
         pytest.param(
@@ -2026,6 +2033,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.float16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-FP16-MLA",
         ),
         pytest.param(
@@ -2038,6 +2046,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],

@@ -1094,6 +1094,8 @@ class TestGroupedMLPFusedOp:
         from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
 
         # Skip invalid configurations
+        if IS_HIP_EXTENSION:
+            pytest.skip("CuTeDSL grouped MLP fusion is not supported on ROCm")
         maybe_skip_quantization("mxfp8")
         maybe_skip_quantization("nvfp4")
 
