@@ -5,18 +5,24 @@
 
 #include "hip/hip_runtime.h"
 #include "../../comm_gemm.h"
+#include "../../kittens_kernel_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include "fused_ag_gemm_tn.cuh"
 #include "fused_ag_gemm_nn.cuh"
 #include "bulk_rs_gemm_nt.cuh"
 #include "fused_rs_gemm_tn.cuh"
 
 #include <array>
+#include <type_traits>
 #include <cstdio>
 #include <map>
 #include <mutex>
 #include <vector>
 
 namespace {
+
+using te_kittens::cdna4::mxfp8::launch_pack_scales;
+using te_kittens::cdna4::mxfp8::launch_pack_scales_sharded;
 
 struct FusedRsLayout {
     size_t stage_bytes;
@@ -59,6 +65,48 @@ uint64_t ag_ready_warn_ticks() {
     return ticks;
 }
 
+// Peer base pointers for the scale all-gather, passed by value like PeerPtrs.
+struct ScalePeers {
+    const char *base[8];
+};
+
+// The 256-multiple shape guards leave chunk_bytes a multiple of 16, so the loop needs no tail.
+template <int U, bool NT>
+__global__
+void gather_scales(char *__restrict__ ub, ScalePeers peers, int my_pe, int tp_size,
+                   size_t scale_base, size_t chunk_bytes) {
+    const int peer = static_cast<int>(blockIdx.y);
+    if (peer >= tp_size || peer == my_pe) return;
+
+    typedef int v4i __attribute__((ext_vector_type(4)));
+
+    const size_t off = scale_base + static_cast<size_t>(peer) * chunk_bytes;
+    const v4i *src = reinterpret_cast<const v4i *>(peers.base[peer] + off);
+    v4i       *dst = reinterpret_cast<v4i *>(ub + off);
+
+    const size_t n4     = chunk_bytes / sizeof(v4i);
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    const size_t step   = stride * U;
+    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if constexpr (U > 1) {
+        for (; i + static_cast<size_t>(U - 1) * stride < n4; i += step) {
+            v4i v[U];
+#pragma unroll
+            for (int u = 0; u < U; u++) v[u] = src[i + static_cast<size_t>(u) * stride];
+#pragma unroll
+            for (int u = 0; u < U; u++) {
+                if (NT) __builtin_nontemporal_store(v[u], &dst[i + static_cast<size_t>(u) * stride]);
+                else    dst[i + static_cast<size_t>(u) * stride] = v[u];
+            }
+        }
+    }
+    for (; i < n4; i += stride) {
+        if constexpr (NT) __builtin_nontemporal_store(src[i], &dst[i]);
+        else    dst[i] = src[i];
+    }
+}
+
 int rs_wb_group(int k_local) {
     return k_local <= 768 ? 1 : 8;
 }
@@ -95,8 +143,8 @@ struct AgPlan {
     void *queue = nullptr;
     int num_tiles  = 0;
     int xcd_bucket = 0;
-    int off[hk_ag_tn::NUM_XCDS_AFF] = {};
-    int cnt[hk_ag_tn::NUM_XCDS_AFF] = {};
+    int off[hk_overlap::NUM_XCDS_AFF] = {};
+    int cnt[hk_overlap::NUM_XCDS_AFF] = {};
 };
 
 using PlanKey = std::array<int, 7>;   // core, M, N, K, tp_size, rank, S
@@ -117,7 +165,6 @@ const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
     }
     return &g_peers.emplace(peer_ub, std::move(v)).first->second;
 }
-
 
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
 // to fill the buckets. The 1024 is fixed, not derived from the grid cap.
@@ -241,10 +288,267 @@ bool run_tn(const KittensAgGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
+
+template <bool GATHERED>
+struct Mxfp8Layout {
+    using TileDesc = std::conditional_t<GATHERED, hk_mxfp8_ag_nn::TileDesc,
+                                                  hk_mxfp8_ag_tn::TileDesc>;
+    static constexpr int PLAN_TAG = GATHERED ? 3 : 2;
+    // These two equal GATHERED by coincidence, not because they mean the same thing: one puts A's
+    // raw scales in column-major order, the other puts the gathered operand on the M axis.
+    static constexpr bool A_SCALE_COLWISE = GATHERED;
+    static constexpr bool GATHERED_ON_M   = GATHERED;
+
+    static std::vector<TileDesc> work_queue(int M, int N, int K, int tp, int pe) {
+        if constexpr (GATHERED) {
+            return hk_mxfp8_ag_nn::build_work_queue(M, N, K, tp, pe);
+        } else {
+            return hk_mxfp8_ag_tn::build_work_queue(M, N, K, tp, pe);
+        }
+    }
+    static auto launch_fn(int M, int N, int K, KittensDType a, KittensDType b) {
+        if constexpr (GATHERED) {
+            return hk_mxfp8_ag_nn::get_persistent_fn(M, N, K, a, b);
+        } else {
+            return hk_mxfp8_ag_tn::get_persistent_fn(M, N, K, a, b);
+        }
+    }
+};
+
+using Mxfp8Tn = Mxfp8Layout<false>;
+using Mxfp8Nn = Mxfp8Layout<true>;
+
+template <class L>
+bool run_mxfp8(const KittensAgGemmArgs &args) {
+    using hk_overlap::BLOCK_ROW;
+    using hk_overlap::BLOCK_COL;
+    using hk_overlap::NUM_XCDS_AFF;
+    using TileDesc = typename L::TileDesc;
+    using hk_overlap::XcdBuckets;
+    using PeerPtrs = hk_overlap::PeerPtrsT<kittens::fp8e4m3>;
+    using kittens::bf16;
+    using kittens::fp8e4m3;
+
+    // The bf16 pair steps 64, so the mxfp8 step of 128 stays with the mxfp8 kernels.
+    constexpr int BLOCK_K = hk_mxfp8_ag_tn::BLOCK_K;
+    static_assert(BLOCK_K == hk_mxfp8_ag_nn::BLOCK_K, "mxfp8 TN/NN must agree on the K step");
+
+    // TN keeps mxfp8_gemm.cpp's BLAS convention (A = weight on M, B = gathered activation on N);
+    // NN swaps the slots. Axis extents, xcd bucketing, arrival flags, the 64/4 <-> 32/8 pack split
+    // and the operand pointers all follow the gathered operand; everything else is shared.
+    const int M       = L::GATHERED_ON_M ? args.n : args.m;
+    const int N_TOTAL = L::GATHERED_ON_M ? args.m : args.n;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+    const int tiles_m = M / BLOCK_ROW;
+    const int tiles_n = N_TOTAL / BLOCK_COL;
+    // Per-rank shard of the gathered axis and that axis in tiles: m_local/tiles_m for NN,
+    // n_local/tiles_n for TN. The gathered axis is args.n either way; only its name moves.
+    const int gath_local = (L::GATHERED_ON_M ? M : N_TOTAL) / tp_size;
+    const int tiles_gath = L::GATHERED_ON_M ? tiles_m : tiles_n;
+
+    const int k_iters = K / BLOCK_K;
+    int scale_K = K / 32;
+
+    // The scale region is sized in CommOverlapP2PBase::initialize. Decline rather than mis-copy if
+    // its chunking disagrees with this kernel's view.
+    if (args.scale_chunk_bytes &&
+        args.scale_chunk_bytes != static_cast<size_t>(gath_local) * static_cast<size_t>(scale_K)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    const PlanKey key{L::PLAN_TAG, M, N_TOTAL, K, tp_size, args.rank, 1};
+    auto it = g_plans.find(key);
+    if (it == g_plans.end()) {
+        AgPlan plan;
+        auto queue      = L::work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_gath);
+        if (plan.xcd_bucket) {
+            XcdBuckets bk{};
+            queue = hk_overlap::bucketize_by_xcd(queue, bk);
+            for (int b = 0; b < NUM_XCDS_AFF; b++) {
+                plan.off[b] = bk.off[b];
+                plan.cnt[b] = bk.cnt[b];
+            }
+        }
+        if (!upload_plan(plan, queue)) return false;
+        it = g_plans.emplace(key, plan).first;
+    }
+    const AgPlan &plan = it->second;
+
+    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair).
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
+
+    const size_t arrive_bytes = static_cast<size_t>(tiles_gath) * sizeof(unsigned int);
+    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+    int *tile_counter = static_cast<int *>(ws.take(sizeof(int)));
+    int *bucket_ctr   = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
+
+    const size_t counter_bytes = ws.used;
+    uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
+    uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
+    if (!ws.fits()) return false;
+
+    // Weight scales are rank-local: no dependency on the gather, so pack them up front. scale_A is
+    // always the weight's; only the <STEP, NG> geometry and the destination follow the slot.
+    if constexpr (L::GATHERED_ON_M) {
+        launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL, scale_K,
+                                                      k_iters, args.stream);
+    } else {
+        launch_pack_scales<L::A_SCALE_COLWISE, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters,
+                                                      args.stream);
+    }
+
+    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
+    if (!bases) return false;
+    PeerPtrs peers{};
+    for (int c = 0; c < tp_size; c++) {
+        peers.base[c] = static_cast<fp8e4m3 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+    }
+    peers.base[args.rank] = static_cast<fp8e4m3 *>(args.ub);
+
+    // Second all-gather region, if the caller supplied one. Its own registered region, so its own
+    // peer table; our slot is the destination, as in the bulk path.
+    PeerPtrs aux_peers{};
+    char *aux_dst = nullptr;
+    if (args.aux_ag != nullptr) {
+        const std::vector<void *> *aux_bases = peer_bases(args.aux_ag->peer_ub, args.peer_count);
+        if (!aux_bases) return false;
+        for (int c = 0; c < tp_size; c++) {
+            aux_peers.base[c] =
+                static_cast<fp8e4m3 *>((*aux_bases)[(args.peer_first + c) % args.peer_count]);
+        }
+        aux_peers.base[args.rank] = static_cast<fp8e4m3 *>(args.aux_ag->dst);
+        aux_dst                   = static_cast<char *>(args.aux_ag->dst);
+    }
+
+    XcdBuckets buckets{};
+    for (int b = 0; b < NUM_XCDS_AFF; b++) {
+        buckets.off[b] = plan.off[b];
+        buckets.cnt[b] = plan.cnt[b];
+    }
+
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
+
+    if (args.arrive_peers && args.arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    // The aux region has its own signal space -- nothing else advances it, since the communicator
+    // that owns it never runs an overlap method of its own.
+    if (args.aux_ag != nullptr && args.arrive_peers && args.aux_ag->arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)),
+            args.aux_ag->arrive_offset, static_cast<const char *>(args.aux_ag->arrive_local),
+            args.aux_ag->arrive_stride, args.aux_ag->arrive_value, args.peer_first,
+            args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    // Aux scales, up front and unpacked: nothing in this kernel reads them, so there is no
+    // lane-native format to interleave into, and the consumer is a later GEMM in TE layout.
+    if (args.aux_ag != nullptr && args.aux_ag->scale_chunk_bytes) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) {
+            sp.base[c] = reinterpret_cast<const char *>(aux_peers.base[c]);
+        }
+        constexpr int SCALE_GATHER_U       = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        const size_t lines     = args.aux_ag->scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                aux_dst, sp, args.rank, tp_size, args.aux_ag->scale_base_offset,
+                args.aux_ag->scale_chunk_bytes);
+    }
+
+    // Packing inside the gatherer only pays at large K, where each scale row's k-range is long
+    // enough that reading it contiguously beats a separate prologue pass.
+    const bool interleave = args.scale_chunk_bytes != 0 && K >= 16384;
+
+    // NVTE_AG_DIAG=1 reports which scale path the geometry selected, once per call.
+    if (args.scale_chunk_bytes && std::getenv("NVTE_AG_DIAG")) {
+        std::fprintf(stderr, "[AG_DIAG] M=%d N=%d K=%d tp=%d scales=%s\n",
+            M, N_TOTAL, K, tp_size, interleave ? "interleaved" : "gathered");
+    }
+
+    if (args.scale_chunk_bytes && !interleave) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
+
+        constexpr int SCALE_GATHER_U = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        // NT stores off: launch_pack_scales reads this region back in the very next kernel.
+        const size_t lines = args.scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                static_cast<char *>(args.ub), sp, args.rank, tp_size, args.scale_base_offset,
+                args.scale_chunk_bytes);
+    }
+
+    if (interleave) {
+        // Peer rows are packed by their gatherer blocks inside the kernel; only ours is left.
+        const int tiles_per_chunk = gath_local / (L::GATHERED_ON_M ? BLOCK_ROW : BLOCK_COL);
+        const uint8_t *local_scales =
+            (const uint8_t *)args.scale_B + (size_t)args.rank * args.scale_chunk_bytes;
+        if constexpr (L::GATHERED_ON_M) {
+            launch_pack_scales_sharded<false, 64, 4>(local_scales, packed_sa,
+                                                     args.rank * tiles_per_chunk, tiles_per_chunk,
+                                                     tiles_gath, scale_K, k_iters, args.stream);
+        } else {
+            launch_pack_scales_sharded<false, 32, 8>(local_scales, packed_sb,
+                                                     args.rank * tiles_per_chunk, tiles_per_chunk,
+                                                     tiles_gath, scale_K, k_iters, args.stream);
+        }
+    } else {
+        if constexpr (L::GATHERED_ON_M) {
+            launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
+                                             args.stream);
+        } else {
+            launch_pack_scales<false, 32, 8>((const uint8_t *)args.scale_B, packed_sb, N_TOTAL, scale_K, k_iters,
+                                             args.stream);
+        }
+    }
+
+    // CBSZ names the kernel's A-slot format and BLGP its B-slot, so the dtypes travel with the
+    // pointers; args.a/b_dtype stay BLAS-canonical (weight / gathered activation).
+    const KittensDType cbsz_dt = L::GATHERED_ON_M ? args.b_dtype : args.a_dtype;
+    const KittensDType blgp_dt = L::GATHERED_ON_M ? args.a_dtype : args.b_dtype;
+    auto launch = L::launch_fn(M, N_TOTAL, K, cbsz_dt, blgp_dt);
+    if (!launch) return false;   // unexpected operand format pair
+
+    fp8e4m3 *const d_weight = static_cast<fp8e4m3 *>(const_cast<void *>(args.A));
+    fp8e4m3 *const d_gath   = static_cast<fp8e4m3 *>(args.ub);
+    launch(
+        M, N_TOTAL, K, L::GATHERED_ON_M ? d_gath : d_weight,
+        L::GATHERED_ON_M ? d_weight : d_gath, static_cast<bf16 *>(args.D),
+        packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles,
+        tile_counter, peers, arrive, args.rank, tp_size, GATH_WG, gath_local, args.chunk_bytes,
+        plan.xcd_bucket, buckets, bucket_ctr,
+        args.scale_base_offset, args.scale_chunk_bytes, interleave, aux_peers, aux_dst,
+        args.stream);
+    return hipGetLastError() == hipSuccess;
+}
+
 struct NnSetup {
     const AgPlan *plan;
     hk_ag_nn::PeerPtrs peers;
-    hk_ag_nn::XcdBuckets buckets;
+    hk_overlap::XcdBuckets buckets;
     int *tile_counter;
     int *bucket_ctr;
     unsigned int *arrive;
@@ -379,6 +683,124 @@ bool run_bulk_nn(const KittensAgGemmArgs &args) {
         args.chunk_bytes, s.plan->xcd_bucket, s.buckets, s.bucket_ctr, args.stream);
     if (S > 1) launch_sk_reduce(s.cw, static_cast<bf16 *>(args.D), static_cast<size_t>(M) * N_TOTAL,
                                 S, args.stream);
+    return hipGetLastError() == hipSuccess;
+}
+
+// Bulk sibling of run_mxfp8: the all-gather is NOT associated with the GEMM. It lands in
+// args.gather_dst while the GEMM reads args.ub and args.A, so no compute block waits on an
+// arrival and the gathered tensor's scales are moved but never packed.
+bool run_bulk_mxfp8(const KittensAgGemmArgs &args) {
+    using L = Mxfp8Nn;
+    using namespace hk_mxfp8_ag_nn;
+    using kittens::bf16;
+    using kittens::fp8e4m3;
+
+    constexpr int BLOCK_K = hk_mxfp8_ag_nn::BLOCK_K;
+
+    // Same NN kernel as run_mxfp8<Mxfp8Nn>: A slot = gathered activation on M, B slot = weight.
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+    const int m_local = M / tp_size;
+    const int tiles_m = M / BLOCK_ROW;
+    const int tiles_n = N_TOTAL / BLOCK_COL;
+    const int k_iters = K / BLOCK_K;
+    const int scale_K = K / 32;
+
+    // The A slot holds the gathered activation, so the CBSZ/BLGP codes swap with the pointers.
+    auto bfn = get_persistent_bulk_fn(M, N_TOTAL, K, args.b_dtype, args.a_dtype);
+    if (!bfn) return false;   // unexpected operand format pair
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    // The work queue depends only on output geometry and TP split, so bulk and fused share a plan.
+    const PlanKey key{L::PLAN_TAG, M, N_TOTAL, K, tp_size, args.rank, 1};
+    auto it = g_plans.find(key);
+    if (it == g_plans.end()) {
+        AgPlan plan;
+        auto queue      = L::work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
+        if (plan.xcd_bucket) {
+            XcdBuckets bk{};
+            queue = hk_overlap::bucketize_by_xcd(queue, bk);
+            for (int b = 0; b < NUM_XCDS_AFF; b++) {
+                plan.off[b] = bk.off[b];
+                plan.cnt[b] = bk.cnt[b];
+            }
+        }
+        if (!upload_plan(plan, queue)) return false;
+        it = g_plans.emplace(key, plan).first;
+    }
+    const AgPlan &plan = it->second;
+
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
+
+    const size_t arrive_bytes = static_cast<size_t>(tiles_m) * sizeof(unsigned int);
+    Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+    int *tile_counter = static_cast<int *>(ws.take(sizeof(int)));
+    int *bucket_ctr   = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    unsigned int *arrive = static_cast<unsigned int *>(ws.take(arrive_bytes));
+    const size_t counter_bytes = ws.used;
+    uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
+    uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
+    if (!ws.fits()) return false;
+
+    // The GEMM's own operand scales, unrelated to the gathered tensor: no dependency on the gather.
+    launch_pack_scales<L::A_SCALE_COLWISE, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N_TOTAL,
+                                                  scale_K, k_iters, args.stream);
+    launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K,
+                                     k_iters, args.stream);
+
+    const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
+    if (!bases) return false;
+    PeerPtrs peers{};
+    for (int c = 0; c < tp_size; c++) {
+        peers.base[c] = static_cast<fp8e4m3 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+    }
+    // Our own slot is the gather DESTINATION, not args.ub -- in bulk those are different buffers.
+    peers.base[args.rank] = static_cast<fp8e4m3 *>(args.gather_dst);
+
+    XcdBuckets buckets{};
+    for (int b = 0; b < NUM_XCDS_AFF; b++) {
+        buckets.off[b] = plan.off[b];
+        buckets.cnt[b] = plan.cnt[b];
+    }
+
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
+
+    if (args.arrive_peers && args.arrive_local) {
+        ag_ready_kernel<<<1, 64, 0, args.stream>>>(
+            static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
+            static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
+    }
+
+    // Gathered scales, if the tensor carries any. No pack: nothing in this kernel reads them.
+    if (args.scale_chunk_bytes) {
+        ScalePeers sp{};
+        for (int c = 0; c < tp_size; c++) sp.base[c] = reinterpret_cast<const char *>(peers.base[c]);
+        constexpr int SCALE_GATHER_U = 4;
+        constexpr int SCALE_GATHER_THREADS = 256;
+        const size_t lines = args.scale_chunk_bytes / 16;
+        const size_t per_block = static_cast<size_t>(SCALE_GATHER_THREADS) * SCALE_GATHER_U;
+        int grid_x = static_cast<int>((lines + per_block - 1) / per_block);
+        if (grid_x < 1) grid_x = 1;
+        if (grid_x > 256) grid_x = 256;
+        gather_scales<SCALE_GATHER_U, false>
+            <<<dim3(grid_x, tp_size), SCALE_GATHER_THREADS, 0, args.stream>>>(
+                static_cast<char *>(args.gather_dst), sp, args.rank, tp_size,
+                args.scale_base_offset, args.scale_chunk_bytes);
+    }
+
+    bfn(M, N_TOTAL, K, static_cast<fp8e4m3 *>(args.ub),
+        static_cast<fp8e4m3 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
+        packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter,
+        peers, static_cast<char *>(args.gather_dst), arrive, args.rank, tp_size,
+        gath_wg_bulk(K, tp_size), m_local, args.chunk_bytes, plan.xcd_bucket, buckets,
+        bucket_ctr, args.stream);
     return hipGetLastError() == hipSuccess;
 }
 
@@ -581,16 +1003,18 @@ bool rs_guards_ok(const KittensRsGemmArgs &args) {
 
 // Shape and pointer requirements shared by ag entry points
 bool ag_guards_ok(const KittensAgGemmArgs &args) {
-    const int M       = args.n;
-    const int N_TOTAL = args.m;
+    // args.n is the gathered token axis, so that is what must split evenly across the TP group.
+    // The predicates are value-identical under the TN/NN naming swap, since BLOCK_ROW == BLOCK_COL.
+    const int M       = args.m;
+    const int N_TOTAL = args.n;
     const int K       = args.k;
     const int tp_size = args.nranks;
 
     // Order matters here
     return tp_size >= 1 && tp_size <= 8 && tp_size <= args.peer_count &&
            args.rank >= 0 && args.rank < tp_size &&
-           M % tp_size == 0 && M % 256 == 0 && N_TOTAL % 256 == 0 &&
-           K % 128 == 0 && K >= 256 && (M / tp_size) % 256 == 0 &&
+           N_TOTAL % tp_size == 0 && N_TOTAL % 256 == 0 && M % 256 == 0 &&
+           K % 128 == 0 && K >= 256 && (N_TOTAL / tp_size) % 256 == 0 &&
            args.workspace && args.ub && args.A && args.D && args.peer_ub;
 }
 
@@ -619,6 +1043,40 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args) {
     if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t)) return false;
 
     return args.transa ? run_tn(args) : run_nn(args);
+}
+
+bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args) {
+    const int M       = args.n;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+
+    if (!ag_guards_ok(args)) return false;
+    // The gathered region IS the [M,K] A operand, so a mis-sized one declines rather than gather
+    // a fraction of itself.
+    if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint8_t)) return false;
+
+    return args.transa ? run_mxfp8<Mxfp8Tn>(args) : run_mxfp8<Mxfp8Nn>(args);
+}
+
+bool kittens_bulk_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args) {
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int tp_size = args.nranks;
+
+    // NN only
+    if (args.transa) return false;
+    if (!args.gather_dst) return false;
+    if (!ag_guards_ok(args)) return false;
+    // The gathered tensor is MXFP8: one byte per element, plus one E8M0 scale per 32.
+    if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * N_TOTAL * sizeof(uint8_t)) {
+        return false;
+    }
+    if (args.scale_chunk_bytes &&
+        args.scale_chunk_bytes != static_cast<size_t>(M / tp_size) * (N_TOTAL / 32)) {
+        return false;
+    }
+
+    return run_bulk_mxfp8(args);
 }
 
 bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args) {
