@@ -43,7 +43,7 @@ from utils import (
     build_recipes,
     generate_gemm_test_cases,
     apply_backend_env, compute_tflops, direction_records,
-    hipblaslt_kernel_names, make_input, te_honors_env,
+    gemm_kernel_names, make_input, te_honors_env,
 )
 
 BENCHMARK_LABEL = "GEMM"
@@ -235,7 +235,7 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype, kernel_names=False):
         fwd_func, bwd_func, fwd_flops, 2 * fwd_flops,
     )
     timed, prepare = (fwd_func, None) if Direction == "fwd" else (bwd_func, fwd_func)
-    records[0]["kernel_names"] = hipblaslt_kernel_names(timed, prepare) if kernel_names else ""
+    records[0]["kernel_names"] = gemm_kernel_names(timed, prepare) if kernel_names else ""
     return records
 
 
@@ -286,6 +286,6 @@ def test_gemm(microbench, case, monkeypatch):
         lambda: bench_gemm(
             case["Case"], case["Precision"], case["Direction"],
             case["M"], case["N"], case["K"], case["dtype"],
-            kernel_names=case["Backend"] == "hipblaslt",
+            kernel_names=case["Backend"] in ("hipblaslt", "triton"),
         ),
     )

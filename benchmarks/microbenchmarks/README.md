@@ -51,6 +51,13 @@ The samples CSV (`<module>_samples.csv` by default) contains one row per timing
 sample with columns for all benchmark parameters plus `label`, `sample_idx`,
 and `time_ms`.
 
+The `benchmark_gemm.py` CSV also has a `Kernels` column with the GEMM kernels the timed
+direction launched (`;`-separated, in launch order): hipBLASLt kernel names (Tensile names
+are cut after the tile and matrix-instruction sizes and get a `~<crc32>` of the full name)
+and, for Triton, the autotuned kernel with the config it picked, e.g.
+`matmul_kernel[128x256x32 GROUP_SIZE_M=4 waves_per_eu=0 num_warps=8 num_stages=3]`. It is
+empty for the other backends.
+
 ### Selecting cases
 
 Use pytest's `-k` to run a subset by parametrize id:
@@ -96,10 +103,8 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
 - The `hipblaslt` rows of `benchmark_gemm.py` run with TE's hipBLASLt tuning
   (`TE_HIPBLASLT_TUNING_RUN_COUNT=10`, `TE_HIPBLASLT_TUNING_ALGO_COUNT=10`), which Megatron's
   training scripts enable for dense GEMMs. Each shape is tuned at its first call (about a
-  minute per MXFP8 shape, whose hipBLASLt kernels are compiled on the fly). Their
-  `Kernel names` CSV column lists the hipBLASLt kernels the timed direction launched
-  (`;`-separated; Tensile names are cut after the tile and matrix-instruction sizes and get a
-  `~<crc32>` of the full name).
+  minute per MXFP8 shape, whose hipBLASLt kernels are compiled on the fly); the `Kernels`
+  CSV column (see [CSV output](#csv-output)) shows the kernels it picked.
 
 ### Kernel profiling
 

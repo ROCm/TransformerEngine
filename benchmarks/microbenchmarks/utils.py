@@ -345,26 +345,64 @@ def _short_kernel_name(name):
     return f"{m.group(1)}~{zlib.crc32(name.encode()):08x}" if m else name
 
 
-def hipblaslt_kernel_names(fn, prepare=None):
-    """``;``-joined hipBLASLt GEMM kernels (Tensile ``Cijk_*``, rocRoller ``RR_GEMM_*``) that
-    one call of *fn* launches, in launch order; *prepare* is as in :func:`_kernel_time_profiler_ms`.
+def _triton_config_name(name, config):
+    """``name[<M>x<N>x<K> key=value ...]`` for a Triton autotuner config."""
+    kw = dict(config.kwargs)
+    tile = [f"BLOCK_SIZE_{d}" for d in "MNK"]
+    parts = ["x".join(str(kw.pop(k)) for k in tile)] if all(k in kw for k in tile) else []
+    kw.update(num_warps=config.num_warps, num_stages=config.num_stages)
+    return f"{name}[{' '.join(parts + [f'{k}={v}' for k, v in kw.items()])}]"
+
+
+def gemm_kernel_names(fn, prepare=None):
+    """``;``-joined GEMM kernels that one call of *fn* launches, in launch order: hipBLASLt
+    kernels (Tensile ``Cijk_*``, rocRoller ``RR_GEMM_*``) and Triton autotuned kernels with the
+    config they run. *prepare* is as in :func:`_kernel_time_profiler_ms`.
     """
     from torch.autograd import DeviceType
     from torch.profiler import profile, ProfilerActivity
 
-    names = []
+    # A Triton kernel has one name for all its configs: record the autotuner's pick per launch.
+    autotuner = sys.modules.get("triton.runtime.autotuner")
+    run = autotuner.Autotuner.run if autotuner else None
+    best = (False, [])
     for _ in range(3):  # ROCm's profiler can drop the odd kernel record
+        launches = []
+
+        def tracked_run(self, *args, **kwargs):
+            out = run(self, *args, **kwargs)
+            base, config = getattr(self, "base_fn", None), getattr(self, "best_config", None)
+            if base is not None and config is not None:
+                launches.append((base.__name__, _triton_config_name(base.__name__, config)))
+            return out
+
         call = _prepared_calls(fn, prepare, 1)[0]
         torch.cuda.synchronize()
-        with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            call()
-            torch.cuda.synchronize()
-            time.sleep(0.05)
-        events = sorted((e for e in prof.events() if e.device_type != DeviceType.CPU),
-                        key=lambda e: e.time_range.start)
-        names = max(names, [e.name for e in events if e.name.startswith(("Cijk_", "RR_GEMM_"))],
-                    key=len)
-    return ";".join(_short_kernel_name(n) for n in names)
+        if autotuner:
+            autotuner.Autotuner.run = tracked_run
+        try:
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                call()
+                torch.cuda.synchronize()
+                time.sleep(0.05)
+        finally:
+            if autotuner:
+                autotuner.Autotuner.run = run
+        triton_configs = {}
+        for name, config in launches:
+            triton_configs.setdefault(name, []).append(config)
+        names = []
+        for e in sorted((e for e in prof.events() if e.device_type != DeviceType.CPU),
+                        key=lambda e: e.time_range.start):
+            name = e.name.removesuffix(".kd")
+            if name.startswith(("Cijk_", "RR_GEMM_")):
+                names.append(_short_kernel_name(name))
+            elif triton_configs.get(name):
+                names.append(triton_configs[name].pop(0))
+        # Prefer a pass where every Triton launch matched its kernel record.
+        best = max(best, (not any(triton_configs.values()), names),
+                   key=lambda r: (r[0], len(r[1])))
+    return ";".join(best[1])
 
 
 def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
@@ -651,7 +689,7 @@ def _metric_row_from_records(metric_records):
                 if kt is not None else ""
             )
         if "kernel_names" in metric:
-            row["Kernel names"] = metric["kernel_names"]
+            row["Kernels"] = metric["kernel_names"]
     return row
 
 
