@@ -397,7 +397,7 @@ static void launch_dequant_fp4_to_bf16(
 }
 
 // Compute per-row alpha vector on device for NVFP4 GEMM:
-//   alpha_out[i] = alpha_in * amax_A * amax_B / (fp4_max^2 * fp8_max^2)  for i in [0, m)
+//   alpha_out[i] = alpha_in * amax_A * amax_B / (fp4_max^2 * fp8_max_A * fp8_max_B)  for i in [0, m)
 // Used with HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST, which
 // expects a device vector of length m for alpha, while beta stays on the host.
 __global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __restrict__ amax_A,
@@ -416,7 +416,8 @@ __global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __r
 // [dim x 8] row-major with block stride 8 (one 128-element K-tile == 8 blocks of 16), dim rows tall
 // (NOT padded to 128). Iterating over the OUTPUT writes every byte once -- valid scale or 0 for the
 // padded blocks of the last K-tile -- so no separate zeroing memset is needed. Both operands are
-// processed in one grid; thread 0 also writes c0 = alpha * amax_A * amax_B / (fp4_max^2 fp8_max^2).
+// processed in one grid; thread 0 also writes
+// c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max_A * fp8_max_B).
 __global__ void nvfp4_prep_kernel(const uint8_t* __restrict__ inA, uint8_t* __restrict__ outA,
                                   int dimA, int in_strideA, const uint8_t* __restrict__ inB,
                                   uint8_t* __restrict__ outB, int dimB, int in_strideB, int k_scale,
@@ -625,8 +626,8 @@ static void setup_nvfp4_gemm_native(
 
   const float fp4_max = 6.0f;
   // 4over6 tensors carry an E4M3 bound of 256, not 448.
-  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.nvfp4_e4m3_max);
-  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.nvfp4_e4m3_max);
+  const float fp8_max_A = static_cast<float>(inputA.nvfp4_e4m3_max);
+  const float fp8_max_B = static_cast<float>(inputB.nvfp4_e4m3_max);
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
@@ -696,8 +697,8 @@ static void dequant_fp4_gemm_inputs(
 
   const float fp4_max = 6.0f;
   // Read the bound per operand as upstream does: 4over6 tensors carry 256, not 448.
-  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.nvfp4_e4m3_max);
-  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.nvfp4_e4m3_max);
+  const float fp8_max_A = static_cast<float>(inputA.nvfp4_e4m3_max);
+  const float fp8_max_B = static_cast<float>(inputB.nvfp4_e4m3_max);
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)

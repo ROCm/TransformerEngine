@@ -746,7 +746,8 @@ else() # USE_ROCM
   list(APPEND transformer_engine_LINKER_LIBS hiprtc)
   find_package(hipblaslt)
   list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
-  # Device scalar alpha (ROCm/rocm-libraries#13482) is not tied to a hipBLASLt version.
+  # Device scalar alpha (ROCm/rocm-libraries#13482) is not in a hipBLASLt release yet; detect the
+  # enum rather than a version, since dev builds can share a version number with releases.
   include(CheckCXXSourceCompiles)
   include(CMakePushCheckState)
   cmake_push_check_state(RESET)
