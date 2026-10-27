@@ -6,7 +6,7 @@
 
 #pragma once
 // gfx1250 MXFP8 dequantize with the Tensor Data Mover, included into dequantize_kernel after
-// rocm_dequantize_mxfp8.cuh, whose grid, scale indexing and fallback chunk it shares.
+// rocm_dequantize_mxfp8.cuh, whose grid and scale indexing it shares.
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
 // Each wave moves its own TDM_BAND_Y-row band of the chunk global->LDS->global, so waves never
@@ -22,7 +22,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                 const e8m0_t *const scales_ptr, const size_t rows,
                                 const size_t cols, const size_t scales_stride,
                                 const size_t mx_swizzle_padded_dim) {
-#ifdef NVTE_ROCM_HAS_TDM
+#ifdef __gfx1250__
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
   __shared__ alignas(128) IType in_sh[TDM_WAVES][TDM_BAND_Y][CHUNK_DIM_X];
@@ -111,12 +111,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   tdm::store_2d(output_ptr, out_sh[wave], rows, cols, cols, band_offset_Y, chunk_offset_X);
   tdm::wait<0>();
-#elif defined(__gfx1250__)
-  // Compiler without the TDM builtins
-  dequantize_mxfp8_chunk<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, false, WITH_GEMM_SWIZZLED_SCALES>(
-      input_ptr, output_ptr, scales_ptr, rows, cols, scales_stride, mx_swizzle_padded_dim, blockIdx.y,
-      blockIdx.x);
-#endif  // NVTE_ROCM_HAS_TDM
+#endif  // __gfx1250__
 }
 
 // Returns false, leaving the work to the generic kernel, where TDM does not apply. The scale

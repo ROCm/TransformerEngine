@@ -8,25 +8,16 @@
 
 // gfx1250 Tensor Data Mover (TDM): asynchronous 2D tile copies between global memory and LDS.
 // Descriptors are packed here rather than with hip/amd_detail/amd_gfx1250_TDM.h, whose stride
-// setters truncate (ROCm/rocm-systems#13274). With a compiler that lacks the TDM builtins, the
-// calling wave copies the tile itself.
+// setters truncate (ROCm/rocm-systems#13274). The 6-operand TDM builtins need clang 23 or newer.
 
 #include <cstddef>
 #include <cstdint>
-#include <type_traits>
-
-#if defined(__gfx1250__) && __has_builtin(__builtin_amdgcn_tensor_load_to_lds) && \
-    __has_builtin(__builtin_amdgcn_tensor_store_from_lds) &&                       \
-    __has_builtin(__builtin_amdgcn_s_wait_tensorcnt)
-#define NVTE_ROCM_HAS_TDM 1
-#endif
 
 #ifdef __gfx1250__
 namespace transformer_engine {
 namespace tdm {
 namespace detail {
 
-#ifdef NVTE_ROCM_HAS_TDM
 // The builtins' operand signedness has changed between compiler versions; integer vectors of
 // either signedness convert implicitly.
 typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
@@ -84,35 +75,6 @@ __device__ __forceinline__ void copy_2d(const T (&lds)[TILE_ROWS][TILE_COLS], co
     __builtin_amdgcn_tensor_load_to_lds(g0, g1, z4, z4, z8, 0);
   }
 }
-#else
-template <bool STORE, typename T, size_t TILE_ROWS, size_t TILE_COLS>
-__device__ __forceinline__ void copy_2d(const T (&lds)[TILE_ROWS][TILE_COLS], const T *gmem,
-                                        uint32_t rows, uint32_t cols, uint64_t ld, uint32_t row,
-                                        uint32_t col) {
-  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
-                "TDM elements are 1, 2, 4 or 8 bytes");
-  using U = std::conditional_t<
-      sizeof(T) == 1, uint8_t,
-      std::conditional_t<sizeof(T) == 2, uint16_t,
-                         std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>>;
-  U *const tile = reinterpret_cast<U *>(const_cast<T *>(&lds[0][0]));
-  U *const tensor = reinterpret_cast<U *>(const_cast<T *>(gmem));
-  // The tile is accessed as U here and as T by the caller.
-  asm volatile("" ::: "memory");
-  for (uint32_t i = __lane_id(); i < TILE_ROWS * TILE_COLS; i += warpSize) {
-    const uint64_t r = row + static_cast<uint64_t>(i / TILE_COLS);
-    const uint64_t c = col + static_cast<uint64_t>(i % TILE_COLS);
-    const bool inside = r < rows && c < cols;
-    if constexpr (STORE) {
-      if (inside) {
-        tensor[r * ld + c] = tile[i];
-      }
-    } else {
-      tile[i] = inside ? tensor[r * ld + c] : U{0};
-    }
-  }
-}
-#endif  // NVTE_ROCM_HAS_TDM
 
 }  // namespace detail
 
@@ -139,9 +101,7 @@ __device__ __forceinline__ void store_2d(T *gmem, const T (&lds)[TILE_ROWS][TILE
 // the loaded data only after a subsequent barrier.
 template <int N>
 __device__ __forceinline__ void wait() {
-#ifdef NVTE_ROCM_HAS_TDM
   __builtin_amdgcn_s_wait_tensorcnt(N);
-#endif
   asm volatile("" ::: "memory");  // the compiler does not see the TDM's LDS writes
 }
 

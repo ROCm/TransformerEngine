@@ -24,7 +24,7 @@ template <typename T>
 __global__ void __launch_bounds__(kWaves * 32)
     tdm_roundtrip_kernel(const T *in, T *out, T *lds_dump, uint32_t rows, uint32_t cols,
                          uint32_t ld_in, uint32_t ld_out) {
-#ifdef NVTE_ROCM_HAS_TDM
+#ifdef __gfx1250__
   __shared__ alignas(128) T tile[kWaves][kTileRows][kTileCols];
   const uint32_t wave = threadIdx.x / 32;
   const uint32_t row = (blockIdx.y * kWaves + wave) * kTileRows;
