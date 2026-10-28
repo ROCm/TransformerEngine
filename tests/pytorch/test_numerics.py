@@ -2978,9 +2978,9 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.max_seqlen_kv,
         )
 
-        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
+        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5), (12, 5)):
             tols_thd = dtype_tols(dtype)
-            # On gfx950 the results for THD are different
+            # On gfx942/gfx950 the results for THD are different
             # that results in lower final result precision
             tols_thd["atol"] = 2e-3
             torch.testing.assert_close(
