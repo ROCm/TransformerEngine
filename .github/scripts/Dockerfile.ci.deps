@@ -9,17 +9,17 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCK_RELEASE_VERSION=10.0.0
+ARG ROCK_RELEASE_VERSION=10.1.0
 ARG PYTHON_VERSION=3.14
 ARG TORCH_VERSION=2.13.0
 ARG TORCHVISION_VERSION=0.28.0
 # triton 3.8.0 ships as a git snapshot: triton-3.8.0+<TRITON_LOCAL>.rocm<rel>
 ARG TRITON_VERSION=3.8.0
-ARG TRITON_LOCAL=git4cff872c
+ARG TRITON_LOCAL=git669b31ac
 ARG JAX_VERSION=0.11.1
-ARG FA_VERSION=v2.8.3
+ARG FA_VERSION=v2.8.3.post2
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
-ARG FLYDSL_VERSION=0.3.4.1
+ARG FLYDSL_VERSION=0.4.0
 ARG GPU_ARCH=gfx950;gfx942
 
 # Package sources. Noble has no Python ${PYTHON_VERSION}, so add deadsnakes.
@@ -47,7 +47,7 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN python -m pip install --upgrade pip setuptools wheel pyyaml \
     && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
-# Python ROCm SDK + torch from https://stable.repo.amd.com/rocm/whl-next/
+# Python ROCm SDK + torch + Jax from https://stable.repo.amd.com/rocm/whl-next/
 RUN W="https://stable.repo.amd.com/rocm/whl-next" \
     && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
     && pip install --no-cache-dir \
@@ -59,18 +59,15 @@ RUN W="https://stable.repo.amd.com/rocm/whl-next" \
         "torch==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
         "torchvision==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" \
         "triton==${TRITON_VERSION}+${TRITON_LOCAL}.${ROCM_WHEEL_TAG}" \
+        "jax==${JAX_VERSION}" \
+        "jax-rocm10-pjrt==${JAX_VERSION}+${ROCM_WHEEL_TAG}" \
+        "jax-rocm10-plugin==${JAX_VERSION}+${ROCM_WHEEL_TAG}" \
     && for arch in ${GPU_ARCH//;/ }; do \
          pip install --no-cache-dir --extra-index-url "${W}" \
            "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" \
            "amd-torch-device-${arch}==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
            "amd-torchvision-device-${arch}==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" ; \
        done
-
-# Install Jax
-RUN pip install --no-cache-dir \
-        "jax==${JAX_VERSION}" \
-        "jax-rocm7-pjrt==${JAX_VERSION}" \
-        "jax-rocm7-plugin==${JAX_VERSION}"
 
 # Install FlyDSL to enable running FlyDSL GEMM tests.
 RUN pip install --no-cache-dir "flydsl==${FLYDSL_VERSION}"
