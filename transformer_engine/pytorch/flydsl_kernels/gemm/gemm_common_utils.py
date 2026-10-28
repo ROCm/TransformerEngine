@@ -12,16 +12,26 @@ private copies. Anything that varies by element type (global-swizzle layouts,
 G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 """
 
+import functools
+
 import torch
 
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 
 from .exceptions import FlyDSLUnsupportedError
 
 
-def get_num_cus() -> int:
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+def get_num_cus(device=None) -> int:
+    """Number of CUs on ``device`` (default: the current device), cached per device index."""
+    index = None if device is None else torch.device(device).index
+    return _num_cus_on(torch.cuda.current_device() if index is None else index)
+
+
+@functools.lru_cache(maxsize=None)
+def _num_cus_on(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
 
 
 def require_block_tiling(m, n, k, *, block_m, block_n, block_k, label, min_k_tiles=4):
@@ -79,6 +89,52 @@ def require_launch_size(label, *tensors):
                 f"FlyDSL {label} operand {name} is {nbytes} bytes, which exceeds "
                 f"the int32 launch-argument limit of {_MAX_LAUNCH_BYTES}"
             )
+
+
+@functools.lru_cache(maxsize=None)
+def placeholder_arg(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """One cached 1-element buffer per (device, dtype) for an unused kernel argument.
+
+    The FlyDSL kernels keep a uniform signature, so a dense launch still passes the
+    grouped/epilogue tensors (Bias/Aux/work_queue/work_counter/data-pointer arrays)
+    and a static-schedule grouped launch still passes the work counter. The kernel
+    never reads or writes those buffers, so one shared zero tensor per (device, dtype)
+    avoids a per-launch allocate+zero.
+    """
+    return torch.zeros(1, dtype=dtype, device=device)
+
+
+# Per-key cache of flyc.compile'd launchers, shared by every FlyDSL GEMM module.
+# flydsl's JitFunction.__call__ rebuilds a full cache key (sig.bind + globals snapshot
+# + arg-signature resolve) on every launch -- ~190us/call, which dominates wall time
+# at small M where the kernel is short. flyc.compile returns a CompiledFunction whose
+# __call__ skips all of that (ctypes pointer/scalar update + invoke, ~5us), baking
+# constexpr values at compile time so one CompiledFunction per key serves every
+# pointer/scalar/stream variation. M/N are runtime scalar args (not baked), so keys
+# exclude them. Each caller's key starts with a module-unique tag (e.g. "fp8_gemm",
+# "mx32_scale_pack"), so specializations from different modules never collide.
+# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
+# these kernel modules never mutate their captured globals between launches, so it
+# is safe here.
+_COMPILED_LAUNCH_CACHE = {}
+
+
+def compiled_launch(key, jit_fn, args):
+    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
+
+    ``key`` uniquely identifies the compiled specialization (the same tuple the
+    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
+    for the first call; it is used once to compile, then the cached CompiledFunction
+    is reused positionally for all later calls with the same ABI.
+    """
+    # A compiled launcher is built for the current device; key on it so a launch on
+    # another device compiles its own instead of reusing this one.
+    key = (key, torch.cuda.current_device())
+    cf = _COMPILED_LAUNCH_CACHE.get(key)
+    if cf is None:
+        cf = flyc.compile(jit_fn, *args)
+        _COMPILED_LAUNCH_CACHE[key] = cf
+    return cf
 
 
 def cdiv(numer: int, denom: int) -> int:

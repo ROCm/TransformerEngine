@@ -656,20 +656,17 @@ def test_grouped_linear_accuracy_rocm_backends(
         ):
             pytest.skip("FlyDSL grouped GEMM supports MXFP8 and tensor-wise FP8 recipes only.")
 
-    # Select exactly one backend; leave the others' env vars unset. HipKittens and CK
-    # are gated behind NVTE_USE_CUTLASS_GROUPED_GEMM; FlyDSL has its own opt-in and
-    # must not see the cutlass/HK/CK env vars.
-    monkeypatch.delenv("NVTE_USE_CUTLASS_GROUPED_GEMM", raising=False)
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_GROUPED_GEMM_FLYDSL", raising=False)
     if grouped_gemm_backend == "hipkittens":
-        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
         monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
     elif grouped_gemm_backend == "ck":
-        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
         monkeypatch.setenv("NVTE_USE_CK_GROUPED_GEMM", "1")
     else:
+        # FlyDSL has its own opt-in; keep the cutlass/HK/CK grouped GEMM path disabled.
+        monkeypatch.delenv("NVTE_USE_CUTLASS_GROUPED_GEMM", raising=False)
         monkeypatch.setenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "1")
 
     # For the configs CK grouped GEMM is guaranteed to handle, 
@@ -689,17 +686,24 @@ def test_grouped_linear_accuracy_rocm_backends(
     # fallback warning stays on so a failure shows the reason.
     flydsl_dispatches = []
     if grouped_gemm_backend == "flydsl":
-        monkeypatch.setenv("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "1")
-        try_flydsl_grouped = _GroupedLinear._try_flydsl_grouped
-
-        def recording_try_flydsl_grouped(cls, phase, kind, **kwargs):
-            ran = try_flydsl_grouped(phase, kind, **kwargs)
-            flydsl_dispatches.append((phase, ran))
-            return ran
-
-        monkeypatch.setattr(
-            _GroupedLinear, "_try_flydsl_grouped", classmethod(recording_try_flydsl_grouped)
+        from transformer_engine.pytorch.flydsl_kernels.gemm import (
+            FlyDSLUnsupportedError,
+            gemm_wrappers,
         )
+
+        monkeypatch.setenv("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "1")
+        grouped_gemm_flydsl = gemm_wrappers._grouped_gemm_flydsl
+        phases = {"TN": "fwd", "NN": "dgrad", "NT": "wgrad"}
+
+        def recording_grouped_gemm_flydsl(*args, layout, **kwargs):
+            try:
+                grouped_gemm_flydsl(*args, layout=layout, **kwargs)
+            except FlyDSLUnsupportedError:
+                flydsl_dispatches.append((phases[layout], False))
+                raise
+            flydsl_dispatches.append((phases[layout], True))
+
+        monkeypatch.setattr(gemm_wrappers, "_grouped_gemm_flydsl", recording_grouped_gemm_flydsl)
 
     test_grouped_linear_accuracy(
         dtype,
@@ -739,6 +743,120 @@ def test_grouped_linear_accuracy_rocm_backends(
             f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
             f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
         )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backend")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "recipe", [recipe.Float8CurrentScaling(), recipe.DelayedScaling()], ids=recipe_id
+)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_grouped_linear_flydsl_fp8_scaling(recipe, fp8_model_params, monkeypatch):
+    """FlyDSL tensor-wise FP8 grouped GEMM vs. sequential Linear over several steps.
+
+    Delayed scaling quantizes its first step with unit scales (there is no amax history
+    yet), so the single-step accuracy test cannot catch a per-expert scale bug for it.
+    Run a few steps with uneven experts and require the compared step to hand FlyDSL
+    non-unit scales that differ across experts, for every phase.
+    """
+    if get_device_compute_capability() != (9, 5):
+        pytest.skip("FlyDSL grouped GEMM is only supported on gfx950.")
+    pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
+    from transformer_engine.pytorch.flydsl_kernels.gemm import (
+        FlyDSLUnsupportedError,
+        gemm_wrappers,
+    )
+
+    num_gemms, num_steps, dtype = 3, 3, torch.bfloat16
+    config = model_configs["126m"]
+    monkeypatch.setenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "1")
+    monkeypatch.setenv("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "1")
+
+    # Record each FlyDSL grouped GEMM: its phase, whether it ran, and the operands'
+    # per-tensor inverse scales.
+    phases = {"TN": "fwd", "NN": "dgrad", "NT": "wgrad"}
+    dispatches = []
+    grouped_gemm_flydsl = gemm_wrappers._grouped_gemm_flydsl
+
+    def recording_grouped_gemm_flydsl(A, B, out, *, layout, **kwargs):
+        scales = {float(t._scale_inv) for t in list(A) + list(B)}
+        try:
+            grouped_gemm_flydsl(A, B, out, layout=layout, **kwargs)
+        except FlyDSLUnsupportedError:
+            dispatches.append((phases[layout], False, scales))
+            raise
+        dispatches.append((phases[layout], True, scales))
+
+    monkeypatch.setattr(gemm_wrappers, "_grouped_gemm_flydsl", recording_grouped_gemm_flydsl)
+
+    with quantized_model_init(enabled=fp8_model_params, recipe=recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+        )
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=False,
+                    params_dtype=dtype,
+                    device="cuda",
+                )
+                for _ in range(num_gemms)
+            ]
+        )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+
+    # Uneven, FlyDSL-aligned experts so each carries its own scales.
+    align = get_align_size_for_quantization(recipe)
+    tokens = config.max_seqlen_q
+    m_splits = [tokens // 4, tokens // 2, tokens // 4]
+    assert sum(m_splits) == tokens and all(m % align == 0 for m in m_splits)
+    reset_rng_states()
+    inputs = [
+        torch.randn(tokens, config.hidden_size, dtype=dtype, device="cuda")
+        for _ in range(num_steps)
+    ]
+
+    def run(block):
+        FP8GlobalStateManager.reset()
+        for inp in inputs:
+            dispatches.clear()
+            for p in block.parameters():
+                p.grad = None
+            inp = inp.clone().requires_grad_()
+            with autocast(enabled=True, recipe=recipe):
+                if isinstance(block, GroupedLinear):
+                    out = block(inp, m_splits)
+                else:
+                    out = torch.cat([block[i](x) for i, x in enumerate(torch.split(inp, m_splits))])
+            out.sum().backward()
+        torch.cuda.synchronize()
+        return [out, inp.grad] + [p.grad for p in block.parameters()]
+
+    outputs_ref = run(sequential_linear)
+    outputs = run(grouped_linear)
+
+    ran = {phase for phase, ok, _ in dispatches if ok}
+    fell_back = sorted({phase for phase, ok, _ in dispatches if not ok})
+    assert not fell_back and ran == {"fwd", "dgrad", "wgrad"}, (
+        f"FlyDSL grouped GEMM ran {sorted(ran)}, fell back in {fell_back}. "
+        "See the [FLYDSL WARNING] for the fallback reason."
+    )
+    for phase, _, scales in dispatches:
+        assert scales != {1.0} and len(scales) > 1, (
+            f"{phase}: the compared step used scales {sorted(scales)}; it must exercise "
+            "non-unit, per-expert FP8 scales."
+        )
+    for o, o_ref in zip(outputs, outputs_ref):
+        torch.testing.assert_close(o, o_ref, rtol=8e-3, atol=1e-3)
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backend")

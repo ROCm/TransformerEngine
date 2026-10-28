@@ -7,11 +7,11 @@
 FP16 and BF16 share one source-level kernel generator: the algorithm is
 identical and only the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode differs. That
 opcode is selected at compile time via ``mfma_suffix``, so each (dtype, K,
-output, layout) combination still compiles to its own cached binary with no
+output, layout) combination still compiles to its own cached kernel with no
 runtime dtype branch.
 
 All supported layouts share the same generator while compiling to separate
-cached binaries:
+cached kernels:
 
     TN: A [M,K] normal read,    B [N,K] normal read
     NN: A [M,K] normal read,    B [K,N] transpose read
@@ -37,9 +37,15 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
-from . import grouped_gemm_utils as gd
+from . import grouped_gemm_utils as grouped_utils
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import get_num_cus, require_block_tiling, require_launch_size
+from .gemm_common_utils import (
+    compiled_launch,
+    get_num_cus,
+    placeholder_arg,
+    require_block_tiling,
+    require_launch_size,
+)
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -418,7 +424,7 @@ def _compile_kernel(
 
         # ``grouped`` gates the shared descriptor queue / work-steal driver (group
         # fwd/dgrad or the wgrad specialization); const_expr folds it all out of the
-        # dense binary.
+        # dense compiled kernel.
         grouped = group or wgrad
         # Grouped drain bound: the exact number of descriptors the host wrote to
         # ``work_queue`` (``num_work``), so no slot past the queue end is ever read.
@@ -446,13 +452,13 @@ def _compile_kernel(
             # LDS broadcast scratch (one int32): thread 0 writes the atomically
             # claimed slot, a barrier broadcasts it to the whole workgroup. The
             # ``if tx==0`` claim control flow must stay inline (AST-rewritten here).
-            claim_iter, claim_view = gd.make_claim_broadcast(lds.claim_slot)
+            claim_iter, claim_view = grouped_utils.make_claim_broadcast(lds.claim_slot)
 
             def _claim_next_slot():
                 if tx_i32 == fx.Int32(0):
                     old = llvm.AtomicRMWOp(
                         llvm.AtomicBinOp.add,
-                        gd.global_i32_ptr(work_counter, fx.Int32(0)),
+                        grouped_utils.global_i32_ptr(work_counter, fx.Int32(0)),
                         fx.as_ir_value(fx.Int32(1)),
                         llvm.AtomicOrdering.monotonic,
                         syncscope="agent",
@@ -463,15 +469,16 @@ def _compile_kernel(
                 return fx.Vector(claim_view.load())[0]
 
             def _desc_field(slot, field):
-                return gd.read_desc_field(wq_div, desc_ld_atom, slot, field)
+                return grouped_utils.read_desc_field(wq_div, desc_ld_atom, slot, field)
 
         def process_tile(pid_m, pid_n, expert):
             bx_m = pid_m * BLOCK_M
             by_n = pid_n * BLOCK_N
 
             # The flattened/XCD-swizzled block coordinates are i32, while global
-            # address arithmetic below is expressed in MLIR index type.  Convert
-            # once here and use these index-typed tile bases for every address.
+            # address arithmetic below is 64-bit (fx.Int64, which FlyDSL prefers over the
+            # deprecated fx.Index).  Convert once here and use these i64 tile bases for
+            # every address, so large operands cannot overflow i32 offsets.
             bx_m_idx = fx.Int64(bx_m)
             by_n_idx = fx.Int64(by_n)
 
@@ -506,12 +513,14 @@ def _compile_kernel(
             # Issue both per-expert base-pointer loads before either is made uniform, so a
             # tile waits on one memory round trip rather than two.
             if const_expr(act_ptrs):
-                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+                a_base_raw = grouped_utils.read_ptr_at(a_data_ptrs, expert)
             if const_expr(group or act_ptrs):
-                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_raw = grouped_utils.read_ptr_at(b_data_ptrs, expert)
             if const_expr(act_ptrs):
-                a_base_i64 = gd.make_uniform_i64(a_base_raw)
-                a_div_tile = gd.rebase_buffer_view(a_base_i64, fx.Uint8.ir_type, a_ptr_layout)
+                a_base_i64 = grouped_utils.make_uniform_i64(a_base_raw)
+                a_div_tile = grouped_utils.rebase_buffer_view(
+                    a_base_i64, fx.Uint8.ir_type, a_ptr_layout
+                )
             else:
                 a_div_tile = a_div
             a_g2s = G2SLoader(
@@ -527,13 +536,17 @@ def _compile_kernel(
             # wgrad bases are pre-shifted (act_ptrs), so they keep the packed column
             # and contraction shift. Dense keeps the shared packed view.
             if const_expr(group):
-                b_base_i64 = gd.make_uniform_i64(b_base_raw)
-                b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
+                b_base_i64 = grouped_utils.make_uniform_i64(b_base_raw)
+                b_div_tile = grouped_utils.rebase_buffer_view(
+                    b_base_i64, fx.Uint8.ir_type, b_ptr_layout
+                )
                 b_data_col = by_n_idx
                 b_k_off = fx.Int64(0)
             elif const_expr(act_ptrs):
-                b_base_i64 = gd.make_uniform_i64(b_base_raw)
-                b_div_tile = gd.rebase_buffer_view(b_base_i64, fx.Uint8.ir_type, b_ptr_layout)
+                b_base_i64 = grouped_utils.make_uniform_i64(b_base_raw)
+                b_div_tile = grouped_utils.rebase_buffer_view(
+                    b_base_i64, fx.Uint8.ir_type, b_ptr_layout
+                )
                 b_data_col = by_n_b_idx
                 b_k_off = b_expert_k_off
             else:
@@ -1439,51 +1452,6 @@ def _cached_launch(
     )
 
 
-@functools.lru_cache(maxsize=None)
-def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
-    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
-    placeholders.
-
-    The dense half-precision binary requires the grouped/epilogue tensor arguments
-    (Bias/Aux/work_queue/work_counter/b_data_ptrs) to be present but never
-    dereferences them. Re-allocating them via ``torch.zeros`` on every call is pure
-    host overhead that dominates wall time at small M; since the contents are never
-    read, a single shared read-only buffer per (device, dtype) is safe to reuse.
-    """
-    return torch.zeros(numel, dtype=dtype, device=device)
-
-
-# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
-# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
-# launch -- ~190us/call, which dominates wall time at small M where the kernel is
-# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
-# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
-# time so one CompiledFunction per launch_key serves every pointer/scalar/stream
-# variation. M/N are runtime scalar args (not baked), so the key excludes them --
-# identical to the MXFP8/FP8 paths.
-# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
-# this module never mutates its captured globals between launches, so it is safe.
-_COMPILED_LAUNCH_CACHE = {}
-
-
-def _compiled_launch(key, jit_fn, args):
-    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
-
-    ``key`` uniquely identifies the compiled specialization (the same tuple the
-    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
-    for the first call; used once to compile, then the cached CompiledFunction is
-    reused positionally for all later calls with the same ABI.
-    """
-    # A compiled launcher is built for the current device; key on it so a launch on
-    # another device compiles its own instead of reusing this one.
-    key = (key, torch.cuda.current_device())
-    cf = _COMPILED_LAUNCH_CACHE.get(key)
-    if cf is None:
-        cf = flyc.compile(jit_fn, *args)
-        _COMPILED_LAUNCH_CACHE[key] = cf
-    return cf
-
-
 def _half_prec_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1748,7 +1716,7 @@ def doGemm(
         raise ValueError(f"{label} epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = gd.current_stream_handle(A.device)
+        stream = grouped_utils.current_stream_handle(A.device)
 
     # Preserve the original validated byte-addressed G2L path. These are
     # metadata-only dtype/flatten views of the already-contiguous row-major
@@ -1762,14 +1730,14 @@ def doGemm(
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = _dense_placeholder(A.device, torch.float32)
+        Bias_arg = placeholder_arg(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.view(-1)
     else:
-        Aux_arg = _dense_placeholder(A.device, C.dtype)
+        Aux_arg = placeholder_arg(A.device, C.dtype)
 
     # Grouped runtime tensors are required by the kernel signature; the dense
-    # binary never dereferences them but still needs placeholder buffers.
+    # compiled kernel never dereferences them but still needs placeholder buffers.
     if group or wgrad:
         # num_work is the kernel's drain bound: it must be the queue's descriptor count.
         if work_queue.numel() != 3 * int(num_work):
@@ -1780,8 +1748,8 @@ def doGemm(
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
-        work_queue_arg = _dense_placeholder(A.device, torch.int32)
-        work_counter_arg = _dense_placeholder(A.device, torch.int32)
+        work_queue_arg = placeholder_arg(A.device, torch.int32)
+        work_counter_arg = placeholder_arg(A.device, torch.int32)
 
     # Per-expert weight base pointers (grouped TN/NN; wgrad's pre-shifted X with
     # act_ptrs): an int64[G] device array read in-kernel so the operand needs no
@@ -1789,7 +1757,7 @@ def doGemm(
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
-        b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+        b_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
     # act_ptrs also selects how the kernel reads B: outside grouped fwd/dgrad, B is
     # read through b_data_ptrs only when act_ptrs is set. So activation pointers are
     # grouped-only, and wgrad takes the dY and X pointer arrays together or not at all.
@@ -1802,7 +1770,7 @@ def doGemm(
     if act_ptrs:
         a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
     else:
-        a_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+        a_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
 
     launch_key = (
         "half_prec_gemm",
@@ -1836,7 +1804,7 @@ def doGemm(
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
     # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
     # runtime scalars, so one compiled launcher per launch_key serves all shapes.
-    _compiled_launch(
+    compiled_launch(
         launch_key,
         _cached_launch(
             K_runtime,

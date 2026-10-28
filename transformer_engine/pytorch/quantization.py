@@ -331,6 +331,22 @@ def get_default_recipe() -> Recipe:
     return get_default_fp8_recipe()
 
 
+def is_flydsl_grouped_gemm_enabled(recipe: Optional[Recipe] = None) -> bool:
+    """Whether the FlyDSL grouped GEMM (ROCm gfx950 opt-in) is enabled for ``recipe``.
+
+    Covers the opt-in and the precisions the kernels implement: MXFP8 and tensor-wise
+    FP8 (current/delayed scaling) when ``recipe`` is given, else unquantized BF16/FP16.
+    GroupedLinear adds its per-call checks on top of this.
+    """
+    if not (
+        IS_HIP_EXTENSION
+        and os.getenv("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
+        and get_device_compute_capability() == (9, 5)
+    ):
+        return False
+    return recipe is None or recipe.mxfp8() or recipe.float8_current_scaling() or recipe.delayed()
+
+
 def get_align_size_for_quantization(recipe: Recipe) -> int:
     """Get the alignment used to pad grouped quantized operations.
 
@@ -346,12 +362,7 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     # The FlyDSL grouped GEMM (gfx950 opt-in) tiles every expert with BLOCK_M=256, so
     # per-expert token counts must be 256-aligned for the recipes it handles (MXFP8 and
     # tensor-wise FP8); other recipes fall back and keep their own alignment.
-    if (
-        IS_HIP_EXTENSION
-        and get_device_compute_capability() == (9, 5)
-        and os.environ.get("NVTE_USE_GROUPED_GEMM_FLYDSL", "0") == "1"
-        and (recipe.mxfp8() or recipe.float8_current_scaling() or recipe.delayed())
-    ):
+    if is_flydsl_grouped_gemm_enabled(recipe):
         return 256
     if recipe.mxfp8():
         # HipKittens grouped GEMM requires 256-aligned expert dimensions.

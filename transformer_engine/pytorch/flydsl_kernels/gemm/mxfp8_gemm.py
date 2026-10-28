@@ -34,9 +34,15 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
-from . import grouped_gemm_utils as gd
+from . import grouped_gemm_utils as grouped_utils
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import get_num_cus, require_block_tiling, require_launch_size
+from .gemm_common_utils import (
+    compiled_launch,
+    get_num_cus,
+    placeholder_arg,
+    require_block_tiling,
+    require_launch_size,
+)
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -58,46 +64,6 @@ BLOCK_M = _BLOCK_M
 BLOCK_N = _BLOCK_N
 BLOCK_K = _BLOCK_K
 SCALE_GROUP_SIZE = 32
-
-
-@functools.lru_cache(maxsize=None)
-def _dummy_arg(dtype: torch.dtype, device: torch.device):
-    """One-element placeholder for an unused uniform-signature kernel arg.
-
-    Cached per (dtype, device) and shared across calls: the kernel never
-    dereferences these buffers, so a single zero tensor avoids a per-launch
-    allocate+zero of a fresh one.
-    """
-    return torch.zeros(1, dtype=dtype, device=device)
-
-
-# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
-# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
-# launch; flyc.compile returns a CompiledFunction whose __call__ skips that, baking
-# constexpr values at compile time so one CompiledFunction per (shape-class, dtype,
-# layout) key serves every pointer/scalar/stream variation.
-# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
-# these kernel modules never mutate their captured globals between launches, so it
-# is safe here. Keyed identically to the underlying @lru_cache launcher builders.
-_COMPILED_LAUNCH_CACHE = {}
-
-
-def _compiled_launch(key, jit_fn, args):
-    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
-
-    ``key`` uniquely identifies the compiled specialization (same tuple the
-    JitFunction's lru_cache uses). ``args`` is the full positional arg list for the
-    first call; it is used once to compile, then the cached CompiledFunction is
-    reused positionally for all later calls with the same ABI.
-    """
-    # A compiled launcher is built for the current device; key on it so a launch on
-    # another device compiles its own instead of reusing this one.
-    key = (key, torch.cuda.current_device())
-    cf = _COMPILED_LAUNCH_CACHE.get(key)
-    if cf is None:
-        cf = flyc.compile(jit_fn, *args)
-        _COMPILED_LAUNCH_CACHE[key] = cf
-    return cf
 
 
 def _debug_enabled() -> bool:
@@ -146,7 +112,7 @@ def _compile_mx32_scale_pack_kernel(
         )
 
     # Select source addressing before FlyDSL captures the kernel.  The emitted
-    # rowwise and columnwise binaries contain no runtime orientation branch.
+    # rowwise and columnwise compiled kernels contain no runtime orientation branch.
     if source_colwise:
 
         def _source_offset(source_k32, source_row):
@@ -213,9 +179,11 @@ def _compile_mx32_scale_pack_kernel(
             # K128 block, so one expert: make its base wave-uniform and rebase a buffer
             # view, keeping the buffer loads of the packed path.
             block = k128 if source_colwise else tile
-            expert = fx.Int32(gd.load_i32_at(expert_table, block))
-            base = gd.make_uniform_i64(gd.read_ptr_at(src_ptrs, expert))
-            src_div = gd.rebase_buffer_view(base, fx.Uint8.ir_type, fx.make_layout(dim * qk, 1))
+            expert = fx.Int32(grouped_utils.load_i32_at(expert_table, block))
+            base = grouped_utils.make_uniform_i64(grouped_utils.read_ptr_at(src_ptrs, expert))
+            src_div = grouped_utils.rebase_buffer_view(
+                base, fx.Uint8.ir_type, fx.make_layout(dim * qk, 1)
+            )
             _store_word(dst, src_div, coords)
 
         @flyc.jit
@@ -270,7 +238,7 @@ def _cached_mx32_scale_pack_launch(
     stride1: int,
     per_expert: bool = False,
 ):
-    """Cache orientation-and-stride-specialized fused pack binaries."""
+    """Cache orientation-and-stride-specialized fused pack compiled kernels."""
     return _compile_mx32_scale_pack_kernel(dim, qk, source_colwise, stride0, stride1, per_expert)
 
 
@@ -314,12 +282,12 @@ def pack_mx32_scales_for_hk(
         device=scales_u8.device,
     )
     if stream is None:
-        stream = gd.current_stream_handle(scales_u8.device)
+        stream = grouped_utils.current_stream_handle(scales_u8.device)
 
     stride0, stride1 = (int(x) for x in scales_u8.stride())
     pack_key = ("mx32_scale_pack", dim, qk, bool(source_colwise), stride0, stride1)
     pack_args = (scales_u8, packed, stream)
-    _compiled_launch(
+    compiled_launch(
         pack_key,
         _cached_mx32_scale_pack_launch(dim, qk, bool(source_colwise), stride0, stride1),
         pack_args,
@@ -341,7 +309,9 @@ def pack_mx32_scales_for_hk_experts(
     back to packing a real concat when the tensors cannot be addressed in place.
     """
     # stacked_operand requires one common trailing shape, so rank 2 holds for all.
-    stacked = gd.stacked_operand(scales, scales[0].device) if scales[0].dim() == 2 else None
+    stacked = (
+        grouped_utils.stacked_operand(scales, scales[0].device) if scales[0].dim() == 2 else None
+    )
     if stacked is None:
         return pack_mx32_scales_for_hk(
             torch.cat(scales, dim=0), source_colwise=source_colwise, stream=stream
@@ -361,16 +331,16 @@ def pack_mx32_scales_for_hk_experts(
         dim, qk = total, inner
         # Experts stack on dim; each thread's bytes share one 64-row tile.
         block = 64
-    expert_table = gd.block_expert_table(extents, block, representative.device)
+    expert_table = grouped_utils.block_expert_table(extents, block, representative.device)
 
     packed = torch.empty((qk // 4, dim), dtype=torch.int32, device=representative.device)
     if stream is None:
-        stream = gd.current_stream_handle(representative.device)
+        stream = grouped_utils.current_stream_handle(representative.device)
     # The shifted pointers address the contiguous concatenation, so its strides apply.
     stride0, stride1 = inner, 1
     pack_key = ("mx32_scale_pack_experts", dim, qk, bool(source_colwise), stride0, stride1)
     pack_args = (src_ptrs, expert_table, packed, stream)
-    _compiled_launch(
+    compiled_launch(
         pack_key,
         _cached_mx32_scale_pack_launch(
             dim, qk, bool(source_colwise), stride0, stride1, per_expert=True
@@ -710,7 +680,7 @@ def _compile_kernel(
         # (pid_m, pid_n) output tile; the body below runs once.
         #
         # Grouped path (group is True, packed TN, const_expr-folded so the dense
-        # binary is untouched): the launch is a fixed num-CU grid of persistent
+        # compiled kernel is untouched): the launch is a fixed num-CU grid of persistent
         # workgroups. Each workgroup claims a queue slot by atomically fetch-adding
         # the shared counter (``work_counter[0]``), reads the precomputed
         # ``(pid_m, pid_n, expert)`` descriptor at that slot from ``work_queue``, and
@@ -744,7 +714,7 @@ def _compile_kernel(
             # a 1-element view. Thread 0 writes via ptr_store; every thread reads via
             # the view after a workgroup barrier. (Descriptor reads reuse the int32
             # ``scale_ld_atom`` as their copy atom.)
-            claim_iter, claim_view = gd.make_claim_broadcast(lds.claim_slot)
+            claim_iter, claim_view = grouped_utils.make_claim_broadcast(lds.claim_slot)
 
             def _claim_next_slot():
                 # One atomic per workgroup: thread 0 fetch-adds the shared counter
@@ -754,7 +724,7 @@ def _compile_kernel(
                 if tx_i32 == fx.Int32(0):
                     old = llvm.AtomicRMWOp(
                         llvm.AtomicBinOp.add,
-                        gd.global_i32_ptr(work_counter, fx.Int32(0)),
+                        grouped_utils.global_i32_ptr(work_counter, fx.Int32(0)),
                         fx.as_ir_value(fx.Int32(1)),
                         llvm.AtomicOrdering.monotonic,
                         syncscope="agent",
@@ -765,15 +735,16 @@ def _compile_kernel(
                 return fx.Vector(claim_view.load())[0]
 
             def _desc_field(slot, field):
-                return gd.read_desc_field(wq_div, scale_ld_atom, slot, field)
+                return grouped_utils.read_desc_field(wq_div, scale_ld_atom, slot, field)
 
         def process_tile(pid_m, pid_n, expert):
             bx_m = pid_m * BLOCK_M
             by_n = pid_n * BLOCK_N
 
             # The flattened/XCD-swizzled block coordinates are i32, while global
-            # address arithmetic below is expressed in MLIR index type. Convert
-            # once here and use these index-typed tile bases for every address.
+            # address arithmetic below is 64-bit (fx.Int64, which FlyDSL prefers over the
+            # deprecated fx.Index).  Convert once here and use these i64 tile bases for
+            # every address, so large operands cannot overflow i32 offsets.
             bx_m_idx = fx.Int64(bx_m)
             by_n_idx = fx.Int64(by_n)
 
@@ -878,12 +849,12 @@ def _compile_kernel(
             # Issue both per-expert base-pointer loads before either is made uniform, so a
             # tile waits on one memory round trip rather than two.
             if const_expr(act_ptrs):
-                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+                a_base_raw = grouped_utils.read_ptr_at(a_data_ptrs, expert)
             if const_expr(group or act_ptrs):
-                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_raw = grouped_utils.read_ptr_at(b_data_ptrs, expert)
             if const_expr(act_ptrs):
-                a_base_i64 = gd.make_uniform_i64(a_base_raw)
-                a_div_tile = gd.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
+                a_base_i64 = grouped_utils.make_uniform_i64(a_base_raw)
+                a_div_tile = grouped_utils.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
             else:
                 a_div_tile = a_div
             a_g2s = G2SLoader(
@@ -899,13 +870,13 @@ def _compile_kernel(
             # TN and NN. wgrad bases are pre-shifted (act_ptrs), so they keep the
             # packed column and contraction shift. Dense keeps the shared ``b_div``.
             if const_expr(group):
-                b_base_i64 = gd.make_uniform_i64(b_base_raw)
-                b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
+                b_base_i64 = grouped_utils.make_uniform_i64(b_base_raw)
+                b_div_tile = grouped_utils.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
                 b_data_col = by_n_idx
                 b_k_off = fx.Int64(0)
             elif const_expr(act_ptrs):
-                b_base_i64 = gd.make_uniform_i64(b_base_raw)
-                b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
+                b_base_i64 = grouped_utils.make_uniform_i64(b_base_raw)
+                b_div_tile = grouped_utils.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
                 b_data_col = by_n_b_idx
                 b_k_off = b_expert_k_off
             else:
@@ -2093,7 +2064,7 @@ def do_gemm(
         raise ValueError(f"MXFP8 epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = gd.current_stream_handle(A.device)
+        stream = grouped_utils.current_stream_handle(A.device)
 
     # A non-contiguous output cannot receive the kernel's writes: the flat
     # descriptor below would target a throwaway ``.contiguous()`` copy. Reject
@@ -2109,19 +2080,19 @@ def do_gemm(
     C_arg = C.view(-1)
     # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers. These
     # placeholders are never dereferenced by the kernel, so a cached shared buffer
-    # (see _dummy_arg) is used rather than a fresh allocate+zero every call.
+    # (see ``placeholder_arg``) is used rather than a fresh allocate+zero every call.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = _dummy_arg(torch.float32, A.device)
+        Bias_arg = placeholder_arg(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.view(-1)
     else:
-        Aux_arg = _dummy_arg(C.dtype, A.device)
+        Aux_arg = placeholder_arg(A.device, C.dtype)
 
     # Grouped runtime tensors are required by the kernel signature; the dense
-    # binary never dereferences them but still needs placeholder buffers. wgrad
-    # uses the same persistent descriptor queue as the grouped fwd/dgrad path.
+    # compiled kernel never dereferences them but still needs placeholder
+    # buffers. wgrad uses the same persistent descriptor queue as the grouped fwd/dgrad path.
     if group or wgrad:
         # num_work is the kernel's drain bound: it must be the queue's descriptor count.
         if work_queue.numel() != 3 * int(num_work):
@@ -2132,8 +2103,8 @@ def do_gemm(
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
-        work_queue_arg = _dummy_arg(torch.int32, A.device)
-        work_counter_arg = _dummy_arg(torch.int32, A.device)
+        work_queue_arg = placeholder_arg(A.device, torch.int32)
+        work_counter_arg = placeholder_arg(A.device, torch.int32)
 
     # Per-expert B base pointers: the weights in grouped fwd/dgrad, or wgrad's
     # pre-shifted X with act_ptrs. Dense passes an unused placeholder so the
@@ -2141,7 +2112,7 @@ def do_gemm(
     if b_data_ptrs is not None:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
-        b_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
+        b_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
     # act_ptrs also selects how the kernel reads B: outside grouped fwd/dgrad, B is
     # read through b_data_ptrs only when act_ptrs is set. So activation pointers are
     # grouped-only, and wgrad takes the dY and X pointer arrays together or not at all.
@@ -2154,7 +2125,7 @@ def do_gemm(
     if act_ptrs:
         a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
     else:
-        a_data_ptrs_arg = _dummy_arg(torch.int64, A.device)
+        a_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
 
     launch_key = (
         "mxfp8_gemm",
@@ -2187,7 +2158,7 @@ def do_gemm(
         int(num_work),
         stream,
     )
-    _compiled_launch(
+    compiled_launch(
         launch_key,
         _cached_launch(
             K_runtime, A.dtype, B.dtype, C.dtype, layout, epilogue, group, sched, wgrad, act_ptrs
@@ -2209,7 +2180,7 @@ def _cached_launch(
     wgrad: bool = False,
     act_ptrs: bool = False,
 ):
-    """Cache independent TN/NN/NT binaries with no runtime layout argument."""
+    """Cache independent TN/NN/NT compiled kernels with no runtime layout argument."""
     return _compile_kernel(
         K,
         a_fp8_dtype,
@@ -2342,7 +2313,7 @@ def mxfp8_matmul(
     sched: str = "worksteal",
     wgrad: bool = False,
 ):
-    """Normalize scale orientation and launch a compile-time layout binary.
+    """Normalize scale orientation and launch a kernel compiled for a fixed layout.
 
     Wrapper-visible contracts:
 

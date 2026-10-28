@@ -25,9 +25,15 @@ from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from . import grouped_gemm_utils as gd
+from . import grouped_gemm_utils as grouped_utils
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import get_num_cus, require_block_tiling, require_launch_size
+from .gemm_common_utils import (
+    compiled_launch,
+    get_num_cus,
+    placeholder_arg,
+    require_block_tiling,
+    require_launch_size,
+)
 
 # Transformer Engine-local FlyDSL utilities.
 from .fp8_gemm_utils import (
@@ -260,7 +266,7 @@ def _compile_kernel(
         num_blocks_n = c_n // BLOCK_N
 
         # ``grouped`` gates the shared descriptor queue / work-steal driver;
-        # const_expr folds it out of the dense binary.
+        # const_expr folds it out of the dense compiled kernel.
         grouped = group or wgrad
         # Grouped drain bound: the exact number of descriptors the host wrote to
         # ``work_queue`` (``num_work``), so no slot past the queue end is ever read.
@@ -286,13 +292,13 @@ def _compile_kernel(
             wq_rsrc = fx.rocdl.make_buffer_tensor(work_queue, max_size=True)
             wq_div = fx.logical_divide(wq_rsrc, fx.make_layout(1, 1))
             desc_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
-            claim_iter, claim_view = gd.make_claim_broadcast(lds.claim_slot)
+            claim_iter, claim_view = grouped_utils.make_claim_broadcast(lds.claim_slot)
 
             def _claim_next_slot():
                 if tx_i32 == fx.Int32(0):
                     old = llvm.AtomicRMWOp(
                         llvm.AtomicBinOp.add,
-                        gd.global_i32_ptr(work_counter, fx.Int32(0)),
+                        grouped_utils.global_i32_ptr(work_counter, fx.Int32(0)),
                         fx.as_ir_value(fx.Int32(1)),
                         llvm.AtomicOrdering.monotonic,
                         syncscope="agent",
@@ -303,15 +309,15 @@ def _compile_kernel(
                 return fx.Vector(claim_view.load())[0]
 
             def _desc_field(slot, field):
-                return gd.read_desc_field(wq_div, desc_ld_atom, slot, field)
+                return grouped_utils.read_desc_field(wq_div, desc_ld_atom, slot, field)
 
         def process_tile(pid_m, pid_n, expert):
             # Per-expert scalar scale: dense reads index 0 (length-1 buffer); grouped
             # reads scale[expert] from the length-num_groups vector, or through the
             # expert's scale_inv pointer (scale_ptrs).
             if const_expr(scale_ptrs):
-                a_scale = fx.Float32(gd.load_f32_at_ptr(A_scale_inv, expert))
-                b_scale = fx.Float32(gd.load_f32_at_ptr(B_scale_inv, expert))
+                a_scale = fx.Float32(grouped_utils.load_f32_at_ptr(A_scale_inv, expert))
+                b_scale = fx.Float32(grouped_utils.load_f32_at_ptr(B_scale_inv, expert))
             else:
                 if const_expr(grouped):
                     scale_idx = fx.Int32(expert)
@@ -325,8 +331,9 @@ def _compile_kernel(
             by_n = pid_n * BLOCK_N
 
             # The flattened/XCD-swizzled block coordinates are i32, while global
-            # address arithmetic below is expressed in MLIR index type.  Convert
-            # once here and use these index-typed tile bases for every address.
+            # address arithmetic below is 64-bit (fx.Int64, which FlyDSL prefers over the
+            # deprecated fx.Index).  Convert once here and use these i64 tile bases for
+            # every address, so large operands cannot overflow i32 offsets.
             bx_m_idx = fx.Int64(bx_m)
             by_n_idx = fx.Int64(by_n)
 
@@ -372,12 +379,12 @@ def _compile_kernel(
             # Issue both per-expert base-pointer loads before either is made uniform, so a
             # tile waits on one memory round trip rather than two.
             if const_expr(act_ptrs):
-                a_base_raw = gd.read_ptr_at(a_data_ptrs, expert)
+                a_base_raw = grouped_utils.read_ptr_at(a_data_ptrs, expert)
             if const_expr(weight_ptrs):
-                b_base_raw = gd.read_ptr_at(b_data_ptrs, expert)
+                b_base_raw = grouped_utils.read_ptr_at(b_data_ptrs, expert)
             if const_expr(act_ptrs):
-                a_base_i64 = gd.make_uniform_i64(a_base_raw)
-                a_div_tile = gd.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
+                a_base_i64 = grouped_utils.make_uniform_i64(a_base_raw)
+                a_div_tile = grouped_utils.rebase_buffer_view(a_base_i64, a_f8_ir_t, a_ptr_layout)
             else:
                 a_div_tile = a_div
             a_g2s = G2SLoader(a_div_tile, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
@@ -385,8 +392,8 @@ def _compile_kernel(
             # read with a LOCAL column (base selects the expert). Other paths keep the
             # shared packed b_div / by_n_b_idx.
             if const_expr(weight_ptrs):
-                b_base_i64 = gd.make_uniform_i64(b_base_raw)
-                b_div_tile = gd.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
+                b_base_i64 = grouped_utils.make_uniform_i64(b_base_raw)
+                b_div_tile = grouped_utils.rebase_buffer_view(b_base_i64, b_f8_ir_t, b_ptr_layout)
                 # wgrad bases are pre-shifted by the packed expert offset (see act_ptrs),
                 # so keep the packed column there; forward/dgrad weight bases are the
                 # real per-expert slabs, read with a local column.
@@ -1191,52 +1198,6 @@ def _compile_kernel(
 
 
 @functools.lru_cache(maxsize=None)
-def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
-    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
-    placeholders.
-
-    The dense FP8 binary requires the grouped/epilogue tensor arguments
-    (Bias/Aux/work_queue/work_counter/b_data_ptrs) to be present but never
-    dereferences them. Re-allocating them via ``torch.zeros`` on every call is
-    pure host overhead that dominates wall time at small M; since the contents
-    are never read, a single shared read-only buffer per (device, dtype) is
-    safe to reuse across calls.
-    """
-    return torch.zeros(numel, dtype=dtype, device=device)
-
-
-# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
-# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
-# launch -- ~190us/call, which dominates wall time at small M where the kernel is
-# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
-# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
-# time so one CompiledFunction per (shape-class, dtype, layout) key serves every
-# pointer/scalar/stream variation. M/N are runtime scalar args (not baked), so the
-# key excludes them -- identical to the MXFP8 path in mxfp8_gemm.py.
-# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
-# this module never mutates its captured globals between launches, so it is safe.
-_COMPILED_LAUNCH_CACHE = {}
-
-
-def _compiled_launch(key, jit_fn, args):
-    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
-
-    ``key`` uniquely identifies the compiled specialization (the same tuple the
-    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
-    for the first call; used once to compile, then the cached CompiledFunction is
-    reused positionally for all later calls with the same ABI.
-    """
-    # A compiled launcher is built for the current device; key on it so a launch on
-    # another device compiles its own instead of reusing this one.
-    key = (key, torch.cuda.current_device())
-    cf = _COMPILED_LAUNCH_CACHE.get(key)
-    if cf is None:
-        cf = flyc.compile(jit_fn, *args)
-        _COMPILED_LAUNCH_CACHE[key] = cf
-    return cf
-
-
-@functools.lru_cache(maxsize=None)
 def _cached_launch(
     K: int,
     a_fp8_dtype: torch.dtype,
@@ -1427,7 +1388,7 @@ def doGemm(
         raise ValueError(f"FP8 epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
-        stream = gd.current_stream_handle(A.device)
+        stream = grouped_utils.current_stream_handle(A.device)
 
     A_arg = A.view(torch.uint8).contiguous().view(-1)
     B_arg = B.view(torch.uint8).contiguous().view(-1)
@@ -1440,14 +1401,14 @@ def doGemm(
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = _dense_placeholder(A.device, torch.float32)
+        Bias_arg = placeholder_arg(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.view(-1)
     else:
-        Aux_arg = _dense_placeholder(A.device, C.dtype)
+        Aux_arg = placeholder_arg(A.device, C.dtype)
 
     # Grouped runtime tensors are required by the kernel signature; the dense
-    # binary never dereferences them but still needs placeholder buffers.
+    # compiled kernel never dereferences them but still needs placeholder buffers.
     if group or wgrad:
         # num_work is the kernel's drain bound: it must be the queue's descriptor count.
         if work_queue.numel() != 3 * int(num_work):
@@ -1458,8 +1419,8 @@ def doGemm(
         work_queue_arg = work_queue.contiguous().view(-1)
         work_counter_arg = work_counter.contiguous().view(-1)
     else:
-        work_queue_arg = _dense_placeholder(A.device, torch.int32)
-        work_counter_arg = _dense_placeholder(A.device, torch.int32)
+        work_queue_arg = placeholder_arg(A.device, torch.int32)
+        work_counter_arg = placeholder_arg(A.device, torch.int32)
 
     # Per-expert weight base pointers (grouped forward and dgrad -- both run on this
     # TN kernel, dgrad over host-transposed weights): compile a kernel that reads each
@@ -1470,13 +1431,13 @@ def doGemm(
     if weight_ptrs:
         b_data_ptrs_arg = b_data_ptrs.contiguous().view(-1)
     else:
-        b_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+        b_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
     # Per-expert activation base pointers (see act_ptrs in _compile_kernel).
     act_ptrs = a_data_ptrs is not None
     if act_ptrs:
         a_data_ptrs_arg = a_data_ptrs.contiguous().view(-1)
     else:
-        a_data_ptrs_arg = _dense_placeholder(A.device, torch.int64)
+        a_data_ptrs_arg = placeholder_arg(A.device, torch.int64)
 
     launch_key = (
         "fp8_gemm",
@@ -1514,7 +1475,7 @@ def doGemm(
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
     # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
     # runtime scalars, so one compiled launcher per launch_key serves all shapes.
-    _compiled_launch(
+    compiled_launch(
         launch_key,
         _cached_launch(
             int(K_runtime),

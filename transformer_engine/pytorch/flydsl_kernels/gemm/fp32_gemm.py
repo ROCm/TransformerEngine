@@ -27,7 +27,12 @@ from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import require_block_tiling, require_launch_size
+from .gemm_common_utils import (
+    compiled_launch,
+    placeholder_arg,
+    require_block_tiling,
+    require_launch_size,
+)
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -198,8 +203,9 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         by_n = pid_n * BLOCK_N
 
         # The flattened/XCD-swizzled block coordinates are i32, while global
-        # address arithmetic below is expressed in MLIR index type.  Convert
-        # once here and use these index-typed tile bases for every address.
+        # address arithmetic below is 64-bit (fx.Int64, which FlyDSL prefers over the
+        # deprecated fx.Index).  Convert once here and use these i64 tile bases for
+        # every address, so large operands cannot overflow i32 offsets.
         bx_m_idx = fx.Int64(bx_m)
         by_n_idx = fx.Int64(by_n)
 
@@ -969,50 +975,6 @@ def _cached_launch(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"
     return _compile_kernel(K, use_xcd_remap=use_xcd_remap, epilogue=epilogue)
 
 
-@functools.lru_cache(maxsize=None)
-def _dense_placeholder(device: torch.device, dtype: torch.dtype, numel: int = 1):
-    """One cached 1-element buffer per (device, dtype) for dense kernel-signature
-    placeholders.
-
-    The FP32 binary requires the Bias/Aux epilogue tensor arguments to be present
-    but never dereferences them in the DEFAULT epilogue. Re-allocating them via
-    ``torch.zeros`` on every call is pure host overhead; since the contents are
-    never read, a single shared read-only buffer per (device, dtype) is safe.
-    """
-    return torch.zeros(numel, dtype=dtype, device=device)
-
-
-# Per-key cache of flyc.compile'd launchers. flydsl's JitFunction.__call__ rebuilds
-# a full cache key (sig.bind + globals snapshot + arg-signature resolve) on every
-# launch -- ~190us/call, which dominates wall time at small M where the kernel is
-# short. flyc.compile returns a CompiledFunction whose __call__ skips all of that
-# (ctypes pointer/scalar update + invoke, ~5us), baking constexpr values at compile
-# time so one CompiledFunction per launch_key serves every pointer/scalar/stream
-# variation. M/N are runtime scalar args (not baked), so the key excludes them --
-# identical to the MXFP8/FP8/half-precision paths.
-# NOTE: the fast path intentionally bypasses flydsl's globals-drift safety check;
-# this module never mutates its captured globals between launches, so it is safe.
-_COMPILED_LAUNCH_CACHE = {}
-
-
-def _compiled_launch(key, jit_fn, args):
-    """Return (and cache) a flyc.compile'd fast launcher for ``jit_fn``.
-
-    ``key`` uniquely identifies the compiled specialization (the same tuple the
-    JitFunction builder's lru_cache uses). ``args`` is the full positional arg list
-    for the first call; used once to compile, then the cached CompiledFunction is
-    reused positionally for all later calls with the same ABI.
-    """
-    # A compiled launcher is built for the current device; key on it so a launch on
-    # another device compiles its own instead of reusing this one.
-    key = (key, torch.cuda.current_device())
-    cf = _COMPILED_LAUNCH_CACHE.get(key)
-    if cf is None:
-        cf = flyc.compile(jit_fn, *args)
-        _COMPILED_LAUNCH_CACHE[key] = cf
-    return cf
-
-
 def fp32_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1128,18 +1090,18 @@ def doGemm(
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
-        Bias_arg = _dense_placeholder(A.device, torch.float32)
+        Bias_arg = placeholder_arg(A.device, torch.float32)
     if needs_aux:
         Aux_arg = aux.contiguous().view(-1)
     else:
-        Aux_arg = _dense_placeholder(A.device, torch.float32)
+        Aux_arg = placeholder_arg(A.device, torch.float32)
 
     launch_key = ("fp32_gemm", int(K_runtime), bool(use_xcd_remap), epilogue)
     launch_args = (A_arg, B_arg, C_arg, Bias_arg, Aux_arg, M_runtime, N_runtime, stream)
     # flyc.compile fast path: skips flydsl's per-call cache-key rebuild (sig.bind +
     # globals snapshot + arg resolve), the dominant host cost at small M. M/N are
     # runtime scalars, so one compiled launcher per launch_key serves all shapes.
-    _compiled_launch(
+    compiled_launch(
         launch_key,
         _cached_launch(int(K_runtime), bool(use_xcd_remap), epilogue),
         launch_args,

@@ -36,6 +36,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr.typing import T
 
 from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import get_num_cus, placeholder_arg
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +166,7 @@ def select_grouped_sched(num_tiles: int, device) -> str:
         raise ValueError(
             f"NVTE_FLYDSL_GROUPED_SCHED must be auto|static|worksteal, got {override!r}"
         )
-    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * _num_cus(device) else "worksteal"
-
-
-@functools.lru_cache(maxsize=None)
-def _num_cus(device):
-    return torch.cuda.get_device_properties(device).multi_processor_count
+    return "static" if num_tiles <= _GROUPED_SCHED_ROUNDS * get_num_cus(device) else "worksteal"
 
 
 # Per-call metadata caches. Keys include the current stream: a cached device tensor is
@@ -271,11 +267,6 @@ def build_wgrad_work_queue(num_groups, num_pid_m, num_pid_n, device):
     )
 
 
-@functools.lru_cache(maxsize=None)
-def _unused_counter(device):
-    return torch.zeros(1, dtype=torch.int32, device=device)
-
-
 def work_counter(sched, device):
     """The atomic tile counter a grouped launch needs for schedule ``sched``.
 
@@ -284,7 +275,7 @@ def work_counter(sched, device):
     """
     if sched == "worksteal":
         return torch.zeros(1, dtype=torch.int32, device=device)
-    return _unused_counter(device)
+    return placeholder_arg(device, torch.int32)
 
 
 class _SpanCAI:
