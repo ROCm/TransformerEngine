@@ -1543,9 +1543,17 @@ class FusedAttnRunner:
             # default dBias tolerance with the expected reduction-error growth.
             dbias_rtol = self.rtol
             dbias_atol = self.atol
-            if self.data_parallel_size > 1:
+            reduction_terms = self.data_parallel_size
+            if is_hip_extension():
+                # [ROCm] The bias is shared across the batch, so dBias sums every batch entry's
+                # contribution. CK writes each contribution in the input dtype and then sums
+                # them over the local batch, the same reduced-precision partial sums as across
+                # DP/FSDP ranks. Strongly cancelling elements (|terms| adding up to ~50 for a
+                # result of ~0.03) otherwise exceed the unscaled tolerance by rounding alone.
+                reduction_terms *= self.batch_size // self.data_parallel_size
+            if reduction_terms > 1:
                 default_tols = dtype_tols(self.dtype)
-                reduction_scale = sqrt(self.data_parallel_size)
+                reduction_scale = sqrt(reduction_terms)
                 if dbias_rtol is None:
                     dbias_rtol = default_tols["rtol"] * reduction_scale
                 if dbias_atol is None:
