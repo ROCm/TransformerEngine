@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -27,6 +29,7 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
@@ -462,6 +465,11 @@ class LinearAttentionBase(torch.nn.Module):
         scale: Optional[float] = None,
     ) -> None:
         super().__init__()
+        if IS_HIP_EXTENSION:
+            raise NotImplementedError(
+                f"{type(self).__name__} is not supported on ROCm: linear attention runs on "
+                "NVIDIA cuDNN frontend kernels, which have no ROCm implementation."
+            )
         if not torch.cuda.is_available():
             raise RuntimeError("TransformerEngine needs CUDA.")
 

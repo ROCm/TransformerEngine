@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 TEST_ROOT = Path(__file__).parent.resolve()
 WORKER = TEST_ROOT / "run_ep.py"
@@ -25,6 +28,7 @@ def _count_launcher_passes() -> int:
     return max(n, 1)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="NCCL EP is not supported on ROCm")
 @pytest.mark.skipif(torch.cuda.device_count() < 4, reason="EP requires >= 4 GPUs")
 def test_multi_process_ep():
     """Launch the EP unit-test suite across all visible GPUs.

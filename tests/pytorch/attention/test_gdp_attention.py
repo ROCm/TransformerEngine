@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +14,7 @@ from typing import Optional, Tuple
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch import GatedDeltaProductAttention
 
@@ -54,7 +57,10 @@ if os.getenv("NVTE_GDP_TEST_REQUIRED", "0") == "1" and not _GDP_OP_AVAILABLE:
         "cutedsl runtime is unavailable."
     )
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+    pytest.mark.skipif(IS_HIP_EXTENSION, reason="Linear attention is not supported on ROCm"),
+]
 requires_gdp = pytest.mark.skipif(
     not (_GDP_OP_AVAILABLE and _gdp_supported_arch()),
     reason="GDP requires the cuDNN frontend FROST kernel runtime on SM100/SM103/SM107",

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +14,7 @@ from typing import Optional, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
@@ -170,6 +173,11 @@ def ep_bootstrap(
     of trapping. Requires ``recv_capacity_per_rank``.
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    if IS_HIP_EXTENSION:
+        raise NotImplementedError(
+            "Expert parallelism is not supported on ROCm: it requires NCCL EP, which is not "
+            "part of the ROCm build."
+        )
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")

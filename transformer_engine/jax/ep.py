@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,6 +19,7 @@ import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
+from transformer_engine.jax.util import is_hip_extension
 from transformer_engine.jax.sharding import (
     _get_mesh,
     get_num_devices_in_mesh,
@@ -154,6 +157,11 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+    if is_hip_extension():
+        raise NotImplementedError(
+            "Expert parallelism is not supported on ROCm: it requires NCCL EP, which is not"
+            " part of the ROCm build."
+        )
     # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
     # at prepare time for the combine backward. Respect an explicit user override.
     os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")

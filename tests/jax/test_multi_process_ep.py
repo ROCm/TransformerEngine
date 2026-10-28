@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -61,6 +63,10 @@ from transformer_engine.jax.version_utils import (
     is_collective_stream_supported,
     is_xla_ffi_collectives_supported,
 )
+from transformer_engine.jax.util import is_hip_extension
+
+if is_hip_extension():
+    raise unittest.SkipTest("Expert parallelism (NCCL EP) is not supported on ROCm.")
 
 
 # ── Test config ─────────────────────────────────────────────────────────────
