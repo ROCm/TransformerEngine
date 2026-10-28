@@ -1224,6 +1224,9 @@ def _legacy_fused_attn(
         qkv,
         bias,
         softmax_offset,
+        None,
+        None,
+        None,
         SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
@@ -1303,6 +1306,9 @@ def fused_attn_thd(
         qkv,
         bias,
         softmax_offset,
+        None,
+        None,
+        None,
         SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
@@ -1327,12 +1333,18 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    # Scale inverses sit with the other primal inputs so jit can trace them.
+    # Their cotangents are None: this path does not differentiate the scales.
+    # Indexes are positions in this signature: 0-7 are differentiable, 8-22 are not.
+    nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     softmax_offset: Optional[jnp.ndarray],
+    q_scale_inv: Optional[jnp.ndarray],
+    k_scale_inv: Optional[jnp.ndarray],
+    v_scale_inv: Optional[jnp.ndarray],
     sequence_descriptor: SequenceDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
@@ -1355,6 +1367,9 @@ def _fused_attn(
         qkv,
         bias,
         softmax_offset,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         sequence_descriptor,
         seed,
         attn_bias_type,
@@ -1369,9 +1384,9 @@ def _fused_attn(
         context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
-        context_checkpoint_name=context_checkpoint_name,
-        stripe_size=stripe_size,
-        return_max_logit=return_max_logit,
+        context_checkpoint_name,
+        stripe_size,
+        return_max_logit,
     )
     return output
 
@@ -1380,6 +1395,9 @@ def _fused_attn_fwd_rule(
     qkv,
     bias,
     softmax_offset,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
     sequence_descriptor,
     seed,
     attn_bias_type,
@@ -1417,6 +1435,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
         return_max_logit=return_max_logit,
     )
     output = checkpoint_name(output, context_checkpoint_name)
@@ -1493,10 +1514,16 @@ def _fused_attn_bwd_rule(
         grad_bias = None
     if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
         grad_softmax_offset = None
+    # Cotangents follow the differentiable inputs, in signature order:
+    # qkv, bias, softmax_offset, q_scale_inv, k_scale_inv, v_scale_inv,
+    # sequence_descriptor, seed.
     return (
         grad_qkv,
         grad_bias,
         grad_softmax_offset,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -1582,6 +1609,9 @@ def fused_attn(
     score_mod_bprop: Optional[Callable] = None,
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
 ):
     """
@@ -1771,6 +1801,9 @@ def fused_attn(
         qkv,
         bias,
         softmax_offset,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
