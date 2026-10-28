@@ -20,6 +20,11 @@
 #include "../../utils.cuh"
 #include "../fp8/gated_fp8.cuh"
 #include "../mxfp8/gated_mxfp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#include "../../util/system.h"
+#include "../fp8/rocm_quantize_fp8_tdm.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -49,6 +54,11 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
 #ifdef __HIP_PLATFORM_AMD__
+      Tensor dummy_grad_tensor;
+      if (fp8::quantize_gated_tdm</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(
+              input, dummy_grad_tensor, output, p, stream)) {
+        break;
+      }
       fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
 #else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
@@ -146,6 +156,10 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
 #ifdef __HIP_PLATFORM_AMD__
+      if (fp8::quantize_gated_tdm</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad,
+                                                                           output, p, stream)) {
+        break;
+      }
       fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
 #else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();

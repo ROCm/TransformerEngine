@@ -36,6 +36,7 @@
 #include "../../common.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "./dequantize_mxfp8.cuh"
 #include "./rocm_vectorized_2d.cuh"
 
 #endif  // #ifndef __HIP_PLATFORM_AMD__
@@ -500,17 +501,22 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   // Row strides must be a whole number of vectors; VECTOR_WIDTH is 16 elements.
   constexpr size_t VECTOR_ELEMS = 16;
+  std::vector<int64_t> last_dims;
   if (last_dims_ptr == nullptr) {
     NVTE_CHECK(last_logical_dim % VECTOR_ELEMS == 0,
                "Grouped dequantize requires the last dimension to be divisible by ", VECTOR_ELEMS,
                "; got ", last_logical_dim, ".");
   } else {
-    const std::vector<int64_t> last_dims = read_dims_to_host(last_dims_ptr);
+    last_dims = read_dims_to_host(last_dims_ptr);
     for (size_t t = 0; t < num_tensors; t++) {
       NVTE_CHECK(static_cast<size_t>(last_dims[t]) % VECTOR_ELEMS == 0,
                  "Grouped dequantize requires each per-tensor last dimension to be divisible by ",
                  VECTOR_ELEMS, "; tensor ", t, " has ", last_dims[t], ".");
     }
+  }
+
+  if (dequantize_kernel::group_dequantize_tdm(*input, output, last_dims, stream)) {
+    return;
   }
 
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;

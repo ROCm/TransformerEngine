@@ -1193,8 +1193,9 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     }
   }
 
-  if (group_quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, activations, noop, output,
-                                                                 dbias, workspace, stream)) {
+  const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
+  if (group_quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+          input, activations, noop, output, dbias, workspace, use_2d_quantization, stream)) {
     return;
   }
 

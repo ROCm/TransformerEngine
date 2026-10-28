@@ -15,13 +15,14 @@ constexpr size_t TDM_WAVE_SIZE = 32;
 constexpr size_t TDM_WAVES = THREADS_PER_CHUNK / TDM_WAVE_SIZE;  // 4
 constexpr size_t TDM_BAND_Y = CHUNK_DIM_Y / TDM_WAVES;          // 32
 
+// Dequantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor.
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
           bool WITH_GEMM_SWIZZLED_SCALES>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    dequantize_mxfp8_tdm_kernel(const IType *input_ptr, OType *output_ptr,
-                                const e8m0_t *const scales_ptr, const size_t rows,
-                                const size_t cols, const size_t scales_stride,
-                                const size_t mx_swizzle_padded_dim) {
+__device__ __forceinline__ void dequantize_chunk(const IType *input_ptr, OType *output_ptr,
+                                                 const e8m0_t *const scales_ptr, const size_t rows,
+                                                 const size_t cols, const size_t scales_stride,
+                                                 const size_t mx_swizzle_padded_dim,
+                                                 const size_t chunk_Y, const size_t chunk_X) {
 #ifdef __gfx1250__
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
@@ -30,8 +31,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / TDM_WAVE_SIZE);
   const int lane = threadIdx.x % TDM_WAVE_SIZE;
-  const size_t band_offset_Y = blockIdx.y * CHUNK_DIM_Y + wave * TDM_BAND_Y;
-  const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
+  const size_t band_offset_Y = chunk_Y * CHUNK_DIM_Y + wave * TDM_BAND_Y;
+  const size_t chunk_offset_X = chunk_X * CHUNK_DIM_X;
   if (band_offset_Y >= rows) {
     return;
   }
@@ -114,6 +115,40 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif  // __gfx1250__
 }
 
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
+          bool WITH_GEMM_SWIZZLED_SCALES>
+__global__ void __launch_bounds__(THREADS_PER_CHUNK)
+    dequantize_mxfp8_tdm_kernel(const IType *input_ptr, OType *output_ptr,
+                                const e8m0_t *const scales_ptr, const size_t rows,
+                                const size_t cols, const size_t scales_stride,
+                                const size_t mx_swizzle_padded_dim) {
+  dequantize_chunk<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, WITH_GEMM_SWIZZLED_SCALES>(
+      input_ptr, output_ptr, scales_ptr, rows, cols, scales_stride, mx_swizzle_padded_dim,
+      blockIdx.y, blockIdx.x);
+}
+
+// A block per chunk of find_group_chunk, of tensors whose compact scales stack in tensor order.
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
+__global__ void __launch_bounds__(THREADS_PER_CHUNK)
+    grouped_dequantize_mxfp8_tdm_kernel(const IType *input_ptr, OType *output_ptr,
+                                        const e8m0_t *const scales_ptr,
+                                        const size_t first_logical_dim, const size_t num_tensors,
+                                        const int64_t *offsets_ptr, const int64_t *first_dims_ptr,
+                                        const int64_t *last_dims_ptr) {
+  constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
+  const auto chunk = tdm_kernel::find_group_chunk<CHUNK_DIM_Y, CHUNK_DIM_X>(
+      blockIdx.x, num_tensors, first_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr);
+  if (chunk.rows == 0) {
+    return;
+  }
+  // Both dimensions are divisible by the scale blocks.
+  const size_t scales_offset = chunk.offset / (USE_ROWWISE_SCALING ? SCALE_DIM_X : SCALE_DIM_Y);
+  dequantize_chunk<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, false>(
+      input_ptr + chunk.offset, output_ptr + chunk.offset, scales_ptr + scales_offset, chunk.rows,
+      chunk.cols, USE_ROWWISE_SCALING ? chunk.cols / SCALE_DIM_X : chunk.cols, 0, chunk.chunk_Y,
+      chunk.chunk_X);
+}
+
 // Returns false, leaving the work to the generic kernel, where TDM does not apply. The scale
 // arguments are the ones of the generic kernel.
 inline bool dequantize_tdm(const Tensor &input, const SimpleTensor &input_data, Tensor *output,
@@ -140,6 +175,61 @@ inline bool dequantize_tdm(const Tensor &input, const SimpleTensor &input_data, 
                           reinterpret_cast<const IType *>(input_data.dptr),
                           reinterpret_cast<OType *>(output->data.dptr), scales_ptr, rows, cols,
                           scales_stride, mx_swizzle_padded_dim););))));  // NOLINT(*)
+  NVTE_CHECK_CUDA(hipGetLastError());
+  return true;
+}
+
+// Grouped dequantize, whose compact scales stack in tensor order. With a common last dimension, the
+// group is one tensor. Otherwise, host_last_dims has the last dimensions, and the chunks of
+// find_group_chunk need them and the first dimensions divisible by 128, as upstream requires of
+// varying first dimensions, which only the device has.
+inline bool group_dequantize_tdm(const GroupedTensor &input, GroupedTensor *output,
+                                 const std::vector<int64_t> &host_last_dims, hipStream_t stream) {
+  const bool rowwise = input.has_data();
+  const SimpleTensor &input_data = rowwise ? input.data : input.columnwise_data;
+  const size_t first_logical_dim = input.logical_shape.data[0];
+  const size_t last_logical_dim = input.logical_shape.data[1];
+  const bool same_last_dim = input.all_same_last_dim();
+  const auto chunk_aligned = [](const int64_t dim) { return dim % CHUNK_DIM_X == 0; };
+  if (!tdm_kernel::use_tdm(first_logical_dim, last_logical_dim,
+                           {input_data.dptr, output->data.dptr}) ||
+      (!same_last_dim &&
+       (input.tensor_offsets.dptr == nullptr ||
+        (input.all_same_first_dim() && first_logical_dim % CHUNK_DIM_Y != 0) ||
+        !std::all_of(host_last_dims.begin(), host_last_dims.end(), chunk_aligned)))) {
+    return false;
+  }
+  const auto *const scales_ptr = reinterpret_cast<const e8m0_t *>(
+      rowwise ? input.scale_inv.dptr : input.columnwise_scale_inv.dptr);
+  const auto *const offsets_ptr = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
+  const auto *const first_dims_ptr = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
+  const auto *const last_dims_ptr = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
+  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+      (rowwise ? 1 : 32), SCALE_DIM_Y,
+      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+          (rowwise ? 32 : 1), SCALE_DIM_X,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+              input.dtype(), IType,
+              TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+                  output->dtype(), OType,
+                  const auto *const input_ptr = reinterpret_cast<const IType *>(input_data.dptr);
+                  auto *const output_ptr = reinterpret_cast<OType *>(output->data.dptr);
+                  if (same_last_dim) {
+                    const dim3 grid(DIVUP(last_logical_dim, CHUNK_DIM_X),
+                                    DIVUP(first_logical_dim, CHUNK_DIM_Y));
+                    dequantize_mxfp8_tdm_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, false>
+                        <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+                            input_ptr, output_ptr, scales_ptr, first_logical_dim,
+                            last_logical_dim,
+                            rowwise ? DIVUP(last_logical_dim, SCALE_DIM_X) : last_logical_dim, 0);
+                  } else {
+                    const dim3 grid(
+                        DIVUP(first_logical_dim * last_logical_dim, CHUNK_DIM_Y * CHUNK_DIM_X));
+                    grouped_dequantize_mxfp8_tdm_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                        <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+                            input_ptr, output_ptr, scales_ptr, first_logical_dim,
+                            input.num_tensors, offsets_ptr, first_dims_ptr, last_dims_ptr);
+                  }))));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
   return true;
 }

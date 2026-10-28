@@ -7,8 +7,8 @@
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
 // gfx1250 Tensor Data Mover pieces shared by the TDM quantize paths: the check whether TDM applies,
-// the reduction of per-chunk dbias partials, and amax. This expects its includer to have included
-// the common headers, util/system.h and util/cuda_runtime.h.
+// the chunks of grouped tensors, the reduction of per-chunk dbias partials, and amax. This expects
+// its includer to have included the common headers, util/system.h and util/cuda_runtime.h.
 
 #include <algorithm>
 #include <initializer_list>
@@ -27,6 +27,69 @@ inline bool use_tdm(const size_t rows, const size_t cols,
   const auto aligned = [](const void *ptr) { return reinterpret_cast<uintptr_t>(ptr) % 16 == 0; };
   return enabled && cuda::sm_arch() == 125 && cols % 16 == 0 && rows <= UINT32_MAX &&
          cols <= UINT32_MAX && std::all_of(tensors.begin(), tensors.end(), aligned);
+}
+
+#ifdef __gfx1250__
+// hip_bfloat16 rounds with per-element branches; __bf16 converts with one instruction.
+template <typename T>
+__device__ __forceinline__ T cvt_from_float(const float x) {
+  if constexpr (std::is_same_v<T, bf16>) {
+    return __builtin_bit_cast(T, static_cast<__bf16>(x));
+  } else {
+    return static_cast<T>(x);
+  }
+}
+#endif  // __gfx1250__
+
+// The last of num_tensors tensors that starts at or before element offset.
+__device__ __forceinline__ size_t find_tensor(const int64_t *offsets, const size_t num_tensors,
+                                              const size_t offset) {
+  size_t lo = 1;
+  size_t hi = num_tensors;
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (static_cast<size_t>(offsets[mid]) <= offset) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo - 1;
+}
+
+struct GroupChunk {
+  size_t offset;  // of the tensor's first element
+  size_t rows;    // of the tensor, or 0 past the last one
+  size_t cols;
+  size_t chunk_Y;
+  size_t chunk_X;
+};
+
+// Chunk `chunk` of a grouped tensor whose tensors have dimensions divisible by the chunk's, so that
+// tensor t owns the chunks from offsets[t] / (CHUNK_DIM_Y * CHUNK_DIM_X) on, row-major. Without
+// first_dims, every tensor has first_logical_dim rows.
+template <size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
+__device__ __forceinline__ GroupChunk find_group_chunk(const size_t chunk, const size_t num_tensors,
+                                                       const size_t first_logical_dim,
+                                                       const int64_t *offsets,
+                                                       const int64_t *first_dims,
+                                                       const int64_t *last_dims) {
+  constexpr size_t CHUNK_ELTS = CHUNK_DIM_Y * CHUNK_DIM_X;
+  const size_t chunk_offset = chunk * CHUNK_ELTS;
+  const size_t tensor_id = find_tensor(offsets, num_tensors, chunk_offset);
+  GroupChunk c{};
+  c.offset = static_cast<size_t>(offsets[tensor_id]);
+  c.rows = first_dims != nullptr ? static_cast<size_t>(first_dims[tensor_id]) : first_logical_dim;
+  c.cols = static_cast<size_t>(last_dims[tensor_id]);
+  if (chunk_offset >= c.offset + c.rows * c.cols) {
+    c.rows = 0;
+    return c;
+  }
+  const size_t chunks_X = c.cols / CHUNK_DIM_X;
+  const size_t tensor_chunk = (chunk_offset - c.offset) / CHUNK_ELTS;
+  c.chunk_Y = tensor_chunk / chunks_X;
+  c.chunk_X = tensor_chunk % chunks_X;
+  return c;
 }
 
 namespace tdm_dbias_kernel {

@@ -694,9 +694,9 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const auto [rows, cols] = input.flat_2d_dims();
 
 #ifdef __HIP_PLATFORM_AMD__
-  if (!use_2d_quantization &&
-      quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
-                                                           workspace, stream)) {
+  if (quantize_tdm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
+                                                           workspace, use_2d_quantization,
+                                                           stream)) {
     return;
   }
 

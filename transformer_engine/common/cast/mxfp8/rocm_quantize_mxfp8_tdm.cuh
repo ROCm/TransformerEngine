@@ -21,6 +21,8 @@ namespace dispatch {
 namespace mxfp8 {
 namespace tdm_kernel {
 
+using common::find_group_chunk;
+using common::find_tensor;
 using common::reduce_dbias_tdm;
 using common::use_tdm;
 
@@ -31,6 +33,7 @@ constexpr size_t WAVE_SIZE = 32;
 constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
 constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
 constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
+constexpr size_t TILE_2D = 32;  // 2D scaling shares a scale per TILE_2D x TILE_2D tile
 constexpr size_t MULTI_MAX_TENSORS = 1024;
 static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
               "A dbias partial row covers a chunk");
@@ -39,15 +42,7 @@ template <typename T>
 using band_t = T[BAND_Y][CHUNK_DIM_X];
 
 #ifdef __gfx1250__
-// hip_bfloat16 rounds with per-element branches; __bf16 converts with one instruction.
-template <typename T>
-__device__ __forceinline__ T cvt_from_float(const float x) {
-  if constexpr (std::is_same_v<T, bf16>) {
-    return __builtin_bit_cast(T, static_cast<__bf16>(x));
-  } else {
-    return static_cast<T>(x);
-  }
-}
+using common::cvt_from_float;
 
 // The e8m0 scale rounds up, so scaled finite values stay within the FP8 range and need no clamp:
 // this matches static_cast<OType> bit for bit, including Inf and NaN, at two values per instruction.
@@ -65,15 +60,22 @@ __device__ __forceinline__ uint32_t cvt_4x_to_fp8(const float x0, const float x1
   return static_cast<uint32_t>(packed);
 }
 
+// With 2D scaling, byte t of tile_exponents is the biased exponent of the band's tile t; this
+// returns the one of band column x.
+__device__ __forceinline__ e8m0_t tile_exponent(const uint32_t tile_exponents, const int x) {
+  return static_cast<e8m0_t>(tile_exponents >> (x / static_cast<int>(TILE_2D) * 8));
+}
+
 // Rowwise MXFP8 of a band in LDS: per step, 8 lanes cover a row with 16 elements each and a lane
-// pair shares a scale. Writes the scales of the first valid_rows rows and valid_scales scale
-// columns, and returns the lane's amax.
-template <typename IType, typename OType, size_t SCALE_DIM_X>
+// pair shares a scale, or with IS_2D the one of its tile. Writes the scales of the first valid_rows
+// rows and valid_scales scale columns, and returns the lane's amax, which IS_2D leaves at 0.
+template <typename IType, typename OType, size_t SCALE_DIM_X, bool IS_2D = false>
 __device__ __forceinline__ float quantize_band_rowwise(const band_t<IType> &in, band_t<OType> &out,
                                                        e8m0_t *const scales,
                                                        const size_t scale_stride,
                                                        const size_t valid_rows,
-                                                       const size_t valid_scales) {
+                                                       const size_t valid_scales,
+                                                       const uint32_t tile_exponents = 0) {
   constexpr size_t ELEMS = 16;
   constexpr size_t LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
   constexpr size_t ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
@@ -88,15 +90,19 @@ __device__ __forceinline__ float quantize_band_rowwise(const band_t<IType> &in, 
     const size_t y = step * ROWS_PER_STEP + lane_offset_Y;
     Vec<IType, ELEMS> x;
     x.load_from(&in[y][lane_offset_X]);
-    float thread_amax = 0;
+    e8m0_t biased_exponent;
+    if constexpr (IS_2D) {
+      biased_exponent = tile_exponent(tile_exponents, lane_offset_X);
+    } else {
+      float thread_amax = 0;
 #pragma unroll
-    for (int j = 0; j < ELEMS; j++) {
-      thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(x.data.elt[j])));
+      for (int j = 0; j < ELEMS; j++) {
+        thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(x.data.elt[j])));
+      }
+      amax = fmaxf(amax, thread_amax);
+      const float scale_amax = rocm_subwarp_allreduce<LANES_PER_SCALE>(thread_amax, rocm_op::max{});
+      biased_exponent = ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
     }
-    amax = fmaxf(amax, thread_amax);
-    const float scale_amax = rocm_subwarp_allreduce<LANES_PER_SCALE>(thread_amax, rocm_op::max{});
-    const e8m0_t biased_exponent =
-        ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
     if (lane % LANES_PER_SCALE == 0 && y < valid_rows && scale_offset_X < valid_scales) {
       scales[y * scale_stride + scale_offset_X] = biased_exponent;
     }
@@ -116,15 +122,11 @@ __device__ __forceinline__ float quantize_band_rowwise(const band_t<IType> &in, 
   return amax;
 }
 
-// Colwise MXFP8 of a band in LDS: each lane owns COLS_PER_LANE adjacent columns, with one pass for
-// the amaxes and one to convert. Writes the scales of the first valid_cols columns and returns the
-// lane's amax.
-template <typename IType, typename OType>
-__device__ __forceinline__ float quantize_band_colwise(const band_t<IType> &in, band_t<OType> &out,
-                                                       e8m0_t *const scales,
-                                                       const size_t valid_cols) {
+// Raises col_amax to the amaxes of the lane's COLS_PER_LANE adjacent columns of a band in LDS.
+template <typename IType>
+__device__ __forceinline__ void band_column_amaxes(const band_t<IType> &in,
+                                                   float (&col_amax)[COLS_PER_LANE]) {
   const int lane_offset_X = (threadIdx.x % WAVE_SIZE) * COLS_PER_LANE;
-  float col_amax[COLS_PER_LANE] = {};
 #pragma unroll
   for (int y = 0; y < BAND_Y; y++) {
     Vec<IType, COLS_PER_LANE> x;
@@ -134,13 +136,30 @@ __device__ __forceinline__ float quantize_band_colwise(const band_t<IType> &in, 
       col_amax[i] = fmaxf(col_amax[i], fabsf(static_cast<float>(x.data.elt[i])));
     }
   }
+}
+
+// Colwise MXFP8 of a band in LDS: each lane owns COLS_PER_LANE adjacent columns, with one pass for
+// the amaxes and one to convert, or with IS_2D only the latter, with the scales of the tiles.
+// Writes the scales of the first valid_cols columns and returns the lane's amax, which IS_2D leaves
+// at 0.
+template <typename IType, typename OType, bool IS_2D = false>
+__device__ __forceinline__ float quantize_band_colwise(const band_t<IType> &in, band_t<OType> &out,
+                                                       e8m0_t *const scales,
+                                                       const size_t valid_cols,
+                                                       const uint32_t tile_exponents = 0) {
+  const int lane_offset_X = (threadIdx.x % WAVE_SIZE) * COLS_PER_LANE;
+  float col_amax[COLS_PER_LANE] = {};
+  if constexpr (!IS_2D) {
+    band_column_amaxes(in, col_amax);
+  }
   float amax = 0;
   float block_scale_inverse[COLS_PER_LANE];
 #pragma unroll
   for (int i = 0; i < COLS_PER_LANE; i++) {
     amax = fmaxf(amax, col_amax[i]);
     const e8m0_t biased_exponent =
-        ptx::float_to_e8m0(col_amax[i] * Quantized_Limits<OType>::max_norm_rcp);
+        IS_2D ? tile_exponent(tile_exponents, lane_offset_X)
+              : ptx::float_to_e8m0(col_amax[i] * Quantized_Limits<OType>::max_norm_rcp);
     if (static_cast<size_t>(lane_offset_X + i) < valid_cols) {
       scales[lane_offset_X + i] = biased_exponent;
     }
@@ -162,10 +181,10 @@ __device__ __forceinline__ float quantize_band_colwise(const band_t<IType> &in, 
 #endif  // __gfx1250__
 
 // Quantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor and writes its dbias partials to row
-// dbias_row of dbias_workspace.
+// dbias_row of dbias_workspace. IS_2D scales TILE_2D x TILE_2D tiles instead of rows and columns.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X>
+          size_t SCALE_DIM_X, bool IS_2D>
 __device__ __forceinline__ void quantize_chunk(
     const IType *input_ptr, const IType *act_input_ptr, OType *output_rowwise,
     OType *output_colwise, e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
@@ -182,6 +201,7 @@ __device__ __forceinline__ void quantize_chunk(
   constexpr size_t AUX_BYTES = std::max({OUT_BYTES, ACT_BYTES, size_t{1}});
   static_assert(!USE_COLWISE_SCALING || SCALE_DIM_Y == BAND_Y,
                 "A band must be one colwise scale block");
+  static_assert(!IS_2D || TILE_2D == BAND_Y, "A band must be one row of tiles");
 
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
   // Stages the activation input of DACT, then holds the outputs once in_sh has the activations.
@@ -244,22 +264,45 @@ __device__ __forceinline__ void quantize_chunk(
       }
     }
 
+    // The amax of a tile scales all its elements; in the colwise layout, its lanes are adjacent.
+    uint32_t tile_exponents = 0;
+    if constexpr (IS_2D) {
+      constexpr int TILE_LANES = TILE_2D / COLS_PER_LANE;  // 8
+      float col_amax[COLS_PER_LANE] = {};
+      band_column_amaxes(in, col_amax);
+      float lane_amax = 0;
+#pragma unroll
+      for (int i = 0; i < COLS_PER_LANE; i++) {
+        lane_amax = fmaxf(lane_amax, col_amax[i]);
+      }
+      amax = fmaxf(amax, lane_amax);
+      const int biased_exponent =
+          ptx::float_to_e8m0(rocm_subwarp_allreduce<TILE_LANES>(lane_amax, rocm_op::max{}) *
+                             Quantized_Limits<OType>::max_norm_rcp);
+#pragma unroll
+      for (int t = 0; t < CHUNK_DIM_X / TILE_2D; t++) {
+        tile_exponents |=
+            static_cast<uint32_t>(__builtin_amdgcn_readlane(biased_exponent, t * TILE_LANES))
+            << (8 * t);
+      }
+    }
+
     if constexpr (USE_ROWWISE_SCALING) {
       const size_t scale_offset_X = chunk_offset_X / SCALE_DIM_X;
       // Like the 128-wide chunks of the generic kernel, this also fills the scale padding.
-      amax = fmaxf(amax, quantize_band_rowwise<IType, OType, SCALE_DIM_X>(
+      amax = fmaxf(amax, quantize_band_rowwise<IType, OType, SCALE_DIM_X, IS_2D>(
                              in, out_rowwise,
                              scales_rowwise + band_offset_Y * scale_stride_rowwise + scale_offset_X,
                              scale_stride_rowwise, rows - band_offset_Y,
-                             scale_stride_rowwise - scale_offset_X));
+                             scale_stride_rowwise - scale_offset_X, tile_exponents));
       tdm::store_2d(output_rowwise, out_rowwise, rows, cols, cols, band_offset_Y, chunk_offset_X);
     }
     if constexpr (USE_COLWISE_SCALING) {
-      amax = fmaxf(amax, quantize_band_colwise<IType, OType>(
+      amax = fmaxf(amax, quantize_band_colwise<IType, OType, IS_2D>(
                              in, out_colwise,
                              scales_colwise + band_offset_Y / SCALE_DIM_Y * scale_stride_colwise +
                                  chunk_offset_X,
-                             cols - chunk_offset_X));
+                             cols - chunk_offset_X, tile_exponents));
       tdm::store_2d(output_colwise, out_colwise, rows, cols, cols, band_offset_Y, chunk_offset_X);
     }
   }
@@ -298,7 +341,7 @@ __device__ __forceinline__ void quantize_chunk(
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X>
+          size_t SCALE_DIM_X, bool IS_2D>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_tdm_kernel(const IType *input, const IType *act_input, OType *output_rowwise,
                               OType *output_colwise, e8m0_t *scales_rowwise,
@@ -311,69 +354,83 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       return;
     }
   }
-  quantize_chunk<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, SCALE_DIM_Y, SCALE_DIM_X>(
-      input, act_input, output_rowwise, output_colwise, scales_rowwise, scales_colwise,
-      dbias_workspace, amax, rows, cols, scale_stride_rowwise, scale_stride_colwise, blockIdx.y,
-      blockIdx.x, blockIdx.y);
+  quantize_chunk<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                 IS_2D>(input, act_input, output_rowwise, output_colwise, scales_rowwise,
+                        scales_colwise, dbias_workspace, amax, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise, blockIdx.y, blockIdx.x, blockIdx.y);
 }
 
-// The tensors share the last dimension and each has a multiple of CHUNK_DIM_Y rows, so no chunk
-// straddles two of them. The dbias partials of chunk row blockIdx.y go to that workspace row.
+// With a common last dimension, the tensors each have a multiple of CHUNK_DIM_Y rows, so no chunk
+// of the 2D grid straddles two of them, and the dbias partials of chunk row blockIdx.y go to that
+// workspace row. Otherwise, the 1D grid has a block per chunk of find_group_chunk and no dbias.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
-          size_t SCALE_DIM_X>
+          size_t SCALE_DIM_X, bool IS_2D>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     grouped_quantize_mxfp8_tdm_kernel(const IType *input, const IType *act_input,
                                       OType *output_rowwise, OType *output_colwise,
                                       e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
                                       const float *noop, float *dbias_workspace, float *amax,
-                                      const size_t first_logical_dim, const size_t cols,
+                                      const size_t first_logical_dim, const size_t last_logical_dim,
                                       const size_t num_tensors, const int64_t *offsets_ptr,
-                                      const int64_t *first_dims_ptr) {
+                                      const int64_t *first_dims_ptr,
+                                      const int64_t *last_dims_ptr) {
   if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }
   }
-  const size_t chunk_offset_Y = static_cast<size_t>(blockIdx.y) * CHUNK_DIM_Y;
-  size_t tensor_id;
   size_t tensor_offset;
-  if (offsets_ptr == nullptr) {
-    const size_t rows_per_tensor = first_logical_dim / num_tensors;
-    tensor_id = chunk_offset_Y / rows_per_tensor;
-    tensor_offset = tensor_id * rows_per_tensor * cols;
-  } else {
-    // The last tensor starting at or before the chunk
-    size_t lo = 1;
-    size_t hi = num_tensors;
-    while (lo < hi) {
-      const size_t mid = lo + (hi - lo) / 2;
-      if (static_cast<size_t>(offsets_ptr[mid]) <= chunk_offset_Y * cols) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
+  size_t rows;
+  size_t cols;
+  size_t chunk_Y;
+  size_t chunk_X;
+  size_t scales_offset_rowwise;
+  size_t scales_offset_colwise;
+  if (last_dims_ptr == nullptr) {
+    cols = last_logical_dim;
+    const size_t chunk_offset_Y = static_cast<size_t>(blockIdx.y) * CHUNK_DIM_Y;
+    size_t tensor_id;
+    if (offsets_ptr == nullptr) {
+      const size_t rows_per_tensor = first_logical_dim / num_tensors;
+      tensor_id = chunk_offset_Y / rows_per_tensor;
+      tensor_offset = tensor_id * rows_per_tensor * cols;
+    } else {
+      tensor_id = find_tensor(offsets_ptr, num_tensors, chunk_offset_Y * cols);
+      tensor_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
     }
-    tensor_id = lo - 1;
-    tensor_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
+    rows = first_dims_ptr != nullptr ? static_cast<size_t>(first_dims_ptr[tensor_id])
+                                     : first_logical_dim / num_tensors;
+    const size_t tensor_offset_Y = tensor_offset / cols;
+    chunk_Y = blockIdx.y - tensor_offset_Y / CHUNK_DIM_Y;
+    chunk_X = blockIdx.x;
+    scales_offset_rowwise = tensor_offset_Y * DIVUP(cols, SCALE_DIM_X);
+    scales_offset_colwise = tensor_offset_Y / SCALE_DIM_Y * cols;
+  } else {
+    const auto chunk = find_group_chunk<CHUNK_DIM_Y, CHUNK_DIM_X>(
+        blockIdx.x, num_tensors, first_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    tensor_offset = chunk.offset;
+    rows = chunk.rows;
+    cols = chunk.cols;
+    chunk_Y = chunk.chunk_Y;
+    chunk_X = chunk.chunk_X;
+    // Both dimensions are divisible by the scale blocks.
+    scales_offset_rowwise = tensor_offset / SCALE_DIM_X;
+    scales_offset_colwise = tensor_offset / SCALE_DIM_Y;
   }
-  const size_t rows = first_dims_ptr != nullptr ? static_cast<size_t>(first_dims_ptr[tensor_id])
-                                                : first_logical_dim / num_tensors;
-  const size_t tensor_offset_Y = tensor_offset / cols;
-  const size_t chunk_Y = blockIdx.y - tensor_offset_Y / CHUNK_DIM_Y;
   if (chunk_Y * CHUNK_DIM_Y >= rows) {
     return;
   }
   constexpr bool ROWWISE = SCALE_DIM_X > 1;
   constexpr bool COLWISE = SCALE_DIM_Y > 1;
-  const size_t scale_stride_rowwise = DIVUP(cols, SCALE_DIM_X);
-  quantize_chunk<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, SCALE_DIM_Y, SCALE_DIM_X>(
-      input + tensor_offset, IS_DACT ? act_input + tensor_offset : nullptr,
-      ROWWISE ? output_rowwise + tensor_offset : nullptr,
-      COLWISE ? output_colwise + tensor_offset : nullptr,
-      ROWWISE ? scales_rowwise + tensor_offset_Y * scale_stride_rowwise : nullptr,
-      COLWISE ? scales_colwise + tensor_offset_Y / SCALE_DIM_Y * cols : nullptr, dbias_workspace,
-      amax, rows, cols, scale_stride_rowwise, cols, chunk_Y, blockIdx.x, blockIdx.y);
+  quantize_chunk<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                 IS_2D>(input + tensor_offset, IS_DACT ? act_input + tensor_offset : nullptr,
+                        ROWWISE ? output_rowwise + tensor_offset : nullptr,
+                        COLWISE ? output_colwise + tensor_offset : nullptr,
+                        ROWWISE ? scales_rowwise + scales_offset_rowwise : nullptr,
+                        COLWISE ? scales_colwise + scales_offset_colwise : nullptr,
+                        dbias_workspace, amax, rows, cols, DIVUP(cols, SCALE_DIM_X), cols, chunk_Y,
+                        chunk_X, blockIdx.y);
 }
 
 struct MultiQuantizeArgs {
@@ -409,7 +466,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if (chunk_Y * CHUNK_DIM_Y >= rows || blockIdx.x * CHUNK_DIM_X >= cols) {
     return;
   }
-  quantize_chunk<false, false, false, Empty, nullptr, IType, OType, SCALE_DIM_Y, SCALE_DIM_X>(
+  quantize_chunk<false, false, false, Empty, nullptr, IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                 false>(
       static_cast<const IType *>(args.input[t]), nullptr,
       static_cast<OType *>(args.output_rowwise[t]), static_cast<OType *>(args.output_colwise[t]),
       static_cast<e8m0_t *>(args.scales_rowwise[t]), static_cast<e8m0_t *>(args.scales_colwise[t]),
@@ -421,7 +479,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *noop, Tensor *output,
-                  Tensor *dbias, Tensor *workspace, hipStream_t stream) {
+                  Tensor *dbias, Tensor *workspace, const bool use_2d_quantization,
+                  hipStream_t stream) {
   using namespace tdm_kernel;
   const bool rowwise = output->has_data();
   const bool colwise = output->has_columnwise_data();
@@ -448,19 +507,22 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
               (colwise ? 32 : 1), SCALE_DIM_Y,
               TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
                   (rowwise ? 32 : 1), SCALE_DIM_X,
-                  quantize_mxfp8_tdm_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                            SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
-                      reinterpret_cast<const IType *>(input.data.dptr),
-                      IS_DACT ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                      reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
-                      reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr,
-                      reinterpret_cast<float *>(output->amax.dptr), rows, cols,
-                      rowwise ? output->scale_inv.shape[1] : 1,
-                      colwise ? output->columnwise_scale_inv.shape[1] : 1);))));  // NOLINT(*)
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      use_2d_quantization, IS_2D,
+                      quantize_mxfp8_tdm_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+                                                OType, SCALE_DIM_Y, SCALE_DIM_X, IS_2D>
+                      <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input.data.dptr),
+                          IS_DACT ? reinterpret_cast<const IType *>(act_input->data.dptr)
+                                  : nullptr,
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                          reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
+                          reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
+                          reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr,
+                          reinterpret_cast<float *>(output->amax.dptr), rows, cols,
+                          rowwise ? output->scale_inv.shape[1] : 1,
+                          colwise ? output->columnwise_scale_inv.shape[1] : 1);)))));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -476,28 +538,35 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 bool group_quantize_tdm(const GroupedTensor *input, const GroupedTensor *activations,
                         const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
-                        Tensor *workspace, hipStream_t stream) {
+                        Tensor *workspace, const bool use_2d_quantization, hipStream_t stream) {
   using namespace tdm_kernel;
   const bool rowwise = output->has_data();
   const bool colwise = output->has_columnwise_data();
   const size_t first_logical_dim = input->logical_shape.data[0];
-  const size_t cols = input->logical_shape.data[1];
+  const size_t last_logical_dim = input->logical_shape.data[1];
   const size_t num_tensors = input->num_tensors;
   const bool same_shape = output->all_same_shape();
-  // Per-tensor rows of a varying first dim are device-side and, as upstream requires, 128-aligned.
+  const bool same_last_dim = output->all_same_last_dim();
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  // Varying dimensions are device-side and, as upstream requires, divisible by 128. Upstream also
+  // has no dbias for varying last dimensions.
   const size_t tensor_rows = same_shape ? first_logical_dim / num_tensors : first_logical_dim;
-  if (!output->all_same_last_dim() || tensor_rows % CHUNK_DIM_Y != 0 ||
-      !use_tdm(first_logical_dim, cols,
+  if ((!output->varying_both_dims() && tensor_rows % CHUNK_DIM_Y != 0) ||
+      (!same_last_dim && (IS_DBIAS || offsets_ptr == nullptr)) ||
+      !use_tdm(first_logical_dim, last_logical_dim,
                {input->data.dptr, IS_DACT ? activations->data.dptr : nullptr,
                 rowwise ? output->data.dptr : nullptr,
                 colwise ? output->columnwise_data.dptr : nullptr,
                 IS_DBIAS ? workspace->data.dptr : nullptr})) {
     return false;
   }
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
+  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
-  const dim3 grid(DIVUP(cols, CHUNK_DIM_X), DIVUP(first_logical_dim, CHUNK_DIM_Y));
+  const dim3 grid = same_last_dim ? dim3(DIVUP(last_logical_dim, CHUNK_DIM_X),
+                                         DIVUP(first_logical_dim, CHUNK_DIM_Y))
+                                  : dim3(DIVUP(first_logical_dim * last_logical_dim,
+                                               CHUNK_DIM_Y * CHUNK_DIM_X));
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -506,24 +575,30 @@ bool group_quantize_tdm(const GroupedTensor *input, const GroupedTensor *activat
               (colwise ? 32 : 1), SCALE_DIM_Y,
               TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
                   (rowwise ? 32 : 1), SCALE_DIM_X,
-                  grouped_quantize_mxfp8_tdm_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                    OType, SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
-                      reinterpret_cast<const IType *>(input->data.dptr),
-                      IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr,
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                      reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
-                      reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr,
-                      reinterpret_cast<float *>(output->amax.dptr), first_logical_dim, cols,
-                      num_tensors, offsets_ptr, first_dims_ptr);))));  // NOLINT(*)
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      use_2d_quantization, IS_2D,
+                      grouped_quantize_mxfp8_tdm_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                                                        IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                                                        IS_2D>
+                      <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input->data.dptr),
+                          IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr)
+                                  : nullptr,
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                          reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
+                          reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
+                          reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr,
+                          reinterpret_cast<float *>(output->amax.dptr), first_logical_dim,
+                          last_logical_dim, num_tensors, offsets_ptr, first_dims_ptr,
+                          last_dims_ptr);)))));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input->dtype(), IType,
-        reduce_dbias_tdm<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, cols,
-                                num_tensors, grid.y, same_shape ? nullptr : offsets_ptr,
+        reduce_dbias_tdm<IType>(reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr,
+                                last_logical_dim, num_tensors, grid.y,
+                                same_shape ? nullptr : offsets_ptr,
                                 same_shape ? nullptr : first_dims_ptr, stream););
   }
   return true;
