@@ -16,6 +16,8 @@ genuine neighbor and there is no self to exclude across the PID namespace.
 handle by PCI address and reports the pre-existing processes on that GPU.
 """
 
+import os
+
 
 def _proc_cmdline(pid):
     """Full argv for *pid* from /proc, or None if unreadable (e.g. another pid namespace)."""
@@ -34,13 +36,15 @@ def _proc_cmdline(pid):
         return None
 
 
-# Monitoring tools open every GPU but aren't real compute interference.
-# Matched after stripping non-alphanumerics, so e.g. "rocm-smi" -> "rocmsmi".
+# Monitoring tools open every GPU but aren't real compute interference. Matched on the
+# executable's basename after stripping non-alphanumerics, so e.g. "/opt/rocm/bin/rocm-smi"
+# -> "rocmsmi".
 _IGNORED_PROC_NAMES = ("nvtop", "amdsmi", "rocmsmi")
 
 
 def _is_ignored_proc(name):
-    base = "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+    exe = os.path.basename(str(name or "").strip())
+    base = "".join(ch for ch in exe.lower() if ch.isalnum())
     return bool(base) and any(base.startswith(n) for n in _IGNORED_PROC_NAMES)
 
 
