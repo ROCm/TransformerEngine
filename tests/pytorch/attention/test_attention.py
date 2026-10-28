@@ -4374,7 +4374,7 @@ _DETERMINISTIC_LAYOUT_MASK_COMBOS = [
 def test_deterministic_bwd_ck(
     dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
 ):
-    """Test deterministic backward (CK backend): bitwise reproducibility.
+    """Test deterministic backward (CK backend): bitwise reproducibility and numerics.
 
     Determinism mode must be enabled externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
     """
@@ -4387,7 +4387,7 @@ def test_deterministic_bwd_ck(
         attn_mask_type=attn_mask_type,
     )
 
-    _, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -4396,6 +4396,7 @@ def test_deterministic_bwd_ck(
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
+    unfused_attn_supported = available_backends[2]
 
     kwargs = dict(
         dtype=dtype,
@@ -4414,3 +4415,23 @@ def test_deterministic_bwd_ck(
     torch.testing.assert_close(out1, out2, atol=0, rtol=0, msg="output not bitwise reproducible")
     for name, x, y in zip(("dQ", "dK", "dV"), grads1[:3], grads2[:3]):
         torch.testing.assert_close(x, y, atol=0, rtol=0, msg=f"{name} not bitwise reproducible")
+
+    # Numerics against the unfused (PyTorch) implementation: a deterministic kernel that is
+    # consistently wrong is still bitwise reproducible. The gradients in this setup are small
+    # (max |dQ| ~1e-4), so the tolerance scales with each reference tensor's magnitude instead
+    # of a fixed atol that would exceed the values themselves.
+    if unfused_attn_supported:
+        ref_out, _, ref_grads = run_dot_product_attention(
+            **{**kwargs, "backend": "UnfusedDotProductAttention"}
+        )
+        tol = 3e-2 if dtype == torch.bfloat16 else 5e-3
+        for name, x, y in zip(
+            ("output", "dQ", "dK", "dV"), (out1, *grads1[:3]), (ref_out, *ref_grads[:3])
+        ):
+            torch.testing.assert_close(
+                x,
+                y,
+                atol=tol * y.abs().max().item(),
+                rtol=tol,
+                msg=lambda m, name=name: f"{name} does not match the unfused reference\n{m}",
+            )
