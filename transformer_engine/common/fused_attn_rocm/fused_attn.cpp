@@ -295,9 +295,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
-  // Only ck returns the max logit, from its tile kernels without bias or dropout on the archs whose
-  // pipelines write it. The opt-in small-seq kernels do not write it, and the backward cannot tell
-  // that the forward skipped them, so configs that may use them go elsewhere.
+  // Only ck returns the max logit, from its fp16/bf16 tile kernels without bias or dropout on the
+  // archs whose pipelines write it. The opt-in small-seq kernels do not write it, and the backward
+  // cannot tell that the forward skipped them, so configs that may use them go elsewhere.
   const char* ck_max_logit_unsupported = nullptr;
   if(return_max_logit){
     if(!nvte_fused_attn_ck){
@@ -308,6 +308,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       ck_max_logit_unsupported = "with bias";
     }else if(dropout != 0.0f){
       ck_max_logit_unsupported = "with dropout";
+    }else if(q_dtype == NVTEDType::kNVTEFloat8E4M3){
+      ck_max_logit_unsupported = "with FP8 inputs";
     }else if(fused_attn_rocm::is_small_seq_possible(
                  static_cast<DType>(q_dtype), qkv_layout, bias_type, attn_mask_type, dropout,
                  max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, num_attn_heads,
