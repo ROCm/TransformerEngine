@@ -101,6 +101,18 @@ class AttentionLogging:
         AttentionLogging._is_logging_setup = True
 
 
+def _scale_inv_operand(scale_inv):
+    """One FP32 inverse scale, or an empty buffer when the caller has no scale."""
+    if scale_inv is None:
+        return jnp.zeros((0,), dtype=jnp.float32)
+    scale_inv = jnp.asarray(scale_inv, dtype=jnp.float32)
+    if scale_inv.size != 1:
+        raise ValueError(
+            f"FP8 fused attention scale_inv must contain one value, got shape {scale_inv.shape}"
+        )
+    return scale_inv.reshape((1,))
+
+
 @partial(
     jax.tree_util.register_dataclass,
     data_fields=[],
@@ -463,7 +475,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     name = "te_fused_attn_forward_ffi"
     multiple_results = True
-    impl_static_args = (14,)
+    impl_static_args = (17,)
     inner_primitive = None
     outer_primitive = None
 
@@ -483,6 +495,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_ids,
         _q_segment_pos,
         _kv_segment_pos,
+        q_scale_inv_aval,
+        k_scale_inv_aval,
+        v_scale_inv_aval,
         *,
         config: _FusedAttnConfig,
     ):
@@ -496,6 +511,20 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert (
             q_dtype == k_dtype == v_dtype == bias_dtype
         ), f"q_dtype={q_dtype}, k_dtype={k_dtype}, v_dtype={v_dtype}, bias_dtype={bias_dtype}"
+        fp8_input = q_dtype in {
+            dtypes.canonicalize_dtype(jnp.float8_e4m3fn),
+            dtypes.canonicalize_dtype(jnp.float8_e4m3fnuz),
+        }
+        expected_scale_shape = (1,) if fp8_input else (0,)
+        for name, aval in (
+            ("q_scale_inv", q_scale_inv_aval),
+            ("k_scale_inv", k_scale_inv_aval),
+            ("v_scale_inv", v_scale_inv_aval),
+        ):
+            assert aval.dtype == jnp.float32, f"{name} must be float32, got {aval.dtype}"
+            assert aval.shape == expected_scale_shape, (
+                f"{name} shape must be {expected_scale_shape} for this dtype, got {aval.shape}"
+            )
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype, (
             f"q_seqlen_or_cu_seqlen_aval={q_seqlen_or_cu_seqlen_aval},"
             f" kv_seqlen_or_cu_seqlen_aval={kv_seqlen_or_cu_seqlen_aval}"
@@ -512,7 +541,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
-        out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
+        # ROCm FP8 E4M3 fused attention returns BF16.
+        output_dtype = (
+            dtypes.canonicalize_dtype(jnp.bfloat16)
+            if is_hip_extension() and fp8_input
+            else q_dtype
+        )
+        out_aval = q_aval.update(shape=output_shape, dtype=output_dtype)
 
         # backend determines the softmax buffer shape/dtype
         input_batch = reduce(operator.mul, batch_shape)
@@ -682,6 +717,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_ids,
         _q_segment_pos,
         _kv_segment_pos,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         *,
         config: _FusedAttnConfig,
     ):
@@ -725,7 +763,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _q_segment_ids,
             _kv_segment_ids,
             _q_segment_pos,
-            _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+            _kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,  # ffi_lowering needs number of parameters meets primitive.lowering
             input_batch=input_batch,
             bias_batch=bias_batch,
             q_max_seqlen=q_max_seqlen,
@@ -766,6 +807,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_ids,
         _q_segment_pos,
         _kv_segment_pos,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         config: _FusedAttnConfig,
     ):
         assert (
@@ -860,6 +904,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,
             config=config,
         )
         # Reduce cuDNN's raw Max tensor to TE's public per-head [H] max_logit.
@@ -1031,8 +1078,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
+        # segment_pos follows segment_ids. scale_inv is appended after those four operands.
+        arg_shardings[13] = arg_shardings[11]
+        arg_shardings[12] = arg_shardings[10]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
         max_logit_reduce_axes = (
@@ -2166,6 +2214,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,
         ):
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
@@ -2213,6 +2264,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         _kv_segment_ids,
                         _q_segment_pos,
                         _kv_segment_pos,
+                        q_scale_inv,
+                        k_scale_inv,
+                        v_scale_inv,
                         config=helper.get_step_config(),
                     )
                     results.append((output, softmax_aux, rng_state, max_logit))
@@ -2473,6 +2527,9 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,
         ):  # pylint: disable=unused-argument
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
@@ -2535,6 +2592,9 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     jnp.zeros(0),
                     jnp.zeros(0),
                     jnp.zeros(0),
+                    q_scale_inv,
+                    k_scale_inv,
+                    v_scale_inv,
                     config=helper.get_step_config_for_striped(
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
@@ -2912,9 +2972,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
-        # Ensure segment_pos gets same sharding as ID.
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
+        # segment_pos follows segment_ids. scale_inv is appended after those four operands.
+        arg_shardings[13] = arg_shardings[11]
+        arg_shardings[12] = arg_shardings[10]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
         max_logit_reduce_axes = (
@@ -2938,6 +2998,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,
         ):
             _not_used = jnp.zeros(0, dtype=v.dtype)
 
@@ -2986,6 +3049,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                             _kv_segment_ids,
                             _q_segment_pos,
                             _kv_segment_pos,
+                            q_scale_inv,
+                            k_scale_inv,
+                            v_scale_inv,
                             config=helper.get_step_config(attn_mask_type),
                         )
                     )
@@ -3014,6 +3080,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                             _kv_segment_ids,
                             _q_segment_pos,
                             _kv_segment_pos,
+                            q_scale_inv,
+                            k_scale_inv,
+                            v_scale_inv,
                             config=helper.get_step_config(AttnMaskType.NO_MASK),
                         )
                     )
@@ -3039,6 +3108,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                             _kv_segment_ids,
                             _q_segment_pos,
                             _kv_segment_pos,
+                            q_scale_inv,
+                            k_scale_inv,
+                            v_scale_inv,
                             config=helper.get_step_config(AttnMaskType.NO_MASK),
                         )
                     )
@@ -3440,9 +3512,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
-        # Ensure segment_pos gets same sharding as ID.
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
+        # segment_pos follows segment_ids. scale_inv is appended after those four operands.
+        arg_shardings[13] = arg_shardings[11]
+        arg_shardings[12] = arg_shardings[10]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
         max_logit_reduce_axes = (
@@ -3466,6 +3538,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             kv_segment_ids,
             q_segment_pos,
             kv_segment_pos,
+            q_scale_inv,
+            k_scale_inv,
+            v_scale_inv,
         ):
             if q_segment_ids.size == 0 or kv_segment_ids.size == 0:
                 raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
@@ -3519,6 +3594,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         kv_segment_ids,
                         q_segment_pos,
                         kv_segment_pos,
+                        q_scale_inv,
+                        k_scale_inv,
+                        v_scale_inv,
                         config=config,
                     )
 
@@ -3781,6 +3859,9 @@ def fused_attn_fwd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
 ) -> jnp.ndarray:
     """
@@ -3915,12 +3996,19 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
+    # FP16/BF16 pass empty buffers. FP8 passes one FP32 inverse scale per tensor.
+    q_scale_inv = _scale_inv_operand(q_scale_inv)
+    k_scale_inv = _scale_inv_operand(k_scale_inv)
+    v_scale_inv = _scale_inv_operand(v_scale_inv)
     output, softmax_aux, rng_state, max_logit = primitive.bind(
         *qkv_for_primitive,
         bias,
         softmax_offset,
         seed,
         *seq_desc_flatten,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         config=fused_config,
     )
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))

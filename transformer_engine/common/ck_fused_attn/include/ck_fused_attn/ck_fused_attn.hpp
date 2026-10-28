@@ -16,9 +16,10 @@ namespace ck_fused_attn{
 
 // input qkv dtypes
 enum class DType {
-  kFloat16    = 0,  /*!< 16-bit float (E5M10) */
-  kBFloat16   = 1,  /*!< 16-bit bfloat (E8M7) */
-  kNumTypes         /*!< Number of supported types */
+  kFloat16  = 0,  /*!< 16-bit float (E5M10) */
+  kBFloat16 = 1,  /*!< 16-bit bfloat (E8M7) */
+  kFloat8   = 2,  /*!< 8-bit float (E4M3) input */
+  kNumTypes       /*!< Number of supported types */
 };
 
 // keep sync with mask_enum in mask.hpp
@@ -102,6 +103,14 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
   // Optional fp32 per-row max logit, same layout and strides as lse_ptr. Needs lse_ptr, no bias or
   // dropout, and the CK tile path (uses_fwd_v3 off, num_splits == 0).
   void* max_ptr = nullptr;
+
+  // For FP8 E4M3 input, the AITER fp8bf16 kernels require BF16.  
+  DType o_dtype = DType::kNumTypes;
+
+  // Per-tensor inverse scales for FP8 Q/K/V: one FP32 value per tensor.
+  const void* q_descale_ptr = nullptr;
+  const void* k_descale_ptr = nullptr;
+  const void* v_descale_ptr = nullptr;
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;

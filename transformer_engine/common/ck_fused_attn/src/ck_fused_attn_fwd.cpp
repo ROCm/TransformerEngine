@@ -128,7 +128,7 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
   log_value(log_file, "bias_ptr", fmha_args.bias_ptr);
   log_value(log_file, "rand_val_ptr", fmha_args.rand_val_ptr);
   log_value(log_file, "lse_ptr", fmha_args.lse_ptr);
-  log_value(log_file, "max_ptr", fmha_args.max_ptr);
+  log_value(log_file, "max_logits_ptr", fmha_args.max_logits_ptr);
   log_value(log_file, "o_ptr", fmha_args.o_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
@@ -243,7 +243,7 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   fmha_args.bias_ptr = bias_type==bias_enum::alibi? args.alibi_slope_ptr : args.bias_ptr;
   fmha_args.lse_ptr  = args.lse_ptr;
-  fmha_args.max_ptr  = args.max_ptr;
+  fmha_args.max_logits_ptr = args.max_ptr;
   fmha_args.o_ptr    = args.o_ptr;
 
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
@@ -294,11 +294,14 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   fmha_args.is_group_mode   = args.is_group_mode();
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
-  fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
+  fmha_args.qscale_type     = static_cast<int>(
+      args.dtype == DType::kFloat8
+          ? quant_scale_enum::pertensor
+          : quant_scale_enum::no_scale);
   fmha_args.has_sink        = args.has_sink;
-  fmha_args.q_descale_ptr    = nullptr;
-  fmha_args.k_descale_ptr    = nullptr;
-  fmha_args.v_descale_ptr    = nullptr;
+  fmha_args.q_descale_ptr    = args.q_descale_ptr;
+  fmha_args.k_descale_ptr    = args.k_descale_ptr;
+  fmha_args.v_descale_ptr    = args.v_descale_ptr;
   // sink_size is CK's StreamingLLM sink *prefix width* in key columns, which is a
   // different feature from the learnable softmax offset NVTE asks for here. The
   // offset only needs has_sink + sink_ptr (CK folds it into the softmax
@@ -315,9 +318,10 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   return fmha_args;
 }
 
-//Split-KV and Sink dispatchers do not honor v3_api_check
-//so we cannot rely on the AITER backend to tell us whether v3 is available.
-//Currently this method is not used so just opt it out.
+// Split-KV and sink dispatchers do not honor v3_api_check, so a naive
+// mha_fwd(..., v3_api_check=true) can still launch a real kernel when those
+// paths are compiled in. Unused today; the FP8 probe in ck_attn_fwd clears
+// sink/split-KV fields before using the same dry-run.
 #if !(FA_WITH_SINK || FA_WITH_NATIVE_SPLITKV)
 // Probe whether AITER's v3 (asm) forward path will run for this config, without
 // launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
@@ -347,6 +351,29 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
 
+  // This PR wires AITER gfx950 FP8 FMHA through the v3 ASM kernels only.
+  // Upstream CK has an FP8 tile path, but it is not enabled here, so a failed
+  // ASM probe must not fall through to an unvalidated CK launch. Enabling CK
+  // tile FP8 is a separate change.
+  //
+  // QoLA builds with FA_WITH_SINK and FA_WITH_NATIVE_SPLITKV, and those
+  // dispatchers run before fmha_fwd_v3 without honoring v3_api_check. Clear
+  // sink/split-KV fields so the probe reaches the v3 dry-run and cannot launch
+  // a real kernel (same reason ck_attn_fwd_uses_v3 is compiled out).
+  if(args.dtype == DType::kFloat8){
+    aiter::mha_fwd_args probe_args = fmha_args;
+    probe_args.v3_api_check = true;
+    probe_args.num_splits = 0;
+    probe_args.splitkv_workspace_ptr = nullptr;
+    probe_args.has_sink = false;
+    probe_args.sink_ptr = nullptr;
+    ck_tile::stream_config probe_config{nullptr, false, false};
+    if(QOLA_NS(mha_fwd)(probe_args, probe_config) != 1){
+      throw std::runtime_error(
+        "ck_fused_attn fwd: no AITER fp8bf16 ASM kernel for this configuration.");
+    }
+  }
+
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(args.is_group_mode() && std::string(env_p) == "1"){
       if(log_file){
@@ -356,7 +383,7 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
     }
   }
 #if FA_WITH_SINK
-  if (args.uses_fwd_v3 && args.h <= kSinkBufMaxHeads &&
+  if (args.uses_fwd_v3 && !args.has_sink && args.h <= kSinkBufMaxHeads &&
       QOLA_NS(mha_fwd_with_sink_supported)(fmha_args)) {
     fmha_args.sink_ptr = get_gfx1250_sink_buf(device_for_stream(stream));
   }

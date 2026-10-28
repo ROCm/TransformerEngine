@@ -80,7 +80,7 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "gemm-backends" 1 test_gemm_backends.py
     NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "triton" 1 triton_kernels/test_gemm_kernel.py
     run 1 test_gqa.py
-    run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run 1 test_grouped_linear.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
@@ -102,7 +102,14 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
-    run_default_fa 1 triton_kernels/test_grouped_gemm.py
+    # Triton 3.8.0 enables direct global->LDS async copy by default on gfx950, which
+    # stages every operand tile in LDS per pipeline stage instead of going through
+    # registers -- roughly doubling shared memory for num_stages=2. The k_heavy and
+    # k_heavy_bwd GMM configs (the only BLOCK_SIZE_K=128 ones) then need 272304 B
+    # against a 163840 B limit and fail to compile on the REAL_SHAPES. 
+    # Disabling async copy restores the 3.7.1 allocation exactly (131072 B). 
+    # Remove this once the gfx950 configs are retuned for the new default.
+    TRITON_HIP_USE_ASYNC_COPY=0 run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_grouped_gemm_mxfp4.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
@@ -145,7 +152,7 @@ run_test_config_mgpu(){
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
-    run_default_fa 3 distributed/test_rocm_fused_overlap.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 3 distributed/test_rocm_fused_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 2 distributed/test_sanity.py

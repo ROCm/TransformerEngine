@@ -2,45 +2,76 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-
 #pragma once
 
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
+#include <cstddef>
 #include <vector>
 
+// Pieces shared by the fused comm+GEMM overlap kernels; each pulls them into its own namespace
+// with `using namespace hk_overlap;`.
 namespace hk_overlap {
 
-constexpr int BLOCK_ROW = 256;
-constexpr int BLOCK_COL = 256;
-constexpr int K_STEP    = 64;
+constexpr int SCHED_ROUNDS = 2;
+constexpr int NUM_WARPS    = 8;
+constexpr int WARPS_ROW    = 2;
+constexpr int WARPS_COL    = 4;
+constexpr int BLOCK_ROW    = 256;
+constexpr int BLOCK_COL    = 256;
+constexpr int HALF_ROW     = BLOCK_ROW / 2;
+constexpr int HALF_COL     = BLOCK_COL / 2;
+constexpr int REG_M        = BLOCK_ROW / WARPS_ROW / 2;
+constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
+constexpr int K_STEP       = 64;
+constexpr int NUM_THREADS  = NUM_WARPS * kittens::WARP_THREADS;
 
-constexpr int WARPS_ROW = 2;
-constexpr int WARPS_COL = 4;
-constexpr int NUM_WARPS = WARPS_ROW * WARPS_COL;
+// The shared MXFP8 scale helpers below walk the gathered axis with one constant, but TN
+// gathers on N and NN on M.
+static_assert(BLOCK_ROW == BLOCK_COL,
+              "pack_tile_scales_from and gather_peer_tile_plus_scales assume one tile extent");
 
-constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
+constexpr int GRID_CAP     = 256;
 
 using G_group = kittens::group<NUM_WARPS>;
 
-constexpr int REG_M = BLOCK_ROW / WARPS_ROW / 2;
-constexpr int REG_N = BLOCK_COL / WARPS_COL / 2;
+// K_STEP above is the bf16 step; the mxfp8 kernels shadow it with 128 in their own namespace.
 
-constexpr int HALF_ROW = BLOCK_ROW / 2;
-constexpr int HALF_COL = BLOCK_COL / 2;
+// TileDesc is deliberately not shared: the bf16 NN descriptor carries an extra split-K index that
+// the other three have no use for, which is why bucketize_by_xcd is templated on the type.
+
+// Per-PE pointer to each peer's operand buffer; the element type differs per kernel.
+template <typename T>
+struct PeerPtrsT {
+    T *base[8];
+};
+
+#ifndef GATH_WG
+#define GATH_WG 8
+#endif
 
 constexpr int NUM_XCDS_AFF = 8;
-
-constexpr int GRID_CAP = 256;
 
 struct XcdBuckets {
     int off[NUM_XCDS_AFF];
     int cnt[NUM_XCDS_AFF];
 };
 
+#ifndef AG_PUBLISH
+#define AG_PUBLISH(p) __hip_atomic_fetch_add((p), 1u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT)
+#define AG_SPIN(p) __hip_atomic_load((p), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
+#define AG_ACQUIRE(p) ((void)__hip_atomic_load((p), __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT))
+#endif
+
 __host__ __device__ __forceinline__
 int tile_xcd(int chunk_id) { return chunk_id & (NUM_XCDS_AFF - 1); }
 
+__device__ __forceinline__
+__hip_bfloat16 bf16_add(__hip_bfloat16 x, __hip_bfloat16 y) {
+    return __float2bfloat16(__bfloat162float(x) + __bfloat162float(y));
+}
+
+// Stable-partition the queue into one contiguous segment per XCD.
 template <typename TD>
 static std::vector<TD> bucketize_by_xcd(const std::vector<TD> &q, XcdBuckets &bk) {
     std::vector<TD> out;
@@ -48,25 +79,256 @@ static std::vector<TD> bucketize_by_xcd(const std::vector<TD> &q, XcdBuckets &bk
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
         bk.off[b] = (int)out.size();
         for (size_t i = 0; i < q.size(); i++) {
-            if (tile_xcd(q[i].chunk_id) == b) {
-                out.push_back(q[i]);
-            }
+            if (tile_xcd(q[i].chunk_id) == b) out.push_back(q[i]);
         }
         bk.cnt[b] = (int)out.size() - bk.off[b];
     }
     return out;
 }
 
+// NT selects nontemporal stores for the gathered shard for performance.
+template <int U, bool NT>
 __device__ __forceinline__
-__hip_bfloat16 bf16_add(__hip_bfloat16 x, __hip_bfloat16 y) {
-    return __float2bfloat16(__bfloat162float(x) + __bfloat162float(y));
+void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t nbytes) {
+    typedef int v4i __attribute__((ext_vector_type(4)));
+    v4i       *d4 = (v4i *)dst;
+    const v4i *s4 = (const v4i *)src;
+    size_t n4 = nbytes / sizeof(v4i);
+    const size_t stride = blockDim.x;
+    const size_t step   = stride * U;
+    size_t i = threadIdx.x;
+
+    if (U > 1) {
+        for (; i + (size_t)(U - 1) * stride < n4; i += step) {
+            v4i v[U];
+#pragma unroll
+            for (int u = 0; u < U; u++) v[u] = s4[i + (size_t)u * stride];
+#pragma unroll
+            for (int u = 0; u < U; u++) {
+                if constexpr (NT) __builtin_nontemporal_store(v[u], &d4[i + (size_t)u * stride]);
+                else    d4[i + (size_t)u * stride] = v[u];
+            }
+        }
+    }
+    for (; i < n4; i += stride) {
+        if constexpr (NT) __builtin_nontemporal_store(s4[i], &d4[i]);
+        else    d4[i] = s4[i];
+    }
+
+    size_t done = n4 * sizeof(v4i);
+    if (threadIdx.x == 0) {
+        for (size_t j = done; j < nbytes; j++) ((char *)dst)[j] = ((const char *)src)[j];
+    }
 }
 
-#ifndef GATH_WG
-#define GATH_WG 8
-#endif
-#define AG_PUBLISH(p) __hip_atomic_fetch_add((p), 1u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT)
-#define AG_SPIN(p)    __hip_atomic_load((p), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
-#define AG_ACQUIRE(p) ((void)__hip_atomic_load((p), __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT))
+// Packs one 256-row tile of the gathered operand's scales into the lane-native layout the GEMM
+// reads, straight from the peer's buffer. dst_rows mirrors the raw bytes into our own Userbuffers
+// scale region, which the host leaves untouched when interleaving skips gather_scales.
+//
+// <STEP, NG> must match the pack_scales_kernel<_, STEP, NG> instantiation mxfp8_gemm.cpp uses for
+// that operand -- both write ln[(tile_id * NG + grp) * 64 + lane]. A side <64,4>, B side <32,8>.
+// pack_scales reads 64 words past the last window start, hence the PAD staging stride below.
+//
+// Blocks take a contiguous [k0,k1) out of gath_wg and write disjoint tile_ids, so the only sync
+// is around the staging buffer.
+template <int STEP = 64, int NG = 4>
+__device__ __forceinline__
+void pack_tile_scales_from(const uint8_t *__restrict__ src_rows, uint32_t *__restrict__ ln,
+                           int cblk, int tiles_per_col, int k_iters, int scale_K,
+                           uint32_t *__restrict__ smem_tile, int sub, int gath_wg,
+                           uint8_t *__restrict__ dst_rows) {
+    constexpr int ROWS     = BLOCK_ROW;            // tile extent on the gathered axis
+    constexpr int PER_WAVE = STEP;                 // window stride one wave packs from
+    constexpr int WAVES    = NG;                   // waves per k-iter: 4 (A side) or 8 (B side)
+    constexpr int KPP      = NUM_WARPS / WAVES;    // k-iters in flight: 8/4 = 2, or 8/8 = 1
+    constexpr int PAD      = (NG - 1) * STEP + 64; // staging stride; covers pack_scales' OOB read
+    static_assert(NUM_WARPS % WAVES == 0, "NG must divide NUM_WARPS");
+    static_assert(KPP >= 1, "NG cannot exceed NUM_WARPS");
+
+    const int lane  = (int)threadIdx.x % 64;
+    const int wave  = (int)threadIdx.x / 64;
+    const int kslot = wave / WAVES;            // which of the KPP k-iters
+    const int wgrp  = wave % WAVES;            // which 64-row chunk
+
+    const int kpb = (k_iters + gath_wg - 1) / gath_wg;  // k-iters per block
+    const int k0  = sub * kpb;
+    const int k1  = (k0 + kpb > k_iters) ? k_iters : k0 + kpb;
+    if (k0 >= k_iters) return;
+
+    // Staging is KPP slots of PAD words. <64,4> lands exactly on KPP*PAD == NUM_THREADS, so it
+    // stages straight-line: one dword per thread, no loop, no bounds test.
+    constexpr bool EXACT = (KPP * PAD == NUM_THREADS);
+    static_assert(KPP * PAD <= 2 * 256, "staging exceeds the caller's scale_A_smem budget");
+
+    const int slot = (int)threadIdx.x / ROWS;   // used by the EXACT path only
+    const int srow = (int)threadIdx.x % ROWS;
+
+    for (int kb = k0; kb < k1; kb += KPP) {
+        if constexpr (EXACT) {
+            uint32_t p = 0;
+            if (kb + slot < k1) {
+                const size_t off = (size_t)srow * scale_K + (kb + slot) * 4;
+                __builtin_memcpy(&p, &src_rows[off], 4);
+                if (dst_rows != nullptr) {
+                    __builtin_memcpy(&dst_rows[off], &p, 4);
+                }
+            }
+            smem_tile[threadIdx.x] = p;
+        } else {
+            for (int i = (int)threadIdx.x; i < KPP * PAD; i += NUM_THREADS) {
+                const int wslot = i / PAD;  // which of the KPP k-iters this word belongs to
+                const int wrow  = i % PAD;  // which row; >= ROWS is the zero-filled OOB tail
+                uint32_t p = 0;
+                if (wrow < ROWS && kb + wslot < k1) {
+                    const size_t off = (size_t)wrow * scale_K + (kb + wslot) * 4;
+                    __builtin_memcpy(&p, &src_rows[off], 4);
+                    if (dst_rows != nullptr) {
+                        __builtin_memcpy(&dst_rows[off], &p, 4);
+                    }
+                }
+                smem_tile[i] = p;
+            }
+        }
+        __syncthreads();
+        if (kslot < KPP && kb + kslot < k1) {
+            const size_t tile_id = (size_t)(kb + kslot) * tiles_per_col + cblk;
+            ln[(tile_id * WAVES + wgrp) * 64 + lane] = kittens::pack_scales(
+                (const kittens::fp8e8m0 *)(smem_tile + kslot * PAD), wgrp * PER_WAVE);
+        }
+        __syncthreads();
+    }
+}
+
+// PUBLISH=false gathers without touching `arrive`: for a second, independent all-gather nothing
+// waits on, and whose increments must not land in the primary's flags -- AG_PUBLISH is a
+// fetch_add, so sharing an array lets a fast block satisfy a tile's count before its peers have
+// written their slices.
+template <int U, bool NT, bool PUBLISH = true, typename T>
+__device__ __forceinline__
+void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
+                      const PeerPtrsT<T> &peers, size_t chunk_bytes, unsigned int *arrive) {
+    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
+    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
+
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
+
+    __syncthreads();
+    if constexpr (NT) {
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    } else {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    }
+    __syncthreads();
+    if constexpr (PUBLISH) {
+        if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+        __syncthreads();
+    }
+}
+
+template <int U, bool NT, int STEP = 64, int NG = 4>
+__device__ __forceinline__
+void gather_peer_tile_plus_scales(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk,
+                                  char *gather_dst, const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes,
+                                  unsigned int *arrive, size_t scale_base, size_t scale_chunk_bytes,
+                                  int scale_K, uint32_t *packed_sa, int tiles_per_col,
+                                  int k_iters, uint32_t *smem_tile) {
+    const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
+    const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
+
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
+
+    __syncthreads();
+
+    // Ordering comes from ag_ready_kernel, same as the data copy above. Trip counts differ across
+    // blocks when gath_wg does not divide k_iters -- fine, __syncthreads() is per block.
+    {
+        // The copy above already relies on gather_dst mirroring peers.base[peer].
+        const size_t soff = scale_base + (size_t)peer * scale_chunk_bytes
+                          + (size_t)tn * BLOCK_ROW * (size_t)scale_K;
+        pack_tile_scales_from<STEP, NG>((const uint8_t *)peers.base[peer] + soff, packed_sa,
+                                        peer * tiles_per_chunk + tn, tiles_per_col,
+                                        k_iters, scale_K, smem_tile, sub, gath_wg,
+                                        (uint8_t *)gather_dst + soff);
+    }
+    __syncthreads();
+
+    // Fence AFTER the pack so it covers the packed_sa stores too, not just the data copy: a
+    // consumer that sees the arrival count reach gath_wg must see both.
+    if constexpr (NT) {
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    } else {
+        __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) AG_PUBLISH(&arrive[peer * tiles_per_chunk + tn]);
+    __syncthreads();
+}
+
+template <int U, bool NT, bool PUBLISH = true, typename T>
+__device__ __forceinline__
+void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrsT<T> &peers,
+                size_t chunk_bytes, unsigned int *arrive) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile<U, NT, PUBLISH>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+    }
+}
+
+template <int U, bool NT, int STEP = 64, int NG = 4>
+__device__ __forceinline__
+void gather_all_plus_scales(int my_pe, int gath_wg, int tiles_per_chunk, char *gb,
+                            const PeerPtrsT<kittens::fp8e4m3> &peers, size_t chunk_bytes, unsigned int *arrive,
+                            size_t scale_base, size_t scale_chunk_bytes, int scale_K,
+                            uint32_t *packed_sa, int tiles_per_col, int k_iters,
+                            uint32_t *smem_tile) {
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile_plus_scales<U, NT, STEP, NG>(
+            peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
+            scale_base, scale_chunk_bytes, scale_K, packed_sa, tiles_per_col, k_iters, smem_tile);
+    }
+}
+
+template <typename U, typename RT>
+__device__ __forceinline__
+void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_stride, int lane) {
+    using T               = float;
+    constexpr int packing = 2;                      // rt_fl holds float2 per data slot
+    U *dst_ptr            = base + (size_t)(row_unit * RT::rows) * row_stride + col_unit * RT::cols;
+    const int row_offset  = RT::base_tile_stride * (lane / RT::base_tile_cols);
+    const int col_offset  = lane % RT::base_tile_cols;
+
+#pragma unroll
+    for (int i = 0; i < RT::height; i++) {
+#pragma unroll
+        for (int j = 0; j < RT::width; j++) {
+            const int col = j * RT::base_tile_cols + col_offset;
+#pragma unroll
+            for (int k = 0; k < RT::base_tile_num_strides; k++) {
+                const int row = i * RT::base_tile_rows + row_offset + k * RT::base_tile_elements_per_stride_group;
+#pragma unroll
+                for (int l = 0; l < RT::base_tile_stride / packing; l++) {
+                    const int idx = l + k * RT::base_tile_stride / packing;
+                    dst_ptr[(row + l * 2)     * row_stride + col] =
+                        kittens::base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
+                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
+                        kittens::base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
+                }
+            }
+        }
+    }
+}
 
 }  // namespace hk_overlap

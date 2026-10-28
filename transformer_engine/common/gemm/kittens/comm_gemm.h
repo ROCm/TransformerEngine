@@ -9,10 +9,29 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "kittens_common.h"
+
+// A second all-gather, carried alongside the GEMM's own but not consumed by it: no compute block
+// waits on these arrivals, so the gathered tensor's dtype and scales are the caller's business.
+// Same contract the BULK path already uses, applied to a region the GEMM never reads.
+struct KittensAuxAgRegion {
+    void *dst;                  // this rank's base for the gathered tensor
+    const void *peer_ub;        // peer base table for this region
+    void *arrive_local;
+    size_t arrive_offset;
+    size_t arrive_stride;
+    uint64_t arrive_value;
+    size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
+};
+
 struct KittensAgGemmArgs {
     const void *A;
     void *ub;
     void *D;
+    const void *scale_A;
+    const void *scale_B;
     const void *peer_ub;
     int peer_first;
     int peer_count;
@@ -25,10 +44,15 @@ struct KittensAgGemmArgs {
     bool transa;
     int rank, nranks;
     size_t chunk_bytes;
+    size_t scale_base_offset;
+    size_t scale_chunk_bytes;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
     void *gather_dst;     // Bulk all-gather only
+    KittensDType a_dtype;
+    KittensDType b_dtype;
+    const KittensAuxAgRegion *aux_ag;   // Second AG region; nullptr when absent
 };
 
 struct KittensRsGemmArgs {
@@ -59,7 +83,11 @@ void kittens_comm_gemm_reset();
 
 bool kittens_fused_ag_gemm_bf16(const KittensAgGemmArgs &args);
 
+bool kittens_fused_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
+
 bool kittens_bulk_ag_gemm_bf16(const KittensAgGemmArgs &args);
+
+bool kittens_bulk_ag_gemm_mxfp8(const KittensAgGemmArgs &args);
 
 bool kittens_bulk_rs_gemm_supported(int sm_arch);
 
