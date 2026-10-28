@@ -196,15 +196,18 @@ ck_fused_attn::BiasType nvte_to_ck_bias_type(NVTE_Bias_Type t_bias_type){
 //    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
 
 // set the ck mask type based on nvte mask type and window size table above
-ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_window_size_left, int64_t nvte_window_size_right){
+ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_window_size_left, int64_t nvte_window_size_right,
+                                    bool bottom_right_diagonal){
   if (nvte_mask_type==NVTE_Mask_Type::NVTE_NO_MASK || nvte_mask_type==NVTE_Mask_Type::NVTE_PADDING_MASK){
     // window size in NVTE_NO_Mask can be (-1, -1) and (>=0, >=0)
     if(nvte_window_size_left==-1 && nvte_window_size_right==-1){
       // (-1, -1)
       return ck_fused_attn::MaskType::no_mask;
     }else{
-      // (>=0, >=0)
-      return ck_fused_attn::MaskType::mask_bottom_right;
+      // (>=0, >=0): the sliding window is aligned to the top-left or bottom-right corner of each
+      // q/kv segment pair, as requested; the two differ whenever seqlen_q != seqlen_kv.
+      return bottom_right_diagonal ? ck_fused_attn::MaskType::mask_bottom_right
+                                   : ck_fused_attn::MaskType::mask_top_left;
     }
   }else if (nvte_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK || nvte_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK){
     // nvte causal mask can map to (-1, 0) or (>=0, 0)
@@ -483,7 +486,7 @@ void fused_attn_ck_fwd_impl(
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   void *devPtrQ, void *devPtrK, void *devPtrV, void* devPtrBias,
   void *devPtrSoftmaxOffset,
   void *devPtrSoftmaxAux, void *devPtrO,
@@ -596,7 +599,7 @@ void fused_attn_ck_fwd_impl(
   ck_args.dropout_probability = dropout_probability;
   ck_args.philox_seed_ptr = devPtrDropoutSeed;
   ck_args.philox_offset_ptr = devPtrDropoutOffset;
-  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right, bottom_right_diagonal);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
   ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
@@ -831,7 +834,7 @@ void fused_attn_ck_bwd_impl(
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   bool deterministic,
   void* devPtrQ, void* devPtrK, void* devPtrV,
   void* devPtrO, void* devPtrSoftmaxAux, void* devPtrBias,
@@ -915,7 +918,7 @@ void fused_attn_ck_bwd_impl(
   ws_size_args.b = b; ws_size_args.h = h; ws_size_args.hg = hg;
   ws_size_args.s_q = s_q; ws_size_args.s_kv = s_kv; ws_size_args.d_qk = d_qk; ws_size_args.d_v = d_v;
   ws_size_args.max_tokens_q = max_tokens_q; ws_size_args.max_tokens_kv = max_tokens_kv;
-  ws_size_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ws_size_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right, bottom_right_diagonal);
   ws_size_args.dropout_probability = dropout_probability;
   ws_size_args.deterministic = deterministic;
   ws_size_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
@@ -1161,7 +1164,7 @@ void fused_attn_ck_bwd_impl(
   ck_args.dropout_probability = dropout_probability;
   ck_args.philox_seed_ptr = devPtrDropoutSeed;
   ck_args.philox_offset_ptr = devPtrDropoutOffset;
-  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right, bottom_right_diagonal);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
   ck_args.dk_expanded_ptr = dk_expanded_ptr;
@@ -1338,7 +1341,7 @@ void fused_attn_ck_fwd(
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias,
   const Tensor* input_SoftmaxOffset,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -1436,7 +1439,7 @@ void fused_attn_ck_fwd(
     is_training, attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type, softmax_type,
-    window_size_left, window_size_right,
+    window_size_left, window_size_right, bottom_right_diagonal,
     devPtrQ, devPtrK, devPtrV, devPtrBias,
     devPtrSoftmaxOffset,
     devPtrS, devPtrO,
@@ -1461,7 +1464,7 @@ void fused_attn_ck_bwd(
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   bool deterministic,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
   const Tensor* input_SoftmaxOffset,
@@ -1526,7 +1529,7 @@ void fused_attn_ck_bwd(
     qkv_layout,
     bias_type, attn_mask_type,
     softmax_type,
-    window_size_left, window_size_right,
+    window_size_left, window_size_right, bottom_right_diagonal,
     deterministic,
     devPtrQ, devPtrK, devPtrV, 
     devPtrO, devPtrSoftmaxStats, devPtrBias,
