@@ -174,10 +174,7 @@ def ep_bootstrap(
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
     if IS_HIP_EXTENSION:
-        raise NotImplementedError(
-            "Expert parallelism is not supported on ROCm: it requires NCCL EP, which is not "
-            "part of the ROCm build."
-        )
+        raise NotImplementedError("Expert parallelism is not supported on ROCm.")
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")

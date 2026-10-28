@@ -466,10 +466,7 @@ class LinearAttentionBase(torch.nn.Module):
     ) -> None:
         super().__init__()
         if IS_HIP_EXTENSION:
-            raise NotImplementedError(
-                f"{type(self).__name__} is not supported on ROCm: linear attention runs on "
-                "NVIDIA cuDNN frontend kernels, which have no ROCm implementation."
-            )
+            raise NotImplementedError(f"{type(self).__name__} is not supported on ROCm.")
         if not torch.cuda.is_available():
             raise RuntimeError("TransformerEngine needs CUDA.")
 

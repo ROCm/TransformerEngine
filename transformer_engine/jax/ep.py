@@ -158,10 +158,7 @@ def ep_bootstrap(
             total_recv_tokens, so callers can detect overflow from it.
     """
     if is_hip_extension():
-        raise NotImplementedError(
-            "Expert parallelism is not supported on ROCm: it requires NCCL EP, which is not"
-            " part of the ROCm build."
-        )
+        raise NotImplementedError("Expert parallelism is not supported on ROCm.")
     # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
     # at prepare time for the combine backward. Respect an explicit user override.
     os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
