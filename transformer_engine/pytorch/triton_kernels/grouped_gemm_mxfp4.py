@@ -19,7 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .common import _amd_compiler_knobs, get_arch
+from ..utils import get_device_compute_capability
+from .common import _amd_compiler_knobs
 
 
 # ===============================================================================
@@ -60,7 +61,7 @@ NUM_XCDS = 8  # gfx942/gfx950 chiplet count
 def _num_xcds():
     """Chiplet-remap width. gfx1250 measured faster with the plain round-robin pid
     order (up to ~15% on MoE grouped GEMMs), so the remap is skipped there."""
-    return 1 if get_arch() == "gfx1250" else NUM_XCDS
+    return 1 if get_device_compute_capability() == (12, 5) else NUM_XCDS
 
 
 @triton.jit
@@ -162,21 +163,23 @@ def _prune_fwd_by_k(configs, named_args, **kwargs):
     """Keep only the current arch's configs whose BLOCK_K divides K (the fwd
     reduction loop is unmasked)."""
     K = named_args["K"]
-    configs = _FWD_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _FWD_TRITON_CONFIGS
+    is_gfx1250 = get_device_compute_capability() == (12, 5)
+    configs = _FWD_TRITON_CONFIGS_GFX1250 if is_gfx1250 else _FWD_TRITON_CONFIGS
     return [c for c in configs if K % c.kwargs["BLOCK_SIZE_K"] == 0]
 
 
 def _prune_vark_by_pad(configs, named_args, **kwargs):
     """Keep the current arch's configs; drop BLOCK_K=256 unless every padded group
     length is 256-divisible (can256)."""
-    configs = _VARK_TRITON_CONFIGS_GFX1250 if get_arch() == "gfx1250" else _VARK_TRITON_CONFIGS
+    is_gfx1250 = get_device_compute_capability() == (12, 5)
+    configs = _VARK_TRITON_CONFIGS_GFX1250 if is_gfx1250 else _VARK_TRITON_CONFIGS
     if named_args["can256"]:
         return list(configs)
     return [c for c in configs if c.kwargs["BLOCK_SIZE_K"] != 256]
 
 
 def _fwd_do_bench(kernel_call, quantiles):
-    if get_arch() == "gfx1250":
+    if get_device_compute_capability() == (12, 5):
         # gfx1250 downclocks under back-to-back load, which do_bench's per-launch L2 flush hides.
         return triton.testing.do_bench_cudagraph(kernel_call, rep=100, quantiles=quantiles)
     return triton.runtime.driver.active.get_benchmarker()(kernel_call, quantiles=quantiles)
@@ -659,7 +662,7 @@ def grouped_gemm_mxfp4_variable_k_triton_kernel(
     l_u8 = lhs.view(torch.uint8)
     r_u8 = rhs.view(torch.uint8)
     cu = num_cu if num_cu is not None else torch.cuda.get_device_properties(lhs.device).multi_processor_count
-    BM, BN = (128, 256) if get_arch() == "gfx1250" else (256, 128)
+    BM, BN = (128, 256) if get_device_compute_capability() == (12, 5) else (256, 128)
     tiles_m = (OUT_M + BM - 1) // BM
     tiles_n = (OUT_N + BN - 1) // BN
     GM = 8 if min(tiles_m, tiles_n) < 16 else 4

@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 import transformer_engine_torch as tex
 from functools import cache
+from ..utils import get_device_compute_capability
 
 @cache
 def get_arch():
@@ -43,7 +44,7 @@ def _amd_knob_overrides(*, is_tn: bool) -> dict:
     if is_cdna3():
         enable = not is_tn
         return {"use_async_copy": enable, "scalarize_packed_fops": enable}
-    if get_arch() == "gfx1250":
+    if get_device_compute_capability() == (12, 5):
         return {"use_async_copy": False}
     return {
         "use_async_copy": True,
