@@ -1135,12 +1135,13 @@ class TestGroupedLinearOp:
 class TestGroupedMLPFusedOp:
     """Tests for grouped MLP fused op"""
 
+    @pytest.mark.skipif(
+        IS_HIP_EXTENSION,
+        reason="The CuTe grouped MLP fusion (cuDNN frontend, SM 10.x) is not supported on ROCm",
+    )
     def test_fusion_requires_supported_grad_output_format(self, monkeypatch) -> None:
         """Fuse E4M3 MXFP8 and NVFP4, but decline MXFP8 with an E5M2 backward."""
         from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
-
-        if IS_HIP_EXTENSION:
-            pytest.skip("The CuTe grouped MLP fusion (cuDNN frontend, SM 10.x) is not supported on ROCm")
 
         # Skip invalid configurations
         maybe_skip_quantization("mxfp8")

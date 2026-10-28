@@ -54,7 +54,8 @@ def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
                 get_cublas_workspace_size_bytes,
             )
 
-            ws_bytes = 2 * 128 * 128 * torch.bfloat16.itemsize + get_cublas_workspace_size_bytes()
+            dequant_bytes = (x.numel() + w.numel()) * torch.bfloat16.itemsize
+            ws_bytes = dequant_bytes + get_cublas_workspace_size_bytes()
             workspace = torch.empty(ws_bytes, dtype=torch.uint8, device="cuda")
         else:
             workspace = torch.empty(4, dtype=torch.uint8, device="cuda")

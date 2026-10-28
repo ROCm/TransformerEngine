@@ -331,12 +331,12 @@ def test_fused_mla_q_uproj_autograd() -> None:
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 # On ROCm the kernel runs wherever MXFP8 is available.
-sm100 = torch.cuda.is_available() and (
+device_valid = torch.cuda.is_available() and (
     IS_HIP_EXTENSION or torch.cuda.get_device_capability()[0] >= 10
 )
 if not mxfp8_available:
     _kv_rope_skip_reason = reason_for_no_mxfp8
-elif not sm100:
+elif not device_valid:
     _kv_rope_skip_reason = "The fused kernel requires SM 10.0+."
 elif not HAVE_TRITON:
     _kv_rope_skip_reason = "The reference MLA RoPE needs Triton."
