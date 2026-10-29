@@ -35,6 +35,7 @@
 #include "../mxfp8/group_scaled_swiglu_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__
+#include "../fp8/rocm_quantize_fp8_tdm.cuh"
 #include "../mxfp4/quantize_mxfp4.cuh"
 #endif //#ifdef __HIP_PLATFORM_AMD__
 // The optimized NVFP4 kernels are Blackwell-only (CUtensorMap/tcgen05); ROCm uses
@@ -87,6 +88,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
+#ifdef __HIP_PLATFORM_AMD__
+      if (fp8::quantize_tdm</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+              *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+              dummy_workspace_tensor, stream)) {
+        break;
+      }
+#endif
       if (output_tensor->has_columnwise_data()) {
         NVTE_CHECK(output_tensor->has_data(),
                    "Quantizing in only the columnwise direction not supported yet!");
@@ -300,6 +308,13 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
   // Dispatch to quantization kernel depending on data format
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+#ifdef __HIP_PLATFORM_AMD__
+      if (fp8::quantize_tdm<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+              *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor,
+              workspace_tensor, stream)) {
+        break;
+      }
+#endif
       if (output_tensor->has_columnwise_data()) {
         NVTE_CHECK(output_tensor->has_data(),
                    "Quantizing in only the columnwise direction not supported yet!");
@@ -728,6 +743,10 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
   NVTE_CHECK(num_tensors <= mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors,
              "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
              mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
+
+  if (mxfp8::multi_quantize_tdm(input_list, output_list, stream)) {
+    return;
+  }
 
   DType itype = input_list[0]->data.dtype;
   DType otype = output_list[0]->dtype();

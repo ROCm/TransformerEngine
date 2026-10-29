@@ -25,6 +25,11 @@
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#include "../../util/system.h"
+#include "../fp8/rocm_quantize_fp8_tdm.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -42,6 +47,11 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       NVTE_CHECK(is_fp8_dtype(input.dtype()), "Input must have FP8 type.");
       NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
       NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
+#ifdef __HIP_PLATFORM_AMD__
+      if (fp8::dequantize_tdm(input, output, stream)) {
+        break;
+      }
+#endif  // #ifdef __HIP_PLATFORM_AMD__
       fp8::dequantize(input, output, stream);
       break;
     }

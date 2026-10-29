@@ -21,6 +21,8 @@
 #include "common/utils.cuh"
 #ifdef __HIP_PLATFORM_AMD__
 #include "common/util/rocm_device_utils.cuh"
+#include "common/util/system.h"
+#include "common/cast/fp8/rocm_quantize_fp8_tdm.cuh"
 #endif
 
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
@@ -569,6 +571,17 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   }
 
   const auto out_dtype = return_identity ? output.dtype : output_t.dtype;
+
+#ifdef __HIP_PLATFORM_AMD__
+  static_assert(dispatch::fp8::tdm_kernel::CHUNK_DIM_X == BLOCK_TILE_DIM &&
+                dispatch::fp8::tdm_kernel::CHUNK_DIM_Y == BLOCK_TILE_DIM);
+  if (dispatch::fp8::quantize_blockwise_tdm<2>(
+          input, output, output_t, scale_inv, scale_inv_t, num_rows, row_length, return_identity,
+          return_transpose, scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
+          epsilon, pow_2_scale, noop_ptr, stream)) {
+    return;
+  }
+#endif
 
   const size_t num_blocks_x = DIVUP(row_length, BLOCK_TILE_DIM);
   const size_t num_blocks_y = DIVUP(num_rows, BLOCK_TILE_DIM);
