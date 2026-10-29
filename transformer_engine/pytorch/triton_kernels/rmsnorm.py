@@ -31,7 +31,16 @@ def _prune_rms_configs(configs, named_args, **kwargs):
         if threads > n_cols * 2:  # too many idle lanes
             continue
         out.append(cfg)
-    return out if out else configs
+    if out:
+        return out
+
+    # Nothing fits (very wide or narrow rows): keep only the closest config(s).
+    def miss(cfg):
+        threads = cfg.num_warps * 64
+        return max(n_cols / 16 / threads, threads / (n_cols * 2))
+
+    best = min(miss(cfg) for cfg in configs)
+    return [cfg for cfg in configs if miss(cfg) == best]
 
 
 # TODO(micky774) Implement fused MXFP8 quantization within the kernel
