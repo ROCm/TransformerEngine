@@ -779,8 +779,7 @@ def _run_dpa_max_logit_exact(
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
     monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    if IS_HIP_EXTENSION:
-        monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
     _attention_backends["backend_selection_requires_update"] = True
 
     # Actual lengths. Padded rows and the gaps between thd sequences hold data that must not count.
@@ -871,7 +870,7 @@ def _run_dpa_max_logit_exact(
     torch.testing.assert_close(max_logit.float(), reference, atol=0.05, rtol=1e-2)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm CK max_logit.")
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize(
     "attn_mask_type", ["no_mask", "causal", "causal_bottom_right", "padding", "padding_causal"]
@@ -888,7 +887,7 @@ def test_dpa_max_logit_exact(
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm CK max_logit.")
 @pytest.mark.parametrize(
     "qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, kwargs",
     [
@@ -938,8 +937,6 @@ def test_dpa_max_logit_exact_variants(
     qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, kwargs, monkeypatch
 ):
     """Test the exact max_logit with fp16, sinks, sliding windows, fully masked rows and MLA"""
-    if kwargs.get("softmax_type", "vanilla") != "vanilla" and not IS_HIP_EXTENSION:
-        pytest.skip("Checks that the softmax offset is left out of the max, as CK does.")
     _run_dpa_max_logit_exact(
         monkeypatch, qkv_format, attn_mask_type, head_dim, seqlen_q, num_gqa_groups, **kwargs
     )
@@ -968,28 +965,38 @@ def test_dpa_max_logit_ck_selected(config_kwargs, qkv_layout):
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm backend selection.")
 @pytest.mark.parametrize(
-    "smallseq, unsupported",
+    "smallseq, qkv_layout, unsupported",
     [
-        (False, {"attn_bias_type": "post_scale_bias"}),
-        (False, {"attn_bias_type": "alibi", "attn_mask_type": "causal"}),
-        (False, {"dropout_p": 0.1}),
-        (True, {}),
+        (False, "bshd_bshd_bshd", {"attn_bias_type": "post_scale_bias"}),
+        (False, "bshd_bshd_bshd", {"attn_bias_type": "alibi", "attn_mask_type": "causal"}),
+        (False, "bshd_bshd_bshd", {"dropout_p": 0.1}),
+        (True, "thd_thd_thd", {"attn_mask_type": "padding"}),
+        (True, "bshd_bshd_bshd", {}),
+        (True, "bshd_bshd_bshd", {"attn_mask_type": "padding"}),
     ],
-    ids=["post_scale_bias", "alibi", "dropout", "smallseq"],
+    ids=[
+        "post_scale_bias",
+        "alibi",
+        "dropout",
+        "smallseq-thd",
+        "smallseq-bshd",
+        "smallseq-bshd-padding",
+    ],
 )
-def test_dpa_max_logit_ck_fallback(smallseq, unsupported, monkeypatch):
-    """CK returns max_logit only without bias or dropout, and not from the small-seq kernels"""
+def test_dpa_max_logit_ck_fallback(smallseq, qkv_layout, unsupported, monkeypatch):
+    """CK returns max_logit only without bias or dropout, and not when the small-seq kernels may
+    run, since the backward picks them on its own"""
     if smallseq:
         monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
     config = ModelConfig(2, 16 if smallseq else 1024, 16, 128, **unsupported)
     _, _, fused_attn_backends = get_available_attention_backends(
-        config, qkv_dtype=torch.bfloat16, qkv_layout="bshd_bshd_bshd"
+        config, qkv_dtype=torch.bfloat16, qkv_layout=qkv_layout
     )
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("CK does not support this configuration.")
     config.return_max_logit = True
     available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config, qkv_dtype=torch.bfloat16, qkv_layout="bshd_bshd_bshd"
+        config, qkv_dtype=torch.bfloat16, qkv_layout=qkv_layout
     )
     assert not fused_attn_backends and available_backends[2]
 

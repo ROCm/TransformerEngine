@@ -173,14 +173,22 @@ bool is_ck_backend_supported(
 }
 
 bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type,
                                    NVTE_Mask_Type mask_type,
                                    float dropout,
+                                   size_t max_seqlen_q,
+                                   size_t max_seqlen_kv,
                                    size_t head_dim_qk,
                                    size_t head_dim_v,
                                    size_t num_attn_heads,
                                    size_t num_gqa_groups,
-                                   NVTE_Softmax_Type softmax_type) {
+                                   NVTE_Softmax_Type softmax_type,
+                                   bool return_max_logit) {
+  if(getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") != "1") return false;
+  if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95) return false;
+  // the small-seq kernels do not write the max logit
+  if(return_max_logit) return false;
   if(dropout != 0.0f) return false;
   if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
   if(softmax_type != NVTE_VANILLA_SOFTMAX) return false;
@@ -191,43 +199,16 @@ bool is_small_seq_supported_static(DType dtype,
   if(num_attn_heads != num_gqa_groups) return false;
   if(num_attn_heads != 16 && num_attn_heads != 32) return false;
   if(!is_padding_mask(mask_type) && mask_type != NVTE_Mask_Type::NVTE_NO_MASK) return false;
-  return true;
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if(qkv_format == NVTE_QKV_Format::NVTE_THD) return true;
+  return qkv_format == NVTE_QKV_Format::NVTE_BSHD && max_seqlen_q == max_seqlen_kv &&
+         max_seqlen_q >= 2 && max_seqlen_q <= kSmallSeqMaxSeqlen;
 }
 
 bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
                                     size_t runtime_max_seqlen_kv) {
   return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
          runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
-}
-
-bool is_small_seq_possible(DType dtype,
-                           NVTE_QKV_Layout qkv_layout,
-                           NVTE_Bias_Type bias_type,
-                           NVTE_Mask_Type mask_type,
-                           float dropout,
-                           size_t max_seqlen_q,
-                           size_t max_seqlen_kv,
-                           size_t head_dim_qk,
-                           size_t head_dim_v,
-                           size_t num_attn_heads,
-                           size_t num_gqa_groups,
-                           NVTE_Softmax_Type softmax_type) {
-  if(getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") != "1") {
-    return false;
-  }
-  if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95) {
-    return false;
-  }
-  if(!is_small_seq_supported_static(dtype, bias_type, mask_type, dropout, head_dim_qk, head_dim_v,
-                                    num_attn_heads, num_gqa_groups, softmax_type)) {
-    return false;
-  }
-  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if(qkv_format == NVTE_QKV_Format::NVTE_THD) {
-    return true;
-  }
-  return qkv_format == NVTE_QKV_Format::NVTE_BSHD && max_seqlen_q == max_seqlen_kv &&
-         max_seqlen_q >= 2 && max_seqlen_q <= kSmallSeqMaxSeqlen;
 }
 
 
@@ -579,8 +560,8 @@ void fused_attn_ck_fwd_impl(
   bool bshd_to_thd = is_BSHD && is_padding;
 
   const bool ck_small_seq_enabled =
-      is_small_seq_possible(dtype, layout, bias_type, mask_type, dropout_probability, s_q, s_kv, d_qk,
-                            d_v, h, hg, softmax_type);
+      is_small_seq_supported_static(dtype, layout, bias_type, mask_type, dropout_probability, s_q,
+                                    s_kv, d_qk, d_v, h, hg, softmax_type, return_max_logit);
   void* ck_smallseq_workspace_prefix = nullptr;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -605,10 +586,6 @@ void fused_attn_ck_fwd_impl(
     ck_smallseq_workspace_prefix =
         planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
   }
-  // The small-seq kernels do not write the max logit, and the backward picks them on its own, so
-  // the backend selection (is_small_seq_possible) keeps such configs away from ck.
-  NVTE_CHECK(!(return_max_logit && ck_small_seq_enabled),
-             "The CK small-seq kernels do not return the max logit.");
 
   void* devPtrAlibiSlope = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
@@ -974,9 +951,11 @@ void fused_attn_ck_bwd_impl(
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
+  // The backward does not know whether the forward returned the max logit, and the backend
+  // selection keeps those configs off ck where this choice would not match the forward.
   const bool ck_small_seq_enabled =
-      is_small_seq_possible(dtype, layout, bias_type, mask_type, dropout_probability, s_q, s_kv, d_qk,
-                            d_v, h, hg, softmax_type);
+      is_small_seq_supported_static(dtype, layout, bias_type, mask_type, dropout_probability, s_q,
+                                    s_kv, d_qk, d_v, h, hg, softmax_type, false);
   void* ck_smallseq_workspace_prefix = nullptr;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing

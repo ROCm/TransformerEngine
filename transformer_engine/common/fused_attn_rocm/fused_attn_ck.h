@@ -34,39 +34,28 @@ bool is_ck_backend_supported(
 constexpr size_t kSmallSeqMaxSeqlen = 17;
 
 // Small-seq eligibility is split into static and runtime checks:
-// - Static: config known at call time (dtype, head dims, heads, bias, dropout, mask).
-//   Used during workspace sizing to reserve THD probe buffers and to gate the small-seq path
-//   before any device data is read.
+// - Static: config known at call time (NVTE_FUSED_ATTN_CK_SMALLSEQ, arch, dtype, layout, max
+//   seqlens, head dims, heads, bias, dropout, mask, max logit). Used during workspace sizing to
+//   reserve THD probe buffers and to gate the small-seq path before any device data is read.
 // - Runtime: actual per-batch max seqlen for THD/ragged inputs (from cu_seqlens on device).
 //   Even when static config matches, individual batches may exceed kSmallSeqMaxSeqlen; probe
 //   at execute time and fall back to regular CK when out of range.
 bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type,
                                    NVTE_Mask_Type mask_type,
                                    float dropout,
+                                   size_t max_seqlen_q,
+                                   size_t max_seqlen_kv,
                                    size_t head_dim_qk,
                                    size_t head_dim_v,
                                    size_t num_attn_heads,
                                    size_t num_gqa_groups,
-                                   NVTE_Softmax_Type softmax_type);
+                                   NVTE_Softmax_Type softmax_type,
+                                   bool return_max_logit);
 
 bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
                                     size_t runtime_max_seqlen_kv);
-
-// Whether the opt-in small-seq kernels (NVTE_FUSED_ATTN_CK_SMALLSEQ=1) can run this config, by the
-// static rules the forward and backward use. THD is decided again at runtime.
-bool is_small_seq_possible(DType dtype,
-                           NVTE_QKV_Layout qkv_layout,
-                           NVTE_Bias_Type bias_type,
-                           NVTE_Mask_Type mask_type,
-                           float dropout,
-                           size_t max_seqlen_q,
-                           size_t max_seqlen_kv,
-                           size_t head_dim_qk,
-                           size_t head_dim_v,
-                           size_t num_attn_heads,
-                           size_t num_gqa_groups,
-                           NVTE_Softmax_Type softmax_type);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(
