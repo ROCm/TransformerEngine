@@ -57,7 +57,8 @@ jobs:
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
     # - ci-skip-scope was added to a PR with existing ci-level label(s); the
-    #   run then skips ci/change_scope.py and runs every suite at that level
+    #   run then skips .github/scripts/change_scope.py and runs every suite at
+    #   that level
     if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}

@@ -110,14 +110,11 @@ run_test_config_mgpu() {
     # hipBLASLt instead. Run those cases with Triton GEMM disabled only.
     _layernorm_mlp_jax_gemm_k="Float8CurrentScaling and with_jax_gemm_True"
     TE_CI_GPUS=4 run_default_fa 2 test_distributed_layernorm_mlp.py -k "not (${_layernorm_mlp_jax_gemm_k})"
-    _saved_xla_flags="$XLA_FLAGS"
-    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
-    TE_CI_GPUS=4 run_default_fa_lbl "no_triton_gemm" 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
-    export XLA_FLAGS="$_saved_xla_flags"
+    TE_CI_GPUS=4 XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false" run_default_fa_lbl "no_triton_gemm" 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
     TE_CI_GPUS=4 run_default_fa 3 test_distributed_permutation.py
     TE_CI_GPUS=4 run_default_fa 3 test_distributed_softmax.py
 
-    TE_CI_GPUS=2 run_default_fa_lbl "mgpu" 3 test_sanity_import.py
+    TE_CI_GPUS=2 run_default_fa 3 test_sanity_import.py
 }
 
 # Single config mode, run it synchronously and return result

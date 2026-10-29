@@ -94,7 +94,6 @@ export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 _script_error_count=0
 _run_error_count=0
 _ignored_error_count=0
-_seen_test_tags=""
 TEST_ERROR_IGNORE=""
 
 script_error() {
@@ -362,20 +361,6 @@ check_test_filter() {
     return 1
 }
 
-# The test name tag names the JUnit XML file and is the TEST_FILTER key a
-# scheduler re-dispatches on, so two call lines may not share one: the second
-# would overwrite the first's results, and one dispatch would run both. Anything
-# that changes what a line runs -- an env prefix, a -k expression, extra pytest
-# args -- needs its own label to keep the tags apart.
-check_test_tag_unique() {
-    case " $_seen_test_tags " in
-    *" $1 "*)
-        script_error "Duplicate test tag $1: give the call site a distinct label"
-        exit 1
-    esac
-    _seen_test_tags="$_seen_test_tags $1"
-}
-
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     export ROCM_PATH=$(resolve_rocm_path)
@@ -415,7 +400,6 @@ pytest_run() {
     shift 3
     _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
-    check_test_tag_unique $_test_name_tag || return
     # List mode: emit the work item instead of running it, so an external
     # scheduler can pack items across GPUs. The tag alone is enough to
     # re-dispatch the item: setting TEST_FILTER to it and re-entering this

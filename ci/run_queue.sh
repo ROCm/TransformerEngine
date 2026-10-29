@@ -25,7 +25,8 @@
 #
 # --suites (or TE_CI_SUITES) runs only the named suites of the config; the rest
 # pass without running, with a verdict that says so. CI sets it from
-# ci/change_scope.py, which works out from a PR's changed paths what it needs.
+# .github/scripts/change_scope.py, which works out from a PR's changed paths
+# what it needs.
 #
 # Example usage:
 #   TEST_LEVEL=1 ci/run_queue.sh
@@ -182,9 +183,9 @@ if [[ -n "$dupe_labels" ]]; then
 fi
 
 # Keep only the --suites the caller asked for. A name the configs do not define
-# is an error rather than a no-op: it means the caller (ci/change_scope.py) and
-# the configs disagree on a label, and quietly running nothing for it would
-# pass a PR that was never tested.
+# is an error rather than a no-op: it means the caller
+# (.github/scripts/change_scope.py) and the configs disagree on a label, and
+# quietly running nothing for it would pass a PR that was never tested.
 if [[ -n "$FILTER_SUITES" ]]; then
     read -r -a wanted <<< "$SELECTED_SUITES"
     for name in "${wanted[@]}"; do
@@ -465,6 +466,19 @@ for i in "${!SUITE_LABELS[@]}"; do
     fi
 done
 rm -f "$LIST_TMP"
+
+# A tag is the TEST_FILTER key its item is dispatched on and the name of its
+# JUnit XML file, so two call lines in one suite may not share one: one dispatch
+# would run both, and the second would overwrite the first's results. Anything
+# that changes what a line runs -- an env prefix, a -k expression, extra pytest
+# args -- needs its own label in the suite script to keep the tags apart. Opaque
+# items have no tag, and their labels were checked unique above.
+dupe_tags=$(awk -F'\t' '$3 != "" { print $1 "/" $3 }' "$QUEUE_FILE.raw" | sort | uniq -d)
+if [[ -n "$dupe_tags" ]]; then
+    log_error "duplicate work item tags; give each call site a distinct label:"
+    echo "$dupe_tags" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 2: narrow the queue to a re-run, then weight and order it

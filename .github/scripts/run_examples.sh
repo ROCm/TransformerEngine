@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 #
 # Run TE examples on a single GPU.
-# HIP_VISIBLE_DEVICES must be set by the caller (run_parallel_sgpu.sh).
+# HIP_VISIBLE_DEVICES must be set by the caller (ci/run_queue.sh).
 
 set -e
 

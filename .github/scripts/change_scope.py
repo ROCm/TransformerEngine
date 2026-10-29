@@ -16,7 +16,7 @@ manual runs, and for a PR labelled ci-skip-scope, the workflow calls this
 script with --all, which ignores the rules and selects every suite.
 
 Example:
-  git diff --name-status --no-renames dev...HEAD | python3 ci/change_scope.py
+  git diff --name-status --no-renames dev...HEAD | python3 .github/scripts/change_scope.py
 """
 
 import argparse
@@ -64,6 +64,16 @@ RULES = [
     (".github/workflows/rocm-ci.yml", EVERYTHING, "the CI workflow"),
     (".github/workflows/rocm-ci-dispatch.yml", EVERYTHING, "the CI workflow"),
     (".github/workflows/rocm-wheels-build.yml", EVERYTHING, "the CI build"),
+    (".github/scripts/run_examples.sh", frozenset({"examples"}), "examples suite script"),
+    # A PR is gated by its own copy of these rules, so one that edits them runs
+    # every suite rather than trusting the rules it is changing.
+    (".github/scripts/change_scope.py", EVERYTHING, "the gating rules"),
+    # Scripts of manually triggered workflows. The CI image in particular is
+    # published by hand and named in ci/ci_config.json, so a PR editing its
+    # recipe still runs on the published image.
+    (".github/scripts/Dockerfile.ci.deps", NOTHING, "CI image recipe; ci-deps-docker-publish.yml"),
+    (".github/scripts/aiter_prebuild_upload.sh", NOTHING, "aiter-prebuilt-upload.yml"),
+    (".github/scripts/check_for_ngc_images.sh", NOTHING, "attach-wheels-to-release.yml"),
     (".github/scripts/**", EVERYTHING, "CI scripts"),
     (".github/**", NOTHING, "other workflows run on their own triggers"),
     # Test sources. No sGPU test imports from tests/pytorch/distributed, but the
@@ -91,6 +101,11 @@ RULES = [
     ("ci/pytorch.sh", TORCH, "PyTorch suite script"),
     ("ci/jax.sh", JAX, "JAX suite script"),
     ("ci/core.sh", frozenset({"core"}), "C++ suite script"),
+    # Queue configs: each is read only by its own queue
+    ("ci/ci_sgpu_queue.conf", frozenset(SGPU_SUITES), "sGPU queue config"),
+    ("ci/ci_mgpu_queue.conf", frozenset(MGPU_SUITES), "mGPU queue config"),
+    # The CI docker images: a new image runs every suite
+    ("ci/ci_config.json", EVERYTHING, "names the CI docker images"),
     # Everything else every suite shares: the C++ library all frameworks link,
     # the build, the submodules and the rest of the CI scripts. The catch-all
     # is spelled out so the table reads as complete.
@@ -171,8 +186,9 @@ def summary_lines(needed, decisions, reason):
     if reason:
         out += [f"Running every suite: {reason}.", ""]
         return out
-    out += [f"- sGPU suites: **{sgpu}**", f"- mGPU suites: **{mgpu}**", ""]
-    if not needed:
+    if needed:
+        out += [f"- sGPU suites: **{sgpu}**", f"- mGPU suites: **{mgpu}**", ""]
+    else:
         out += ["Nothing this PR changes is built or tested by CI, so no test job runs.", ""]
     out += [
         f"<details><summary>Why -- {len(decisions)} changed paths</summary>",
