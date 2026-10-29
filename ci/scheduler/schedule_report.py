@@ -101,25 +101,33 @@ def calculate_gpu_utilisation_table(frame, wall, gpu_ids):
     ]
 
 
-def calculate_schedule_table(frame, default_weight):
-    """What ran where, in execution order, against its cached duration."""
+def calculate_schedule_table(frame, default_weight, weighted=True):
+    """What ran where, in execution order, against its cached duration.
+
+    ``weighted`` is false for a queue that keeps no weight table; it has no
+    cached duration to compare against, so those two columns are left out.
+    """
     # Grouped by the first GPU an item held; an item's GPUs are listed in full,
     # so a 4-GPU item shows which three others it kept busy.
     order = frame.assign(_gpu=frame["gpus"].str.split(",").str[0].astype(int)).sort_values(
         ["_gpu", "start_off", "name"], kind="stable"
     )
-    rows = [
-        [
-            "GPUs",
-            "Start (s)",
-            "Duration (s)",
-            "Result",
-            "Cached duration (s)",
-            "Run vs cached",
-            "Test item (suite/file.backend.label)",
-        ]
-    ]
+    header = ["GPUs", "Start (s)", "Duration (s)", "Result"]
+    if weighted:
+        header += ["Cached duration (s)", "Run vs cached"]
+    rows = [header + ["Test item (suite/file.backend.label)"]]
     for row in order.itertuples(index=False):
+        if not weighted:
+            rows.append(
+                [
+                    f"gpu{row.gpus}",
+                    f"{row.start_off}",
+                    f"{row.secs}",
+                    outcome(row.rc, row.incomplete),
+                    row.name,
+                ]
+            )
+            continue
         known = row.est > 0 and row.est != default_weight
         # Run vs cached is the scheduler feedback loop made visible: a large
         # positive miss is an item that should have been dispatched earlier.
@@ -231,6 +239,9 @@ def render_report_md(
     note = f" ({stopped} stopped short, so not timed)" if stopped else ""
     util = int(frame["gpu_secs"].sum()) * 100 / (wall * n_gpus)
     mark = ":x:" if failed or ran != total_items else ":white_check_mark:"
+    # Every item held every GPU, one after another: each GPU's row would be the
+    # same, and utilisation only measures the gaps between items.
+    whole_box = bool((frame["width"] == n_gpus).all())
 
     out = [
         f"## {title}",
@@ -240,7 +251,7 @@ def render_report_md(
         # Utilisation is left out of a re-run's headline rather than shown and
         # disclaimed: a handful of items on eight GPUs reads as single digits,
         # which says only that the queue was short and invites the wrong fix.
-        + ("" if rerun else f" at {util:.1f}% GPU utilisation")
+        + ("" if rerun or whole_box else f" at {util:.1f}% GPU utilisation")
         + (f", {total_wall}s end to end" if total_wall else ""),
         "",
     ]
@@ -261,7 +272,7 @@ def render_report_md(
     # This reads a re-run's short queue as a badly packed one -- five idle GPUs
     # are what queueing three items looks like, not a scheduling fault -- so it
     # is a full run's section only.
-    if not rerun:
+    if not rerun and not whole_box:
         rows = calculate_gpu_utilisation_table(frame, wall, gpu_ids)
         out += ["### Per-GPU utilisation", ""] + render_md(rows) + [""]
 
@@ -277,7 +288,7 @@ def render_report_md(
     tables = [
         (
             "Schedule -- what ran where, in execution order",
-            calculate_schedule_table(frame, default_weight),
+            calculate_schedule_table(frame, default_weight, weighted=weights is not None),
             # A re-run's schedule is a handful of rows someone is reading to find
             # out whether the thing that failed still fails. The vocabulary is
             # worth a paragraph against a full run's ninety rows, not against
@@ -293,7 +304,8 @@ def render_report_md(
     ]
     # Titled "for next run", and on a re-run that is a lie: phase 6 skips the
     # update entirely, so every Next weight here is one nothing will ever write.
-    if not rerun:
+    # A queue that keeps no weight table has nothing to show here at all.
+    if not rerun and weights is not None:
         tables.append(
             (
                 "Updated weights for next run",
@@ -346,10 +358,10 @@ def main():
     )
     parser.add_argument(
         "--weights",
-        required=True,
         metavar="TABLE",
         help="the weight table build_weights.py has just rewritten; the report "
-        "reads it to show what the next run will schedule with",
+        "reads it to show what the next run will schedule with. Left out for a "
+        "queue that keeps no weight table",
     )
     parser.add_argument(
         "--skipped",
@@ -382,7 +394,7 @@ def main():
     queue_keys = read_queue_keys(queue) if os.path.exists(queue) else list(frame["name"])
     missing = missing_items(frame, queue_keys)
 
-    weights = read_weights(args.weights)
+    weights = read_weights(args.weights) if args.weights else None
 
     report = render_report_md(
         frame,

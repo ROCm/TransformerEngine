@@ -5,7 +5,7 @@
 
 """Order/Update the queue scheduler's weight table.
 
-  order  : Read the cached weight table and apply it to sort the scheduler's queue widest-first, then by longest-processing-time first.
+  order  : Read the cached weight table and apply it to sort the scheduler's queue widest-first, then by longest-processing-time first. Without a table the queue keeps its listed order.
   update : Read a finished run's timings and blend them into the cached weight table.
 """
 
@@ -145,25 +145,33 @@ def plan_lines(queue, weights_path, n_weights, gpu_ids, default_weight):
 
     n_gpus = len(gpu_ids) or 1
     lines = [f"== Queue: {len(queue)} items over {n_gpus} GPUs ({' '.join(gpu_ids)}) =="]
-    if n_weights:
-        lines.append(f"   weights: {weights_path} ({n_weights} items)")
+    if not weights_path:
+        lines.append("   weights: none kept for this queue -- items run in the order listed")
+        lines.append("== Queue plan (dispatch order) ==")
     else:
-        lines.append(f"   weights: none yet -- this run is unordered and will write {weights_path}")
+        if n_weights:
+            lines.append(f"   weights: {weights_path} ({n_weights} items)")
+        else:
+            lines.append(
+                f"   weights: none yet -- this run is unordered and will write {weights_path}"
+            )
+        lines.append("== Queue plan (dispatch order; est = weight used to sort) ==")
 
-    lines.append("== Queue plan (dispatch order; est = weight used to sort) ==")
     total = 0
     for position, (weight, label, _cmd, tag, _rest, gpus) in enumerate(queue, 1):
         # GPU-time, not wall time: a 4-GPU item takes 4 GPUs off the box for as
         # long as it runs.
         total += weight * gpus
+        estimate = f"est={est(weight):<8} " if weights_path else ""
         lines.append(
-            f"  {position:3d}. est={est(weight):<8} gpus={gpus:<2} {label:<9} {tag or '(whole suite)'}"
+            f"  {position:3d}. {estimate}gpus={gpus:<2} {label:<9} {tag or '(whole suite)'}"
         )
-    lines.append("")
-    lines.append(
-        f"  estimated work {total} GPU-s over {n_gpus} GPUs -> lower bound {total / n_gpus:.0f}s"
-        f" (longest item {est(max(row[0] for row in queue))})"
-    )
+    if weights_path:
+        lines.append("")
+        lines.append(
+            f"  estimated work {total} GPU-s over {n_gpus} GPUs -> lower bound {total / n_gpus:.0f}s"
+            f" (longest item {est(max(row[0] for row in queue))})"
+        )
     return lines
 
 
@@ -244,7 +252,7 @@ def run_order(args):
         print("error: queue is empty: every suite expanded to nothing", file=sys.stderr)
         return 1
 
-    weights = read_weights(args.weights)
+    weights = read_weights(args.weights) if args.weights else {}
     queue = order_queue(rows, weights, args.default_weight)
     try:
         with open(args.output, "w", encoding="utf-8") as handle:
@@ -310,7 +318,10 @@ def main():
     )
     order.add_argument("queue", metavar="QUEUE", help="the unweighted queue from expansion")
     order.add_argument(
-        "-w", "--weights", required=True, metavar="TABLE", help="weight table to read"
+        "-w",
+        "--weights",
+        metavar="TABLE",
+        help="weight table to read; without one the queue keeps its listed order",
     )
     order.add_argument(
         "-o", "--output", required=True, metavar="FILE", help="where to write the sorted queue"

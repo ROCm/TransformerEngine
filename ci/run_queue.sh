@@ -12,9 +12,8 @@
 #
 #   sgpu  the suites' single-GPU tests (TEST_SGPU=1); every item takes one GPU.
 #         Default config ci/ci_sgpu_queue.conf.
-#   mgpu  the suites' multi-GPU tests (TEST_MGPU=1). An item takes the GPU count
-#         its call site declares with TE_CI_GPUS=N, and the whole box when it
-#         declares none. Default config ci/ci_mgpu_queue.conf.
+#   mgpu  the suites' multi-GPU tests (TEST_MGPU=1); every item takes the whole
+#         box. Default config ci/ci_mgpu_queue.conf.
 #
 # Config format (one suite per line; # comments and blank lines are ignored):
 #   <label>  <logfile>  <mode>  <command> [args...]
@@ -48,7 +47,7 @@ fi
 # Three directories in the repo root:
 #
 #   test-results/  everything one run produced; this script adds logs/ under it
-#   ci-weights/    the learned weight table
+#   ci-weights/    the learned weight table (sGPU queue only)
 #   ci-rerun/      what failed, so a re-run of this job can queue only that
 : "${LOG_DIR:=${REPO_ROOT}/test-results/logs}"
 
@@ -276,17 +275,21 @@ if [[ -z "$ARCH" ]]; then
 fi
 echo "== Arch: ${ARCH} =="
 
-# The weight table is keyed by queue, arch, TEST_LEVEL and GPU count. The GPU
-# count matters because an mGPU item that declares no TE_CI_GPUS takes the whole
-# box, and those are the tests that size themselves to it: the same item on a
-# 4-GPU box is a different amount of work than on an 8-GPU one.
-WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
-mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
-# One-time migration: the sGPU table predates the queue and GPU-count keys. Pick
-# it up under the new name so the first run after the rename is still ordered.
-LEGACY_WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
-if [[ "$QUEUE" == "sgpu" && ! -e "$WEIGHTS_FILE" && -s "$LEGACY_WEIGHTS_FILE" ]]; then
-    mv "$LEGACY_WEIGHTS_FILE" "$WEIGHTS_FILE"
+# Only the sGPU queue keeps a weight table. Its items share the box, so the order
+# they start in decides when the last one finishes. An mGPU item takes the whole
+# box and the items run one after another, so their order does not change the
+# wall time and there is nothing to learn. The table is keyed by arch,
+# TEST_LEVEL and GPU count.
+WEIGHTS_FILE=""
+if [[ "$QUEUE" == "sgpu" ]]; then
+    WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
+    mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
+    # One-time migration: the sGPU table predates the queue and GPU-count keys. Pick
+    # it up under the new name so the first run after the rename is still ordered.
+    LEGACY_WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
+    if [[ ! -e "$WEIGHTS_FILE" && -s "$LEGACY_WEIGHTS_FILE" ]]; then
+        mv "$LEGACY_WEIGHTS_FILE" "$WEIGHTS_FILE"
+    fi
 fi
 
 # What failed last time, keyed the same way. Phase 5 writes it; Phase 2 reads it
@@ -305,9 +308,9 @@ RERUN_MODE=""   # set by Phase 2 once it has actually narrowed the queue
 # file here re-runs whole -- so nothing about the queue depends on it being right.
 RERUN_TESTS_DIR="${RERUN_DIR}/tests"
 
-# How many GPUs an item gets when its call site declares no TE_CI_GPUS. An sGPU
-# item is single-GPU by definition; an undeclared mGPU item gets the whole box,
-# which is exactly what it had before there was a queue.
+# How many GPUs an item gets. An sGPU item is single-GPU by definition. An mGPU
+# item gets the whole box: the tests read the visible GPU count and adapt to it,
+# and given fewer GPUs they skip cases or run fewer ranks rather than fail.
 case "$QUEUE" in
     sgpu) DEFAULT_ITEM_GPUS=1 ;;
     mgpu) DEFAULT_ITEM_GPUS=$NUM_GPUS ;;
@@ -391,29 +394,6 @@ LIST_TMP="$QUEUE_DIR/.expand.tmp"  # one suite's list, reused per suite
 # QUEUE_DIR covers the same case; this keeps the phase correct on its own.
 : > "$QUEUE_FILE.raw"
 
-# Usage: item_gpus <label> <tag> [<declared>]
-# Echo how many GPUs an item runs on: what its call site declared with
-# TE_CI_GPUS, else the queue's default. A count larger than the box is clamped
-# to the box -- the item still runs, but whatever needed the rest of the GPUs
-# will skip, so say so. Returns 1 on a count that is not a number.
-item_gpus() {
-    local label=$1 tag=$2 want=${3:-}
-    if [[ -z "$want" ]]; then
-        echo "$DEFAULT_ITEM_GPUS"
-        return 0
-    fi
-    if [[ ! "$want" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "${label}/${tag}: TE_CI_GPUS=${want} is not a GPU count"
-        return 1
-    fi
-    if (( want > NUM_GPUS )); then
-        log_warn "${label}/${tag} declares ${want} GPUs but only ${NUM_GPUS} are visible;" \
-                 "running it on ${NUM_GPUS}, so cases needing more will skip"
-        want=$NUM_GPUS
-    fi
-    echo "$want"
-}
-
 echo "== Expanding test suites into work items =="
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
@@ -436,11 +416,8 @@ for i in "${!SUITE_LABELS[@]}"; do
             tail -20 "$EXPAND_LOG" >&2
             exit 1
         fi
-        # Each entry is "<tag>" or "<tag> <gpus>"; see pytest_run in _utils.sh
-        for entry in "${tags[@]}"; do
-            read -r tag declared <<< "$entry"
-            gpus=$(item_gpus "$label" "$tag" "$declared") || exit 1
-            printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" "$gpus" \
+        for tag in "${tags[@]}"; do
+            printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" "$DEFAULT_ITEM_GPUS" \
                 >> "$QUEUE_FILE.raw"
         done
 
@@ -511,7 +488,7 @@ if [[ -s "$RERUN_FILE" ]]; then
 fi
 
 if ! scheduler_py build_weights.py order "$QUEUE_FILE.raw" \
-        --weights "$WEIGHTS_FILE" \
+        ${WEIGHTS_FILE:+--weights "$WEIGHTS_FILE"} \
         --output "$QUEUE_FILE" \
         --default-weight "$DEFAULT_WEIGHT" \
         --gpus "${GPU_IDS[*]}"; then
@@ -700,10 +677,14 @@ run_item() {
     #
     #   time  gpus  start offset  duration  rc  estimate  suite  item
     #
-    printf '[%s] gpu%-8s t+%-7s %5ss rc=%-4s est=%-8s %-9s %s\n' \
+    # The estimate is left blank for a queue that keeps no weight table.
+    local est=""
+    if [[ -n "$WEIGHTS_FILE" ]]; then
+        est="est=$([[ $weight -eq $DEFAULT_WEIGHT ]] && echo unknown || echo "${weight}s")"
+    fi
+    printf '[%s] gpu%-8s t+%-7s %5ss rc=%-4s %-12s %-9s %s\n' \
         "$(date '+%H:%M:%S')" "$gpus" "$((start - START_TS))s" "$((end - start))" \
-        "$rc" "$([[ $weight -eq $DEFAULT_WEIGHT ]] && echo unknown || echo "${weight}s")" \
-        "$label" "$safetag"
+        "$rc" "$est" "$label" "$safetag"
 }
 
 # The dispatcher's view of the box: which GPUs an item holds, keyed by the pid
@@ -851,8 +832,10 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 6: update the learned weight table for the next run
 # ---------------------------------------------------------------------------
-echo
-if [[ -n "$RERUN_MODE" ]]; then
+[[ -n "$WEIGHTS_FILE" ]] && echo
+if [[ -z "$WEIGHTS_FILE" ]]; then
+    :   # this queue keeps no weight table
+elif [[ -n "$RERUN_MODE" ]]; then
     # Two reasons, either of which alone is enough. An item narrowed to its
     # failing nodeids ran a handful of its tests, so its duration measures the
     # re-run and not the item -- there is no contention model that recovers the
@@ -881,7 +864,7 @@ if ! scheduler_py schedule_report.py "$LOG_DIR" \
         --wall "$WALL" \
         --total-wall "$(( $(date +%s) - SCRIPT_START_TS ))" \
         --default-weight "$DEFAULT_WEIGHT" \
-        --weights "$WEIGHTS_FILE" \
+        ${WEIGHTS_FILE:+--weights "$WEIGHTS_FILE"} \
         --skipped "${SKIPPED_LABELS[*]}" \
         ${RERUN_MODE:+--rerun}; then
     log_warn "could not write the scheduling report"

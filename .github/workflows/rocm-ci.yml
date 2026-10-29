@@ -391,9 +391,7 @@ jobs:
         run: docker rm -f te-runner || true
 
   # PyTorch and JAX multi-GPU tests share one 8-GPU runner as a single queue.
-  # Each item runs on the GPUs its call site declares (TE_CI_GPUS in
-  # ci/pytorch.sh and ci/jax.sh) or on the whole box, and items that fit side by
-  # side share it -- see ci/run_queue.sh.
+  # Each item runs on the whole box, one after another -- see ci/run_queue.sh.
   mgpu_tests:
     name: mGPU Tests (${{ matrix.arch_label }})
     needs: [scope, select_image, build]
@@ -451,13 +449,6 @@ jobs:
           EOF
           )"
 
-      - name: Restore learned test weights
-        uses: actions/cache/restore@v4
-        with:
-          path: ci-weights
-          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
-
       # What failed on an earlier attempt of *this* run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         uses: actions/cache/restore@v4
@@ -476,10 +467,6 @@ jobs:
         run: |
           rm -rf test-results
 
-          mkdir -p ci-weights
-          wc -l ci-weights/*.txt 2>/dev/null \
-            || echo "no weight table restored; this run will be unordered"
-
           mkdir -p ci-rerun
           wc -l ci-rerun/mgpu/*.tsv 2>/dev/null \
             || echo "no failed-item list restored; this run queues every suite"
@@ -495,13 +482,6 @@ jobs:
             -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
               --log-dir /workspace/test-results/logs"
-
-      - name: Save learned test weights
-        if: always() && hashFiles('ci-weights/*') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: ci-weights
-          key: te-mgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
@@ -561,7 +541,6 @@ jobs:
           name: logs-mgpu-${{ matrix.arch_label }}
           path: |
             test-results/**
-            ci-weights/*.txt
             ci-rerun/mgpu/**
           if-no-files-found: ignore
           retention-days: 5
