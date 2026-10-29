@@ -746,6 +746,21 @@ else() # USE_ROCM
   list(APPEND transformer_engine_LINKER_LIBS hiprtc)
   find_package(hipblaslt)
   list(APPEND transformer_engine_LINKER_LIBS roc::hipblaslt)
+  # Device scalar alpha (ROCm/rocm-libraries#13482) is not in a hipBLASLt release yet; detect the
+  # enum rather than a version, since dev builds can share a version number with releases.
+  include(CheckCXXSourceCompiles)
+  include(CMakePushCheckState)
+  cmake_push_check_state(RESET)
+  set(CMAKE_REQUIRED_LIBRARIES roc::hipblaslt hip::host)
+  unset(NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA CACHE)
+  check_cxx_source_compiles("
+    #include <hipblaslt/hipblaslt.h>
+    int main() { return HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT; }"
+    NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA)
+  cmake_pop_check_state()
+  if(NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA)
+  endif()
   if(USE_FUSED_ATTN_AOTRITON)
     target_compile_definitions(transformer_engine PUBLIC USE_FUSED_ATTN_AOTRITON)
     list(APPEND transformer_engine_LINKER_LIBS aotriton)
