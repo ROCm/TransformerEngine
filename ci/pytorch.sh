@@ -143,7 +143,7 @@ run_test_config(){
     run_default_fa 1 layernorm_mlp/test_selective_activation_checkpoint.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_custom_recipe.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 mxfp8/
-    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
+    check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
 }
 
 run_test_config_mgpu(){
