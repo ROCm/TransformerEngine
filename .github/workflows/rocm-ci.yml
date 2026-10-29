@@ -288,15 +288,18 @@ jobs:
           wc -l ci-rerun/sgpu/tests/*.txt 2>/dev/null \
             || echo "no per-test lists restored; any queued item re-runs whole"
 
+          # No core dumps: a crashing test would leave one in its working
+          # directory under test-results/, and ROCm's GPU core dump is mode 0600
+          # and root-owned there, which fails the whole log upload with EACCES.
           docker exec \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            te-runner bash /workspace/ci/run_queue.sh --queue sgpu \
-              --suites "${{ needs.scope.outputs.sgpu_suites }}" \
-              --log-dir /workspace/test-results/logs
+            -e TE_CI_SUITES="${{ needs.scope.outputs.sgpu_suites }}" \
+            te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue sgpu \
+              --log-dir /workspace/test-results/logs"
 
       - name: Save learned test weights
         if: always() && hashFiles('ci-weights/*') != ''
