@@ -214,6 +214,22 @@ class CommOverlapCore {
                                      cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void fused_overlap_bulk_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                     bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                     TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
+                                     bool grad, bool accumulate, bool use_split_accumulator,
+                                     TensorWrapper &rs_output, cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
+
+  virtual void fused_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator,
+                                TensorWrapper &rs_output, cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -255,6 +271,7 @@ class CommOverlapBase : public CommOverlapCore {
                     TensorWrapper &workspace, bool grad, bool accumulate,
                     bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
                     cudaStream_t stream_main) override;
+
 
   void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                               bool transb, TensorWrapper &D, TensorWrapper &bias,
@@ -319,6 +336,13 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _prev_rank;
   int _rank_round_tp;
   int _num_ubuf_chunks;
+#ifdef __HIP_PLATFORM_AMD__
+  // ROCm fused AG+GEMM: the MXFP8 scale region carved from the tail of the Userbuffers
+  // allocation, and the second all-gather region armed by arm_aux_ag_region() below.
+  size_t _scale_chunk_bytes{0};
+  size_t _scale_base_offset{0};
+  CommOverlapP2PBase *_aux_ag_comm{nullptr};
+#endif
   int _self_chunk_id;
   std::vector<TensorWrapper> _ubufs;
   std::vector<cudaStream_t> _stream_send;
@@ -443,7 +467,71 @@ class CommOverlapP2PBase : public CommOverlapCore {
                              bool accumulate, bool use_split_accumulator,
                              cudaStream_t stream_main) override;
 
+  /*
+  ** ROCm fused bulk ReduceScatter implemented with hipKittens
+  */
+  void fused_overlap_bulk_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                             bool transb, TensorWrapper &D, TensorWrapper &bias,
+                             TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                             bool accumulate, bool use_split_accumulator, TensorWrapper &rs_output,
+                             cudaStream_t stream_main) override;
+
+  /*
+  ** ROCm fused ReduceScatter + GEMM implemented with hipKittens
+  */
+  void fused_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &rs_output,
+                        cudaStream_t stream_main) override;
+
   bool is_fused() override { return _fused; }
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool has_scale_buffer() { return _scale_chunk_bytes != 0; }
+
+  /*
+  ** ROCm fused AG+GEMM only. Arms a second Userbuffers region whose all-gather rides in this
+  ** region's GEMM grid. No compute block waits on it, so it is pure data movement.
+  **
+  ** MXFP8 cannot derive column-wise scale-inverses from row-wise ones, so backward needs a
+  ** second, column-scaled copy of the gathered grad output for the wgrad GEMM. Upstream gathers
+  ** it with an external all-gather on borrowed dgrad streams (pytorch/module/linear.py); the
+  ** fused backend carries it instead.
+  **
+  ** Deliberately not a parameter on the shared gemm() entry point, which stays identical to
+  ** upstream. One-shot: fused_overlap_ag() takes and clears it on entry, and every other overlap
+  ** path rejects a leftover arming, so a gather can never be silently dropped. If something raises
+  ** between arming and that GEMM, the arming is left behind and the next use of this object fails.
+  */
+  void arm_aux_ag_region(CommOverlapP2PBase *aux) {
+    NVTE_CHECK(_fused, "A second all-gather region requires the fused overlap backend.");
+    NVTE_CHECK(aux != nullptr, "arm_aux_ag_region was given no region.");
+    NVTE_CHECK(aux->_fused, "The second all-gather region must itself be fused-backed.");
+    NVTE_CHECK(aux->has_scale_buffer(),
+               "The second all-gather region carries no MXFP8 scale region, so the wgrad GEMM "
+               "would have no column-wise scale-inverses for the gathered tensor.");
+    NVTE_CHECK(aux->_tp_size == _tp_size,
+               "The second all-gather region spans a different tensor-parallel group.");
+    NVTE_CHECK(_aux_ag_comm == nullptr,
+               "A second all-gather region is already armed on this Userbuffers object: the "
+               "previous one was armed but never consumed by a fused AG+GEMM.");
+    _aux_ag_comm = aux;
+  }
+
+  bool has_aux_ag_region() const { return _aux_ag_comm != nullptr; }
+
+ protected:
+  // Rejects a leftover arming on every overlap path that cannot carry one. Without this the
+  // gather is silently never issued and the wgrad GEMM reads an un-gathered buffer.
+  void check_no_aux_ag_region(const char *path) const {
+    NVTE_CHECK(_aux_ag_comm == nullptr, "A second all-gather region was armed on this "
+               "Userbuffers object, but ", path, " cannot carry one: the gather would silently "
+               "never happen.");
+  }
+
+ public:
+#endif
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.

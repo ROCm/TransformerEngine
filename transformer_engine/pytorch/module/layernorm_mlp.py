@@ -26,10 +26,14 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     fused_ag_gemm_eligible,
+    fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
+    fused_bulk_rs_eligible,
+    fused_wgrad_ag_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    _ub_is_fused,
     ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
@@ -72,17 +76,20 @@ from ..distributed import (
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
+from ..tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 if IS_HIP_EXTENSION:
     from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, set_quantizer_amax_reduction_group, WeightGradStore
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
+from ._common import (
+    apply_normalization,
+    set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
+    WeightGradStore,
+)
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -405,16 +412,34 @@ class _LayerNormMLP(torch.autograd.Function):
             fused_ag_gemm_eligible(
                 "fc1_fprop", inp, fc1_weight, None if bias_gelu_fusion else fc1_bias, 
                 activation_dtype, tp_size, fp8, gelu=activation == "gelu" and not bias_gelu_fusion,
+                mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
             )
             and fused_ag_gemm_eligible(
                 "fc2_dgrad", inp, fc2_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+                mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
             )
         ):
             ub_overlap_ag = False
+        if ub_overlap_rs and not fused_rs_gemm_eligible(
+            "fc2_fprop", fc2_weight, fc2_bias, activation_dtype, tp_size, fp8,
+        ):
+            ub_overlap_rs = False
+        if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
+            "fc1_dgrad", fc1_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+        ):
+            ub_overlap_rs_dgrad = False
         if ub_bulk_dgrad and not fused_bulk_ag_eligible(
             "fc1_dgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+            mxfp8=fp8 and fp8_meta["recipe"].mxfp8(),
         ):
             ub_bulk_dgrad = False
+        # The bulk reduce-scatter kernel is bf16 only and declines anything else, which trips the
+        # NVTE_CHECK in fused_overlap_bulk_rs rather than falling back. linear.py and
+        # layernorm_linear.py already gate on this; LayerNormMLP did not.
+        if ub_bulk_wgrad and not fused_bulk_rs_eligible(
+            "fc1_wgrad", inp, fc1_weight, activation_dtype, tp_size, fp8,
+        ):
+            ub_bulk_wgrad = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -444,12 +469,16 @@ class _LayerNormMLP(torch.autograd.Function):
         # for debug: : layernorm output = High precision to enable processing of this norm
 
         custom = is_custom(fc1_input_quantizer)
+        hybrid = isinstance(fc1_input_quantizer, HybridQuantizer)
+        identity = isinstance(fc1_input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
             and not custom
+            and not hybrid
+            and not identity
         )
 
         # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
@@ -1234,12 +1263,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.fc1_input_quantizer
-                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
@@ -1302,6 +1326,30 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 fc2_weight.update_usage(columnwise_usage=True)
 
+            # ROCm fused backend: the fc2 dgrad kernel can carry a second all-gather for the
+            # column-scaled grad output, so upstream's external AG on borrowed dgrad streams is
+            # not needed. It rides inside this GEMM, so the region is staged before it launches.
+            ub_obj_fc2_wgrad_ag = None
+            grad_output_wgrad = None
+            ub_fused_wgrad_ag = (
+                ctx.fc2_weight_requires_grad
+                and ctx.ub_overlap_ag
+                and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
+                and fused_wgrad_ag_eligible("fc2")
+            )
+            if ub_fused_wgrad_ag:
+                ub_obj_fc2_wgrad_ag = get_ub("fc2_wgrad", ctx.fp8)
+                ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                    ub_obj_fc2_wgrad_ag,
+                    grad_outputs[0],
+                    ctx.fc2_grad_output_quantizer,
+                    ctx.tp_group,
+                )
+                # The fc2 dgrad kernel carries this region's gather in its own grid. Armed here
+                # and consumed by the GEMM immediately below; see arm_aux_ag_region.
+                ub_obj_fc2_dgrad.arm_aux_ag_region(ub_obj_fc2_wgrad_ag)
+
             # Perform GEMM
             gemm_output, *_ = general_gemm(
                 fc2_weight,
@@ -1350,9 +1398,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # we gather here. Route through the same FP8-aware all-gather as
             # the non-overlap path in
             # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
-            # the grad_output quantizer. Columnwise data needed for fc2_wgrad
-            # is produced by ``update_usage(columnwise_usage=True)`` further
-            # below.
+            # the grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
+            # data from the gathered rowwise data; MXFP8 must instead quantize
+            # the original gradient columnwise to avoid double quantization.
             if (
                 ctx.fc2_weight_requires_grad
                 and ctx.ub_overlap_ag
@@ -1360,7 +1408,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.fc2_grad_output_quantizer is not None:
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.fc2_grad_output_quantizer)
+                if isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                    grad_output = (
+                        grad_outputs[0].reshape(-1, grad_outputs[0].shape[-1]).contiguous()
+                    )
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -1376,7 +1428,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                if ub_fused_wgrad_ag:
+                    # The fc2 dgrad kernel carried the column-scaled gather into the fc2_wgrad
+                    # region, so the view staged above that GEMM is already complete.
+                    grad_output = grad_output_wgrad
+                elif (
+                    ctx.ub_overlap_ag
+                    and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
+                    and not ub_obj_fc2_dgrad.with_cublasmp()
+                ):
                     # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
@@ -1537,7 +1597,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     if (
-                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
+                        isinstance(
+                            ctx.fc1_grad_output_quantizer,
+                            (Float8BlockQuantizer, IdentityQuantizer),
+                        )
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
@@ -2139,7 +2202,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if ub_overlap_disabled("fc1_dgrad"):
                 self.ub_overlap_rs_dgrad = False
                 self.ub_bulk_dgrad = False
-            if ub_overlap_disabled("fc1_wgrad"):
+            if ub_overlap_disabled("fc1_wgrad") or (
+                IS_HIP_EXTENSION and not _ub_is_fused("fc1_wgrad")
+            ):
                 self.ub_bulk_wgrad = False
 
         if any(
@@ -2442,6 +2507,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight, fc2_weight = self._get_weight_tensors()
             fc1_bias = self.fc1_bias if self.use_bias else None
             fc2_bias = self.fc2_bias if self.use_bias else None
+            if not debug:
+                if fc1_weight_quantizer is not None:
+                    fc1_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc1_weight_quantizer, fc1_weight
+                    )
+                if fc2_weight_quantizer is not None:
+                    fc2_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc2_weight_quantizer, fc2_weight
+                    )
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.dequantize()
@@ -2590,7 +2664,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 rowwise=True,
                 columnwise=isinstance(
                     fc2_input_quantizer,
-                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
+                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer, HybridQuantizer),
                 ),
             )
             if IS_HIP_EXTENSION and isinstance(fc2_input_quantizer, MXFP4Quantizer):
@@ -2827,18 +2901,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc2_weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
             fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-        else:
-            # Weight scale factors must be GEMM-swizzled before cuBLAS/CUTLASS can
-            # consume them. Pre-swizzle once at quantize time (persisted on the cached
-            # workspace when the weight is cached) instead of lazily inside every GEMM.
-            # No-op for recipes whose scales don't need swizzling (e.g. per-tensor FP8).
-            # The exception is quantized_model_init, where the weight parameter is
-            # itself quantized and gets all-gathered (FSDP2) and optimizer-updated in
-            # its unswizzled layout; swizzling would break the all-gather and the
-            # dequantize-on-update, so leave the quantizer state untouched.
-            if not self.primary_weights_in_fp8:
-                fc1_weight_quantizer.optimize_for_gemm = True
-                fc2_weight_quantizer.optimize_for_gemm = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):

@@ -1,5 +1,5 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,8 +8,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION

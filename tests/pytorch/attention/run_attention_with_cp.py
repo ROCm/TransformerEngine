@@ -17,17 +17,21 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
+    get_thd_partitioned_indices,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
 
 # Executed as a script, so sibling imports rely on the interpreter putting this file's
 # directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
+from test_attention_with_cp import (
+    model_configs_flash_attn,
+    model_configs_fused_attn,
+)
 from transformer_engine.pytorch import (
     autocast,
+    CPLoadBalancingStrategy,
     DotProductAttention,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -59,6 +63,7 @@ def generate_input_shapes(
     world_size: int,
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -117,8 +122,33 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
-        seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+            assert config.batch_size == 2
+            if kernel_backend == "FlashAttention" and fa_pad_between_seqs == "False":
+                seqlens_q = torch.tensor(
+                    [config.max_seqlen_q - 2, config.max_seqlen_q], dtype=torch.int32
+                )
+                assert seqlens_q.sum().item() % world_size == 0
+                seqlens_q_padded = seqlens_q
+            else:
+                # Exercise both document padding and a CP chunk boundary inside a document.
+                seqlens_q = torch.tensor(
+                    [config.max_seqlen_q - 2, config.max_seqlen_q - 1],
+                    dtype=torch.int32,
+                )
+                padded_total = 2 * config.max_seqlen_q
+                assert padded_total % world_size == 0
+                seqlens_q_padded = torch.tensor(
+                    [config.max_seqlen_q - 1, config.max_seqlen_q + 1],
+                    dtype=torch.int32,
+                )
+        else:
+            seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(
+                torch.int32
+            )
+            seqlens_q_padded = (
+                (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+            )
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
@@ -220,12 +250,20 @@ def run_dpa_with_cp(
     is_training="True",
     fa_pad_between_seqs="False",
     deterministic="False",
+    load_balancing_strategy="DUAL_CHUNK_SWAP",
+    softcap="0.0",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    load_balancing_strategy = CPLoadBalancingStrategy[load_balancing_strategy]
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
+    pad_between_seqs = None
+    if qkv_format == "thd":
+        # Keep this in sync with generate_input_shapes so DPA gets the explicit
+        # padding state without a GPU-to-CPU sync.
+        pad_between_seqs = kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
 
     # set up environment variables and config
     if deterministic == "True":
@@ -248,7 +286,10 @@ def run_dpa_with_cp(
         config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = copy.deepcopy(model_configs_fused_attn[model])
+        if model in model_configs_fused_attn:
+            config = copy.deepcopy(model_configs_fused_attn[model])
+        else:
+            assert False, f"{model=} is not a known FusedAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -258,6 +299,7 @@ def run_dpa_with_cp(
             config.attn_mask_type = "padding_causal"
         else:
             config.attn_mask_type = "padding"
+    config.softcap = float(softcap)
 
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
@@ -319,6 +361,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        softcap=config.softcap,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
     ).cuda()
@@ -337,7 +380,14 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend, fa_pad_between_seqs)
+    ) = generate_input_shapes(
+        qkv_format,
+        config,
+        world_size,
+        kernel_backend,
+        fa_pad_between_seqs,
+        load_balancing_strategy,
+    )
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -428,13 +478,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
-            # FlashAttention path, i.e. no inter-sequence padding. Declare this
-            # explicitly so the sync-free auto-detect (which conservatively
-            # picks True when padded cu_seqlens are present) does not disable FA.
-            pad_between_seqs=(
-                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
-            ),
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -480,11 +524,21 @@ def run_dpa_with_cp(
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        seq_idx_q = get_thd_partitioned_indices(
+            cu_seqlens_q_padded,
+            q_.shape[0],
+            world_size,
+            rank,
+            device=q_.device,
+            load_balancing_strategy=load_balancing_strategy,
         )
-        seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        seq_idx_kv = get_thd_partitioned_indices(
+            cu_seqlens_kv_padded,
+            k_.shape[0],
+            world_size,
+            rank,
+            device=k_.device,
+            load_balancing_strategy=load_balancing_strategy,
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
@@ -528,8 +582,9 @@ def run_dpa_with_cp(
         cp_comm_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
+        load_balancing_strategy,
     )
-    if config.softmax_type != "vanilla":
+    if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
     if dtype == "fp8":
         core_attn.fp8_initialized = False
@@ -552,12 +607,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # See note above (non-CP branch): same explicit declaration so
-            # FlashAttention isn't disabled by the conservative sync-free
-            # auto-detect when this test path constructs no inter-seq padding.
-            pad_between_seqs=(
-                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
-            ),
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -659,46 +709,54 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-            for x in [dq, out, dq_, out_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_q_padded[-1] :] = 0
-                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_q[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
+            if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+                for x in [dq, out, dq_, out_]:
+                    if (
+                        IS_HIP_EXTENSION
+                        and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0
+                    ):
+                        warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                        x[cu_seqlens_q_padded[-1] :] = 0
+                    assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_q[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (
+                                        cu_seqlens_q_padded[b + 1] - num_pads_q[b]
+                                    ) : cu_seqlens_q_padded[b + 1]
                                 ]
-                            ]
-                        ).item()
-                        == 0
-                    )
+                            ).item()
+                            == 0
+                        )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
             )
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-            for x in [dk, dv, dk_, dv_]:
-                if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0:
-                    warnings.warn(f"Rank:{rank} non-zero elements in padding region")
-                    x[cu_seqlens_kv_padded[-1] :] = 0
-                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_kv[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (
-                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                ) : cu_seqlens_kv_padded[b + 1]
-                            ]
-                        ).item()
-                        == 0
-                    )
+            if load_balancing_strategy is not CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+                for x in [dk, dv, dk_, dv_]:
+                    if (
+                        IS_HIP_EXTENSION
+                        and torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() != 0
+                    ):
+                        warnings.warn(f"Rank:{rank} non-zero elements in padding region")
+                        x[cu_seqlens_kv_padded[-1] :] = 0
+                    assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_kv[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (
+                                        cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                    ) : cu_seqlens_kv_padded[b + 1]
+                                ]
+                            ).item()
+                            == 0
+                        )
             # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
             # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
             # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.

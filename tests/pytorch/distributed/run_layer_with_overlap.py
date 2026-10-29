@@ -11,6 +11,7 @@ import sys
 import socket
 import subprocess
 import argparse
+import hashlib
 import warnings
 import pprint
 import yaml
@@ -19,6 +20,12 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
+
+try:
+    from torch._dynamo.utils import counters as dynamo_counters
+except ImportError:  # pragma: no cover
+    dynamo_counters = None
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
@@ -88,6 +95,8 @@ def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
         "ub_overlap_ag": not reference,
         "ub_overlap_rs": not reference,
     }
+    if config.no_bias:
+        kwargs["bias"] = False
 
     if config.layer_type in [te.Linear, te.LayerNormLinear]:
         if config.linear_parallel_mode == "row":
@@ -212,7 +221,23 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
     )
     parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Wrap each layer in torch.compile (tests Userbuffers on the compiled path).",
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead"],
+        help="torch.compile mode used when --compile is set.",
+    )
+    parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
+    )
+    parser.add_argument(
+        "--no-bias", action="store_true", default=False, help="Build the linear layer without a bias.",
     )
     parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
     parser.add_argument(
@@ -296,6 +321,13 @@ def _parse_args(argv=None, namespace=None):
     )
     args = parser.parse_args(argv, namespace)
 
+    if args.compile and args.use_cuda_graphs:
+        parser.error(
+            "--compile and --use-cuda-graphs are mutually exclusive; to test"
+            " torch.compile with CUDA graphs use --compile --compile-mode"
+            " reduce-overhead."
+        )
+
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
         args.use_cuda_graphs = False
@@ -317,6 +349,18 @@ def _parse_args(argv=None, namespace=None):
         )
 
     return args
+
+
+def _digest(tensors):
+    """A bit-exact, order-sensitive fingerprint of a tensor list."""
+    digest = hashlib.sha256()
+    for tensor in tensors:
+        if tensor is None:
+            digest.update(b"<none>")
+            continue
+        raw = tensor.detach().contiguous().cpu().flatten().view(torch.uint8)
+        digest.update(raw.numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _compare_tensors(name, test, ref, rtol, atol):
@@ -363,6 +407,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
     return numerics_failed, numerics_info
 
 
+@record
 def _train(opts):
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         # Execution with `mpirun -np N`
@@ -553,6 +598,14 @@ def _train(opts):
             loss.backward()
         return out
 
+    if opts.compile:
+        for i, layer in enumerate(test_model.layers):
+            test_model.layers[i] = torch.compile(layer, fullgraph=True, mode=opts.compile_mode)
+        dist_print(
+            f"Compiled test model layers with torch.compile (mode={opts.compile_mode})...",
+            debug=True,
+        )
+
     torch_rng_state = torch.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
@@ -563,7 +616,18 @@ def _train(opts):
         if not opts.benchmark:
             del test_graph
     else:
+        if opts.compile and opts.compile_mode == "reduce-overhead":
+            # Warm up so the measured run below replays captured CUDA graphs.
+            for _ in range(2):
+                torch.compiler.cudagraph_mark_step_begin()
+                run_fwd_bwd(test_model, test_x)
+                test_model.zero_grad(set_to_none=True)
+                test_x.grad = None
+            torch.compiler.cudagraph_mark_step_begin()
         test_out = run_fwd_bwd(test_model, test_x)
+        if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
+            skips = dynamo_counters["inductor"]["cudagraph_skips"]
+            assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
     dist_print(
         "UB BULK ELIGIBLE: "
         + " ".join(sorted(n for n, ok in te.module.base._ub_fused_bulk_decisions.items() if ok))
@@ -574,6 +638,10 @@ def _train(opts):
         if test_param.requires_grad and "layer_norm" not in test_name:
             test_grads.append(test_param.grad)
             names.append(test_name + ".grad")
+
+    all_digests = [None] * opts.tp
+    dist.all_gather_object(all_digests, _digest(test_grads), group=nccl_world)
+    dist_print("OUTPUT HASH: " + " ".join(all_digests))
 
     torch.set_rng_state(torch_rng_state)
     torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))

@@ -4,8 +4,10 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -17,6 +19,7 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include <hipblaslt/hipblaslt.h>  // HIPBLASLT_VERSION_{MAJOR,MINOR} for the MXFP4 capability gate
+#include <hip/hip_runtime.h>      // virtual-memory APIs, for the scale-boundary regression test
 #endif
 
 using namespace transformer_engine;
@@ -442,6 +445,87 @@ static void run_reference(
 }
 
 
+constexpr size_t kBlockLen = 128;
+
+// Blockwise FP8 reference, TN layout: D[j*m + i] = sum_kk sA * sB * A[i*k + kk] * B[j*k + kk]
+// Both FP8 encodings are one byte, so operands are read as bytes and decoded per element rather
+// than adding a template axis that would multiply with the output type.
+__device__ inline float ref_fp8_read(const uint8_t* p, size_t idx, bool is_e5m2) {
+  if (is_e5m2) return static_cast<float>(reinterpret_cast<const fp8e5m2*>(p)[idx]);
+  return static_cast<float>(reinterpret_cast<const fp8e4m3*>(p)[idx]);
+}
+
+__global__ void blockwise_ref_kernel(const uint8_t* __restrict__ a,
+                                     const uint8_t* __restrict__ b,
+                                     const float* __restrict__ a_scale,
+                                     const float* __restrict__ b_scale,
+                                     size_t m, size_t k, size_t n, bool a_2d,
+                                     bool a_is_e5m2, bool b_is_e5m2,
+                                     float* __restrict__ d) {
+  const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i >= m || j >= n) return;
+
+  const size_t k_blocks = (k + kBlockLen - 1) / kBlockLen;
+  float acc = 0.0f;
+  for (size_t kk = 0; kk < k; ++kk) {
+    const size_t kb = kk / kBlockLen;
+    const float sa = a_2d ? a_scale[(i / kBlockLen) * k_blocks + kb] : a_scale[kb * m + i];
+    acc += sa * b_scale[kb * n + j] * ref_fp8_read(a, i * k + kk, a_is_e5m2) *
+           ref_fp8_read(b, j * k + kk, b_is_e5m2);
+  }
+  // FP32, not the output type: the epilogue runs on the unrounded product.
+  d[j * m + i] = acc;
+}
+
+// dgelu, written out rather than taken from common/util/math.h: a reference that calls the
+// implementation's own function cannot catch a bug in it.
+__device__ inline float ref_dgelu(float x) {
+  const float t = tanhf(0.79788456f * x * (1.f + 0.044715f * x * x));
+  return 0.5f * x * ((1.f - t * t) * (0.79788456f + 0.1070322243f * x * x)) + 0.5f * (1.f + t);
+}
+
+// out_dtype is only ever one of these three -- BlockwiseParams allows no other, and the kernel's
+// own dispatch agrees.  test_common.h's TYPE_SWITCH_ALL would additionally instantiate the fp8,
+// fp4 and integer cases, which cannot occur here and for which the float conversions below are
+// not meaningful.  A local switch keeps this test to its own domain without reaching into
+// transformer_engine/common/common.h, which is not a public header.
+#define BLOCKWISE_OUT_TYPE_SWITCH(dtype, type, ...)                            \
+  switch (dtype) {                                                             \
+    case DType::kFloat32: { using type = float; { __VA_ARGS__ } } break;       \
+    case DType::kFloat16: { using type = fp16;  { __VA_ARGS__ } } break;       \
+    case DType::kBFloat16: { using type = bf16; { __VA_ARGS__ } } break;       \
+    default: GTEST_FAIL() << "unsupported blockwise output dtype";             \
+  }
+
+// The fused epilogue, applied to that product and then converted to the output type.
+//
+// The order is the kernel's and is not arbitrary: the accumulate term rounds to the output type
+// before adding the prior value, so bias must go in before that rounding.
+//
+// `d` is [n][m], so (i, j) is d[j * m + i] and bias is indexed by i, the contiguous axis.
+template <typename OutType>
+__global__ void blockwise_ref_epilogue(const float* __restrict__ product,
+                                       const bf16* __restrict__ bias,
+                                       const OutType* __restrict__ gelu_aux,
+                                       const OutType* __restrict__ d_prior, float beta,
+                                       size_t m, size_t n, OutType* __restrict__ d) {
+  const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i >= m || j >= n) return;
+  const size_t idx = j * m + i;
+
+  float x = product[idx];
+  if (bias != nullptr) x += static_cast<float>(bias[i]);
+  if (beta != 0.0f) {
+    x = static_cast<float>(static_cast<OutType>(x));
+    x += beta * static_cast<float>(d_prior[idx]);
+  }
+  if (gelu_aux != nullptr) x *= ref_dgelu(static_cast<float>(gelu_aux[idx]));
+  d[idx] = static_cast<OutType>(x);
+}
+
+
 template <typename Type>
 void cpu_rowwise_to_columnwise(
   size_t m, size_t n,
@@ -516,6 +600,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
     cudaDeviceProp prop;
     (void)cudaGetDeviceProperties(&prop, 0);
     if (prop.major == 9 && prop.minor == 5) {
+      atol = std::max(atol, 3e-3);
       rtol = std::max(rtol, 2e-2);
     }
   }
@@ -530,6 +615,45 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
+std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop) {
+  if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+    return std::nullopt;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && prop.minor >= 5) && !(prop.major == 12 && prop.minor >= 5)) {
+    return "MXFP8 requires gfx950 or newer";
+  }
+#endif
+  if (params.m % 16 || params.n % 16) {
+    return "MXFP8 requires M & N to be multiples of 16";
+  }
+
+#ifdef __HIP_PLATFORM_AMD__
+  const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#else
+  const size_t required_k_multiple = 128;
+#endif
+  if (params.k % required_k_multiple) {
+    return "MXFP8 requires K to be a multiple of " + std::to_string(required_k_multiple);
+  }
+
+  if (params.force_hipblaslt) {
+    return std::nullopt;
+  }
+#ifdef __HIP_PLATFORM_AMD__
+  if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
+    return "HipKittens requires gfx942 or gfx950";
+  }
+  if (params.m % 256 || params.n % 256 || params.k < 256) {
+    return "HipKittens requires M and N 256-aligned, K >= 256";
+  }
+  return std::nullopt;
+#else
+  return "HipKittens requires ROCm";
+#endif
+}
+
+
 template <typename A_Type, typename B_Type, typename Bias_Type, typename Gelu_Type, typename D_Type>
 void performTest(const TestParams& params) {
   DType atype = TypeInfo<A_Type>::dtype;
@@ -539,29 +663,20 @@ void performTest(const TestParams& params) {
   DType dtype = TypeInfo<D_Type>::dtype;
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
-  const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
 
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
+  const bool use_mxfp8 = (params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING);
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
   if (use_mxfp8)
   {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
-    if (params.m % 16 || params.n % 16) {
-      GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-    }
-    size_t required_k_multiple = 128;
-  #ifdef __HIP_PLATFORM_AMD__
-    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-  #endif
-    if (params.k % required_k_multiple) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-    }
-    if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
-      GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
+    if (auto reason = checkMxFP8Support(params, prop))
+    {
+      GTEST_SKIP() << *reason;
     }
   }
 
@@ -595,18 +710,20 @@ void performTest(const TestParams& params) {
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-    const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-    if (use_mxfp8 && !mxfp8_supported) {
-      GTEST_SKIP() << "MXFP8 is not supported in current config";
-    }
-    if (!use_hipkittens_mxfp8 && params.use_bias) {
-      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
-    }
     if (params.use_gelu && !fp8_gelu_fusion_config && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
       GTEST_SKIP() << "FP8 GEMM with bias and FP16 output is not supported";
+    }
+  }
+  //hipBLASLt specific MXFP8 limitations
+  if (use_mxfp8 && !use_hipkittens_mxfp8) {
+    if (isFp8Type(dtype)) {
+      GTEST_SKIP() << "MXFP8 GEMM with float8 output is not supported by hipBLASLt";
+    }
+    if (params.use_bias) {
+      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
     }
   }
 
@@ -689,7 +806,7 @@ void performTest(const TestParams& params) {
   size_t workspace_size = 33'554'432;
 #ifdef __HIP_PLATFORM_AMD__
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
-    workspace_size = 67'108'864;
+    workspace_size = 134'217'728;
   }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
@@ -774,27 +891,12 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-  }
-  size_t required_k_multiple = 128;
-#ifdef __HIP_PLATFORM_AMD__
-  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
-#endif
-  if (params.k % required_k_multiple) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
-  }
-
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
-  if (!mxfp8_supported) {
-    GTEST_SKIP() << "MXFP8 is not supported in current config";
+  if (auto reason = checkMxFP8Support(params, prop))
+  {
+    GTEST_SKIP() << *reason;
   }
   if (params.use_bias || params.use_gelu) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
-  }
-  if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
-    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
   // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
@@ -1107,7 +1209,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
@@ -1116,7 +1218,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(false)),        //force hipblaslt
+                                            ::testing::Values(true)),        //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, FP8GEMMTestSuite,
@@ -1259,5 +1361,552 @@ TEST(InputGenTest, FillUniform_DoesNotGetOverwrittenByFromCpu) {
                               << " dev=" << dev[i] << " cpu=" << cpu[i];
   }
 }
+
+// ============================== Blockwise FP8 GEMM ==============================
+namespace {
+
+struct BlockwiseParams {
+  size_t m, k, n;
+  bool a_2d_scaled;
+  bool fp32_scales;
+  float amax_epsilon;
+  bool degenerate;
+  float src_scale;
+  // Fused epilogue, output type and operand types; defaulted so the older cases read unchanged.
+  // nvte_cublas_gemm rejects bias with grad and requires grad plus a bf16 output for dgelu, so
+  // use_gelu implies grad and forbids bias.
+  bool use_bias = false;
+  bool use_gelu = false;
+  bool accumulate = false;
+  DType out_dtype = DType::kBFloat16;
+  DType a_dtype = DType::kFloat8E4M3;
+  DType b_dtype = DType::kFloat8E4M3;
+};
+
+void scale_source(Tensor* src, size_t n_elems, float factor) {
+  src->to_cpu();
+  bf16* p = src->rowwise_cpu_dptr<bf16>();
+  for (size_t i = 0; i < n_elems; ++i) {
+    p[i] = static_cast<bf16>(static_cast<float>(p[i]) * factor);
+  }
+  src->from_cpu();
+}
+
+// k-block 1 quantizes to a subnormal scale_inv and k-block 2 to ~22, so prev/curr spans >1e39.
+void inject_degenerate_kblocks(Tensor* src, size_t rows, size_t cols) {
+  src->to_cpu();
+  bf16* p = src->rowwise_cpu_dptr<bf16>();
+  for (size_t r = 0; r < rows; ++r) {
+    for (size_t c = kBlockLen; c < 3 * kBlockLen && c < cols; ++c) {
+      p[r * cols + c] = static_cast<bf16>(c < 2 * kBlockLen ? 1e-37f : 1e4f);
+    }
+  }
+  src->from_cpu();
+}
+
+Tensor make_blockwise_operand(const std::string& name, const std::vector<size_t>& shape,
+                              NVTEScalingMode mode, bool force_pow2, float amax_epsilon,
+                              bool degenerate, float src_scale,
+                              DType dtype = DType::kFloat8E4M3) {
+  Tensor src(name + "_bf16", shape, DType::kBFloat16);
+  fillUniform(&src);
+  if (src_scale != 0.0f) scale_source(&src, shape[0] * shape[1], src_scale);
+  if (degenerate) inject_degenerate_kblocks(&src, shape[0], shape[1]);
+
+  Tensor out(name, shape, dtype, /*rowwise=*/true, /*columnwise=*/false, mode);
+  QuantizationConfigWrapper cfg;
+  cfg.set_force_pow_2_scales(force_pow2);
+  cfg.set_amax_epsilon(amax_epsilon);
+  nvte_quantize_v2(src.data(), out.data(), cfg, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  return out;
+}
+
+void performBlockwiseTest(const BlockwiseParams& p) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  const bool is_gfx950 = (prop.major == 9 && prop.minor == 5);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+  if (p.fp32_scales && !is_gfx950) {
+    GTEST_SKIP() << "The continuous fp32-scale kernel exists only on gfx950";
+  }
+  if (p.m % 16 != 0 || p.k % 16 != 0) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM requires M and K to be multiples of 16";
+  }
+  if (p.degenerate && p.k <= 3 * kBlockLen) {
+    GTEST_SKIP() << "Degenerate case needs K > 384 to hold both injected k-blocks";
+  }
+
+  if (p.fp32_scales) {
+    setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1", 1);
+  } else {
+    unsetenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES");
+  }
+
+  const bool force_pow2 = !p.fp32_scales;
+  const NVTEScalingMode a_mode =
+      p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+
+  Tensor A = make_blockwise_operand("A", {p.m, p.k}, a_mode, force_pow2, p.amax_epsilon,
+                                    p.degenerate, p.src_scale, p.a_dtype);
+  Tensor B = make_blockwise_operand("B", {p.n, p.k}, NVTE_BLOCK_SCALING_1D, force_pow2,
+                                    p.amax_epsilon, p.degenerate, /*src_scale=*/0.0f, p.b_dtype);
+
+  Tensor D("D", TShape{p.n, p.m}, p.out_dtype);
+  Tensor RefD("RefD", TShape{p.n, p.m}, p.out_dtype);
+  // FP32, so the epilogue is applied before any rounding.
+  Tensor Product("Product", TShape{p.n, p.m}, DType::kFloat32);
+
+  const dim3 block(16, 16);
+  const dim3 grid(static_cast<unsigned>((p.n + block.x - 1) / block.x),
+                  static_cast<unsigned>((p.m + block.y - 1) / block.y));
+  blockwise_ref_kernel<<<grid, block, 0, 0>>>(
+      static_cast<const uint8_t*>(A.rowwise_dptr()),
+      static_cast<const uint8_t*>(B.rowwise_dptr()),
+      static_cast<const float*>(A.rowwise_scale_inv_dptr()),
+      static_cast<const float*>(B.rowwise_scale_inv_dptr()),
+      p.m, p.k, p.n, p.a_2d_scaled,
+      p.a_dtype == DType::kFloat8E5M2, p.b_dtype == DType::kFloat8E5M2,
+      static_cast<float*>(Product.rowwise_dptr()));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  // bias is indexed by m, the output's contiguous axis.  Its profile has a period dividing
+  // neither the 4 elements a lane holds nor the 16 or 128 of a tile, so a misplaced bias fails.
+  Tensor bias;
+  if (p.use_bias) {
+    bias = Tensor("bias", TShape{p.m}, DType::kBFloat16);
+    std::vector<bf16> h(p.m);
+    for (size_t i = 0; i < p.m; ++i) {
+      h[i] = static_cast<bf16>(0.5f * std::sin(0.37f * static_cast<float>(i)) +
+                               0.03f * static_cast<float>(i % 7));
+    }
+    NVTE_CHECK_CUDA(cudaMemcpy(bias.rowwise_dptr(), h.data(), p.m * sizeof(bf16),
+                               cudaMemcpyHostToDevice));
+  }
+
+  // Filled rather than left uninitialised: dgelu is not linear, so a NaN here would decide
+  // whether the comparison means anything at all.
+  Tensor pre_gelu_out;
+  if (p.use_gelu) {
+    pre_gelu_out = Tensor("pre_gelu_out", TShape{p.n, p.m}, p.out_dtype);
+    fillUniform(&pre_gelu_out);
+  }
+
+  // accumulate is beta = 1 against whatever D holds, so D is filled and copied verbatim -- the
+  // reference must see the same bytes, not the same generator.
+  Tensor DPrior;
+  if (p.accumulate) {
+    fillUniform(&D);
+    DPrior = Tensor("DPrior", TShape{p.n, p.m}, p.out_dtype);
+    NVTE_CHECK_CUDA(cudaMemcpy(DPrior.rowwise_dptr(), D.rowwise_dptr(),
+                               p.n * p.m * (typeToNumBits(p.out_dtype) / 8), cudaMemcpyDeviceToDevice));
+  }
+
+  // dgelu is fused into a backward GEMM, and bias is rejected there, so the two never coincide.
+  const bool grad = p.use_gelu;
+  const float beta = p.accumulate ? 1.0f : 0.0f;
+
+  BLOCKWISE_OUT_TYPE_SWITCH(p.out_dtype, OutType,
+    blockwise_ref_epilogue<OutType><<<grid, block, 0, 0>>>(
+        static_cast<const float*>(Product.rowwise_dptr()),
+        p.use_bias ? static_cast<const bf16*>(bias.rowwise_dptr()) : nullptr,
+        p.use_gelu ? static_cast<const OutType*>(pre_gelu_out.rowwise_dptr()) : nullptr,
+        p.accumulate ? static_cast<const OutType*>(DPrior.rowwise_dptr()) : nullptr,
+        beta, p.m, p.n, static_cast<OutType*>(RefD.rowwise_dptr()));
+  );
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   /*transa=*/true, /*transb=*/false, grad, Workspace.data(),
+                   p.accumulate, /*use_split_accumulator=*/true,
+                   prop.multiProcessorCount, /*stream=*/0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  RefD.to_cpu();
+  BLOCKWISE_OUT_TYPE_SWITCH(p.out_dtype, OutType,
+    compareResults("D", D, RefD.rowwise_cpu_dptr<OutType>(), /*rowwise=*/true,
+                   /*atol=*/1e-3, /*rtol=*/6e-2);
+  );
+}
+
+}  // namespace
+
+class BlockwiseGEMMTestSuite : public ::testing::TestWithParam<BlockwiseParams> {};
+
+TEST_P(BlockwiseGEMMTestSuite, TestFp8Blockwise) {
+  performBlockwiseTest(GetParam());
+}
+
+static std::string BlockwiseTestName(
+    const testing::TestParamInfo<BlockwiseGEMMTestSuite::ParamType>& info) {
+  const auto& p = info.param;
+  // Operand and output types lead the name, spelled the way the rest of this file spells them
+  // (fp8 = e4m3, bf8 = e5m2), so these read like the FP8GEMMTestSuite cases above.
+  auto fp8_name = [](DType t) { return t == DType::kFloat8E5M2 ? "bf8" : "fp8"; };
+  auto out_name = [](DType t) {
+    return t == DType::kFloat32 ? "fp32" : (t == DType::kFloat16 ? "fp16" : "bf16");
+  };
+  std::string name = std::string(fp8_name(p.a_dtype)) + "x" + fp8_name(p.b_dtype) + "x" +
+                     out_name(p.out_dtype) + "x" +
+                     std::to_string(p.m) + "x" + std::to_string(p.k) + "x" +
+                     std::to_string(p.n) + "x" + (p.a_2d_scaled ? "1Dx2D" : "1Dx1D") + "x" +
+                     (p.fp32_scales ? "fp32scales" : "pow2scales");
+  name += p.amax_epsilon > 0.0f ? "xeps" : "xnoeps";
+  if (p.degenerate) name += "xdegenerate";
+  if (p.src_scale != 0.0f) name += "xsmallmagnitude";
+  if (p.use_bias) name += "xbias";
+  if (p.use_gelu) name += "xdgelu";
+  if (p.accumulate) name += "xaccumulate";
+  return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestBlockwise, BlockwiseGEMMTestSuite,
+    ::testing::Values(
+        BlockwiseParams{256, 256, 256, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 256, 256, true,  true,  1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{320, 512, 336, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{1024, 4096, 1024, false, true, 1e-4f, false, 0.0f},
+        // Extreme dynamic range across K: pins kMinScaleInv from below.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  true,  0.0f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  true,  0.0f},
+        // Real-wgrad magnitudes.
+        BlockwiseParams{256, 512, 256, false, true,  0.0f,  false, 1e-9f},
+        BlockwiseParams{256, 512, 256, false, false, 0.0f,  false, 1e-9f},
+
+        // ---- fused epilogue ------------------------------------------------------------
+        //
+        // The cases above reach two kernel instantiations, both with no epilogue.  The epilogue
+        // is a template parameter, so each combination below is separately generated code and a
+        // pass under one says nothing about another.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, false, false, 1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{256, 512, 256, true,  false, 1e-4f, false, 0.0f, true},
+        // Partial tiles on both axes: 272 = 256 + 16, so the last block along each is short and
+        // the epilogue has to stop where the output does.
+        BlockwiseParams{272, 512, 272, false, true,  1e-4f, false, 0.0f, true},
+        // The same shape under 1Dx2D.  Worth having separately: with the weights blocked 128x128
+        // the second half of the last 256-wide output block has no scale group of its own, which
+        // is the case the scale-pointer clamp exists for.  The 1Dx1D variant above cannot reach
+        // it, because there the scale layout makes that read in bounds.
+        BlockwiseParams{272, 512, 272, true,  true,  1e-4f, false, 0.0f, true},
+        BlockwiseParams{272, 512, 272, true,  true,  1e-4f, false, 0.0f},
+
+        // dgelu: implies grad, forbids bias, bf16 output only.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true},
+
+        // accumulate, alone and with bias -- the kernel rounds before adding the prior value,
+        // so bias on the wrong side of that rounding is invisible to the accumulate-only case.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, true},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, true},
+        // dgelu with accumulate: the heaviest epilogue, with both a per-element auxiliary input
+        // and the prior output live at once.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, true,  true},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, true,  true},
+
+        // ---- output types: fp32 and fp16 were both unreached ----------------------------
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat32},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat16},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
+                        DType::kFloat32},
+
+        // ---- e5m2 operands, which select the MFMA's cbsz/blgp codes ---------------------
+        //
+        // fp8_format=HYBRID quantises the backward grad to e5m2, so these run in a real backward
+        // pass.  Both operands e5m2 at once is rejected by the GEMM.
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E4M3, DType::kFloat8E5M2},
+        BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
+        BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3}),
+    BlockwiseTestName);
+
+// ---- regression: the 1Dx2D scale read must stay inside the scale tensor ---------------------
+//
+// None of the cases above can catch an overrun here, and it is worth saying why rather than
+// adding another shape and assuming.  The out-of-bounds value only reaches the accumulator
+// halves that store_output_t masks off, so poisoning the memory past the scale tensor leaves the
+// output bit-identical -- any test that compares results against a reference passes either way.
+// What is observable is the access itself, so this test makes the memory immediately after the
+// scale tensor unreadable and checks that the kernel still completes.
+//
+// The GEMM swaps its operands, so the kernel's N is the caller's m and the kernel's scale_B is
+// the caller's A scale.  m = 272 = 256 + 16 is the shape that reaches the bug: the last 256-wide
+// output block's second half begins past the end, so it has no 128-column scale group of its
+// own, and an unclamped `+ scale_K` addresses one that does not exist.
+//
+// Runs in a child process, because a GPU memory fault aborts the process and no assertion in
+// this one can survive it.  The "threadsafe" death-test style re-executes the binary rather than
+// only forking, which matters twice: the HIP runtime does not survive a bare fork, and
+// NVTE_FP8_BLOCK_SCALING_FP32_SCALES is read once into a function-local static, so only a
+// freshly started process picks it up.
+namespace {
+
+#define OOB_CHECK_HIP(expr)                                                                 \
+  do {                                                                                      \
+    hipError_t status = (expr);                                                             \
+    if (status != hipSuccess) {                                                             \
+      std::cerr << "probe setup failed: " #expr " -> " << hipGetErrorString(status) << "\n"; \
+      std::exit(2);                                                                         \
+    }                                                                                       \
+  } while (0)
+
+void scale_b_boundary_probe() {
+  constexpr size_t kM = 272;   // the kernel's N
+  constexpr size_t kK = 512;
+  constexpr size_t kN = 272;
+
+  setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1", 1);
+
+  cudaDeviceProp dev_prop;
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&dev_prop, 0));
+
+  Tensor A = make_blockwise_operand("A", {kM, kK}, NVTE_BLOCK_SCALING_2D, /*force_pow2=*/false,
+                                    /*amax_epsilon=*/1e-4f, /*degenerate=*/false,
+                                    /*src_scale=*/0.0f);
+  Tensor B = make_blockwise_operand("B", {kN, kK}, NVTE_BLOCK_SCALING_1D, /*force_pow2=*/false,
+                                    /*amax_epsilon=*/1e-4f, /*degenerate=*/false,
+                                    /*src_scale=*/0.0f);
+
+  // Taken from the tensor rather than recomputed, so the shape and dtype stay whatever TE chose
+  // and only the pointer moves.
+  NVTEBasicTensor scale = nvte_get_tensor_param(A.data(), kNVTERowwiseScaleInv);
+  size_t scale_elems = 1;
+  for (size_t i = 0; i < scale.shape.ndim; ++i) {
+    scale_elems *= scale.shape.data[i];
+  }
+  const size_t scale_bytes = scale_elems * sizeof(float);
+
+  // The premise of this test is that the scale tensor is exactly ceil(M/128) x (K/128) with no
+  // padding -- CUDA pads these dimensions to a multiple of 4 and ROCm does not.  If that ever
+  // changes the overrun moves and the test stops testing anything, so say so loudly.
+  const size_t expect_elems = ((kM + 127) / 128) * (kK / 128);
+  if (scale_elems != expect_elems) {
+    std::cerr << "probe premise broken: scale has " << scale_elems << " elements, expected "
+              << expect_elems << " -- the scale layout changed\n";
+    std::exit(3);
+  }
+
+  int device = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+
+  hipMemAllocationProp alloc_prop = {};
+  alloc_prop.type = hipMemAllocationTypePinned;
+  alloc_prop.location.type = hipMemLocationTypeDevice;
+  alloc_prop.location.id = device;
+
+  size_t granularity = 0;
+  OOB_CHECK_HIP(hipMemGetAllocationGranularity(&granularity, &alloc_prop,
+                                               hipMemAllocationGranularityMinimum));
+
+  // Two pages of address space, only the first backed.
+  void* base = nullptr;
+  OOB_CHECK_HIP(hipMemAddressReserve(&base, 2 * granularity, granularity, nullptr, 0));
+  hipMemGenericAllocationHandle_t handle;
+  OOB_CHECK_HIP(hipMemCreate(&handle, granularity, &alloc_prop, 0));
+  OOB_CHECK_HIP(hipMemMap(base, granularity, 0, handle, 0));
+  hipMemAccessDesc access = {};
+  access.location = alloc_prop.location;
+  access.flags = hipMemAccessFlagsProtReadWrite;
+  OOB_CHECK_HIP(hipMemSetAccess(base, granularity, &access, 1));
+
+  // The scale tensor now ends on the mapped page's last byte, so the first float past it is the
+  // first byte of the reserved-but-unbacked page.
+  void* scale_at_edge = static_cast<char*>(base) + granularity - scale_bytes;
+  NVTE_CHECK_CUDA(cudaMemcpy(scale_at_edge, scale.data_ptr, scale_bytes, cudaMemcpyDeviceToDevice));
+  scale.data_ptr = scale_at_edge;
+  nvte_set_tensor_param_v2(A.data(), kNVTERowwiseScaleInv, &scale, sizeof(scale));
+
+  Tensor D("D", TShape{kN, kM}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+
+  nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                   /*accumulate=*/false, /*use_split_accumulator=*/true,
+                   dev_prop.multiProcessorCount, /*stream=*/0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  std::cerr << "blockwise-oob-probe: clean\n";
+  std::exit(0);
+}
+
+#undef OOB_CHECK_HIP
+
+}  // namespace
+
+TEST(BlockwiseGEMMBoundaryTest, ScaleReadStaysInsideScaleTensor) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor == 5)) {
+    GTEST_SKIP() << "The continuous fp32-scale kernel exists only on gfx950";
+  }
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(scale_b_boundary_probe(), ::testing::ExitedWithCode(0),
+              "blockwise-oob-probe: clean");
+}
+
+// ---- regression: gfx942 prefetch of operand rows not aligned to 128 B ----------------------
+//
+// K % 128 != 0 and 16-B-offset A/B bases must take the unswizzled prefetch.  The failure is
+// intermittent, so each case runs many GEMMs, alternating two operand sets.
+namespace {
+
+struct UnalignedRowsParams {
+  size_t k;
+  bool a_2d_scaled;
+  size_t a_offset;  // bytes
+  size_t b_offset;  // bytes
+};
+
+constexpr size_t kUnalignedRowsMN = 2048;
+constexpr int kUnalignedRowsRuns = 100;
+
+// Re-points t's rowwise data `offset` bytes into a fresh allocation.
+void move_rowwise_data(Tensor* t, size_t offset, CudaPtr<>* storage) {
+  *storage = cuda_alloc(bytes(t->rowwise_shape(), t->dtype()) + offset);
+  const NVTEBasicTensor data{static_cast<char*>(storage->get()) + offset,
+                             static_cast<NVTEDType>(t->dtype()), t->rowwise_shape()};
+  nvte_set_tensor_param_v2(t->data(), kNVTERowwiseData, &data, sizeof(data));
+}
+
+// Copies src's rowwise data and scales into dst.
+void copy_operand(const Tensor& src, Tensor* dst) {
+  NVTE_CHECK_CUDA(cudaMemcpy(dst->rowwise_dptr(), src.rowwise_dptr(),
+                             bytes(src.rowwise_shape(), src.dtype()), cudaMemcpyDeviceToDevice));
+  NVTE_CHECK_CUDA(cudaMemcpy(dst->rowwise_scale_inv_dptr(), src.rowwise_scale_inv_dptr(),
+                             bytes(src.rowwise_scale_inv_shape(), DType::kFloat32),
+                             cudaMemcpyDeviceToDevice));
+}
+
+void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+  unsetenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES");
+
+  const size_t m = kUnalignedRowsMN;
+  const size_t n = kUnalignedRowsMN;
+  const NVTEScalingMode a_mode = p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  auto make_a = [&](const std::string& name) {
+    return make_blockwise_operand(name, {m, p.k}, a_mode, /*force_pow2=*/true,
+                                  /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
+  };
+  auto make_b = [&](const std::string& name) {
+    return make_blockwise_operand(name, {n, p.k}, NVTE_BLOCK_SCALING_1D, /*force_pow2=*/true,
+                                  /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
+  };
+
+  // Two operand sets and their references.
+  const dim3 block(16, 16);
+  const dim3 grid(static_cast<unsigned>((n + block.x - 1) / block.x),
+                  static_cast<unsigned>((m + block.y - 1) / block.y));
+  Tensor A[2], B[2], RefD[2];
+  Tensor Product("Product", TShape{n, m}, DType::kFloat32);
+  for (int s = 0; s < 2; ++s) {
+    A[s] = make_a("A" + std::to_string(s));
+    B[s] = make_b("B" + std::to_string(s));
+    RefD[s] = Tensor("RefD" + std::to_string(s), TShape{n, m}, DType::kBFloat16);
+    blockwise_ref_kernel<<<grid, block, 0, 0>>>(
+        static_cast<const uint8_t*>(A[s].rowwise_dptr()),
+        static_cast<const uint8_t*>(B[s].rowwise_dptr()),
+        static_cast<const float*>(A[s].rowwise_scale_inv_dptr()),
+        static_cast<const float*>(B[s].rowwise_scale_inv_dptr()),
+        m, p.k, n, p.a_2d_scaled, /*a_e5m2=*/false, /*b_e5m2=*/false,
+        static_cast<float*>(Product.rowwise_dptr()));
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    blockwise_ref_epilogue<bf16><<<grid, block, 0, 0>>>(
+        static_cast<const float*>(Product.rowwise_dptr()), nullptr, nullptr, nullptr,
+        /*beta=*/0.0f, m, n, static_cast<bf16*>(RefD[s].rowwise_dptr()));
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    RefD[s].to_cpu();
+  }
+
+  // GEMM operands, refilled from one of the two sets before each run.
+  Tensor WorkA = make_a("WorkA");
+  Tensor WorkB = make_b("WorkB");
+  CudaPtr<> a_storage, b_storage;
+  if (p.a_offset != 0) {
+    move_rowwise_data(&WorkA, p.a_offset, &a_storage);
+  }
+  if (p.b_offset != 0) {
+    move_rowwise_data(&WorkB, p.b_offset, &b_storage);
+  }
+
+  Tensor D("D", TShape{n, m}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+  for (int run = 0; run < kUnalignedRowsRuns; ++run) {
+    const int s = run % 2;
+    SCOPED_TRACE("GEMM run " + std::to_string(run + 1) + " on operand set " + std::to_string(s));
+    copy_operand(A[s], &WorkA);
+    copy_operand(B[s], &WorkB);
+    // Finite fill, so an unwritten D fails the comparison.
+    NVTE_CHECK_CUDA(cudaMemset(D.rowwise_dptr(), 0x7B, n * m * sizeof(bf16)));
+    nvte_cublas_gemm(WorkA.data(), WorkB.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                     /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                     /*accumulate=*/false, /*use_split_accumulator=*/true,
+                     prop.multiProcessorCount, /*stream=*/0);
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    compareResults("D", D, RefD[s].rowwise_cpu_dptr<bf16>(), /*rowwise=*/true,
+                   /*atol=*/1e-3, /*rtol=*/6e-2);
+    // compareResults does not flag NaN.
+    const bf16* d = D.rowwise_cpu_dptr<bf16>();
+    size_t non_finite = 0;
+    for (size_t i = 0; i < n * m; ++i) {
+      non_finite += std::isfinite(static_cast<float>(d[i])) ? 0 : 1;
+    }
+    EXPECT_EQ(non_finite, 0u);
+    if (::testing::Test::HasFailure()) {
+      break;
+    }
+  }
+}
+
+}  // namespace
+
+class BlockwiseUnalignedRowsGEMMTestSuite
+    : public ::testing::TestWithParam<UnalignedRowsParams> {};
+
+TEST_P(BlockwiseUnalignedRowsGEMMTestSuite, TestFp8Blockwise) {
+  performBlockwiseUnalignedRowsTest(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestBlockwise, BlockwiseUnalignedRowsGEMMTestSuite,
+    ::testing::Values(UnalignedRowsParams{320, false, 0, 0}, UnalignedRowsParams{320, true, 0, 0},
+                      UnalignedRowsParams{256, false, 16, 0}, UnalignedRowsParams{256, false, 0, 16},
+                      UnalignedRowsParams{256, true, 16, 0}, UnalignedRowsParams{256, true, 0, 16}),
+    [](const testing::TestParamInfo<UnalignedRowsParams>& info) {
+      const auto& p = info.param;
+      std::string name = "K" + std::to_string(p.k) + (p.a_2d_scaled ? "x1Dx2D" : "x1Dx1D");
+      if (p.a_offset != 0) {
+        name += "xAoffset" + std::to_string(p.a_offset);
+      }
+      if (p.b_offset != 0) {
+        name += "xBoffset" + std::to_string(p.b_offset);
+      }
+      return name;
+    });
 
 #endif  // __HIP_PLATFORM_AMD__

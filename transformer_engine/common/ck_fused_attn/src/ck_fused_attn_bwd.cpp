@@ -255,6 +255,8 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args,
   log_value(log_file, "dk_ptr", fmha_args.dk_ptr);
   log_value(log_file, "dv_ptr", fmha_args.dv_ptr);
   log_value(log_file, "dbias_ptr", fmha_args.dbias_ptr);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
+  log_value(log_file, "d_sink_ptr", fmha_args.d_sink_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
   log_value(log_file, "seqstart_k_ptr", fmha_args.seqstart_k_ptr);
@@ -312,7 +314,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args,
   log_value(log_file, "mask_type", fmha_args.mask_type);
   log_value(log_file, "bias_type", fmha_args.bias_type);
   log_value(log_file, "p_drop", fmha_args.p_drop);
-  log_value(log_file, "p_undrop", fmha_args.p_undrop);
   log_value(log_file, "dropout_seed_ptr",
     std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))
   );
@@ -416,8 +417,8 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   }
 
   aiter::mha_bwd_args fmha_args{};
-  fmha_args.sink_ptr = nullptr;
-  fmha_args.d_sink_ptr = nullptr;
+  fmha_args.sink_ptr = args.sink_ptr;
+  fmha_args.d_sink_ptr = args.d_sink_ptr;
   fmha_args.mask_type = static_cast<int>(static_cast<mask_enum>(args.attn_mask_type));
   // Mirrors AITER's small-seqlen guard at aiter/ops/mha.py:1689.
   fmha_args.use_asm_v3 = (args.s_q < 16) ? false : args.uses_bwd_v3;
@@ -534,6 +535,8 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   fmha_args.p_undrop = 1.0 - args.dropout_probability;
   fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
 
+  fmha_args.det_split = 0;
+
   return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
 }
 
@@ -558,11 +561,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   const bool has_dbias = built.has_dbias;
   const BiasShape bias_shape = built.bias_shape;
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   auto* log_file = get_ck_log_stream();
   // print kernel name on verbose mode

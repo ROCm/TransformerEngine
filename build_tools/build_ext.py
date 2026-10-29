@@ -6,11 +6,13 @@
 
 """Installation script."""
 
+import copy
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
-import copy
+import tempfile
 import time
 
 from pathlib import Path
@@ -25,6 +27,8 @@ from .utils import (
     rocm_build,
     rocm_path,
     cmake_bin,
+    cuda_home_path,
+    cuda_version,
     debug_build_enabled,
     found_ninja,
     nvcc_path,
@@ -45,7 +49,7 @@ class CMakeExtension(setuptools.Extension):
         self.cmake_path: Path = cmake_path
         self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
 
-    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
+    def _build_cmake(self, build_dir: Path, install_dir: Path, inplace: bool = False) -> None:
         # Make sure paths are str
         _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
@@ -66,12 +70,47 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+
+        discovered_cuda_home = cuda_home_path()
+        if discovered_cuda_home is not None:
+            configure_command.append(f"-DCUDAToolkit_ROOT={discovered_cuda_home}")
+
+            # CUDA wheels use `lib`, while toolkit installations typically use
+            # `lib64`. Only override CMake's library discovery for a wheel-style
+            # layout with the expected libraries present.
+            cuda_lib_dir = discovered_cuda_home / "lib"
+            if cuda_lib_dir.is_dir() and (cuda_full_version := cuda_version()):
+                cuda_major_version = cuda_full_version[0]
+                cuda_libraries = {
+                    "CUDA_CUDART": cuda_lib_dir / f"libcudart.so.{cuda_major_version}",
+                    "CUDA_cudart_LIBRARY": cuda_lib_dir / f"libcudart.so.{cuda_major_version}",
+                    "CUDA_cublas_LIBRARY": cuda_lib_dir / f"libcublas.so.{cuda_major_version}",
+                    "CUDA_cublasLt_LIBRARY": cuda_lib_dir / f"libcublasLt.so.{cuda_major_version}",
+                }
+                if all(library.is_file() for library in cuda_libraries.values()):
+                    configure_command.append(f"-DCMAKE_CUDA_FLAGS=-L{cuda_lib_dir}")
+                    configure_command.extend(
+                        f"-D{variable}={library}" for variable, library in cuda_libraries.items()
+                    )
+
+        discovered_nvcc_path = nvcc_path()
+        if discovered_nvcc_path is not None:
+            configure_command.append(f"-DCMAKE_CUDA_COMPILER={discovered_nvcc_path}")
+
         if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
             ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
             configure_command += [
                 f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
                 f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
             ]
+        if rocm_build():
+            # An inplace build leaves the objects in the source tree, out of
+            # $ORIGIN's reach, and only ever runs where it was built. Passed
+            # either way: the CMake build dir persists, so omitting it would
+            # leave an earlier inplace build's value cached.
+            purelib = sysconfig.get_path("purelib") if inplace else ""
+            configure_command.append(f"-DTE_ROCM_PURELIB={purelib}")
+
         configure_command += self.cmake_flags
 
         #ROCm: below variable is not used by CMake build. Leave it here for reference
@@ -131,21 +170,36 @@ def get_build_ext(
             for ext in self.extensions:
                 package_path = Path(self.get_ext_fullpath(ext.name))
                 install_dir = package_path.resolve().parent
-                if isinstance(ext, CMakeExtension):
-                    print(f"Building CMake extension {ext.name}")
-                    # Set up incremental builds for CMake extensions
-                    build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
-                    if build_dir:
-                        build_dir = Path(build_dir).resolve()
-                    else:
-                        root_dir = Path(__file__).resolve().parent.parent
-                        build_dir = root_dir / "build" / "cmake"
+                if not isinstance(ext, CMakeExtension):
+                    continue
 
-                    # Ensure the directory exists
+                print(f"Building CMake extension {ext.name}")
+                configured_build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+                if not configured_build_dir and self.inplace:
+                    root_dir = Path(__file__).resolve().parent.parent
+                    configured_build_dir = root_dir / "build" / "cmake"
+
+                if configured_build_dir:
+                    # A persistent build directory enables incremental builds.
+                    build_dir = Path(configured_build_dir).resolve()
                     build_dir.mkdir(parents=True, exist_ok=True)
-
                     ext._build_cmake(
                         build_dir=build_dir,
+                        install_dir=install_dir,
+                        inplace=self.inplace,
+                    )
+                    continue
+
+                # Isolate CMake state between concurrent and successive builds.
+                build_temp = Path(self.build_temp)
+                build_temp.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(
+                    prefix=f"cmake-build-{ext.name}-",
+                    dir=build_temp,
+                ) as build_dir:
+                    print(f"Building CMake extension {ext.name} in temporary directory {build_dir}")
+                    ext._build_cmake(
+                        build_dir=Path(build_dir),
                         install_dir=install_dir,
                     )
 
@@ -175,6 +229,17 @@ def get_build_ext(
                 for ext in Path(self.build_lib).glob("*.so"):
                     self.copy_file(ext, target_dir)
                     os.remove(ext)
+
+                nccl_ep_dir = Path(self.build_lib) / "nccl_ep"
+                if nccl_ep_dir.is_dir():
+                    target_nccl_ep_dir = target_dir / "nccl_ep"
+                    if target_nccl_ep_dir.exists():
+                        shutil.rmtree(target_nccl_ep_dir)
+                    shutil.copytree(
+                        nccl_ep_dir,
+                        target_nccl_ep_dir,
+                    )
+                    shutil.rmtree(nccl_ep_dir)
 
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
@@ -214,6 +279,11 @@ def get_build_ext(
                             os.path.splitext(src)[1] in [".cu", ".cuh"]
                             and not framework_extension_only
                         ):
+                            if nvcc_bin is None:
+                                raise RuntimeError(
+                                    f"NVCC not found and is required for building CUDA source {src}"
+                                )
+
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]

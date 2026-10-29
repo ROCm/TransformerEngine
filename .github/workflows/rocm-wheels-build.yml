@@ -29,7 +29,14 @@ on:
         description: 'ROCm TheRock repository URL used inside the Docker image.'
         type: string
         required: true
-        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+        default: 'https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/'
+      # The image is only used to build wheels, so any one supported GPU arch works here; 
+      # The arch-less amdrocm-core-devel10.1 pulls every GPU family (gfx908..gfx1250, ~8.4 GB), 
+      # while amdrocm-core-devel10.1-gfx950 pulls only gfx950 (~2.7 GB).
+      rocm_devel_package:
+        description: 'ROCm devel package installed in the Docker image.'
+        required: true
+        default: 'amdrocm-core-devel10.1-gfx950'
       force_build_image:
         description: 'Force building of ROCm Docker image, skip checking intermediate storage.'
         type: boolean
@@ -55,7 +62,10 @@ on:
         default: true
       rocm_repo_url:
         type: string
-        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+        default: 'https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/'
+      rocm_devel_package:
+        type: string
+        default: 'amdrocm-core-devel10.1-gfx950'
       force_build_image:
         type: boolean
         default: true
@@ -158,6 +168,7 @@ jobs:
           docker build \
             --no-cache \
             --build-arg ROCM_REPO_URL="${{ inputs.rocm_repo_url }}" \
+            --build-arg ROCM_DEVEL_PACKAGE="${{ inputs.rocm_devel_package }}" \
             --tag "${{ steps.set-tag.outputs.image_tag }}" \
             --file build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86 \
             build_tools/wheel_utils/
@@ -194,6 +205,7 @@ jobs:
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
             --env TARGET_BRANCH="${{ github.ref_name }}" \
+            --env NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250 \
             ${{ inputs.use_local_version && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
             ${{ inputs.use_prebuilt_aiter && '--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}"' || '' }} \
             --volume "${{ github.workspace }}:/TransformerEngine" \

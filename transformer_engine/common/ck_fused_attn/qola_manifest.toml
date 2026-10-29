@@ -1,10 +1,10 @@
 [qola]
-aiter_commit = "a50a62aaa292427e00190dd7ba58e39a6db4e61e"    # pinned AITER submodule commit
+aiter_commit = "2cc8c750461c035f0333711dfb3c02571161aa95"    # pinned AITER submodule commit
 namespace = "te"
 rocm_versions = ["7.14"]
 
 [build]
-architectures = ["gfx950", "gfx942"]
+architectures = ["gfx950", "gfx942", "gfx1250"]
 
 [[modules]]
 name = "libmha_fwd"
@@ -12,7 +12,7 @@ mode = "cpp_itfs"
 receipt = 700
 drop_srcs = ["mha_fwd_split.cu", "mha_fwd_batch_prefill.cu"]
 drop_directions = ["fwd_splitkv", "batch_prefill"]
-flags_extra_cc = ["'-DFA_WITH_NATIVE_SPLITKV=1'"]
+flags_extra_cc = ["'-DFA_WITH_NATIVE_SPLITKV=1'", "'-DFA_WITH_SINK=1'"]
 
 [[modules]]
 name = "libmha_bwd"

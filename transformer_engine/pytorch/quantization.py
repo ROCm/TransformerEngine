@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import abc
-import functools
 import dataclasses
 import warnings
 import os
@@ -57,6 +56,7 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
+_MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -177,7 +177,7 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5), (12, 5)):
+        if gpu_arch in ((9, 5),): #TODO: enable for gfx1250 when GEMM is available
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
@@ -203,15 +203,25 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
-            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
-        return True, ""
+        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx94x or gfx95x is required for FP8 block scaling execution."
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
         False,
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
+
+
+def _compute_mxfp4_support() -> Tuple[bool, str]:
+    """Return if mxfp4 support is available"""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch in ((9, 5),):  # TODO: enable for gfx1250 when GEMM is available
+            return True, ""
+        return False, "Device arch gfx95x is required for MXFP4 execution."
+    return False, "Only ROCm supports MXFP4"
 
 
 @torch.compiler.assume_constant_result
@@ -250,15 +260,13 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     return _FP8_BLOCK_SCALING_SUPPORT
 
 
-@functools.lru_cache(maxsize=None)
+@torch.compiler.assume_constant_result
 def check_mxfp4_support() -> Tuple[bool, str]:
-    """Return if mxfp4 support is available"""
-    if IS_HIP_EXTENSION:
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):  # TODO: enable for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
-    return False, "Only ROCm gfx950 supports MXFP4"
+    """Return if MXFP4 support is available."""
+    global _MXFP4_SUPPORT
+    if _MXFP4_SUPPORT is None:
+        _MXFP4_SUPPORT = _compute_mxfp4_support()
+    return _MXFP4_SUPPORT
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -324,7 +332,17 @@ def get_default_recipe() -> Recipe:
 
 
 def get_align_size_for_quantization(recipe: Recipe) -> int:
-    """Get the alignment size for quantization."""
+    """Get the alignment used to pad grouped quantized operations.
+
+    Built-in recipes use their format requirement. Custom recipes use their
+    declarative ``quantization_alignment`` contract rather than invoking
+    ``qfactory``, since a factory may be stateful or role-dependent.
+    """
+    # TODO(#3158): Prefer module/role-specific alignment derived from canonical
+    # cached quantizers when that context is available. Keep the recipe-wide
+    # alignment as the conservative fallback for context-free callers.
+    if recipe.custom():
+        return recipe.quantization_alignment
     if recipe.mxfp8():
         # HipKittens grouped GEMM requires 256-aligned expert dimensions.
         # HK is used by default when NVTE_USE_CUTLASS_GROUPED_GEMM=1,
@@ -333,12 +351,11 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         use_ck = os.environ.get("NVTE_USE_CK_GROUPED_GEMM", "0") == "1"
         use_cutlass = os.environ.get("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
         use_hipkittens = use_hk or (use_cutlass and not use_ck)
-        if (
-            IS_HIP_EXTENSION
-            and get_device_compute_capability() == (9, 5)
-            and use_hipkittens
-        ):
-            return 256
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+            if use_hipkittens:
+                return 256
+            # All gfx950 MXFP8 GEMMs need K % 128, and the split size is K in wgrad.
+            return 128
         return 32
     if recipe.nvfp4():
         return 128
@@ -1193,7 +1210,7 @@ def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@torch.jit.script
+@jit_fuser
 def _default_get_amax_and_update_history(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
@@ -1652,7 +1669,23 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-        return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+        if self.mode not in ("forward", "backward"):
+            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+
+        if self.mode == "backward" or not self.recipe.enable_2d_quantization:
+            return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+
+        def _use_2d_quantization(idx: int) -> bool:
+            role = self._slot_role(idx)
+            return role.module_type in ("linear", "grouped_linear") and role.tensor_type == "weight"
+
+        return [
+            MXFP8Quantizer(
+                self.dtype,
+                with_2d_quantization=_use_2d_quantization(idx),
+            )
+            for idx in range(self.num_quantizers)
+        ]
 
 
 class Float8BlockScalingRecipeState(RecipeState):
@@ -2119,18 +2152,17 @@ class CustomRecipeState(RecipeState):
             )
             roles = [QuantizerRole() for _ in range(self.num_quantizers)]
 
-        # qfactory must return a Quantizer or QuantizerRequest for every slot.
-        # None is not a valid return value — it would silently disable quantization
-        # for that tensor, risking hard-to-detect performance regressions.
-        # TODO(negvet): Introduce an explicit IdentityQuantizer for intentional no-op
-        # quantization. Until then, None is rejected.
+        # qfactory returns one quantizer-like object per slot; use
+        # ``IdentityQuantizer`` for intentional high-precision passthrough.
         raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
         for i, q in enumerate(raw):
             if q is None:
                 raise ValueError(
                     f"CustomRecipe qfactory returned None for slot {i} "
                     f"(role={roles[i]}). Every slot must return a Quantizer "
-                    "instance or a QuantizerRequest."
+                    "instance or a QuantizerRequest. For an intentional no-op "
+                    "(high-precision / unquantized) slot, return an "
+                    "IdentityQuantizer instead of None."
                 )
 
         # -- Delayed scaling sub-state --
