@@ -11,6 +11,11 @@
 
 #include "../../common.h"
 #include "../../utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#include "../../util/system.h"
+#include "../core/rocm_tdm_common.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -82,6 +87,19 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
              " entries, got ", output->amax.shape, ".");
 
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+#ifdef __HIP_PLATFORM_AMD__
+  if ((input.dtype() == DType::kBFloat16 || input.dtype() == DType::kFloat16 ||
+       input.dtype() == DType::kFloat32)) {
+    bool done = false;
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+        input.dtype(), IType,
+        done = common::compute_rowwise_amax_tdm(reinterpret_cast<const IType *>(input.data.dptr),
+                                                amax_ptr, rows, cols, noop_ptr, stream););
+    if (done) {
+      return;
+    }
+  }
+#endif
   if (input.dtype() == DType::kBFloat16) {
     const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
     launch_compute_rowwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),

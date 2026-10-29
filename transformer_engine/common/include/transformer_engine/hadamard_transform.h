@@ -1,4 +1,5 @@
 /*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -75,6 +76,21 @@ void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor ou
                                            const NVTETensor hadamard_matrix,
                                            const NVTEQuantizationConfig quant_config,
                                            cudaStream_t stream);
+
+#ifdef __HIP_PLATFORM_AMD__
+/*! \brief Whether nvte_quantize_with_hadamard_transform supports these tensors on this GPU.
+ *
+ *  On ROCm, it runs only where the gfx1250 Tensor Data Mover kernel applies; elsewhere,
+ *  quantize after an unfused nvte_hadamard_transform.
+ *
+ *  \param[in]      input           Input tensor to apply Hadamard transform.
+ *  \param[in]      output          Output tensor.
+ *  \param[in]      quant_config    Quantization configuration.
+ */
+bool nvte_quantize_with_hadamard_transform_supported(const NVTETensor input,
+                                                     const NVTETensor output,
+                                                     const NVTEQuantizationConfig quant_config);
+#endif
 
 /*! \brief Split a tensor along dimension 0 and compute RHT amaxes for each split.
  *

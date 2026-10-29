@@ -22,6 +22,9 @@
 #include "hadamard_transform_utils.cuh"
 #else
 #include "../util/cuda_runtime.h" //cuda::sm_arch
+#include "../util/system.h"
+#include "../cast/core/rocm_tdm_common.cuh"
+#include "../transpose/cast_transpose.h"
 #endif
 
 namespace transformer_engine {
@@ -870,6 +873,11 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
 
   ZeroAmaxKernel<<<1, 1, 0, stream>>>(pre_amax_ptr, id_amax_ptr, tr_amax_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
+  if (out_t_ptr == nullptr && id_amax_ptr == nullptr &&
+      dispatch::common::compute_rht_amax_tdm(in_ptr, pre_amax_ptr, tr_amax_ptr, num_rows,
+                                             row_length, random_sign_mask_t, stream)) {
+    return;
+  }
 #else
   constexpr int kHadamardDimension = 16;
   NVTE_CHECK(row_length % kHadamardDimension == 0,
@@ -985,3 +993,33 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
                           static_cast<uint16_t>(random_sign_mask),
                           static_cast<uint16_t>(random_sign_mask_t), stream);
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+bool nvte_quantize_with_hadamard_transform_supported(const NVTETensor input,
+                                                     const NVTETensor output,
+                                                     const NVTEQuantizationConfig quant_config) {
+  using namespace transformer_engine;
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+  return detail::quantize_with_hadamard_transform_supported(
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(output), quant_config_cpp);
+}
+
+void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor output,
+                                           const NVTETensor hadamard_matrix,
+                                           const NVTEQuantizationConfig quant_config,
+                                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_with_hadamard_transform);
+  using namespace transformer_engine;
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+  detail::quantize_with_hadamard_transform(*convertNVTETensorCheck(input),
+                                           *convertNVTETensorCheck(output),
+                                           *convertNVTETensorCheck(hadamard_matrix),
+                                           quant_config_cpp, stream);
+}
+#endif  // __HIP_PLATFORM_AMD__

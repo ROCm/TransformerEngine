@@ -1,4 +1,5 @@
 /*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -493,6 +494,29 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const size_t *split_sections, size_t num_tensors,
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
+
+#ifdef __HIP_PLATFORM_AMD__
+/*! \brief Casts the splits of a tensor along dimension 0 to NVFP4 tensors, amaxes included, in
+ *         grouped gfx1250 Tensor Data Mover kernels.
+ *
+ *  Launches nothing and returns false where those kernels do not apply; quantize each split on
+ *  its own then. Splits with no rows keep their amaxes.
+ *
+ *  \param[in]      input              BF16 input tensor to be cast.
+ *  \param[in,out]  outputs            Output NVFP4 tensors, one per split.
+ *  \param[in]      split_sections     Split sections of the input tensor.
+ *  \param[in]      num_tensors        Number of output tensors.
+ *  \param[in]      with_rht           Whether the columnwise outputs are of the random Hadamard
+ *                                     transform of the transposed splits.
+ *  \param[in]      random_sign_mask_t 16-bit sign mask of that transform.
+ *  \param[in]      quant_config       (Optional) Quantization configurations.
+ *  \param[in]      stream             CUDA stream used for the operation.
+ */
+bool nvte_group_nvfp4_quantize_tdm(const NVTETensor input, NVTETensor *outputs,
+                                   const size_t *split_sections, size_t num_tensors, bool with_rht,
+                                   int random_sign_mask_t,
+                                   const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+#endif
 
 #ifdef __cplusplus
 }  // extern "C"

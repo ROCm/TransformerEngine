@@ -66,6 +66,42 @@ __device__ __forceinline__ uint32_t cvt_8x_to_fp4_sr(const float *x, const uint2
   }
   return packed;
 }
+
+// The 16-point Walsh-Hadamard transform, scaled by 1/4, with the operations of the four-lane
+// butterfly of hadamard16_inplace and wht16, lane q's values being x[4q..4q+3].
+__device__ __forceinline__ void hadamard16(float *x) {
+#pragma unroll
+  for (int q = 0; q < 4; q++) {
+    const float a0 = x[4 * q] + x[4 * q + 1];
+    const float a1 = x[4 * q] - x[4 * q + 1];
+    const float a2 = x[4 * q + 2] + x[4 * q + 3];
+    const float a3 = x[4 * q + 2] - x[4 * q + 3];
+    x[4 * q] = a0 + a2;
+    x[4 * q + 2] = a0 - a2;
+    x[4 * q + 1] = a1 + a3;
+    x[4 * q + 3] = a1 - a3;
+  }
+#pragma unroll
+  for (int d = 1; d <= 2; d *= 2) {
+    float y[16];
+#pragma unroll
+    for (int q = 0; q < 4; q++) {
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        const float p = x[4 * (q ^ d) + i];
+        y[4 * q + i] = (q & d) ? p - x[4 * q + i] : p + x[4 * q + i];
+      }
+    }
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+      x[i] = y[i];
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < 16; i++) {
+    x[i] *= 0.25f;
+  }
+}
 #endif  // __gfx1250__
 
 // Stores the first n of the N bytes of src to dst, at once when that is all of them and dst is
@@ -298,6 +334,221 @@ bool compute_amax_tdm(const IType *input, float *amax, const size_t n, const flo
   const size_t blocks =
       std::min(DIVUP(n, TILE * WAVES), static_cast<size_t>(cuda::sm_count()));
   amax_tdm_kernel<IType><<<blocks, WAVES * WAVE_SIZE, 0, stream>>>(input, amax, n, noop);
+  NVTE_CHECK_CUDA(hipGetLastError());
+  return true;
+}
+
+namespace tdm_amax_kernel {
+
+constexpr int RHT_TILE_Y = 64;
+constexpr int RHT_TILE_X = 128;
+constexpr int RHT_DIM = 16;
+constexpr int RHT_COLS_PER_LANE = RHT_TILE_X / WAVE_SIZE;  // 4
+
+// The splits of a tensor along dimension 0 whose amaxes split_amax_tdm_kernel computes.
+template <int kMaxSplits>
+struct SplitAmaxArgs {
+  const void *input[kMaxSplits];
+  float *amax[kMaxSplits];
+  float *amax_t[kMaxSplits];
+  uint32_t rows[kMaxSplits];
+};
+
+// For split blockIdx.y of the cols-wide BF16 input: max |x| into *amax and, with kRHT, into
+// *amax_t the max |y| over the transposed RHT y of its 16-row column blocks, rounded to BF16 as
+// hadamard_transform stores it, else max |x| as well. Null pointers are skipped. Grid and reduction
+// as amax_tdm_kernel, with 2D tiles.
+template <bool kRHT, int kMaxSplits>
+__global__ void __launch_bounds__(WAVES * WAVE_SIZE)
+    split_amax_tdm_kernel(const SplitAmaxArgs<kMaxSplits> args, const uint32_t cols,
+                          const uint32_t sign_mask) {
+#ifdef __gfx1250__
+  __shared__ alignas(128) uint16_t tile_sh[WAVES][RHT_TILE_Y][RHT_TILE_X];
+  __shared__ float amax_sh[2][WAVES];
+
+  const uint16_t *const input = static_cast<const uint16_t *>(args.input[blockIdx.y]);
+  const uint32_t rows = args.rows[blockIdx.y];
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane = threadIdx.x % WAVE_SIZE;
+  auto &tile = tile_sh[wave];
+  const uint32_t tiles_x = DIVUP(cols, static_cast<uint32_t>(RHT_TILE_X));
+  const uint32_t tiles = DIVUP(rows, static_cast<uint32_t>(RHT_TILE_Y)) * tiles_x;
+  float amax = 0;
+  float amax_t = 0;
+  for (uint32_t t = blockIdx.x * WAVES + wave; t < tiles; t += gridDim.x * WAVES) {
+    tdm::load_2d(tile, input, rows, cols, cols, t / tiles_x * RHT_TILE_Y,
+                 t % tiles_x * RHT_TILE_X);
+    tdm::wait<0>();
+#pragma unroll
+    for (int b = 0; b < RHT_TILE_Y / RHT_DIM; b++) {
+      float x[RHT_COLS_PER_LANE][RHT_DIM];
+#pragma unroll
+      for (int y = 0; y < RHT_DIM; y++) {
+        const uint2 bits =
+            *reinterpret_cast<const uint2 *>(&tile[b * RHT_DIM + y][lane * RHT_COLS_PER_LANE]);
+        x[0][y] = __uint_as_float(bits.x << 16);
+        x[1][y] = __uint_as_float(bits.x & 0xFFFF0000);
+        x[2][y] = __uint_as_float(bits.y << 16);
+        x[3][y] = __uint_as_float(bits.y & 0xFFFF0000);
+      }
+#pragma unroll
+      for (int i = 0; i < RHT_COLS_PER_LANE; i++) {
+#pragma unroll
+        for (int y = 0; y < RHT_DIM; y++) {
+          amax = fmaxf(amax, fabsf(x[i][y]));
+        }
+        if constexpr (kRHT) {
+#pragma unroll
+          for (int y = 0; y < RHT_DIM; y++) {
+            x[i][y] = (sign_mask >> y) & 1 ? -x[i][y] : x[i][y];
+          }
+          hadamard16(x[i]);
+#pragma unroll
+          for (int y = 0; y < RHT_DIM; y++) {
+            amax_t = fmaxf(amax_t, fabsf(static_cast<float>(static_cast<__bf16>(x[i][y]))));
+          }
+        }
+      }
+    }
+  }
+  amax = rocm_subwarp_allreduce<WAVE_SIZE>(amax, rocm_op::max{});
+  amax_t = rocm_subwarp_allreduce<WAVE_SIZE>(amax_t, rocm_op::max{});
+  if (lane == 0) {
+    amax_sh[0][wave] = amax;
+    amax_sh[1][wave] = amax_t;
+  }
+  __syncthreads();
+  if (threadIdx.x < 2) {
+    float block_amax = 0;
+#pragma unroll
+    for (int w = 0; w < WAVES; w++) {
+      block_amax = fmaxf(block_amax, amax_sh[kRHT ? threadIdx.x : 0][w]);
+    }
+    float *const ptr = threadIdx.x == 0 ? args.amax[blockIdx.y] : args.amax_t[blockIdx.y];
+    if (ptr != nullptr) {
+      rocm_atomicMaxFloat(ptr, block_amax);
+    }
+  }
+#endif  // __gfx1250__
+}
+
+template <int kMaxSplits>
+__global__ void zero_split_amax_kernel(const SplitAmaxArgs<kMaxSplits> args, const int splits) {
+  for (int t = threadIdx.x; t < splits; t += blockDim.x) {
+    if (args.amax[t] != nullptr) {
+      *args.amax[t] = 0;
+    }
+    if (args.amax_t[t] != nullptr) {
+      *args.amax_t[t] = 0;
+    }
+  }
+}
+
+// Sets the amaxes of the first splits of args as split_amax_tdm_kernel defines them, spreading a
+// block per CU over the splits by size.
+template <bool kRHT, int kMaxSplits>
+void launch_split_amax_tdm(const SplitAmaxArgs<kMaxSplits> &args, const int splits,
+                           const size_t cols, const uint16_t sign_mask, const bool zero,
+                           hipStream_t stream) {
+  size_t max_rows = 0;
+  size_t total_rows = 0;
+  for (int t = 0; t < splits; t++) {
+    max_rows = std::max<size_t>(max_rows, args.rows[t]);
+    total_rows += args.rows[t];
+  }
+  if (zero) {
+    zero_split_amax_kernel<kMaxSplits><<<1, 256, 0, stream>>>(args, splits);
+  }
+  if (total_rows == 0) {
+    NVTE_CHECK_CUDA(hipGetLastError());
+    return;
+  }
+  // The largest split's tiles over its share of the CUs, as each split gets as many blocks.
+  const size_t tiles = DIVUP(max_rows, static_cast<size_t>(RHT_TILE_Y)) *
+                       DIVUP(cols, static_cast<size_t>(RHT_TILE_X));
+  const size_t share = std::max<size_t>(1, cuda::sm_count() * max_rows / total_rows);
+  const dim3 grid(std::min(DIVUP(tiles, WAVES), share), splits);
+  split_amax_tdm_kernel<kRHT, kMaxSplits><<<grid, WAVES * WAVE_SIZE, 0, stream>>>(args, cols,
+                                                                                    sign_mask);
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
+}  // namespace tdm_amax_kernel
+
+// Raises *amax to the max |x| of the rows x cols BF16 input and *amax_t to that of the RHT of its
+// transpose with sign_mask, as hadamard_transform_amax computes them; null pointers are skipped.
+template <typename = void>
+bool compute_rht_amax_tdm(const void *input, float *amax, float *amax_t, const size_t rows,
+                          const size_t cols, const uint16_t sign_mask, hipStream_t stream) {
+  using namespace tdm_amax_kernel;
+  if (rows % RHT_DIM != 0 || !use_tdm(rows, cols, {input})) {
+    return false;
+  }
+  SplitAmaxArgs<1> args;
+  args.input[0] = input;
+  args.amax[0] = amax;
+  args.amax_t[0] = amax_t;
+  args.rows[0] = rows;
+  launch_split_amax_tdm<true>(args, 1, cols, sign_mask, false, stream);
+  return true;
+}
+
+namespace tdm_amax_kernel {
+
+// amax[r] = max |x| over row r of the rows x cols input. A wave owns whole rows, streamed in
+// single-row tiles, so it writes each amax without atomics.
+template <typename IType>
+__global__ void __launch_bounds__(WAVES * WAVE_SIZE)
+    rowwise_amax_tdm_kernel(const IType *input, float *amax_ptr, const uint32_t rows,
+                            const uint32_t cols, const float *noop) {
+#ifdef __gfx1250__
+  constexpr uint32_t TILE = TILE_BYTES / sizeof(IType);
+  constexpr uint32_t VEC = 16 / sizeof(IType);
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  __shared__ alignas(128) IType tile_sh[WAVES][1][TILE];
+
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane = threadIdx.x % WAVE_SIZE;
+  auto &tile = tile_sh[wave];
+  for (uint32_t row = blockIdx.x * WAVES + wave; row < rows; row += gridDim.x * WAVES) {
+    float amax = 0;
+    for (uint32_t col = 0; col < cols; col += TILE) {
+      tdm::load_2d(tile, input, rows, cols, cols, row, col);
+      tdm::wait<0>();
+      const uint32_t n = min(TILE, cols - col);
+      for (uint32_t i = lane * VEC; i < n; i += WAVE_SIZE * VEC) {
+        Vec<IType, VEC> x;
+        x.load_from(&tile[0][i]);
+#pragma unroll
+        for (int j = 0; j < VEC; j++) {
+          __builtin_assume(amax >= 0);
+          amax = fmaxf(fabsf(static_cast<float>(x.data.elt[j])), amax);
+        }
+      }
+    }
+    amax = rocm_subwarp_allreduce<WAVE_SIZE>(amax, rocm_op::max{});
+    if (lane == 0) {
+      amax_ptr[row] = amax;
+    }
+  }
+#endif  // __gfx1250__
+}
+
+}  // namespace tdm_amax_kernel
+
+// amax[r] = max |x| over row r of the rows x cols input, as the row-scaled NVFP4 quantize needs.
+template <typename IType>
+bool compute_rowwise_amax_tdm(const IType *input, float *amax, const size_t rows,
+                              const size_t cols, const float *noop, hipStream_t stream) {
+  using namespace tdm_amax_kernel;
+  if (!use_tdm(rows, cols, {input})) {
+    return false;
+  }
+  const size_t blocks = std::min(DIVUP(rows, WAVES), static_cast<size_t>(cuda::sm_count()));
+  rowwise_amax_tdm_kernel<IType>
+      <<<blocks, WAVES * WAVE_SIZE, 0, stream>>>(input, amax, rows, cols, noop);
   NVTE_CHECK_CUDA(hipGetLastError());
   return true;
 }

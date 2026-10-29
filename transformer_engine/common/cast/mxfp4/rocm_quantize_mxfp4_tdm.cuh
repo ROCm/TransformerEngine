@@ -53,6 +53,7 @@ struct ScaleLayout {
 
 #ifdef __gfx1250__
 using common::cvt_8x_to_fp4;
+using common::hadamard16;
 
 __device__ __forceinline__ void write_scale(const ScaleLayout &layout, const int row, const int col,
                                             const uint8_t e8m0) {
@@ -63,41 +64,6 @@ __device__ __forceinline__ void write_scale(const ScaleLayout &layout, const int
     layout.ptr[row * layout.stride + col] = e8m0;
   } else if (row < layout.pad_rows && col < layout.pad_cols) {
     layout.ptr[te_mxfp4::compute_scale_shuffle_index(row, col, layout.pad_cols)] = e8m0;
-  }
-}
-
-// hadamard16_inplace of the four quad lanes whose values x[4q..4q+3] one lane holds.
-__device__ __forceinline__ void hadamard16(float *x) {
-#pragma unroll
-  for (int q = 0; q < 4; q++) {
-    const float a0 = x[4 * q] + x[4 * q + 1];
-    const float a1 = x[4 * q] - x[4 * q + 1];
-    const float a2 = x[4 * q + 2] + x[4 * q + 3];
-    const float a3 = x[4 * q + 2] - x[4 * q + 3];
-    x[4 * q] = a0 + a2;
-    x[4 * q + 2] = a0 - a2;
-    x[4 * q + 1] = a1 + a3;
-    x[4 * q + 3] = a1 - a3;
-  }
-#pragma unroll
-  for (int d = 1; d <= 2; d *= 2) {
-    float y[16];
-#pragma unroll
-    for (int q = 0; q < 4; q++) {
-#pragma unroll
-      for (int i = 0; i < 4; i++) {
-        const float p = x[4 * (q ^ d) + i];
-        y[4 * q + i] = (q & d) ? p - x[4 * q + i] : p + x[4 * q + i];
-      }
-    }
-#pragma unroll
-    for (int i = 0; i < 16; i++) {
-      x[i] = y[i];
-    }
-  }
-#pragma unroll
-  for (int i = 0; i < 16; i++) {
-    x[i] *= 0.25f;
   }
 }
 

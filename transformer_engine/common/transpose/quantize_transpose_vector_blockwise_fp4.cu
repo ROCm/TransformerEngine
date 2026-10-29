@@ -1233,8 +1233,8 @@ void quantize_transpose_vector_blockwise_fp4(
   if (nvfp4_tdm::quantize(input, global_amax, scale_inv, scale_inv_t, output, output_t, num_rows,
                           row_length, return_identity, return_transpose, swizzled_scale,
                           use_stochastic_rounding, rng_state, use_2d_quantization,
-                          row_scaled_nvfp4, nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
-                          noop_ptr, e4m3_max_for_arch, stream)) {
+                          row_scaled_nvfp4, nvfp4_4over6_mode, noop_ptr, e4m3_max_for_arch,
+                          stream)) {
     return;
   }
 #endif
@@ -1330,6 +1330,55 @@ void quantize_transpose_vector_blockwise_fp4(
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // CUDA_VERSION >= 12080
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+bool quantize_with_hadamard_transform_supported(const Tensor& input, const Tensor& output,
+                                                const QuantizationConfig& config) {
+  using namespace transformer_engine::quantize_transpose_nvfp4;
+  const auto [num_rows, row_length] = input.flat_2d_dims();
+  return config.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled && !output.row_scaled_nvfp4 &&
+         nvfp4_tdm::supported_rht(input.data, output.data, output.columnwise_data, num_rows,
+                                  row_length, config.nvfp4_2d_quantization,
+                                  output.with_gemm_swizzled_scales);
+}
+
+void quantize_with_hadamard_transform(const Tensor& input, Tensor& output,
+                                      const Tensor& hadamard_matrix,
+                                      const QuantizationConfig& config, cudaStream_t stream) {
+  using namespace transformer_engine::quantize_transpose_nvfp4;
+  NVTE_CHECK(quantize_with_hadamard_transform_supported(input, output, config),
+             "NVFP4 quantize with Hadamard transform does not support these tensors here.");
+  NVTE_CHECK(hadamard_matrix.dtype() == DType::kBFloat16 &&
+                 (hadamard_matrix.shape() == std::vector<size_t>{16, 16}),
+             "Hadamard matrix must be a 16x16 BF16 tensor.");
+  const auto [num_rows, row_length] = input.flat_2d_dims();
+  const size_t* rng_state = nullptr;
+  if (config.rng_state != nullptr) {
+    const Tensor& rng_state_tensor = *convertNVTETensorCheck(config.rng_state);
+    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64 && rng_state_tensor.numel() == 2,
+               "RNG state should contain 2 64-bit values.");
+    rng_state = reinterpret_cast<const size_t*>(rng_state_tensor.data.dptr);
+  }
+  const float* noop = config.noop_tensor != nullptr
+                          ? reinterpret_cast<const float*>(
+                                convertNVTETensorCheck(config.noop_tensor)->data.dptr)
+                          : nullptr;
+  const float e4m3_max = te_fp8_fnuz() ? 240.0f : static_cast<float>(output.nvfp4_e4m3_max);
+  nvfp4_tdm::quantize_rht(input.data, output.amax, output.columnwise_amax, hadamard_matrix.data,
+                          output.scale_inv, output.columnwise_scale_inv, output.data,
+                          output.columnwise_data, num_rows, row_length, config.stochastic_rounding,
+                          rng_state, noop, e4m3_max, stream);
+}
+
+bool group_quantize_nvfp4_tdm(const Tensor& input, const std::vector<Tensor*>& outputs,
+                              const size_t* split_sections, const bool with_rht,
+                              const uint16_t sign_mask, const QuantizationConfig& config,
+                              cudaStream_t stream) {
+  using namespace transformer_engine::quantize_transpose_nvfp4;
+  return nvfp4_tdm::group_quantize(input, outputs, split_sections, with_rht, sign_mask, config,
+                                   stream);
+}
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace detail
 }  // namespace transformer_engine
