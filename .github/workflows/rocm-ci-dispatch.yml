@@ -27,14 +27,22 @@ jobs:
               return m ? Number(m[1]) : 0;
             };
 
+            const action = context.payload.action;
+            const addedLevel = action === 'labeled'
+              ? parseLevelLabel(context.payload.label?.name)
+              : 0;
+
             const labels = (context.payload.pull_request.labels || [])
               .map(l => parseLevelLabel(l.name));
-            const action = context.payload.action;
+            // Fold the label that triggered this event into the set: when several
+            // labels are added at once, GitHub may hand us a pull_request.labels
+            // snapshot that doesn't yet include it, which otherwise makes a valid
+            // ci-level addition look lower than itself and skips the run.
+            if (addedLevel > 0) labels.push(addedLevel);
             const currentLevel = labels.length ? Math.max(...labels) : 0;
 
             let dispatch = false;
             if (action === 'labeled') {
-              const addedLevel = parseLevelLabel(context.payload.label?.name);
               // Only dispatch when the newly added label is (or ties) the highest level.
               dispatch = addedLevel > 0 && addedLevel === currentLevel;
             } else {
@@ -43,7 +51,7 @@ jobs:
             }
 
             const level = dispatch ? String(currentLevel) : '';
-            core.info(`action=${action}, currentLevel=${currentLevel}, dispatch=${dispatch}`);
+            core.info(`action=${action}, addedLevel=${addedLevel}, currentLevel=${currentLevel}, dispatch=${dispatch}`);
             core.setOutput('test_level', level);
 
   dispatch:
