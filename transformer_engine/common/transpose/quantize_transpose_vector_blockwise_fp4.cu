@@ -24,6 +24,9 @@
 #include "common/utils.cuh"
 #ifdef __HIP_PLATFORM_AMD__
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
+// After the util headers it uses.
+#include "common/cast/core/rocm_tdm_common.cuh"
 #endif
 
 namespace transformer_engine {
@@ -1130,6 +1133,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 }  // NOLINT(readability/fn_size) 4over6 grows upstream's kernel past 500 lines
 
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/transpose/rocm_quantize_nvfp4_tdm.cuh"
+#endif
+
 }  // namespace
 }  // namespace quantize_transpose_nvfp4
 #endif  // CUDA_VERSION >= 12080
@@ -1221,6 +1228,16 @@ void quantize_transpose_vector_blockwise_fp4(
                "Shape of the RNG state should be [2], but got ", rng_state_te_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
   }
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (nvfp4_tdm::quantize(input, global_amax, scale_inv, scale_inv_t, output, output_t, num_rows,
+                          row_length, return_identity, return_transpose, swizzled_scale,
+                          use_stochastic_rounding, rng_state, use_2d_quantization,
+                          row_scaled_nvfp4, nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
+                          noop_ptr, e4m3_max_for_arch, stream)) {
+    return;
+  }
+#endif
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,

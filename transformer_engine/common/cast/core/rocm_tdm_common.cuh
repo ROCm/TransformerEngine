@@ -7,8 +7,9 @@
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
 // gfx1250 Tensor Data Mover pieces shared by the TDM quantize paths: the check whether TDM applies,
-// the chunks of grouped tensors, the reduction of per-chunk dbias partials, and amax. This expects
-// its includer to have included the common headers, util/system.h and util/cuda_runtime.h.
+// conversions and stores, the chunks of grouped tensors, the reduction of per-chunk dbias partials,
+// and amax. This expects its includer to have included the common headers, util/system.h and
+// util/cuda_runtime.h.
 
 #include <algorithm>
 #include <initializer_list>
@@ -39,7 +40,48 @@ __device__ __forceinline__ T cvt_from_float(const float x) {
     return static_cast<T>(x);
   }
 }
+
+typedef float f32x8 __attribute__((ext_vector_type(8)));
+
+// x / scale for 8 values as FP4, rounded to nearest even, the first in the low nibble.
+__device__ __forceinline__ uint32_t cvt_8x_to_fp4(const float *x, const float scale) {
+  const f32x8 v = {x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]};
+  return __builtin_amdgcn_cvt_scalef32_pk8_fp4_f32(v, scale);
+}
+
+// cvt_8x_to_fp4, rounding stochastically with a random byte of rbits per value. The conversion
+// rounds its first value up when bits 15:0 of its random operand plus the 16-bit fraction to the
+// next FP4 value carry, its second likewise with bits 31:16, and the other 6 with shifts of the
+// same bits, so each conversion takes only 2 values.
+__device__ __forceinline__ uint32_t cvt_8x_to_fp4_sr(const float *x, const uint2 rbits,
+                                                     const float scale) {
+  uint32_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const uint32_t bytes = ((i < 2 ? rbits.x : rbits.y) >> (16 * (i % 2))) & 0xFFFF;
+    // The bytes on top of half a byte, so that the probability of rounding up rounds to nearest.
+    const uint32_t r = (bytes & 0xFF) << 8 | (bytes & 0xFF00) << 16 | 0x00800080;
+    const f32x8 v = {x[2 * i], x[2 * i + 1], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    packed |= (__builtin_amdgcn_cvt_scalef32_sr_pk8_fp4_f32(v, r, scale) & 0xFF) << (8 * i);
+  }
+  return packed;
+}
 #endif  // __gfx1250__
+
+// Stores the first n of the N bytes of src to dst, at once when that is all of them and dst is
+// aligned for it.
+template <int N, typename T>
+__device__ __forceinline__ void store_bytes(T *dst, const T (&src)[N], const int n) {
+  static_assert(sizeof(T) == 1 && (N == 4 || N == 8), "Stores 4 or 8 bytes");
+  using Word = std::conditional_t<N == 8, uint64_t, uint32_t>;
+  if (n >= N && reinterpret_cast<uintptr_t>(dst) % N == 0) {
+    *reinterpret_cast<Word *>(dst) = *reinterpret_cast<const Word *>(src);
+  } else {
+    for (int i = 0; i < min(n, N); i++) {
+      dst[i] = src[i];
+    }
+  }
+}
 
 // The last of num_tensors tensors that starts at or before element offset.
 __device__ __forceinline__ size_t find_tensor(const int64_t *offsets, const size_t num_tensors,

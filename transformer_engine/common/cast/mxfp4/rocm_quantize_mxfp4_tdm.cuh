@@ -20,6 +20,7 @@ namespace dispatch {
 namespace mxfp4 {
 namespace tdm_kernel {
 
+using common::store_bytes;
 using common::use_tdm;
 
 constexpr size_t CHUNK_DIM_Y = 128;
@@ -30,12 +31,14 @@ constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
 constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
 constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
 constexpr size_t BLOCK_SIZE = 32;
+constexpr size_t SCALES_PER_ROW = CHUNK_DIM_X / BLOCK_SIZE;  // 4
 constexpr size_t BAND_BYTES = BAND_Y * CHUNK_DIM_X / 2;  // packed FP4 of a band
 constexpr size_t CHUNK_BYTES = CHUNK_DIM_Y * CHUNK_DIM_X / 2;
 // The shuffled FP4 layouts store each 16-row group contiguously, in 16-byte column slices.
 constexpr size_t SHUFFLE_ROWS = 16;
 constexpr size_t SHUFFLE_SLICE = 16;
 static_assert(BAND_Y == BLOCK_SIZE, "A band must be one colwise scale block");
+static_assert(BAND_Y == WAVE_SIZE, "A lane per band row writes the rowwise scales");
 
 // Where the E8M0 scales of one direction go: scale (row, col) for col < valid_cols, at
 // row * stride + col or, with shuffle, at its compute_scale_shuffle_index within the padding.
@@ -49,7 +52,7 @@ struct ScaleLayout {
 };
 
 #ifdef __gfx1250__
-typedef float f32x8 __attribute__((ext_vector_type(8)));
+using common::cvt_8x_to_fp4;
 
 __device__ __forceinline__ void write_scale(const ScaleLayout &layout, const int row, const int col,
                                             const uint8_t e8m0) {
@@ -110,12 +113,6 @@ __device__ __forceinline__ uint8_t block_scale(const float *x, const int n, floa
   return te_mxfp4::compute_e8m0_scale(amax, scale);
 }
 
-// x / scale for 8 values as FP4, the first in the low nibble.
-__device__ __forceinline__ uint32_t cvt_8x_to_fp4(const float *x, const float scale) {
-  const f32x8 v = {x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]};
-  return __builtin_amdgcn_cvt_scalef32_pk8_fp4_f32(v, scale);
-}
-
 __device__ __forceinline__ float bf16_bits_to_float(const uint32_t bits) {
   return __uint_as_float(bits << 16);
 }
@@ -132,6 +129,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #ifdef __gfx1250__
   __shared__ alignas(128) uint16_t in_sh[WAVES][BAND_Y][CHUNK_DIM_X];
   __shared__ alignas(128) uint8_t rowwise_sh[ROWWISE ? WAVES : 1][BAND_BYTES];
+  __shared__ alignas(4) uint8_t rowwise_scale_sh[ROWWISE ? WAVES : 1][BAND_Y][SCALES_PER_ROW];
   // The transpose of the chunk, so that its rows go out in CHUNK_DIM_Y / 2-byte segments.
   __shared__ alignas(128) uint8_t colwise_sh[COLWISE ? CHUNK_BYTES : 1];
   __shared__ alignas(4) uint8_t colwise_scale_sh[COLWISE ? CHUNK_DIM_X : 1][WAVES];
@@ -160,6 +158,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int lane_offset_X = (lane % LANES_PER_ROW) * ELEMS;
     const int packed_X = lane_offset_X / 2;
     uint8_t *const out = rowwise_sh[wave];
+    auto &scales = rowwise_scale_sh[wave];
 #pragma unroll
     for (int step = 0; step < BAND_Y / ROWS_PER_STEP; step++) {
       const int y = step * ROWS_PER_STEP + lane_offset_Y;
@@ -185,9 +184,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                    y % SHUFFLE_ROWS * SHUFFLE_SLICE + packed_X % SHUFFLE_SLICE
                              : y * (CHUNK_DIM_X / 2) + packed_X;
       *reinterpret_cast<uint2 *>(out + offset) = packed;
-      if (lane % 2 == 0 && band_offset_Y + y < rows) {
-        write_scale(rowwise_scales, band_offset_Y + y, (chunk_offset_X + lane_offset_X) / BLOCK_SIZE,
-                    e8m0);
+      if (lane % 2 == 0) {
+        scales[y][lane_offset_X / BLOCK_SIZE] = e8m0;
       }
     }
     const uint32_t packed_cols = cols / 2;
@@ -200,6 +198,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     } else {
       tdm::store_2d(rowwise_fp4, *reinterpret_cast<uint8_t(*)[BAND_Y][CHUNK_DIM_X / 2]>(out), rows,
                     packed_cols, packed_cols, band_offset_Y, chunk_offset_X / 2);
+    }
+    // A lane per band row writes the row's scales.
+    const uint32_t row = band_offset_Y + lane;
+    const int first_scale = chunk_offset_X / BLOCK_SIZE;
+    if (row < rows) {
+      if (!rowwise_scales.shuffle) {
+        store_bytes(rowwise_scales.ptr + row * rowwise_scales.stride + first_scale, scales[lane],
+                    rowwise_scales.valid_cols - first_scale);
+      } else {
+#pragma unroll
+        for (int s = 0; s < SCALES_PER_ROW; s++) {
+          write_scale(rowwise_scales, row, first_scale + s, scales[lane][s]);
+        }
+      }
     }
   }
 
@@ -247,11 +259,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int first_scale = blockIdx.y * WAVES;
     if (col < cols) {
       const ScaleLayout &layout = colwise_scales;
-      uint8_t *const dst = layout.ptr + col * layout.stride + first_scale;
-      if (!layout.shuffle && first_scale + static_cast<int>(WAVES) <= layout.valid_cols &&
-          reinterpret_cast<uintptr_t>(dst) % 4 == 0) {
-        *reinterpret_cast<uint32_t *>(dst) =
-            *reinterpret_cast<const uint32_t *>(colwise_scale_sh[threadIdx.x]);
+      if (!layout.shuffle) {
+        store_bytes(layout.ptr + col * layout.stride + first_scale, colwise_scale_sh[threadIdx.x],
+                    layout.valid_cols - first_scale);
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; w++) {
