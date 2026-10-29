@@ -6,10 +6,11 @@
 """Summarize pytest/ctest JUnit XML results into a GitHub Actions report.
 
 Reads every ``*.xml`` file in the given directory -- each produced by a single
-pytest file invocation (see ``get_pytest_junitxml`` in ``_utils.sh``) or a
-ctest run -- aggregates pass/fail/error/skip/timeout counts, writes a Markdown
-digest to ``$GITHUB_STEP_SUMMARY`` (or stdout when run locally), and emits
-``::error::`` workflow annotations for the failing tests.
+pytest file invocation (see ``get_pytest_junitxml`` in ``_utils.sh``), a ctest
+run, or one example (``.github/scripts/run_example.py``) -- aggregates
+pass/fail/error/skip/timeout counts, writes a Markdown digest to
+``$GITHUB_STEP_SUMMARY`` (or stdout when run locally), and emits ``::error::``
+workflow annotations for the failing tests.
 
 Design notes:
   * Standard library only, so it runs on any runner without provisioning.

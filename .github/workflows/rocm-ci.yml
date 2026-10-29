@@ -333,6 +333,7 @@ jobs:
           }
           report torch "sGPU PyTorch (${{ matrix.arch_label }})"
           report jax "sGPU JAX (${{ matrix.arch_label }})"
+          report examples "sGPU Examples (${{ matrix.arch_label }})"
           report core "sGPU Core (${{ matrix.arch_label }})"
           if [ -f test-results/logs/report/schedule.md ]; then
             cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
