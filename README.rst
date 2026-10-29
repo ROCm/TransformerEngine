@@ -311,14 +311,15 @@ to the regular CK/AITER fused-attention path:
 * head dimension is 128 or 256, with matching Q/K and V head dimensions;
 * number of attention heads is 16 or 32, with no GQA/MQA (num_heads == num_gqa_groups);
 * no attention bias and no dropout;
-* mask type is padding mask or no mask;
+* Q, K and V in separate tensors (no packed QKV or KV layouts);
+* mask type is ``no_mask`` or ``padding`` (no causal masks), without a sliding window;
 
 Both ``THD`` (variable-length, e.g. cross-attention) and ``BSHD`` (dense self-attention with s_q == s_kv)
 layouts are supported, with different sequence-length ranges:
 
 * ``THD`` — eligibility uses the **runtime** maximum sequence length per batch (from ``cu_seqlens``).
   ``1 <= s_q <= 17`` and ``2 <= s_kv <= 17`` (``s_q = 1`` is supported for cross-attention).
-* ``BSHD`` — eligibility uses the **static** sequence length. Requires ``s_q == s_kv`` with
+* ``BSHD`` — eligibility uses the **static** sequence length. Requires no mask and ``s_q == s_kv`` with
   ``2 <= s_q <= 17``.
 
 When using the JAX integration, the small-seq path requires XLA GPU graph capture (command buffers) to be

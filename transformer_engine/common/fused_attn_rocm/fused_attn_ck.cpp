@@ -173,6 +173,7 @@ bool is_ck_backend_supported(
 }
 
 bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type,
                                    NVTE_Mask_Type mask_type,
                                    float dropout,
@@ -180,7 +181,9 @@ bool is_small_seq_supported_static(DType dtype,
                                    size_t head_dim_v,
                                    size_t num_attn_heads,
                                    size_t num_gqa_groups,
-                                   NVTE_Softmax_Type softmax_type) {
+                                   NVTE_Softmax_Type softmax_type,
+                                   int64_t window_size_left,
+                                   int64_t window_size_right) {
   if(dropout != 0.0f) return false;
   if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
   if(softmax_type != NVTE_VANILLA_SOFTMAX) return false;
@@ -190,7 +193,13 @@ bool is_small_seq_supported_static(DType dtype,
   if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) return false;
   if(num_attn_heads != num_gqa_groups) return false;
   if(num_attn_heads != 16 && num_attn_heads != 32) return false;
-  if(!is_padding_mask(mask_type) && mask_type != NVTE_Mask_Type::NVTE_NO_MASK) return false;
+  // the small-seq kernels take Q, K and V as separate tensors without strides
+  if(nvte_get_qkv_layout_group(qkv_layout) != NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) return false;
+  // they apply no causal mask or sliding window
+  if(mask_type != NVTE_Mask_Type::NVTE_NO_MASK && mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) return false;
+  if(window_size_left != -1 || window_size_right != -1) return false;
+  // the BSHD ones take no sequence lengths
+  if(nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD && is_padding_mask(mask_type)) return false;
   return true;
 }
 
@@ -433,15 +442,15 @@ void pad_remap(
 }
 
 // Cuda kernel to copy softmax lse between padded and unpadded layouts.
-// Also performs a format conversion between CK[h, total_tokens_q] and
-// NVTE[total_tokens_q, h] formats. 
 // padded layout (selected by is_ragged):
 //   is_ragged=false: [b, h, s_q]
 //   is_ragged=true : [max_tokens_q with padding, h]
-// unpadded layout: [h, max_tokens_q]
+// unpadded layout (selected by token_major):
+//   token_major=false: [h, max_tokens_q], as the CK kernels write it
+//   token_major=true : [max_tokens_q, h], as the small-seq kernels write it
 // One wavefront in charge of one token index (h*sizeof(float) bytes)
 // One workitem (thread) in one wavefront is charge of one element in THREADS_PER_WAVE_FRONT(64) segment trunk of h
-template<bool is_ragged, PadDirection dir>
+template<bool is_ragged, PadDirection dir, bool token_major>
 __global__ void pad_remap_lse_kernel(
   uint64_t b, uint64_t h, uint64_t s_q,
   uint64_t max_tokens_q,
@@ -465,7 +474,12 @@ __global__ void pad_remap_lse_kernel(
       }else{
         padded_idx = b_idx*h*s_q + h_idx*s_q + s_idx;
       }
-      uint64_t unpadded_idx = h_idx * max_tokens_q + token_id;
+      uint64_t unpadded_idx;
+      if constexpr(token_major){
+        unpadded_idx = token_id*h + h_idx;
+      }else{
+        unpadded_idx = h_idx * max_tokens_q + token_id;
+      }
       if constexpr(dir == PadDirection::Add){
         padded_lse_ptr[padded_idx] = unpadded_lse_ptr[unpadded_idx];
       }else{
@@ -476,7 +490,7 @@ __global__ void pad_remap_lse_kernel(
 }
 
 // kernel launcher for softmax_lse padded<->unpadded copy
-template<PadDirection dir>
+template<PadDirection dir, bool token_major = false>
 void pad_remap_lse(
   uint64_t b, uint64_t h, uint64_t s_q,
   uint64_t max_tokens_q,
@@ -490,14 +504,14 @@ void pad_remap_lse(
   dim3 block(THREADS_PER_BLOCK);
   dim3 grid(ceil(1.0 * max_tokens_q * cuda::warp_size()/THREADS_PER_BLOCK));
   if(is_ragged){
-    pad_remap_lse_kernel<true, dir><<<grid, block, 0, stream>>>(
+    pad_remap_lse_kernel<true, dir, token_major><<<grid, block, 0, stream>>>(
       b, h, s_q, max_tokens_q,
       static_cast<float*>(padded_lse_ptr),
       static_cast<const int32_t*>(cu_seqlen_q_ptr),
       static_cast<const int32_t*>(cu_seqlen_q_padded_ptr),
       static_cast<float*>(unpadded_lse_ptr));
   }else{
-    pad_remap_lse_kernel<false, dir><<<grid, block, 0, stream>>>(
+    pad_remap_lse_kernel<false, dir, token_major><<<grid, block, 0, stream>>>(
       b, h, s_q, max_tokens_q,
       static_cast<float*>(padded_lse_ptr),
       static_cast<const int32_t*>(cu_seqlen_q_ptr),
@@ -567,8 +581,8 @@ void fused_attn_ck_fwd_impl(
 
   if(ck_small_seq_env_enabled) {
     if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
-      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
-                                     h, hg, softmax_type)) {
+      if(is_small_seq_supported_static(dtype, layout, bias_type, mask_type, dropout_probability, d_qk, d_v,
+                                     h, hg, softmax_type, window_size_left, window_size_right)) {
         if(is_ragged) {
           ck_small_seq_enabled = true;
           ck_smallseq_workspace_prefix =
@@ -763,10 +777,10 @@ void fused_attn_ck_fwd_impl(
   // ck_small_seq_enabled (env, gfx942/950, and is_small_seq_supported_static).
   //
   // BSHD (is_BSHD): uniform s_q in [2, 17], ck_attn_smallseq_fwd_bshd on Q/K/V/O;
-  //   LSE [h,tokens] -> pad_remap_lse -> devPtrSoftmaxAux [b,h,s].
+  //   LSE [tokens,h] -> pad_remap_lse -> devPtrSoftmaxAux [b,h,s].
   //
   // THD (is_ragged): probe runtime max seqlen via cu_seqlens; if <= 17,
-  //   ck_attn_smallseq_fwd_thd with cu_seqlens; LSE remap to THD layout on O.
+  //   ck_attn_smallseq_fwd_thd with cu_seqlens; LSE [tokens,h] -> pad_remap_lse -> devPtrSoftmaxAux [tokens,h].
   //
   // ---------------------------------------------------------------------------
   if(ck_small_seq_enabled) {
@@ -778,9 +792,9 @@ void fused_attn_ck_fwd_impl(
       ck_fused_attn::ck_attn_smallseq_fwd_bshd(
           b, h, s_q, s_kv, d_qk, scaling_factor, devPtrQ, devPtrK, devPtrV, devPtrO,
           devPtrSoftmaxLSEWithoutPadding, nvte_to_ck_dtype(dtype), stream);
-      pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
-                                       devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
-                                       devPtrSoftmaxLSEWithoutPadding, stream);
+      pad_remap_lse<PadDirection::Add, true>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
+                                             devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+                                             devPtrSoftmaxLSEWithoutPadding, stream);
       return;
     } else {
       void* max_seqlen_workspace_q = ck_smallseq_workspace_prefix;
@@ -803,9 +817,9 @@ void fused_attn_ck_fwd_impl(
             b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
             devPtrO, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ,
             devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, nvte_to_ck_dtype(dtype), stream);
-        pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
-                                           devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
-                                           devPtrSoftmaxLSEWithoutPadding, stream);
+        pad_remap_lse<PadDirection::Add, true>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
+                                               devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
+                                               devPtrSoftmaxLSEWithoutPadding, stream);
         return;
       }
     }
@@ -934,8 +948,8 @@ void fused_attn_ck_bwd_impl(
 
   if(ck_small_seq_env_enabled) {
     if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
-      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
-                                     h, hg, softmax_type)) {
+      if(is_small_seq_supported_static(dtype, layout, bias_type, mask_type, dropout_probability, d_qk, d_v,
+                                     h, hg, softmax_type, window_size_left, window_size_right)) {
         if(is_ragged) {
           ck_small_seq_enabled = true;
           ck_smallseq_workspace_prefix =
@@ -1232,9 +1246,9 @@ void fused_attn_ck_bwd_impl(
         std::cout << std::endl << "attn_bwd(ck small-seq, BSHD self-attn)"
                   << std::endl;
       }
-      pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
-                                          devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
-                                          devPtrSoftmaxLSEWithoutPadding, stream);
+      pad_remap_lse<PadDirection::Remove, true>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
+                                                devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+                                                devPtrSoftmaxLSEWithoutPadding, stream);
       ck_fused_attn::ck_attn_smallseq_bwd_bshd(
           b, h, s_q, s_kv, d_qk, scaling_factor, devPtrQ, devPtrK, devPtrV, devPtrdO,
           devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV, nvte_to_ck_dtype(dtype),
@@ -1257,9 +1271,9 @@ void fused_attn_ck_bwd_impl(
       }
 
       if(run_smallseq) {
-        pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
-                                            devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
-                                            devPtrSoftmaxLSEWithoutPadding, stream);
+        pad_remap_lse<PadDirection::Remove, true>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
+                                                  devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
+                                                  devPtrSoftmaxLSEWithoutPadding, stream);
         ck_fused_attn::ck_attn_smallseq_bwd_thd(
             b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
             devPtrdO, devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV,
