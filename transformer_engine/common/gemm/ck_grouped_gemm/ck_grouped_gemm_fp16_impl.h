@@ -65,6 +65,14 @@ struct TileCfg_256x128x64 : TileCfg_256x256x64 {
   static constexpr ck_tile::index_t N_Tile = 128;
 };
 
+struct TileCfg_128x256x64 : TileCfg_256x256x64 {
+  static constexpr ck_tile::index_t M_Tile = 128;
+};
+
+struct TileCfg_256x256x32 : TileCfg_256x256x64 {
+  static constexpr ck_tile::index_t K_Tile = 32;
+};
+
 template <typename Base, bool PadM_, bool PadN_, bool PadK_>
 struct WithPadding : Base {
   static constexpr bool kPadM = PadM_;
@@ -262,6 +270,13 @@ bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
   const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
+  // Tiles for N % 256 == 0. 256x256x64 spills hundreds of registers with ROCm >= 7.14 compilers
+  // (up to ~10x slower). 256x256x32 stays spill-free only for column-major A with a 16-bit output
+  // and no accumulate; elsewhere use a 64-deep K tile, which K-contiguous A also prefers.
+  // FIXME: re-evaluate once llvm/llvm-project#222182 (PRs #217328, #225372) is fixed.
+  using TileCfg_N256_K64 = std::conditional_t<std::is_same_v<BLayout, RowMajor>,
+                                              TileCfg_128x256x64, TileCfg_256x128x64>;
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(a_dtype, a_te_type, {
     using AType = typename TETypeToCKType<a_te_type>::type;
     using BType = typename TETypeToCKType<a_te_type>::type;
@@ -269,13 +284,16 @@ bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
       using CType = typename TETypeToCKType<d_te_type>::type;
+      using TileCfg_N256 = std::conditional_t<std::is_same_v<ALayout, ColMajor> &&
+                                                  std::is_same_v<CType, AType>,
+                                              TileCfg_256x256x32, TileCfg_N256_K64>;
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(need_m_pad, kPadM, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(need_k_pad, kPadK, {
           if (ctx.arch == GPUArch::GFX1250) {
             MAKE_RUNNER(TileCfg_256x256x64_WMMA, true, true, true);
-          } else if (ctx.N % 256 == 0) {
-            MAKE_RUNNER(TileCfg_256x256x64, kPadM, false, kPadK);
+          } else if (ctx.N % 256 == 0 && !ctx.accumulate) {
+            MAKE_RUNNER(TileCfg_N256, kPadM, false, kPadK);
           } else if (ctx.N % 128 == 0) {
             MAKE_RUNNER(TileCfg_256x128x64, kPadM, false, kPadK);
           } else {
