@@ -812,10 +812,9 @@ def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_e
 def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulation):
     """``single_grouped_weight`` wgrad matches the ungrouped per-expert ``.grad``.
 
-    Fuse-wgrad writes the packed ``[E, out, in]`` result through the per-expert
-    ``main_grad`` aliases (fp32). Without fuse, autograd receives per-expert views of
-    the kernel ``dW``; those land on the split views' ``.grad`` (and on the grouped
-    Parameter when the views still carry a grad edge to it).
+    Fuse-wgrad writes the ``[E, out, in]`` result straight into the grouped Parameter's
+    ``main_grad`` (fp32). Without fuse, the whole kernel ``dW`` lands on the grouped
+    Parameter's ``.grad``.
     """
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     # single_grouped_weight requires this gate, else the module falls back to per-expert params.
@@ -841,10 +840,10 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
     weights = torch.randn(grouped_shape, device="cuda", dtype=torch.bfloat16)
     grad_output = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
 
-    def run(mod, weight_views):
+    def run(mod, expert_weights):
         with torch.no_grad():
-            for view, init in zip(weight_views, weights):
-                view.copy_(init)
+            for expert_weight, init in zip(expert_weights, weights):
+                expert_weight.copy_(init)
         routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
         out = mod(inp, m_splits, permute_free_metadata=routing)
         # Block-padded canonical: the output is [R_block, out] in padded slot order, and the
@@ -866,14 +865,9 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
             single_grouped_weight=single_grouped_weight,
         )
 
-    def grouped_wgrad_fp32(mod, grouped_weight):
-        if grouped_weight.grad is not None:
-            return grouped_weight.grad.view(grouped_shape).float()
-        view_grads = [w.grad for w in mod._get_weight_tensors()]
-        assert all(g is not None for g in view_grads), (
-            "grouped wgrad missing on both Parameter.grad and split expert views"
-        )
-        return torch.stack([g.detach().float() for g in view_grads])
+    def grouped_wgrad_fp32(grouped_weight):
+        assert grouped_weight.grad is not None, "grouped wgrad missing on Parameter.grad"
+        return grouped_weight.grad.view(grouped_shape).float()
 
     # --- ungrouped reference: separate per-expert params, wgrad via autograd .grad ---
     ungrouped_mod = make(single_grouped_weight=False, fuse=False)
@@ -886,14 +880,15 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
     if fuse_wgrad_accumulation:
         grouped_weight.main_grad = torch.zeros(grouped_shape, device="cuda", dtype=torch.float32)
         grouped_weight.grad_added_to_main_grad = False
-    _, valid = run(grouped_mod, list(grouped_mod._get_weight_tensors()))
+    _, valid = run(grouped_mod, grouped_weight.split_into_quantized_tensors())
 
     if fuse_wgrad_accumulation:
-        assert grouped_weight.grad is None
+        # The wgrad went to main_grad; the Parameter only gets Megatron's dummy grad.
+        assert grouped_weight.grad_added_to_main_grad is True
         grouped_grad = grouped_weight.main_grad.view(grouped_shape).float()
     else:
         assert getattr(grouped_weight, "grad_added_to_main_grad", False) is False
-        grouped_grad = grouped_wgrad_fp32(grouped_mod, grouped_weight)
+        grouped_grad = grouped_wgrad_fp32(grouped_weight)
         assert tuple(grouped_grad.shape) == grouped_shape
 
     # Same kernel dW on both sides, so the only difference is the sink dtype (exact for the bf16
@@ -907,7 +902,7 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
         routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
         out = grouped_mod(inp, m_splits, permute_free_metadata=routing)
         (out[valid].float() * grad_output.float()).sum().backward()
-        accumulated = grouped_wgrad_fp32(grouped_mod, grouped_weight)
+        accumulated = grouped_wgrad_fp32(grouped_weight)
         assert_close(accumulated, 2.0 * grad_ref, **dtype_tols(torch.bfloat16))
 
 

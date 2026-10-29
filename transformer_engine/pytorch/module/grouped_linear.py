@@ -2647,6 +2647,24 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
             single_grouped_weight, single_grouped_bias
         )
+        # On ROCm use_grouped_tensor is forced False, leaving the split-quantize path (discrete
+        # params only) and the permute-free path (consumes the single grouped weight directly).
+        # Keep single params only when permute-free is enabled.
+        if (
+            IS_HIP_EXTENSION
+            and not self.use_grouped_tensor
+            and not is_permute_free_grouped_gemm_enabled()
+            and (single_grouped_weight or single_grouped_bias)
+        ):
+            warnings.warn(
+                "single_grouped_weight/single_grouped_bias require the native GroupedTensor "
+                "path or the permute-free grouped GEMM path (NVTE_PERMUTE_FREE_GROUPED_GEMM=1), "
+                "neither of which is available; falling back to discrete per-expert parameters.",
+                UserWarning,
+                stacklevel=2,
+            )
+            single_grouped_weight = False
+            single_grouped_bias = False
         self.single_grouped_weight = single_grouped_weight
         self.single_grouped_bias = single_grouped_bias
         if self.use_bias and self.single_grouped_weight and not self.single_grouped_bias:
@@ -3195,11 +3213,15 @@ class GroupedLinear(TransformerEngineBaseModule):
         num_gemms = self.num_gemms
 
         # Make sure splits are in expected format
-        if (self.single_grouped_weight or self.single_grouped_bias) and not self.use_grouped_tensor:
+        if (
+            (self.single_grouped_weight or self.single_grouped_bias)
+            and not self.use_grouped_tensor
+            and permute_free_metadata is None
+        ):
             raise RuntimeError(
                 "single_grouped_weight and single_grouped_bias require "
-                "use_grouped_tensor=True; the split-quantize path only supports discrete "
-                "parameters."
+                "use_grouped_tensor=True or permute_free_metadata; the split-quantize path "
+                "only supports discrete parameters."
             )
         if not isinstance(m_splits, torch.Tensor):
             # Convert list of ints to tensor for backward compatibility
