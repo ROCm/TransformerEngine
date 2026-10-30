@@ -102,7 +102,14 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
-    run_default_fa 1 triton_kernels/test_grouped_gemm.py
+    # Triton 3.8.0 enables direct global->LDS async copy by default on gfx950, which
+    # stages every operand tile in LDS per pipeline stage instead of going through
+    # registers -- roughly doubling shared memory for num_stages=2. The k_heavy and
+    # k_heavy_bwd GMM configs (the only BLOCK_SIZE_K=128 ones) then need 272304 B
+    # against a 163840 B limit and fail to compile on the REAL_SHAPES. 
+    # Disabling async copy restores the 3.7.1 allocation exactly (131072 B). 
+    # Remove this once the gfx950 configs are retuned for the new default.
+    TRITON_HIP_USE_ASYNC_COPY=0 run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_grouped_gemm_mxfp4.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py

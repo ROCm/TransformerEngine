@@ -58,9 +58,7 @@ class BuildPy(_build_py):
         # Generated into the source tree so build_py picks it up as an ordinary module of
         # the package, putting the same file in the checkout and in the wheel. Both need
         # it: transformer_engine/__init__.py imports it with `from . import _rocm_init`
-        # and tolerates its absence, so an install without it silently skips the rocm-sdk
-        # preload and loads the native libraries against an uninitialized ROCm runtime.
-        # The generated file is gitignored.
+        # and tolerates its absence
         #
         # The write has to stay ahead of super().run(): build_py globs the package
         # directory as it runs, so a later write would land in the checkout but miss the
@@ -147,6 +145,14 @@ def setup_common_extension() -> CMakeExtension:
         # CMake now expects CUDNN_FRONTEND_INCLUDE_DIR from the caller, sourced from
         # the nvidia-cudnn-frontend pip package. CUDA-only (ROCm uses a stub).
         cmake_flags.append(f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}")
+
+        with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
+        if with_cutedsl:
+            tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
+            cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
+            cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
+        else:
+            cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
             assert (
