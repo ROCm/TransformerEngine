@@ -42,6 +42,7 @@ pybind11::dict Registrations() {
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
+#ifndef USE_ROCM
   dict["te_scaled_softmax_forward_ffi"] = pybind11::dict(
       pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxForwardInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxForwardHandler));
@@ -62,6 +63,19 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") =
           EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler));
+#else
+  // No initialize stage on ROCm, as for normalization: it pre-loads kernel modules because CUDA
+  // cannot load them lazily inside a graph capture, which HIP can.
+  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
+  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
+  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
+  dict["te_scaled_masked_softmax_backward_ffi"] =
+      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+#endif
 
 #ifndef USE_ROCM
   // Normalization
