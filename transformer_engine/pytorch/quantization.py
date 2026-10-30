@@ -362,13 +362,8 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     if recipe.mxfp4():
         return 256
     if IS_HIP_EXTENSION and recipe.float8_block_scaling():
-        # CDNA3 (gfx942) blockwise FP8 GEMM needs K padded to 128; the Triton path
-        # (NVTE_USE_BLOCKWISE_GMM_TRITON) pads K internally, so it stays 16-aligned.
-        if (
-            get_device_compute_capability() == (9, 4)
-            and os.environ.get("NVTE_USE_BLOCKWISE_GMM_TRITON", "0") != "1"
-        ):
-            return 128
+        # ROCm blockwise FP8 GEMMs need K % 128 == 0, and the split size is K in grouped wgrad.
+        return 128
     return 16
 
 

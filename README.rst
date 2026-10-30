@@ -222,6 +222,8 @@ These backends are not enabled by default. The following environment variables c
 * ``NVTE_USE_CK_GROUPED_GEMM=1`` -- Explicitly select CK, bypassing HipKittens.
 
 When none are set, TE uses multi-stream dispatch (one hipBLASLt GEMM per expert).
+FP8 block scaling does not use these grouped GEMM backends; it runs one HipKittens blockwise FP8 GEMM per expert.
+Setting ``NVTE_USE_BLOCKWISE_GMM_TRITON=1`` instead lets ``GroupedLinear`` use a Triton blockwise FP8 grouped GEMM where supported.
 
 
 FlyDSL GEMM Backend on ROCm
@@ -361,7 +363,9 @@ Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
 It supports 1Dx2D and 1Dx1D scaling, e4m3/e5m2 inputs in any combination except e5m2 x e5m2, bf16/fp32/fp16 output, and bias/beta/DGELU epilogues.
-The K and N dimensions must be multiples of 16.
+The K dimension must be a multiple of 128 and the N dimension a multiple of 16; other shapes raise an error.
+K is in_features in fprop and out_features in dgrad (per tensor-parallel rank), and the number of tokens in wgrad (per expert for grouped GEMMs), so callers must pad.
+Fp8Padding with align_size left unset pads each expert's tokens to a multiple of 128.
 The backend shares the existing USE_HIPKITTENS_GEMM build option with MXFP8:
 
 * OFF - disable the HipKittens blockwise FP8 and MXFP8 GEMM backend;

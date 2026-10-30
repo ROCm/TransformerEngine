@@ -1918,7 +1918,11 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
     device = "cuda"
 
     # FP8 GEMMs require leading dimensions divisible by 16.
-    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    in_features, out_features, num_tokens = 64, 32, 32
+    if IS_HIP_EXTENSION and isinstance(fp8_recipe, recipe.Float8BlockScaling):
+        # ROCm blockwise FP8 GEMMs require K % 128 == 0 (K = in, out and tokens here).
+        in_features, out_features, num_tokens = 128, 128, 128
+    model = te.Linear(in_features, out_features, params_dtype=dtype, device=device)
 
     def fn(inp):
         if fp8_recipe is None:
@@ -1930,7 +1934,7 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
     if compile_mode == "reduce-overhead":
         _cudagraph_warmup(
             fn,
-            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            torch.randn(num_tokens, in_features, dtype=dtype, device=device, requires_grad=True),
             backward=True,
         )
         model.zero_grad(set_to_none=True)
@@ -1940,7 +1944,7 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
     n_iters = 3 if compile_mode == "reduce-overhead" else 1
     with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
         for _ in range(n_iters):
-            base = torch.randn(32, 64, dtype=dtype, device=device)
+            base = torch.randn(num_tokens, in_features, dtype=dtype, device=device)
             _assert_close_eager_compiled(fn, compiled, model, base)
 
 
@@ -1952,8 +1956,16 @@ def test_te_linear_compiles_without_transpose_cache(fp8_recipe):
     which drops the weight's columnwise usage that the fake forward must mirror."""
     dtype = torch.bfloat16
     device = "cuda"
+    in_features, out_features, num_tokens = 64, 32, 32
+    if IS_HIP_EXTENSION and isinstance(fp8_recipe, recipe.Float8BlockScaling):
+        # ROCm blockwise FP8 GEMMs require K % 128 == 0 (K = in, out and tokens here).
+        in_features, out_features, num_tokens = 128, 128, 128
     model = te.Linear(
-        64, 32, params_dtype=dtype, device=device, keep_fp8_weight_transpose_cache=False
+        in_features,
+        out_features,
+        params_dtype=dtype,
+        device=device,
+        keep_fp8_weight_transpose_cache=False,
     )
 
     def fn(inp):
@@ -1962,7 +1974,7 @@ def test_te_linear_compiles_without_transpose_cache(fp8_recipe):
 
     torch._dynamo.reset()
     compiled = torch.compile(fn, fullgraph=True)
-    base = torch.randn(32, 64, dtype=dtype, device=device)
+    base = torch.randn(num_tokens, in_features, dtype=dtype, device=device)
     _assert_close_eager_compiled(fn, compiled, model, base)
 
 

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cuda_bf16.h>
@@ -13,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
@@ -1422,6 +1424,20 @@ Tensor make_blockwise_operand(const std::string& name, const std::vector<size_t>
   return out;
 }
 
+// Runs `gemm`, which must fail the blockwise FP8 K % 128 check.
+template <typename Gemm>
+void expect_blockwise_k_error(const Gemm& gemm) {
+  try {
+    gemm();
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("must be multiple of 128 for blockwise FP8 scaling"),
+              std::string::npos)
+        << e.what();
+    return;
+  }
+  ADD_FAILURE() << "Blockwise FP8 GEMM was not rejected";
+}
+
 void performBlockwiseTest(const BlockwiseParams& p) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
@@ -1433,8 +1449,8 @@ void performBlockwiseTest(const BlockwiseParams& p) {
   if (p.fp32_scales && !is_gfx950) {
     GTEST_SKIP() << "The continuous fp32-scale kernel exists only on gfx950";
   }
-  if (p.m % 16 != 0 || p.k % 16 != 0) {
-    GTEST_SKIP() << "Blockwise FP8 GEMM requires M and K to be multiples of 16";
+  if (p.m % 16 != 0 || p.k % 128 != 0) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM requires M to be a multiple of 16 and K of 128";
   }
   if (p.degenerate && p.k <= 3 * kBlockLen) {
     GTEST_SKIP() << "Degenerate case needs K > 384 to hold both injected k-blocks";
@@ -1634,7 +1650,18 @@ INSTANTIATE_TEST_SUITE_P(
         BlockwiseParams{256, 512, 256, true,  true,  1e-4f, false, 0.0f, false, false, false,
                         DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
-                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3}),
+                        DType::kBFloat16, DType::kFloat8E5M2, DType::kFloat8E4M3},
+
+        // ---- K = 128 and an odd number of k-blocks -------------------------------------
+        //
+        // K = 128 is the only legal K that takes gfx950's partial-K kernel, and a single k-step
+        // on gfx942.  K = 384 is an odd number of k-blocks, so gfx950's double-buffered k-loop
+        // drains from the other buffer.
+        BlockwiseParams{256, 128, 256, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 128, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 128, 256, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{256, 384, 256, false, false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 384, 256, false, true,  1e-4f, false, 0.0f}),
     BlockwiseTestName);
 
 // ---- regression: the 1Dx2D scale read must stay inside the scale tensor ---------------------
@@ -1765,8 +1792,8 @@ TEST(BlockwiseGEMMBoundaryTest, ScaleReadStaysInsideScaleTensor) {
 
 // ---- regression: gfx942 prefetch of operand rows not aligned to 128 B ----------------------
 //
-// K % 128 != 0 and 16-B-offset A/B bases must take the unswizzled prefetch.  The failure is
-// intermittent, so each case runs many GEMMs, alternating two operand sets.
+// 16-B-offset A/B bases must take the unswizzled prefetch.  The failure is intermittent, so each
+// such case runs many GEMMs, alternating two operand sets.  K % 128 != 0 must be rejected.
 namespace {
 
 struct UnalignedRowsParams {
@@ -1816,6 +1843,32 @@ void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
                                   /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
   };
 
+  // GEMM operands, refilled from one of the two sets below before each run.
+  Tensor WorkA = make_a("WorkA");
+  Tensor WorkB = make_b("WorkB");
+  CudaPtr<> a_storage, b_storage;
+  if (p.a_offset != 0) {
+    move_rowwise_data(&WorkA, p.a_offset, &a_storage);
+  }
+  if (p.b_offset != 0) {
+    move_rowwise_data(&WorkB, p.b_offset, &b_storage);
+  }
+
+  Tensor D("D", TShape{n, m}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+  auto run_gemm = [&]() {
+    nvte_cublas_gemm(WorkA.data(), WorkB.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                     /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                     /*accumulate=*/false, /*use_split_accumulator=*/true,
+                     prop.multiProcessorCount, /*stream=*/0);
+  };
+  if (p.k % 128 != 0) {
+    expect_blockwise_k_error(run_gemm);
+    return;
+  }
+
   // Two operand sets and their references.
   const dim3 block(16, 16);
   const dim3 grid(static_cast<unsigned>((n + block.x - 1) / block.x),
@@ -1841,21 +1894,6 @@ void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
     RefD[s].to_cpu();
   }
 
-  // GEMM operands, refilled from one of the two sets before each run.
-  Tensor WorkA = make_a("WorkA");
-  Tensor WorkB = make_b("WorkB");
-  CudaPtr<> a_storage, b_storage;
-  if (p.a_offset != 0) {
-    move_rowwise_data(&WorkA, p.a_offset, &a_storage);
-  }
-  if (p.b_offset != 0) {
-    move_rowwise_data(&WorkB, p.b_offset, &b_storage);
-  }
-
-  Tensor D("D", TShape{n, m}, DType::kBFloat16);
-  Tensor bias;
-  Tensor pre_gelu_out;
-  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
   for (int run = 0; run < kUnalignedRowsRuns; ++run) {
     const int s = run % 2;
     SCOPED_TRACE("GEMM run " + std::to_string(run + 1) + " on operand set " + std::to_string(s));
@@ -1863,10 +1901,7 @@ void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
     copy_operand(B[s], &WorkB);
     // Finite fill, so an unwritten D fails the comparison.
     NVTE_CHECK_CUDA(cudaMemset(D.rowwise_dptr(), 0x7B, n * m * sizeof(bf16)));
-    nvte_cublas_gemm(WorkA.data(), WorkB.data(), D.data(), bias.data(), pre_gelu_out.data(),
-                     /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
-                     /*accumulate=*/false, /*use_split_accumulator=*/true,
-                     prop.multiProcessorCount, /*stream=*/0);
+    run_gemm();
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     compareResults("D", D, RefD[s].rowwise_cpu_dptr<bf16>(), /*rowwise=*/true,
                    /*atol=*/1e-3, /*rtol=*/6e-2);
@@ -1908,5 +1943,108 @@ INSTANTIATE_TEST_SUITE_P(
       }
       return name;
     });
+
+// ---- blockwise FP8 GEMMs reject K % 128 != 0 -----------------------------------------------
+TEST(BlockwiseKRuleGEMMTestSuite, RejectsKNotMultipleOf128) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+
+  constexpr size_t kM = 256;
+  constexpr size_t kN = 256;
+  Tensor D("D", TShape{kN, kM}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+  // Multiples of 16 but not of 128.
+  for (const size_t k : {64, 192, 320}) {
+    for (const bool a_2d_scaled : {false, true}) {
+      SCOPED_TRACE("K=" + std::to_string(k) + (a_2d_scaled ? " 1Dx2D" : " 1Dx1D"));
+      Tensor A = make_blockwise_operand(
+          "A", {kM, k}, a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D,
+          /*force_pow2=*/true, /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
+      Tensor B = make_blockwise_operand("B", {kN, k}, NVTE_BLOCK_SCALING_1D, /*force_pow2=*/true,
+                                        /*amax_epsilon=*/1e-4f, /*degenerate=*/false,
+                                        /*src_scale=*/0.0f);
+      expect_blockwise_k_error([&]() {
+        nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                         /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                         /*accumulate=*/false, /*use_split_accumulator=*/true,
+                         prop.multiProcessorCount, /*stream=*/0);
+      });
+    }
+  }
+}
+
+// With the single-launch grouped GEMMs requested, blockwise FP8 must still run per GEMM, and a
+// grouped GEMM with one bad K must be rejected before any of its GEMMs launches.
+TEST(BlockwiseKRuleGEMMTestSuite, GroupedRejectsKNotMultipleOf128) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+
+  constexpr size_t kM = 256;
+  constexpr size_t kN = 256;
+  // Only the second GEMM breaks the rule.
+  const std::vector<size_t> ks = {256, 192};
+  const int num_gemms = static_cast<int>(ks.size());
+  std::vector<Tensor> A, B, D;
+  std::vector<Tensor> bias(num_gemms), pre_gelu_out(num_gemms);
+  for (int i = 0; i < num_gemms; ++i) {
+    const std::string idx = std::to_string(i);
+    A.push_back(make_blockwise_operand("A" + idx, {kM, ks[i]}, NVTE_BLOCK_SCALING_1D,
+                                       /*force_pow2=*/true, /*amax_epsilon=*/1e-4f,
+                                       /*degenerate=*/false, /*src_scale=*/0.0f));
+    B.push_back(make_blockwise_operand("B" + idx, {kN, ks[i]}, NVTE_BLOCK_SCALING_1D,
+                                       /*force_pow2=*/true, /*amax_epsilon=*/1e-4f,
+                                       /*degenerate=*/false, /*src_scale=*/0.0f));
+    D.emplace_back("D" + idx, TShape{kN, kM}, DType::kBFloat16);
+    // Sentinel fill, so a GEMM that ran shows up.
+    NVTE_CHECK_CUDA(cudaMemset(D[i].rowwise_dptr(), 0x7B, kN * kM * sizeof(bf16)));
+  }
+  std::vector<NVTETensor> A_ptrs, B_ptrs, D_ptrs, bias_ptrs, gelu_ptrs;
+  for (int i = 0; i < num_gemms; ++i) {
+    A_ptrs.push_back(A[i].data());
+    B_ptrs.push_back(B[i].data());
+    D_ptrs.push_back(D[i].data());
+    bias_ptrs.push_back(bias[i].data());
+    gelu_ptrs.push_back(pre_gelu_out[i].data());
+  }
+  // The per-GEMM path takes workspace[i % num_streams].
+  const int num_streams = nvte_get_num_compute_streams();
+  std::vector<Tensor> workspaces;
+  for (int s = 0; s < num_streams; ++s) {
+    workspaces.emplace_back("Workspace" + std::to_string(s),
+                            TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+  }
+  std::vector<NVTETensor> workspace_ptrs;
+  for (const Tensor& w : workspaces) {
+    workspace_ptrs.push_back(w.data());
+  }
+
+  setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1", 1);
+  expect_blockwise_k_error([&]() {
+    nvte_multi_tensor_gemm(A_ptrs.data(), B_ptrs.data(), D_ptrs.data(), bias_ptrs.data(),
+                           gelu_ptrs.data(), num_gemms, /*transa=*/true, /*transb=*/false,
+                           /*grad=*/false, workspace_ptrs.data(), /*accumulate=*/false,
+                           /*use_split_accumulator=*/true, prop.multiProcessorCount,
+                           /*stream=*/0);
+  });
+  unsetenv("NVTE_USE_CUTLASS_GROUPED_GEMM");
+
+  // The valid first GEMM must not have run either.
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  std::vector<uint8_t> d0(kN * kM * sizeof(bf16));
+  NVTE_CHECK_CUDA(cudaMemcpy(d0.data(), D[0].rowwise_dptr(), d0.size(), cudaMemcpyDeviceToHost));
+  size_t changed = 0;
+  for (const uint8_t byte : d0) {
+    changed += byte == 0x7B ? 0 : 1;
+  }
+  EXPECT_EQ(changed, 0u);
+}
 
 #endif  // __HIP_PLATFORM_AMD__

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,7 @@ from typing import Optional
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
@@ -277,6 +280,20 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
     if recipe_name == "fp8_block_scaling" and any(m % 4 != 0 for m in non_empty_splits):
         pytest.skip(
             "GroupedLinear + Float8BlockScaling requires each non-empty m_split divisible by 4."
+        )
+
+
+def _maybe_skip_rocm_fp8_block_scaling_k(recipe_name: str, *gemm_k_dims: int) -> None:
+    # ROCm FP8 block-scaling GEMMs require K % 128 == 0: K is in_features (fprop),
+    # out_features (dgrad) and the token count of each GEMM (wgrad). Empty GEMMs do not run.
+    if (
+        IS_HIP_EXTENSION
+        and recipe_name == "fp8_block_scaling"
+        and any(k % 128 != 0 for k in gemm_k_dims if k > 0)
+    ):
+        pytest.skip(
+            "ROCm Float8BlockScaling requires in_features, out_features and token counts "
+            "divisible by 128."
         )
 
 
@@ -1088,6 +1105,9 @@ def test_linear_like_backward_override_matches_reference(
     _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
+    _maybe_skip_rocm_fp8_block_scaling_k(
+        recipe_name, input_shape[-1], out_features, math.prod(input_shape[:-1])
+    )
 
     in_features = input_shape[-1]
     quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
@@ -1271,6 +1291,7 @@ def test_grouped_linear_backward_override_matches_reference(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "grouped_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "grouped_linear")
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
+    _maybe_skip_rocm_fp8_block_scaling_k(recipe_name, in_features, out_features, *m_splits)
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
@@ -1432,6 +1453,9 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
     _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
+    _maybe_skip_rocm_fp8_block_scaling_k(
+        recipe_name, input_shape[-1], out_features, math.prod(input_shape[:-1])
+    )
 
     module = _make_linear_like_module(
         module_type,
@@ -1501,6 +1525,7 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "grouped_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "grouped_linear")
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
+    _maybe_skip_rocm_fp8_block_scaling_k(recipe_name, in_features, out_features, *m_splits)
 
     num_tokens = sum(m_splits)
     module = te.GroupedLinear(
@@ -2097,3 +2122,127 @@ def test_backward_override_memory_peak_report(
             f"{delta_bwd_str:>{delta_col_width}} | "
             f"{delta_e2e_str:>{delta_col_width}}"
         )
+
+
+# --------------------------
+# ROCm FP8 block-scaling cases
+# --------------------------
+
+# ROCm FP8 block-scaling GEMMs require in_features, out_features and token counts divisible by
+# 128, which no shared case above satisfies. These cases run only for that recipe on ROCm.
+_rocm_fp8_block_scaling_shape_cases = [
+    pytest.param((128, 128), 128, id="2d_m128_k128_n128"),
+    pytest.param((2, 64, 256), 128, id="3d_m128_k256_n128"),
+    pytest.param((2, 2, 64, 128), 256, id="4d_m256_k128_n256"),
+]
+
+_rocm_fp8_block_scaling_feature_cases = [
+    pytest.param(128, 128, id="k128_n128"),
+    pytest.param(256, 128, id="k256_n128"),
+    pytest.param(128, 256, id="k128_n256"),
+]
+
+_rocm_fp8_block_scaling_m_split_cases = [
+    pytest.param([128, 128, 128, 128], id="uniform_splits"),
+    pytest.param([128, 0, 256, 128], id="128_divisible_splits"),
+]
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only FP8 block-scaling cases")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize("module_type", ("linear", "layernorm_linear"))
+@pytest.mark.parametrize("input_shape,out_features", _rocm_fp8_block_scaling_shape_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_linear_like_backward_override_matches_reference_rocm_fp8_block_scaling(
+    module_type: str,
+    input_shape: tuple[int, ...],
+    out_features: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    backward_override: str,
+) -> None:
+    test_linear_like_backward_override_matches_reference(
+        recipe_name="fp8_block_scaling",
+        module_type=module_type,
+        input_shape=input_shape,
+        out_features=out_features,
+        use_bias=use_bias,
+        dtype=dtype,
+        backward_override=backward_override,
+    )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only FP8 block-scaling cases")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize("in_features,out_features", _rocm_fp8_block_scaling_feature_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("m_splits", _rocm_fp8_block_scaling_m_split_cases)
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_grouped_linear_backward_override_matches_reference_rocm_fp8_block_scaling(
+    in_features: int,
+    out_features: int,
+    use_bias: bool,
+    m_splits: list[int],
+    dtype: torch.dtype,
+    backward_override: str,
+) -> None:
+    test_grouped_linear_backward_override_matches_reference(
+        recipe_name="fp8_block_scaling",
+        in_features=in_features,
+        out_features=out_features,
+        use_bias=use_bias,
+        m_splits=m_splits,
+        dtype=dtype,
+        backward_override=backward_override,
+    )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only FP8 block-scaling cases")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize("module_type", ("linear", "layernorm_linear"))
+@pytest.mark.parametrize("input_shape,out_features", _rocm_fp8_block_scaling_shape_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_linear_like_runtime_backward_override_switch_updates_ctx_rocm_fp8_block_scaling(
+    module_type: str,
+    input_shape: tuple[int, ...],
+    out_features: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    backward_override: str,
+) -> None:
+    test_linear_like_runtime_backward_override_switch_updates_ctx(
+        recipe_name="fp8_block_scaling",
+        module_type=module_type,
+        input_shape=input_shape,
+        out_features=out_features,
+        use_bias=use_bias,
+        dtype=dtype,
+        backward_override=backward_override,
+    )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only FP8 block-scaling cases")
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize("in_features,out_features", _rocm_fp8_block_scaling_feature_cases)
+@pytest.mark.parametrize("m_splits", _rocm_fp8_block_scaling_m_split_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_grouped_linear_runtime_backward_override_switch_updates_ctx_rocm_fp8_block_scaling(
+    in_features: int,
+    out_features: int,
+    m_splits: list[int],
+    use_bias: bool,
+    dtype: torch.dtype,
+    backward_override: str,
+) -> None:
+    test_grouped_linear_runtime_backward_override_switch_updates_ctx(
+        recipe_name="fp8_block_scaling",
+        in_features=in_features,
+        out_features=out_features,
+        m_splits=m_splits,
+        use_bias=use_bias,
+        dtype=dtype,
+        backward_override=backward_override,
+    )

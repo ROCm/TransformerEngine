@@ -10,6 +10,7 @@ import os
 import pathlib
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
 from transformer_engine.pytorch.constants import TE_DType
@@ -400,7 +401,8 @@ class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):
     @pytest.mark.parametrize(
         "batch_size, hidden_size, out_size",
         [
-            (16, 256, 128),
+            # batch_size is the wgrad K; ROCm blockwise FP8 GEMMs require K % 128 == 0.
+            (128 if IS_HIP_EXTENSION else 16, 256, 128),
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
@@ -460,7 +462,8 @@ class TestFP8BlockScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase)
     @pytest.mark.parametrize(
         "batch_size, hidden_size, out_size",
         [
-            (16, 256, 128),
+            # batch_size is the wgrad K; ROCm blockwise FP8 GEMMs require K % 128 == 0.
+            (128 if IS_HIP_EXTENSION else 16, 256, 128),
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
@@ -511,3 +514,33 @@ class TestFP8BlockScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase)
             recipe1_golden_tensors=None,
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION, reason="ROCm-only: blockwise FP8 GEMMs reject K % 128 != 0"
+)
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear"])
+@pytest.mark.parametrize(
+    "tokens, in_features, out_features",
+    [
+        pytest.param(128, 192, 128, id="fprop_K192"),  # fprop K = in_features
+        pytest.param(128, 64, 128, id="fprop_K64"),
+        pytest.param(128, 128, 192, id="dgrad_K192"),  # dgrad K = out_features
+        pytest.param(192, 128, 128, id="wgrad_K192"),  # wgrad K = tokens
+    ],
+)
+def test_blockwise_gemm_rejects_k_not_multiple_of_128(
+    module_type: str, tokens: int, in_features: int, out_features: int
+) -> None:
+    """ROCm blockwise FP8 GEMMs raise instead of computing when K % 128 != 0."""
+    module_cls = te.Linear if module_type == "Linear" else te.LayerNormLinear
+    layer = module_cls(in_features, out_features, params_dtype=torch.bfloat16, device="cuda")
+    # requires_grad so that the backward runs the dgrad GEMM.
+    x = torch.randn(tokens, in_features, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    # Explicit None: an inherited NVTE_BACKWARD_OVERRIDE would skip the FP8 backward GEMMs.
+    fp8_recipe = Float8BlockScaling(backward_override=None)
+    with pytest.raises(RuntimeError, match="must be multiple of 128 for blockwise FP8 scaling"):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = layer(x)
+        y.sum().backward()
