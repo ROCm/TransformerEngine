@@ -14,7 +14,8 @@ Each family self-gates on backend *availability*:
 - The ``test_triton_*`` family runs when ``pytorch-triton-rocm`` is importable
   (the Triton GEMM path has no arch gate, so it runs on gfx942 and gfx950).
 - The ``test_flydsl_*`` family runs when the version-gated ``flydsl`` package is
-  importable and the device is gfx950 (the only arch the FlyDSL path supports).
+  importable and the device is gfx950; the ``test_flydsl_*_mxfp4`` tests run on
+  gfx1250 instead (the only arch the FlyDSL MXFP4 path supports).
 
 Triton coverage: fp32 / fp16 / bf16 / same-format FP8 / mixed FP8 (skipped for a
 compiler bug) / MXFP8 across TN / NN / NT, plus bias / bias-grad epilogues and a
@@ -32,7 +33,9 @@ FlyDSL coverage mirrors the Triton surface for the currently supported FlyDSL
 config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
-not implemented on any FlyDSL path yet. FlyDSL kernels require tile-aligned
+not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT / TT
+with FP32 / BF16 / FP16 output against a torch.matmul reference only: the native
+C++ MXFP4 GEMM does not run on gfx1250. FlyDSL kernels require tile-aligned
 launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
 rather than reusing the odd-sized Triton edge-mask cases.
 """
@@ -47,6 +50,7 @@ import torch
 from transformer_engine.pytorch import Float8Tensor, is_mxfp8_available
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.utils import get_gemm_backend
@@ -93,7 +97,14 @@ requires_flydsl_backend = pytest.mark.skipif(
     reason="FlyDSL GEMM tests require the flydsl package on gfx950",
 )
 
-if _flydsl_available:
+# FlyDSL MXFP4 is gfx1250-only (matching the C++ dispatch).
+_flydsl_mxfp4_available = _CAP == (12, 5) and importlib.util.find_spec("flydsl") is not None
+requires_flydsl_mxfp4_backend = pytest.mark.skipif(
+    not _flydsl_mxfp4_available,
+    reason="FlyDSL MXFP4 GEMM tests require the flydsl package on gfx1250",
+)
+
+if _flydsl_available or _flydsl_mxfp4_available:
     pytest.importorskip("flydsl", reason="FlyDSL package is not installed")
 
 # gfx942's Triton fp32 matmul has a stable numerical divergence from
@@ -162,7 +173,19 @@ FLYDSL_MXFP8_SHAPES = [
     (512, 512, 1024),  # M != N
 ]
 
+FLYDSL_MXFP4_SHAPES = [
+    (512, 512, 512),
+    (512, 1024, 512),
+    (512, 512, 1024),  # M != N
+    (512, 640, 512),  # odd K tile count
+]
+
 LAYOUTS = ["TN", "NN", "NT"]
+
+# MXFP4 also supports TT (every layout runs the same TN kernel).
+MXFP4_LAYOUTS = ["TN", "NN", "NT", "TT"]
+
+MXFP4_OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 
 # Same-format FP8 combos, shared by both backends.
 FP8_FORMAT_COMBOS = [
@@ -255,6 +278,8 @@ def get_shapes(layout, M, K, N):
         return (K, M), (N, K)
     if layout == "NT":  # A not transposed, B transposed
         return (K, M), (K, N)
+    if layout == "TT":  # both transposed
+        return (M, K), (K, N)
     raise ValueError(f"Unsupported layout: {layout}")
 
 
@@ -267,6 +292,8 @@ def compute_pytorch_reference(A_ref, B_ref, layout):
         return torch.matmul(B_ref, A_ref)
     if layout == "NT":
         return torch.matmul(B_ref.T, A_ref)
+    if layout == "TT":
+        return torch.matmul(B_ref.T, A_ref.T)
     raise ValueError(f"Unsupported layout: {layout}")
 
 
@@ -332,6 +359,41 @@ def create_mxfp8_tensors(
     B_mxfp8 = MXFP8Quantizer(fp8_dtype=fp8_dtype_b, rowwise=True, columnwise=True)(B_f32)
 
     return A_mxfp8, B_mxfp8, A_mxfp8.dequantize(), B_mxfp8.dequantize()
+
+
+_E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _dequantize_mxfp4(data, scale):
+    """Dequantize packed FP4 ``data`` [rows, K/2] with E8M0 ``scale`` (padded) to FP32."""
+    data = data.view(torch.uint8)
+    rows, k = data.shape[0], data.shape[1] * 2
+    codes = torch.stack([data & 0xF, data >> 4], dim=-1).reshape(rows, k).long()
+    values = torch.tensor(_E2M1_MAGNITUDES, device=data.device)[codes & 7]
+    values = torch.where(codes & 8 != 0, -values, values)
+    scales = torch.exp2(scale[:rows, : k // 32].float() - 127.0)
+    return values * scales.repeat_interleave(32, dim=1)
+
+
+def create_mxfp4_tensors(M, K, N, layout):
+    """Create MXFP4 inputs and references dequantized from the buffers ``layout`` consumes.
+
+    MXFP4 rowwise and columnwise data are quantized separately (columnwise is the
+    rowwise quantization of the transposed tensor), so the reference must use the
+    buffer the GEMM reads: rowwise for a transposed operand, columnwise otherwise.
+    """
+    # the MXFP4 quantizer takes BF16 input
+    A_bf16, B_bf16 = create_regular_tensors(M, K, N, layout, dtype=torch.bfloat16)
+    quantizer = MXFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1, rowwise=True, columnwise=True)
+    A_mxfp4, B_mxfp4 = quantizer(A_bf16), quantizer(B_bf16)
+
+    def reference(t, rowwise):
+        if rowwise:
+            return _dequantize_mxfp4(t._rowwise_data, t._rowwise_scale_inv)
+        return _dequantize_mxfp4(t._columnwise_data, t._columnwise_scale_inv).T
+
+    transa, transb = layout[0] == "T", layout[1] == "T"
+    return A_mxfp4, B_mxfp4, reference(A_mxfp4, transa), reference(B_mxfp4, not transb)
 
 
 # ==============================================================================
@@ -1092,6 +1154,45 @@ def test_flydsl_mxfp8_unsupported_shape_falls_back():
     )
     expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), "TN")
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", MXFP4_LAYOUTS)
+@pytest.mark.parametrize("out_dtype", MXFP4_OUT_DTYPES, ids=["fp32", "bf16", "fp16"])
+def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
+    """Test MXFP4 FlyDSL GEMMs (gfx1250) against an FP32 PyTorch reference."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+
+    output = flydsl_call_gemm(A_mxfp4, B_mxfp4, layout, out_dtype=out_dtype, use_flydsl=True)
+    expected = compute_pytorch_reference(A_deq, B_deq, layout)
+
+    assert output.dtype == out_dtype
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+def test_flydsl_mxfp4_unsupported_shape_raises():
+    """MXFP4 configs FlyDSL cannot run raise FlyDSLUnsupportedError.
+
+    That is the type ``general_gemm`` catches to fall back. The native MXFP4
+    GEMM does not run on gfx1250, so the fallback itself is not exercised.
+    """
+    from transformer_engine.pytorch.flydsl_kernels.gemm import (
+        FlyDSLUnsupportedError,
+        te_generic_gemm_flydsl,
+    )
+
+    torch.manual_seed(42)
+    # M=128 is not a multiple of the 256-wide kernel tile
+    A_mxfp4, B_mxfp4, _, _ = create_mxfp4_tensors(128, 512, 256, "TN")
+    with pytest.raises(FlyDSLUnsupportedError):
+        te_generic_gemm_flydsl(A_mxfp4, True, B_mxfp4, False, None, None, tex.DType.kBFloat16)
 
 
 # --- Approach 2: FlyDSL vs native C++ ``generic_gemm`` reference --------------

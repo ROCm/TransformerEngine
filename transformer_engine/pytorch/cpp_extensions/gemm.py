@@ -437,6 +437,56 @@ def _validate_native_gemm_output_quantizer(quantization_params):
 _flydsl_import_warned = False
 
 
+def _try_flydsl_gemm(*args, **kwargs):
+    """Run te_generic_gemm_flydsl; return None if the caller should fall back."""
+    try:
+        # Lazy import keeps FlyDSL off the normal Transformer Engine
+        # import path. It is done inside the try so a wheel built without
+        # flydsl (NVTE_GEMM_BACKEND!=FLYDSL at build time) degrades to the
+        # default backend instead of raising a bare ImportError.
+        from ..flydsl_kernels.gemm import (
+            FlyDSLUnsupportedError,
+            te_generic_gemm_flydsl,
+        )
+
+        return te_generic_gemm_flydsl(
+            *args,
+            **kwargs,
+        )
+    except ImportError as exc:
+        # NVTE_GEMM_BACKEND=FLYDSL was requested but the flydsl package is
+        # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
+        # is a misconfiguration, not an unsupported GEMM config, so always
+        # warn (once) regardless of the opt-in fallback flag before
+        # degrading to the default backend.
+        global _flydsl_import_warned
+        if not _flydsl_import_warned:
+            _flydsl_import_warned = True
+            warnings.warn(
+                "[FLYDSL WARNING]: NVTE_GEMM_BACKEND=FLYDSL but the flydsl "
+                "package is unavailable; falling back to the default backend. "
+                f"Install a supported version (e.g. `pip install flydsl`) to "
+                f"enable it. Reason: {exc}",
+                UserWarning,
+                stacklevel=3,
+            )
+        return None
+    except FlyDSLUnsupportedError as exc:
+        warn_fallback = os.environ.get(
+            "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
+            "0",
+        ).lower() not in ("", "0", "false", "no", "off")
+
+        if warn_fallback:
+            warnings.warn(
+                "[FLYDSL WARNING]: FlyDSL GEMM does not support this configuration; "
+                f"falling back to the default backend. Reason: {exc}",
+                UserWarning,
+                stacklevel=3,
+            )
+        return None
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -540,9 +590,43 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
-    # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
+    # MXFP4 GEMM: FlyDSL on gfx1250 if NVTE_GEMM_BACKEND=FLYDSL, else route to AITER a4w4 ASM
+    # kernels, unless the hipBLASLt backend is opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
+        if (
+            IS_HIP_EXTENSION
+            and get_device_compute_capability() == (12, 5)
+            and get_gemm_backend() == "flydsl"
+        ):
+            result = _try_flydsl_gemm(
+                A,
+                transa,
+                B,
+                transb,
+                out,
+                quantization_params,
+                TE_DType[out_dtype] if out_dtype is not None else None,
+                bias,
+                bias_dtype,
+                gelu,
+                gelu_in,
+                grad,
+                workspace,
+                workspace.shape[0],
+                accumulate,
+                use_split_accumulator,
+                comm_overlap=ub,
+                comm_type=ub_type,
+                extra_output=extra_output,
+                bulk_overlap=bulk_overlap,
+                alpha=alpha,
+                beta=beta,
+            )
+            if result is not None:
+                out, bias_grad, gelu_input, extra_output = result
+                if debug_quantizer is not None:
+                    out = debug_quantizer.process_gemm_output(out)
+                return out, bias_grad, gelu_input, extra_output
         if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
             result = mxfp4_gemm(
                 A,
@@ -625,55 +709,9 @@ def general_gemm(
             and get_device_compute_capability() == (9, 5)
             and gemm_backend == "flydsl"
         )
-        if use_gemm_flydsl:
-            try:
-                # Lazy import keeps FlyDSL off the normal Transformer Engine
-                # import path. It is done inside the try so a wheel built without
-                # flydsl (NVTE_GEMM_BACKEND!=FLYDSL at build time) degrades to the
-                # default backend instead of raising a bare ImportError.
-                from ..flydsl_kernels.gemm import (
-                    FlyDSLUnsupportedError,
-                    te_generic_gemm_flydsl,
-                )
-
-                out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
-                    *args,
-                    **kwargs,
-                )
-            except ImportError as exc:
-                # NVTE_GEMM_BACKEND=FLYDSL was requested but the flydsl package is
-                # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
-                # is a misconfiguration, not an unsupported GEMM config, so always
-                # warn (once) regardless of the opt-in fallback flag before
-                # degrading to the default backend.
-                global _flydsl_import_warned
-                if not _flydsl_import_warned:
-                    _flydsl_import_warned = True
-                    warnings.warn(
-                        "[FLYDSL WARNING]: NVTE_GEMM_BACKEND=FLYDSL but the flydsl "
-                        "package is unavailable; falling back to the default backend. "
-                        f"Install a supported version (e.g. `pip install flydsl`) to "
-                        f"enable it. Reason: {exc}",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-
-                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-            except FlyDSLUnsupportedError as exc:
-                warn_fallback = os.environ.get(
-                    "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
-                    "0",
-                ).lower() not in ("", "0", "false", "no", "off")
-
-                if warn_fallback:
-                    warnings.warn(
-                        "[FLYDSL WARNING]: FlyDSL GEMM does not support this configuration; "
-                        f"falling back to the default backend. Reason: {exc}",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-
-                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+        result = _try_flydsl_gemm(*args, **kwargs) if use_gemm_flydsl else None
+        if result is not None:
+            out, bias_grad, gelu_input, extra_output = result
         else:
             out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
