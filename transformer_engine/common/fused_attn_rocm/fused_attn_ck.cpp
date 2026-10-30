@@ -1104,8 +1104,9 @@ void fused_attn_ck_bwd_impl(
   //k and v are having the same seqlen but k has the same head_dim with q
   //x and dx are having the same shape and stride
 
-  // Initialize user-output dq/dk/dv buffers (CK uses atomic ops on dq).
-  //TODO: remove the memset afer ck fixes the atomic operations
+  // Initialize user-output dq/dk/dv buffers (CK uses atomic ops on dq, and the small-seq backward
+  // skips sequences without keys, leaving their dQ rows to this memset).
+  //TODO: remove the memset after ck fixes the atomic operations, but keep zeroing dq for the small-seq path
   if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) || (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
   }else{

@@ -246,8 +246,8 @@ __global__ void fmha_fwd_mfma_16x16_kernel(
                 softmax_lse[((size_t)(q_offset + q_row) * head_num + head_idx)] = lse_row;
             }
 
-            // Normalize and apply dropout
-            float inv_sum = __builtin_amdgcn_rcpf(row_sum);
+            // Normalize and apply dropout; a row without keys keeps zero weights
+            float inv_sum = (row_sum > 0.0f) ? __builtin_amdgcn_rcpf(row_sum) : 0.0f;
             #pragma unroll
             for(int kvt = 0; kvt < kv_tiles; kvt++)
             {
@@ -287,18 +287,23 @@ __global__ void fmha_fwd_mfma_16x16_kernel(
 
     __syncthreads();
 
-    // Load V → KV_lds (clamped; invalid positions zeroed by softmax weights)
+    // Load V → KV_lds
     {
         constexpr int threads_per_row = head_dim / 8;
         const int v_row = tid / threads_per_row;
         const int v_col = (tid % threads_per_row) * 8;
-        const int clamped_max = max(seq_kv - 1, 0);
 
         for(int r = v_row; r < lds_kv_rows; r += (256 / threads_per_row))
         {
-            const int clamped_r = min(r, clamped_max);
-            const T* v_src = V + ((size_t)(kv_offset + clamped_r) * head_num + head_idx) * head_dim;
-            *(bf16x8*)(&KV_lds[r * hd_pad + v_col]) = load_cvt_bf16x8_16(v_src + v_col);
+            if(r < seq_kv)
+            {
+                const T* v_src = V + ((size_t)(kv_offset + r) * head_num + head_idx) * head_dim;
+                *(bf16x8*)(&KV_lds[r * hd_pad + v_col]) = load_cvt_bf16x8_16(v_src + v_col);
+            }
+            else
+            {
+                *(bf16x8*)(&KV_lds[r * hd_pad + v_col]) = bf16x8{0, 0, 0, 0, 0, 0, 0, 0};
+            }
         }
     }
 
