@@ -15,7 +15,7 @@ Each family self-gates on backend *availability*:
   (the Triton GEMM path has no arch gate, so it runs on gfx942 and gfx950).
 - The ``test_flydsl_*`` family runs when the version-gated ``flydsl`` package is
   importable and the device is gfx950; the ``test_flydsl_*_mxfp4`` tests run on
-  gfx1250 instead (the only arch the FlyDSL MXFP4 path supports).
+  gfx1250 instead (the only arch the FlyDSL MXFP4 path currently supports).
 
 Triton coverage: fp32 / fp16 / bf16 / same-format FP8 / mixed FP8 (skipped for a
 compiler bug) / MXFP8 across TN / NN / NT, plus bias / bias-grad epilogues and a
@@ -34,8 +34,7 @@ config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
 not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT / TT
-with FP32 / BF16 / FP16 output against a torch.matmul reference only: the native
-C++ MXFP4 GEMM does not run on gfx1250. FlyDSL kernels require tile-aligned
+with FP32 / BF16 / FP16 output against a torch.matmul reference only. FlyDSL kernels require tile-aligned
 launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
 rather than reusing the odd-sized Triton edge-mask cases.
 """
