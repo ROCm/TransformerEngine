@@ -181,6 +181,7 @@ __device__ inline void apply_epilogue(
 // kittens::make_srsrc sets in the buffer descriptor. On gfx942, cache-swizzled loads of tiles whose rows straddle
 // 128-byte cache lines return wrong data: intermittently for K % BLOCK_K != 0 in kernels built with ROCm 10.1, and for
 // a base that is not 128-byte aligned also with ROCm 10.0 (seen on the B prefetch; A is cleared as a precaution).
+// rocm_gemm.cu now rejects K % 128 != 0, so through TE only misaligned bases use the unswizzled copy.
 template <bool CACHE_SWIZZLE, int NUM_THREADS, typename ST, typename GL, typename COORD = kittens::coord<ST>>
 __device__ inline void load_tile_to_register_buffer(float4 *reg_buffer, const int buffer_size, const GL &src,
                                                     const COORD &idx, const ST &dst_template) {

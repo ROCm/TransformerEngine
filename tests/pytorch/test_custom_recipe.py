@@ -502,7 +502,11 @@ def test_factory_matches_block_scaling():
     if not torch.cuda.is_available() or not available:
         pytest.skip("Float8 block scaling unsupported on this device")
 
-    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+    if IS_HIP_EXTENSION:
+        # ROCm blockwise FP8 GEMMs require K % 128 == 0; the batch is the wgrad K.
+        model_ref, model_cus, inp_ref, inp_cus = _make_pair(batch=128)
+    else:
+        model_ref, model_cus, inp_ref, inp_cus = _make_pair()
 
     out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
         model_ref, inp_ref, recipe.Float8BlockScaling()

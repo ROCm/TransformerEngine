@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -5,6 +7,7 @@
 from typing import Optional, List
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import pytest
 import os
 import copy
@@ -84,6 +87,19 @@ model_configs = {
     "weird": ModelConfig(3, 37, 3, 23, num_layers=2),
     "large": ModelConfig(2, 128, 4, 128, num_layers=1),
 }
+
+
+def _get_model_config(model: str, fp8_recipe: Optional[recipe.Recipe]) -> ModelConfig:
+    # ROCm FP8 block-scaling GEMMs require K % 128 == 0; "large" keeps the hidden sizes and
+    # token counts of these tests multiples of 128.
+    if (
+        IS_HIP_EXTENSION
+        and model == "small"
+        and fp8_recipe is not None
+        and fp8_recipe.float8_block_scaling()
+    ):
+        model = "large"
+    return model_configs[model]
 
 
 def nvfp4_vanilla():
@@ -454,7 +470,7 @@ def test_sanity_layernorm_linear(
     normalization,
     microbatching,
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     skip_unsupported_backward_override("layernorm_linear", fp8_recipe, backward_override)
     if fp8_recipe is not None:
@@ -496,7 +512,7 @@ def test_sanity_layernorm_linear(
 def test_sanity_linear(
     dtype, fp8_recipe, backward_override, model, skip_wgrad, skip_dgrad, microbatching
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
     if fp8_recipe is not None:
@@ -536,7 +552,7 @@ def test_sanity_linear(
 def test_sanity_linear_with_zero_tokens(
     dtype, bs, model, fp8_recipe, backward_override, fp8_model_params, use_bias
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
 
@@ -594,7 +610,7 @@ def test_sanity_grouped_linear(
     num_gemms,
     empty_split,
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
     ffn_hidden_size = 4 * config.hidden_size
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
@@ -708,7 +724,7 @@ def test_sanity_layernorm_mlp(
     microbatching,
     checkpoint,
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -754,7 +770,7 @@ def test_sanity_gpt(
     normalization,
     parallel_attention_mlp,
 ):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -815,7 +831,7 @@ def test_sanity_gpt_126m():
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, normalization):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not fp8_available:
@@ -871,7 +887,7 @@ def test_sanity_bert_126m():
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, normalization):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not fp8_available:
@@ -926,7 +942,7 @@ def test_sanity_T5_126m():
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -958,7 +974,7 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 def test_sanity_drop_path(dtype, fp8_recipe, model):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -994,7 +1010,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -1030,7 +1046,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad):
-    config = model_configs[model]
+    config = _get_model_config(model, fp8_recipe)
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):

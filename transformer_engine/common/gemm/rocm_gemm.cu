@@ -2265,6 +2265,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
 #endif
   }
+  // FP8 block scaling on ROCm: K must be a whole number of 128-element blocks; callers pad.
+  if (is_fp8_block_scaling(inputA->scaling_mode) || is_fp8_block_scaling(inputB->scaling_mode)) {
+    NVTE_CHECK((k % 128) == 0,
+               "GEMM K dimension must be multiple of 128 for blockwise FP8 scaling (got K=", k, ")");
+  }
 
   const int lda = is_transa ? k : m;
   const int ldb = is_transb ? n : k;
@@ -2315,8 +2320,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  "Blockwise FP8 GEMM DGELU epilogue only supports bfloat16 output");
       NVTE_CHECK(use_split_accumulator,
                  "Blockwise FP8 GEMM requires split accumulator");
-      NVTE_CHECK((k % 16) == 0,
-                 "GEMM K dimension must be multiple of 16 for blockwise FP8 scaling (got K=", k, ")");
       NVTE_CHECK((m % 16) == 0,
                  "GEMM M dimension must be multiple of 16 for blockwise FP8 scaling (got M=", m, ")");
 

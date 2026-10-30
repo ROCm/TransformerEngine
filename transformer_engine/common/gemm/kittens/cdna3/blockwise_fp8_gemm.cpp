@@ -425,7 +425,8 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
         const bool has_gelu  = (args.gelu_aux != nullptr);
         const bool has_beta  = (args.c_in != nullptr);
         // IS_PARTIAL_K kernels also handle K % BLOCK_K == 0 and do not set the cache-swizzle bit in their register
-        // prefetch: use them whenever operand rows do not all start on a 128-B cache line.
+        // prefetch: use them whenever operand rows do not all start on a 128-B cache line. rocm_gemm.cu rejects
+        // K % 128 != 0, so through TE only A/B bases that are not 128-byte aligned select them.
         const bool has_partial_k = (K % BLOCK_K != 0) ||
                                    (reinterpret_cast<uintptr_t>(kA) | reinterpret_cast<uintptr_t>(kB)) % 128 != 0;
         const int  k_blocks  = (K + BLOCK_K - 1) / BLOCK_K;

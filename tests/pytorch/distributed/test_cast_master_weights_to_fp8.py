@@ -673,6 +673,12 @@ def _test_cast_master_weights_to_fp8(
         "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
     }
 
+    # ROCm FP8 block-scaling GEMMs need K % 128 == 0 (hidden size, tokens); 256 + 384 keeps the
+    # shard boundary in the middle of a weight row, as 256 + 32 does.
+    rocm_fp8_block = IS_HIP_EXTENSION and quantization == "fp8_block"
+    hidden_size = 256 + 384 if rocm_fp8_block else 256 + 32
+    num_tokens = 128 if rocm_fp8_block else 32
+
     # Create model with FP8 weights
     with te.quantized_model_init(
         enabled=quantization is not None,
@@ -680,15 +686,15 @@ def _test_cast_master_weights_to_fp8(
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 32, **linear_kwargs),
-            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
+            te.Linear(128, hidden_size, **linear_kwargs),
+            te.Linear(hidden_size, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 32, **linear_kwargs),
-        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
+        te.Linear(128, hidden_size, **linear_kwargs),
+        te.Linear(hidden_size, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -713,7 +719,8 @@ def _test_cast_master_weights_to_fp8(
             w.main_grad.zero_()
 
         inputs = [
-            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(num_tokens, 128, dtype=torch.bfloat16, device="cuda")
+            for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
@@ -772,6 +779,12 @@ def _test_fsdp_cast_master_weights_to_fp8(
         "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
     }
 
+    # ROCm FP8 block-scaling GEMMs need K % 128 == 0 (hidden size, tokens); 256 + 384 keeps the
+    # shard boundary in the middle of a weight row, as 256 + 32 does.
+    rocm_fp8_block = IS_HIP_EXTENSION and quantization == "fp8_block"
+    hidden_size = 256 + 384 if rocm_fp8_block else 256 + 32
+    num_tokens = 128 if rocm_fp8_block else 32
+
     # Create model with FP8 weights
     with te.quantized_model_init(
         enabled=quantization is not None,
@@ -779,15 +792,15 @@ def _test_fsdp_cast_master_weights_to_fp8(
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 32, **linear_kwargs),
-            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
+            te.Linear(128, hidden_size, **linear_kwargs),
+            te.Linear(hidden_size, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 32, **linear_kwargs),
-        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
+        te.Linear(128, hidden_size, **linear_kwargs),
+        te.Linear(hidden_size, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -806,7 +819,8 @@ def _test_fsdp_cast_master_weights_to_fp8(
         optimizer.zero_grad()
 
         inputs = [
-            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(num_tokens, 128, dtype=torch.bfloat16, device="cuda")
+            for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]

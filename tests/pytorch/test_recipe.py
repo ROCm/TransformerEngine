@@ -10,6 +10,7 @@ import pickle
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import warnings
 
 import transformer_engine.common.recipe
@@ -458,6 +459,10 @@ class TestFP8Recipe:
         in_features = 32
         out_features = 32
         batch_size = 32
+        if IS_HIP_EXTENSION and target_recipe_class.float8_block_scaling():
+            # ROCm blockwise FP8 GEMMs require K % 128 == 0 (fprop K = in_features,
+            # wgrad K = batch_size).
+            in_features = out_features = batch_size = 128
         linear = Linear(in_features, out_features).cuda()
         initial_recipe = DelayedScaling()
 

@@ -170,6 +170,14 @@ def _get_dist_info():
     return world_size, device
 
 
+def _get_seq_len(recipe_name):
+    """Get the per-rank sequence length of the input for a recipe."""
+    # ROCm FP8 block-scaling GEMMs need K % 128 == 0; SEQ_LEN * BATCH_PER_RANK is the wgrad K.
+    if IS_HIP_EXTENSION and recipe_name in ("Float8BlockScaling", "HybridFloat8BlockScaling"):
+        return 128 // BATCH_PER_RANK
+    return SEQ_LEN
+
+
 def _collective_assert(condition, message):
     """Raise on every rank only after all ranks report structural status."""
     failed = torch.tensor([not condition], dtype=torch.uint8, device="cuda")
@@ -381,7 +389,8 @@ def test_fused_adam_fp8_master_weights(recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     for step in range(NUM_STEPS):
@@ -446,7 +455,8 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     for step in range(NUM_STEPS):
@@ -552,7 +562,8 @@ def test_fused_adam_fp8_high_precision_init(recipe_name):
             ), f"master_param dtype {state['master_param'].dtype}, expected float32"
 
     # Training loop
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.float32, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.float32, device=device)
     target = torch.randn_like(x)
 
     for step in range(NUM_STEPS):
@@ -618,7 +629,8 @@ def test_fused_adam_bf16(recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     losses = []
@@ -673,7 +685,8 @@ def test_fused_adam_fp8_no_master(recipe_name):
         master_weights=False,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     for step in range(NUM_STEPS):
@@ -729,7 +742,8 @@ def test_fused_adam_bf16_store_param_remainders(recipe_name):
         store_param_remainders=True,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     losses = []
@@ -810,7 +824,8 @@ def test_fuse_wgrad_accumulation(recipe_name):
         use_decoupled_grad=True,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # This is currently failing during backward because the local Float8Tensor
@@ -859,7 +874,8 @@ def test_safetensors_fp32_export(recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # Train a few steps.
@@ -957,7 +973,8 @@ def test_dcp_output_parity(recipe_name, async_save):
             master_weight_dtype=torch.float32,
         )
 
-        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        seq_len = _get_seq_len(recipe_name)
+        x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
         target = torch.randn_like(x)
 
         for _ in range(NUM_STEPS):
@@ -1182,7 +1199,8 @@ def test_dcp_resharding_save(recipe_name):
     # Fixed seed so the load phase reproduces the exact same input tensor.
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     for _ in range(NUM_STEPS):
@@ -1251,7 +1269,8 @@ def test_dcp_resharding_load(recipe_name):
         # Same fixed seed as the save phase to reproduce identical x/target.
         torch.manual_seed(12345)
         torch.cuda.manual_seed(12345)
-        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        seq_len = _get_seq_len(recipe_name)
+        x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
         target = torch.randn_like(x)
 
         # Populate optimizer state so load_state_dict has a matching structure.
@@ -1384,7 +1403,8 @@ def test_fused_adam_hybrid_master_weights(hybrid_recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     losses = []
@@ -1433,7 +1453,8 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
     world_size, device = _get_dist_info()
 
     # Shared, fixed input/target so the two schedules are compared on identical data.
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     def assert_exact(actual, expected, path):
@@ -1539,7 +1560,8 @@ def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     def run_training(model, recipe_for_autocast):
@@ -1638,7 +1660,8 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
 
     # Shared, fixed input/target; the comparison is per-rank (base vs hybrid on
     # the same rank), so cross-rank input consistency does not matter.
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     def run_training(build_fn, recipe_for_autocast):
@@ -2215,7 +2238,8 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
             master_weight_dtype=torch.float32,
         )
 
-        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        seq_len = _get_seq_len(hybrid_recipe_name)
+        x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
         target = torch.randn_like(x)
         failures = []
 
