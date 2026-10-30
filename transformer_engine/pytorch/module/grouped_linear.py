@@ -35,7 +35,7 @@ from .base import (
 )
 from ._common import can_reconstruct_wgrad_input_from_original, WeightGradStore
 from . import _split_quantization
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import FP8GlobalStateManager, QuantizerRole, is_flydsl_grouped_gemm_enabled
 from ..utils import (
     divide,
     cast_if_needed,
@@ -750,6 +750,51 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
     @staticmethod
+    def _is_flydsl_grouped_gemm_supported(
+        *,
+        fp8,
+        recipe,
+        activation_dtype,
+        use_bias,
+        use_grouped_gemm_triton,
+        backward_override,
+        cpu_offloading,
+        save_original_input,
+        debug,
+        unpad_output,
+        actual_m_splits,
+        in_features,
+        out_features,
+    ) -> bool:
+        """ROCm FlyDSL grouped GEMM: the opt-in and precision (see
+        ``is_flydsl_grouped_gemm_enabled``) plus this module's per-call constraints.
+
+        It does not quantize: ``general_grouped_gemm_flydsl`` consumes TE's quantized
+        operands and still falls back per GEMM on anything its kernels cannot serve.
+        """
+        if fp8:
+            enabled = recipe is not None and is_flydsl_grouped_gemm_enabled(recipe)
+        else:
+            # One half-precision kernel covers BF16 and FP16.
+            half_precision = activation_dtype in (torch.bfloat16, torch.float16)
+            enabled = half_precision and is_flydsl_grouped_gemm_enabled()
+        return (
+            enabled
+            and in_features % 128 == 0
+            and out_features % 128 == 0
+            and not (
+                use_bias
+                or use_grouped_gemm_triton
+                or backward_override
+                or cpu_offloading
+                or save_original_input
+                or debug
+                or unpad_output
+                or actual_m_splits is not None
+            )
+        )
+
+    @staticmethod
     def _forward_blockwise_fp8_triton(
         ctx,
         *,
@@ -1161,6 +1206,24 @@ class _GroupedLinear(torch.autograd.Function):
                 pow2_grad=blockwise_recipe.fp8_quant_bwd_grad.power_2_scale,
             )
 
+        # FlyDSL grouped GEMM (ROCm gfx950) opt-in: a drop-in for general_grouped_gemm
+        # over TE's already-quantized operands.
+        use_grouped_gemm_flydsl = _GroupedLinear._is_flydsl_grouped_gemm_supported(
+            fp8=fp8,
+            recipe=blockwise_recipe,
+            activation_dtype=activation_dtype,
+            use_bias=use_bias,
+            use_grouped_gemm_triton=use_grouped_gemm_triton,
+            backward_override=backward_override,
+            cpu_offloading=cpu_offloading,
+            save_original_input=save_original_input,
+            debug=debug,
+            unpad_output=unpad_output,
+            actual_m_splits=actual_m_splits,
+            in_features=weights[0].size(-1),
+            out_features=weights[0].size(0),
+        )
+
         backward_needs_input = is_grad_enabled and weight_requires_grad
         if backward_override is None and save_original_input and backward_needs_input:
             if recipe is not None and recipe.delayed():
@@ -1385,6 +1448,11 @@ class _GroupedLinear(torch.autograd.Function):
         if use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
+        elif use_grouped_gemm_flydsl:
+            from ..flydsl_kernels.gemm import general_grouped_gemm_flydsl
+
+            general_grouped_gemm_func = general_grouped_gemm_flydsl
+            kwargs = {}
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
@@ -1522,6 +1590,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
             ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
+            ctx.use_grouped_gemm_flydsl = use_grouped_gemm_flydsl
             ctx.num_input_tensors = len(inputmats)
             ctx.dgrad_out = dgrad_out
 
@@ -1990,6 +2059,11 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.use_grouped_gemm_triton:
                     general_grouped_gemm_func = general_grouped_gemm_triton
                     kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                elif ctx.use_grouped_gemm_flydsl:
+                    from ..flydsl_kernels.gemm import general_grouped_gemm_flydsl
+
+                    general_grouped_gemm_func = general_grouped_gemm_flydsl
+                    kwargs = {}
                 else:
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}
@@ -2119,6 +2193,17 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.use_grouped_gemm_triton:
                     general_grouped_gemm_func = general_grouped_gemm_triton
                     kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                elif (
+                    ctx.use_grouped_gemm_flydsl
+                    and not ctx.fuse_wgrad_accumulation
+                    and not (ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute())
+                ):
+                    # FlyDSL wgrad writes plain per-expert gradients; fused main_grad
+                    # accumulation and delayed wgrad stay on the default grouped GEMM.
+                    from ..flydsl_kernels.gemm import general_grouped_gemm_flydsl
+
+                    general_grouped_gemm_func = general_grouped_gemm_flydsl
+                    kwargs = {}
                 else:
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}

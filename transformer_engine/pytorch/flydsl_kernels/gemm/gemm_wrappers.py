@@ -5,16 +5,23 @@
 """TE entry points for the FlyDSL GEMM backend."""
 
 import os
+import warnings
+from dataclasses import dataclass
+from typing import Callable
 
 import torch
 import transformer_engine_torch as tex
 
+from . import grouped_gemm_utils as grouped_utils
 from .exceptions import FlyDSLUnsupportedError
 
-from .half_prec_gemm import bf16_matmul, fp16_matmul
+from .half_prec_gemm import _BLOCK_M as HALF_PREC_BLOCK_M, _BLOCK_N as HALF_PREC_BLOCK_N
+from .half_prec_gemm import bf16_matmul, doGemm as half_prec_doGemm, fp16_matmul
 from .fp32_gemm import fp32_matmul
-from .fp8_gemm import fp8_matmul
-from .mxfp8_gemm import mxfp8_matmul
+from .fp8_gemm import _BLOCK_M as FP8_BLOCK_M, _BLOCK_N as FP8_BLOCK_N
+from .fp8_gemm import doGemm as fp8_doGemm, fp8_matmul
+from .mxfp8_gemm import BLOCK_M as MXFP8_BLOCK_M, BLOCK_N as MXFP8_BLOCK_N
+from .mxfp8_gemm import SCALE_GROUP_SIZE as MXFP8_SCALE_GROUP_SIZE, mxfp8_matmul
 
 # TODO: Some backend-independent GEMM wrapper utilities overlap with the
 # Triton GEMM backend (PR#667), including operand classification, logical
@@ -1006,6 +1013,514 @@ def _run_mxfp8(
         aux=aux.view(m, n) if aux is not None else None,
     )
     return D, aux
+
+
+# ---------------------------------------------------------------------------------------
+# Grouped (MoE) GEMM: one persistent launch spans every expert.
+#
+# general_grouped_gemm_flydsl is a drop-in for cpp_extensions.general_grouped_gemm. The
+# layout selects the phase (TN forward, NN dgrad, NT wgrad) and the operands' storage
+# selects the kernel family. A _GroupedKernel describes the only parts that differ per
+# family -- how an operand's payload and scale are read and how the kernel is launched --
+# while output validation, the descriptor queue, schedule choice, and the wgrad
+# K-bucketing and scatter are shared by every family.
+# ---------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GroupedKernel:
+    """How one FlyDSL kernel family reads grouped operands and launches."""
+
+    name: str
+    block_m: int
+    block_n: int
+    # tensor -> (payload, scale) whose contraction runs along the payload's last dim.
+    rows: Callable
+    # tensor -> (payload, scale) read the other way: dgrad's B and both wgrad operands.
+    cols: Callable
+    # (per-expert scales, device, k_pad) -> the kernel's scale argument. ``k_pad`` is
+    # the wgrad bucket's padded token count when the operands were padded, else None.
+    scale_arg: Callable
+    # (a, a_scale, b, b_scale, D, *, layout, m, n, k, **grouped) -> None
+    launch: Callable
+    # Kernel layout for dgrad: NN, or TN when cols() yields a materialized transpose.
+    dgrad_layout: str
+    # Axis of the wgrad operands (as returned by cols) that holds the tokens.
+    wgrad_token_axis: int
+
+
+def _mxfp8_scale_arg(scales, device, k_pad):
+    # Per-expert E8M0 scales, packed by the kernel wrapper; a padded wgrad bucket pads
+    # them to the bucket's token count as well.
+    if k_pad is None:
+        return list(scales)
+    return grouped_utils.uniform_pad_concat(list(scales), k_pad // MXFP8_SCALE_GROUP_SIZE)
+
+
+def _launch_mxfp8(a, a_scale, b, b_scale, D, *, layout, m, n, k, **grouped):
+    mxfp8_matmul(a, a_scale, b, b_scale, D, layout=layout, **grouped)
+
+
+def _fp8_transpose(t):
+    """The materialized transpose of FP8 operand ``t`` (the TN-only kernel reads it)."""
+    if t._transpose is None or t._transpose_invalid:
+        raise FlyDSLUnsupportedError("FP8 operand has no valid transpose")
+    return t._transpose
+
+
+def _launch_fp8(a, a_scale, b, b_scale, D, *, layout, m, n, k, **grouped):
+    # Tensor-wise FP8 is TN-only; dgrad and wgrad reach it through transposed operands.
+    fp8_doGemm(a, b, D, a_scale, b_scale, m=m, n=n, k=k, **grouped)
+
+
+def _as_rows(t):
+    """``t`` as 2-D rows; GroupedLinear's per-expert tensors already are, so skip the view."""
+    return t if t.dim() == 2 else t.reshape(-1, t.shape[-1])
+
+
+def _launch_half(a, a_scale, b, b_scale, D, *, layout, m, n, k, **grouped):
+    # BF16 and FP16 share this kernel; the MFMA opcode is selected per operand dtype.
+    half_prec_doGemm(
+        a,
+        b,
+        D,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        input_dtype=a.dtype,
+        label="half-precision grouped",
+        **grouped,
+    )
+
+
+_MXFP8_GROUPED = _GroupedKernel(
+    name="MXFP8",
+    block_m=MXFP8_BLOCK_M,
+    block_n=MXFP8_BLOCK_N,
+    rows=lambda t: (t._rowwise_data, t._rowwise_scale_inv),
+    cols=lambda t: (t._columnwise_data, t._columnwise_scale_inv),
+    scale_arg=_mxfp8_scale_arg,
+    launch=_launch_mxfp8,
+    dgrad_layout="NN",
+    wgrad_token_axis=0,
+)
+
+# One scalar inverse scale per expert, read in place through a pointer array.
+_FP8_GROUPED = _GroupedKernel(
+    name="FP8",
+    block_m=FP8_BLOCK_M,
+    block_n=FP8_BLOCK_N,
+    rows=lambda t: (t._data, t._scale_inv),
+    cols=lambda t: (_fp8_transpose(t), t._scale_inv),
+    scale_arg=lambda scales, device, k_pad: grouped_utils.expert_ptrs(list(scales), device),
+    launch=_launch_fp8,
+    dgrad_layout="TN",
+    wgrad_token_axis=1,
+)
+
+_HALF_GROUPED = _GroupedKernel(
+    name="half-precision",
+    block_m=HALF_PREC_BLOCK_M,
+    block_n=HALF_PREC_BLOCK_N,
+    rows=lambda t: (_as_rows(t), None),
+    cols=lambda t: (_as_rows(t), None),
+    scale_arg=lambda scales, device, k_pad: None,
+    launch=_launch_half,
+    dgrad_layout="NN",
+    wgrad_token_axis=0,
+)
+
+
+def _grouped_kernel_for(tensors):
+    """The kernel family for ``tensors``, which must all share one storage type."""
+    from ...quantized_tensor import QuantizedTensorStorage
+    from ...tensor.storage import Float8TensorStorage, MXFP8TensorStorage
+
+    if all(isinstance(t, MXFP8TensorStorage) for t in tensors):
+        return _MXFP8_GROUPED
+    if all(isinstance(t, Float8TensorStorage) for t in tensors):
+        return _FP8_GROUPED
+    if any(isinstance(t, QuantizedTensorStorage) for t in tensors):
+        raise FlyDSLUnsupportedError(
+            "FlyDSL grouped GEMM supports only MXFP8, tensor-wise FP8, and BF16/FP16 "
+            f"operands, got {sorted({type(t).__name__ for t in tensors})}"
+        )
+    dtypes = {t.dtype for t in tensors}
+    if len(dtypes) == 1 and dtypes <= {torch.bfloat16, torch.float16}:
+        return _HALF_GROUPED
+    raise FlyDSLUnsupportedError(
+        f"FlyDSL half-precision grouped GEMM requires bf16/fp16 operands, got {dtypes}"
+    )
+
+
+def _as_kernel_dtype(data, t):
+    """Reinterpret TE's uint8 FP8 payload ``data`` of operand ``t`` as its FP8 dtype."""
+    if data.dtype == torch.uint8:
+        return reinterpret_as_fp8_tensor(data, t._fp8_dtype)
+    return data
+
+
+def _row_operand(datas, m_splits):
+    """Per-expert ``[m_e, K]`` row payloads as one grouped-kernel operand.
+
+    Returns ``(data, data_ptrs)``: each expert's rows are read in place through base
+    pointers shifted to their packed row (``grouped_gemm_utils.stacked_operand``), so
+    the kernel sees the ``[M_total, K]`` layout without a concat. Falls back to
+    ``(concat_or_view_rows(datas), None)`` when the payloads are not row-major
+    ``[m_e, K]`` blocks.
+    """
+    if all(d.dim() == 2 and d.size(0) == int(m) for d, m in zip(datas, m_splits)):
+        stacked = grouped_utils.stacked_operand(datas, datas[0].device)
+        if stacked is not None:
+            return stacked
+    return grouped_utils.concat_or_view_rows(datas), None
+
+
+def _run_grouped(kernel, a_tensors, b_tensors, D, *, m_splits, layout):
+    """One packed forward or dgrad launch: ``D[rows of e] = A_e @ op(B_e)`` per expert.
+
+    ``layout`` is the GEMM's TE layout. TN (forward): A = activations ``[M_total, K]``,
+    B = per-expert weights ``[N, K]``. NN (dgrad): A = grad_output ``[M_total, N_out]``,
+    B = per-expert weights ``[N_out, K_in]``, read through ``kernel.cols`` and launched
+    with ``kernel.dgrad_layout``. A is read per expert in place; the weights are never
+    concatenated -- the kernel reads expert ``e``'s from ``b_data_ptrs[e]`` (``b_data``
+    is one representative, for dtype and shape). The per-tile ``(pid_m, pid_n, expert)``
+    descriptor queue is built on the host from ``m_splits``, so there is no
+    device-to-host sync. Operands arrive already quantized.
+    """
+    if layout == "NN":
+        b_read, layout = kernel.cols, kernel.dgrad_layout
+    else:
+        b_read = kernel.rows
+    a_datas, a_scales = zip(*(kernel.rows(t) for t in a_tensors))
+    b_datas, b_scales = zip(*(b_read(t) for t in b_tensors))
+    a_data, a_data_ptrs = _row_operand(list(a_datas), m_splits)
+    device = a_data.device
+    b_data_ptrs = grouped_utils.expert_ptrs(list(b_datas), device)
+    a_data = _as_kernel_dtype(a_data, a_tensors[0])
+    b_data = _as_kernel_dtype(b_datas[0], b_tensors[0])
+
+    # TN: B is [N, K]; NN: B is [K, N].
+    n = b_data.size(0) if layout == "TN" else b_data.size(-1)
+    k = a_data.size(-1)
+    m_total = sum(int(m) for m in m_splits)
+    D = _validate_or_allocate_output(
+        D,
+        shape=torch.Size((m_total, n)),
+        dtype=D.dtype,
+        device=device,
+        backend_name=f"{kernel.name} grouped {layout}",
+    )
+
+    # Tiles cover each expert's rows of the packed output; expert token counts must be
+    # BLOCK_M multiples (the queue builder raises otherwise), so no tile spans two
+    # experts. "static" walks the queue with a grid stride; "worksteal" claims tiles
+    # atomically to balance uneven experts (NVTE_FLYDSL_GROUPED_SCHED overrides).
+    work_queue, num_tiles = grouped_utils.build_fwd_dgrad_work_queue(
+        m_splits, n // kernel.block_n, kernel.block_m, device
+    )
+    sched = grouped_utils.select_grouped_sched(num_tiles, device)
+    kernel.launch(
+        a_data,
+        kernel.scale_arg(a_scales, device, None),
+        b_data,
+        kernel.scale_arg(b_scales, device, None),
+        D.view(m_total, n),
+        layout=layout,
+        m=m_total,
+        n=n,
+        k=k,
+        group=True,
+        num_groups=len(m_splits),
+        work_queue=work_queue,
+        work_counter=grouped_utils.work_counter(sched, device),
+        sched=sched,
+        num_work=num_tiles,
+        b_data_ptrs=b_data_ptrs,
+        a_data_ptrs=a_data_ptrs,
+        a_shape=(m_total, a_data.size(-1)) if a_data_ptrs is not None else None,
+    )
+
+
+def _wgrad_operands(dy_b, x_b, unpadded, pad, device):
+    """One wgrad bucket's (dy, dy_ptrs, x, x_ptrs), shared by every dtype.
+
+    When no expert in the bucket needs padding (``unpadded``), both operands are read
+    in place from their per-expert tensors (``grouped_utils.stacked_operand``), so the kernel
+    sees the packed layout without a host-side concat. Otherwise ``pad`` builds the
+    padded packed operand and the pointers are ``None``.
+    """
+    if unpadded:
+        dy = grouped_utils.stacked_operand(dy_b, device)
+        x = grouped_utils.stacked_operand(x_b, device)
+        if dy is not None and x is not None:
+            return dy[0], dy[1], x[0], x[1]
+    return pad(dy_b), None, pad(x_b), None
+
+
+def _wgrad_max_buckets():
+    """Launch-count cap for the K-bucketed wgrad (env override, default uncapped)."""
+    v = os.getenv("NVTE_FLYDSL_WGRAD_MAX_BUCKETS", "")
+    if v.strip() in ("", "0"):
+        return None
+    return int(v)
+
+
+def _pad_tokens(tensors, k_pad, token_axis):
+    """Zero-pad each expert's tokens to ``k_pad`` and stack the bucket's experts."""
+    if token_axis == 0:
+        return grouped_utils.uniform_pad_concat(tensors, k_pad)
+    padded = []
+    for t in tensors:
+        # [feature, m_e]: tokens are the trailing axis.
+        if t.size(1) == k_pad:
+            padded.append(t.contiguous())
+        else:
+            out = t.new_zeros((t.size(0), k_pad))
+            out[:, : t.size(1)].copy_(t)
+            padded.append(out)
+    return torch.cat(padded, dim=0)
+
+
+def _run_grouped_wgrad(kernel, dy_tensors, x_tensors, dW, *, m_splits):
+    """Grouped wgrad: ``dW_e = dY_e^T @ X_e`` per expert, via K-bucketed launches.
+
+    Both operands are read through ``kernel.cols``: ``[m_e, feature]`` for MXFP8 and
+    half precision (an NT launch), or the materialized ``[feature, m_e]`` transposes for
+    tensor-wise FP8 (a TN launch). ``dW`` is the packed ``[G*N_out, K_in]`` output.
+
+    The kernel's contraction K (the per-expert token count) is baked in at compile
+    time, so experts are grouped into **K-buckets** by their own padded token count
+    (``bucketize_wgrad_tokens``): each expert rounds up to its own BLOCK_M multiple
+    (floor 512), and experts sharing a rounded K share one launch. A single large
+    expert therefore no longer forces every small expert to contract over its token
+    count (which wasted work and overflowed the int32 launch-arg limit under skew).
+    Balanced token counts collapse to a single bucket.
+
+    Per bucket, the experts' operands are read in place when none needs padding,
+    otherwise zero-padded on the token axis to the bucket's ``k_pad`` and stacked
+    (bucket-local, so the kernel's ``expert*K`` addressing uses the bucket-local
+    index). Output goes straight to ``dW`` when the bucket is every expert in order,
+    else to a bucket-local buffer copied into each expert's global rows. The
+    hand-scheduled 4-wave MFMA pipeline is untouched -- K stays compile-time per launch.
+    """
+    dy_datas, dy_scales = zip(*(kernel.cols(t) for t in dy_tensors))
+    x_datas, x_scales = zip(*(kernel.cols(t) for t in x_tensors))
+    axis = kernel.wgrad_token_axis
+    n_out = dy_datas[0].size(1 - axis)
+    k_in = x_datas[0].size(1 - axis)
+    num_groups = len(m_splits)
+    device = dW.device
+    dW = _validate_or_allocate_output(
+        dW,
+        shape=torch.Size((num_groups * n_out, k_in)),
+        dtype=dW.dtype,
+        device=device,
+        backend_name=f"{kernel.name} grouped wgrad",
+    )
+
+    # One (pid_m, pid_n, expert) descriptor per tile of each expert's [N_out, K_in]
+    # weight gradient; the kernel offsets the output row by expert*N_out.
+    num_pid_m = n_out // kernel.block_m
+    num_pid_n = k_in // kernel.block_n
+    buckets = grouped_utils.bucketize_wgrad_tokens(
+        m_splits, kernel.block_m, max_buckets=_wgrad_max_buckets()
+    )
+    buckets = grouped_utils.drop_empty_experts(buckets, m_splits, dW, n_out)
+
+    for k_pad, ids in buckets:
+        bsize = len(ids)
+        dy_b = [dy_datas[e] for e in ids]
+        x_b = [x_datas[e] for e in ids]
+        dy_data, dy_ptrs, x_data, x_ptrs = _wgrad_operands(
+            dy_b,
+            x_b,
+            all(t.size(axis) == k_pad for t in dy_b + x_b),
+            lambda ts: _pad_tokens(ts, k_pad, axis),
+            device,
+        )
+        dy_data = _as_kernel_dtype(dy_data, dy_tensors[0])
+        x_data = _as_kernel_dtype(x_data, x_tensors[0])
+        # Scales are read in place when the operands are; otherwise padded alongside them.
+        scale_k_pad = None if dy_ptrs is not None else k_pad
+        dy_scale = kernel.scale_arg([dy_scales[e] for e in ids], device, scale_k_pad)
+        x_scale = kernel.scale_arg([x_scales[e] for e in ids], device, scale_k_pad)
+
+        # When the bucket holds all experts in order (the balanced case), bucket-local
+        # and global expert indices match, so the kernel writes dW directly.
+        direct = ids == list(range(num_groups))
+        dW_b = dW if direct else torch.empty(bsize * n_out, k_in, dtype=dW.dtype, device=device)
+
+        work_queue, num_tiles = grouped_utils.build_wgrad_work_queue(
+            bsize, num_pid_m, num_pid_n, device
+        )
+        sched = grouped_utils.select_grouped_sched(num_tiles, device)
+        if axis == 0:
+            a_shape, b_shape = (bsize * k_pad, n_out), (bsize * k_pad, k_in)
+        else:  # transposed operands stack the bucket's experts on the feature axis
+            a_shape, b_shape = (bsize * n_out, k_pad), (bsize * k_in, k_pad)
+        kernel.launch(
+            dy_data,
+            dy_scale,
+            x_data,
+            x_scale,
+            dW_b,
+            layout="NT",
+            m=n_out,
+            n=k_in,
+            k=k_pad,
+            group=False,
+            num_groups=bsize,
+            work_queue=work_queue,
+            work_counter=grouped_utils.work_counter(sched, device),
+            sched=sched,
+            wgrad=True,
+            num_work=num_tiles,
+            a_data_ptrs=dy_ptrs,
+            b_data_ptrs=x_ptrs,
+            a_shape=a_shape if dy_ptrs is not None else None,
+            b_shape=b_shape if x_ptrs is not None else None,
+        )
+
+        if not direct:
+            # Scatter each bucket-local expert block to its global dW rows.
+            for j, e in enumerate(ids):
+                dW[e * n_out : (e + 1) * n_out].copy_(dW_b[j * n_out : (j + 1) * n_out])
+
+
+def _packed_wgrad_view(wgrad_list, n_out, k_in):
+    """Return a ``[G*n_out, k_in]`` view over ``wgrad_list`` if it is one packed run.
+
+    The non-fused grouped-wgrad destinations are adjacent ``[n_out, k_in]`` slices of
+    one contiguous ``[G, n_out, k_in]`` buffer, so the kernel can write its packed
+    output directly into that storage, eliding the per-expert copy-out. Return ``None``
+    (the caller allocates a scratch buffer and scatters) whenever the destinations are
+    not a single contiguous, row-contiguous, correctly-shaped run.
+    """
+    first = wgrad_list[0]
+    elem = first.element_size()
+    expected_ptr = first.data_ptr()
+    for w in wgrad_list:
+        if (
+            w.dtype != first.dtype
+            or tuple(w.shape) != (n_out, k_in)
+            or not w.is_contiguous()
+            or w.data_ptr() != expected_ptr
+        ):
+            return None
+        expected_ptr += w.numel() * elem
+    # One contiguous run anchored at first.data_ptr(); span all rows over its storage.
+    return torch.as_strided(first, (len(wgrad_list) * n_out, k_in), (k_in, 1))
+
+
+def _grouped_gemm_flydsl(A, B, out, *, layout, m_splits, single_output):
+    """Run ``general_grouped_gemm``'s plain GEMM on FlyDSL, or raise if unsupported.
+
+    TE's grouped layouts map onto the three phases: TN forward ``out = B_e @ A_e^T``
+    (A = weights, B = activations), NN dgrad ``out = B_e @ A_e`` (A = weights,
+    B = grad_output), NT wgrad ``out[e] = B_e^T @ A_e`` (A = activations,
+    B = grad_output). Raises ``FlyDSLUnsupportedError`` for any operand or config the
+    kernels cannot serve.
+    """
+    if layout not in ("TN", "NN", "NT") or m_splits is None:
+        raise FlyDSLUnsupportedError(f"FlyDSL grouped GEMM does not support layout {layout}")
+    kernel = _grouped_kernel_for(list(A) + list(B))
+    if layout == "NT":
+        if single_output:
+            raise FlyDSLUnsupportedError("FlyDSL grouped wgrad writes per-expert outputs")
+        k_in = kernel.cols(A[0])[0].size(1 - kernel.wgrad_token_axis)
+        n_out = out[0].size(0)
+        # Write straight into the packed wgrad storage when ``out`` is one contiguous
+        # run; otherwise launch into scratch and scatter.
+        dW = _packed_wgrad_view(out, n_out, k_in)
+        scatter = dW is None
+        if scatter:
+            dW = torch.empty(len(out) * n_out, k_in, dtype=out[0].dtype, device=out[0].device)
+        _run_grouped_wgrad(kernel, B, A, dW, m_splits=m_splits)
+        if scatter:
+            for g, w in enumerate(out):
+                w.copy_(dW[g * n_out : (g + 1) * n_out])
+        return
+    if not single_output:
+        raise FlyDSLUnsupportedError("FlyDSL grouped fwd/dgrad writes one packed output")
+    _run_grouped(kernel, B, A, out[0], m_splits=m_splits, layout=layout)
+
+
+def _warn_fallback_enabled() -> bool:
+    return os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK", "0").lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def general_grouped_gemm_flydsl(
+    A,
+    B,
+    out,
+    quantization_params,
+    out_dtype,
+    layout="TN",
+    m_splits=None,
+    gelu=False,
+    grad=False,
+    accumulate=False,
+    bias=None,
+    use_bias=False,
+    use_split_accumulator=False,
+    D_dtype=None,
+    single_output=False,
+    **kwargs,
+):
+    """Drop-in replacement for ``general_grouped_gemm`` using the FlyDSL grouped kernels.
+
+    Serves the plain grouped GEMM over BF16/FP16, tensor-wise FP8, and MXFP8 operands
+    (gfx950) in all three layouts. Anything else -- bias, GELU, accumulation, an
+    explicit output dtype, another quantized storage, or a shape the kernel tiling
+    cannot cover -- falls back to ``general_grouped_gemm``, mirroring the dense FlyDSL
+    fallback in ``cpp_extensions.gemm``. ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` warns on
+    fallback. Returns ``general_grouped_gemm``'s ``(out, bias, gelu_input)`` triple.
+    """
+    from ...cpp_extensions.gemm import _empty_tensor, general_grouped_gemm
+
+    try:
+        if gelu or accumulate or use_bias or D_dtype is not None:
+            raise FlyDSLUnsupportedError(
+                "FlyDSL grouped GEMM does not support gelu, accumulate, bias, or D_dtype"
+            )
+        _grouped_gemm_flydsl(
+            A, B, out, layout=layout, m_splits=m_splits, single_output=single_output
+        )
+    except FlyDSLUnsupportedError as exc:
+        if _warn_fallback_enabled():
+            warnings.warn(
+                "[FLYDSL WARNING]: FlyDSL grouped GEMM does not support this configuration "
+                f"(layout={layout}); falling back to the default backend. Reason: {exc}",
+                UserWarning,
+                stacklevel=2,
+            )
+        return general_grouped_gemm(
+            A,
+            B,
+            out,
+            quantization_params,
+            out_dtype,
+            layout=layout,
+            m_splits=m_splits,
+            gelu=gelu,
+            grad=grad,
+            accumulate=accumulate,
+            bias=bias,
+            use_bias=use_bias,
+            use_split_accumulator=use_split_accumulator,
+            D_dtype=D_dtype,
+            single_output=single_output,
+        )
+    empty_tensors = [_empty_tensor()] * len(A)
+    return out, empty_tensors, empty_tensors
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
