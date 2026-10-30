@@ -208,6 +208,7 @@ const std::unordered_map<NVTE_QKV_Layout, std::string> mNVTEQKVLayoutStr = {
   {NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD, "BSHD_SBHD_SBHD"},
   {NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD, "THD_BSHD_BSHD"},
   {NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD, "THD_SBHD_SBHD"},
+  {NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD, "BHSD_BHSD_BHSD"},
 };
 
 // for printing bias_type in log_fused_attn_config
