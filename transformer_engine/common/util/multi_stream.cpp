@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -27,7 +29,12 @@ cudaStream_t get_compute_stream(int idx) {
   static std::once_flag stream_init_flag;
   auto init = [&]() {
     for (size_t i = 0; i < num_streams; i++) {
+#ifdef __HIP_PLATFORM_AMD__
+      // High-priority HW queues make event waits against the main stream slow on ROCm.
+      NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
+#else
       NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, -1));
+#endif
     }
   };
   std::call_once(stream_init_flag, init);
