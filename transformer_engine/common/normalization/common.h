@@ -260,7 +260,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
                       const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-                      , const NVTEScalingMode mode, const bool training
+                      , const NVTEScalingMode mode, const bool training, const bool is_aligned
 #endif
                     );
   Shape getWorkspaceShape() const override;

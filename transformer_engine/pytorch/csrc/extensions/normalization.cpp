@@ -120,6 +120,13 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
+#ifdef USE_ROCM
+    // The gfx1250 kernel quantizes as it normalizes, into compact scales
+    if (out.is_none() &&
+        nvte_norm_fwd_mxfp8_fused_supported(input_nvte.data(), weight_nvte.data())) {
+      impl = Impl::FULLY_FUSED;
+    }
+#endif
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -365,6 +372,13 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
+#ifdef USE_ROCM
+    // The gfx1250 kernel quantizes as it normalizes, into compact scales
+    if (out.is_none() &&
+        nvte_norm_fwd_mxfp8_fused_supported(input_nvte.data(), weight_nvte.data())) {
+      impl = Impl::FULLY_FUSED;
+    }
+#endif
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
     auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());

@@ -79,7 +79,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 #endif
   {
     norm_backend = NVTE_Norm_Backend::Te;
+#ifdef __HIP_PLATFORM_AMD__
+    is_aligned = is_ptr_aligned(z->data.dptr, z->columnwise_data.dptr, x.data.dptr,
+                                gamma.data.dptr, rsigma->data.dptr);
+#else
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, rsigma->data.dptr);
+#endif
   }
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(

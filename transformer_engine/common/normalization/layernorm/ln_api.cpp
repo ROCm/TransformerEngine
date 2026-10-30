@@ -88,8 +88,13 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 #endif //__HIP_PLATFORM_AMD__
   {
     norm_backend = NVTE_Norm_Backend::Te;
+#ifdef __HIP_PLATFORM_AMD__
+    is_aligned = is_ptr_aligned(z->data.dptr, z->columnwise_data.dptr, x.data.dptr,
+                                gamma.data.dptr, beta.data.dptr, mu->data.dptr, rsigma->data.dptr);
+#else
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
                                 mu->data.dptr, rsigma->data.dptr);
+#endif
   }
 
   bool training =
