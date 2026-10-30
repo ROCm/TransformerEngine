@@ -26,17 +26,13 @@ on:
         required: false
         default: true
       rocm_repo_url:
-        description: 'ROCm TheRock repository URL used inside the Docker image.'
+        description: 'ROCm TheRock repository URL used inside the Docker image. Empty: the Dockerfile default.'
         type: string
-        required: true
-        default: 'https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/'
-      # The image is only used to build wheels, so any one supported GPU arch works here; 
-      # The arch-less amdrocm-core-devel10.1 pulls every GPU family (gfx908..gfx1250, ~8.4 GB), 
-      # while amdrocm-core-devel10.1-gfx950 pulls only gfx950 (~2.7 GB).
+        required: false
       rocm_devel_package:
-        description: 'ROCm devel package installed in the Docker image.'
-        required: true
-        default: 'amdrocm-core-devel10.1-gfx950'
+        description: 'ROCm devel package installed in the Docker image. Empty: the Dockerfile default.'
+        type: string
+        required: false
       force_build_image:
         description: 'Force building of ROCm Docker image, skip checking intermediate storage.'
         type: boolean
@@ -62,10 +58,10 @@ on:
         default: true
       rocm_repo_url:
         type: string
-        default: 'https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/'
+        required: false
       rocm_devel_package:
         type: string
-        default: 'amdrocm-core-devel10.1-gfx950'
+        required: false
       force_build_image:
         type: boolean
         default: true
@@ -77,6 +73,7 @@ on:
         default: ''
 
 env:
+  ROCM_DOCKERFILE: build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
@@ -103,6 +100,8 @@ jobs:
 
       - name: Derive Docker image tag
         id: set-tag
+        env:
+          ROCM_URL: ${{ inputs.rocm_repo_url }}
         run: |
           # Harbor registry configuration
           HARBOR_REGISTRY="registry-sc-harbor.amd.com"
@@ -117,8 +116,11 @@ jobs:
             # Get current year-month
             YEAR_MONTH=$(date +"%Y%m")
             
-            # Try to detect ROCm revision from repomd.xml
-            ROCM_URL="${{ inputs.rocm_repo_url }}"
+            # Try to detect ROCm revision from repomd.xml (of the Dockerfile default repo if rocm_repo_url is empty)
+            if [ -z "${ROCM_URL}" ]; then
+              ROCM_URL=$(grep -oP '^ARG\s+ROCM_REPO_URL=\K\S+' "${ROCM_DOCKERFILE}" | head -n1 || echo "")
+              echo "rocm_repo_url is empty, using the Dockerfile default: ${ROCM_URL}"
+            fi
             ROCM_REVISION=$(curl -s "${ROCM_URL}/repodata/repomd.xml" 2>/dev/null | grep -oP '(?<=<revision>)[^<]+' | head -n1 || echo "")
             
             if [ -n "$ROCM_REVISION" ]; then
@@ -161,16 +163,29 @@ jobs:
 
       # The build context is build_tools/wheel_utils/ because the Dockerfile
       # COPYs build_wheels.sh from that directory.
+      # ROCm build args are passed only when set: an empty value would override the Dockerfile default.
       - name: Build Docker image
         if: ${{ inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true' }}
+        env:
+          ROCM_URL: ${{ inputs.rocm_repo_url }}
+          ROCM_PACKAGE: ${{ inputs.rocm_devel_package }}
         run: |
+          BUILD_ARGS=()
+          if [ -n "${ROCM_URL}" ]; then
+            BUILD_ARGS+=(--build-arg "ROCM_REPO_URL=${ROCM_URL}")
+          fi
+          if [ -n "${ROCM_PACKAGE}" ]; then
+            BUILD_ARGS+=(--build-arg "ROCM_DEVEL_PACKAGE=${ROCM_PACKAGE}")
+          fi
+          echo "ROCm defaults in ${ROCM_DOCKERFILE}:"
+          grep -E '^ARG ROCM_(REPO_URL|DEVEL_PACKAGE)=' "${ROCM_DOCKERFILE}" || true
+          echo "ROCm build-arg overrides: ${BUILD_ARGS[*]:-none}"
           echo "Building Docker image: ${{ steps.set-tag.outputs.image_tag }}"
           docker build \
             --no-cache \
-            --build-arg ROCM_REPO_URL="${{ inputs.rocm_repo_url }}" \
-            --build-arg ROCM_DEVEL_PACKAGE="${{ inputs.rocm_devel_package }}" \
+            "${BUILD_ARGS[@]}" \
             --tag "${{ steps.set-tag.outputs.image_tag }}" \
-            --file build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86 \
+            --file "${ROCM_DOCKERFILE}" \
             build_tools/wheel_utils/
 
       - name: Upload Docker image to Harbor
