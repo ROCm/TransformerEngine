@@ -461,11 +461,19 @@ __global__ void pad_remap_lse_kernel(
   int wavefront_idx = (blockIdx.x * blockDim.x + threadIdx.x) / THREADS_PER_WAVEFRONT;
   int workitem_idx = threadIdx.x % THREADS_PER_WAVEFRONT;
   int num_wavefronts = (blockDim.x * gridDim.x) / THREADS_PER_WAVEFRONT;
-  int num_total_tokens = cu_seqlen_q_ptr[b];
+  // the BSHD small-seq kernels take no sequence lengths and write all b*s_q rows
+  constexpr bool dense = token_major && !is_ragged;
+  int num_total_tokens = dense ? b*s_q : cu_seqlen_q_ptr[b];
 
   for(int token_id = wavefront_idx; token_id < num_total_tokens; token_id += num_wavefronts){
-    int b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
-    int s_idx = token_id - cu_seqlen_q_ptr[b_idx];
+    int b_idx, s_idx;
+    if constexpr(dense){
+      b_idx = token_id / s_q;
+      s_idx = token_id % s_q;
+    }else{
+      b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
+      s_idx = token_id - cu_seqlen_q_ptr[b_idx];
+    }
 
     for(int h_idx = workitem_idx; h_idx < h; h_idx += THREADS_PER_WAVEFRONT){
       uint64_t padded_idx;

@@ -4329,10 +4329,13 @@ def test_dpa_ck_smallseq(qkv_layout, attn_mask_type, swa, smallseq, monkeypatch,
     not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
     reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
 )
-@pytest.mark.parametrize("qkv_format", ["bshd", "thd"])
-def test_ck_smallseq_lse(qkv_format, monkeypatch, capfd):
+@pytest.mark.parametrize(
+    "qkv_format, short_cu_seqlens", [("bshd", False), ("bshd", True), ("thd", False)]
+)
+def test_ck_smallseq_lse(qkv_format, short_cu_seqlens, monkeypatch, capfd):
     """The CK small-seq kernels save the softmax LSE in the same layout as the regular CK kernels,
-    so either forward can be followed by either backward."""
+    so either forward can be followed by either backward. BSHD without a mask ignores cu_seqlens,
+    as the regular kernels do."""
     batch, seqlen, num_heads, head_dim = 2, 16, 16, 128
     dtype, scale = torch.bfloat16, head_dim**-0.5
     config = ModelConfig(batch, seqlen, num_heads, head_dim, attn_mask_type="padding")
@@ -4352,6 +4355,9 @@ def test_ck_smallseq_lse(qkv_format, monkeypatch, capfd):
     lengths = torch.tensor(seqlens, dtype=torch.int32, device="cuda")
     cu_seqlens = make_cu_seqlens(lengths)
     cu_seqlens_padded = make_cu_seqlens(torch.full_like(lengths, segment))
+    if short_cu_seqlens:
+        # without a mask every row counts, whatever cu_seqlens say
+        cu_seqlens = make_cu_seqlens(torch.tensor([5, seqlen], dtype=torch.int32, device="cuda"))
 
     def tokens(x, i):
         if qkv_format == "bshd":
