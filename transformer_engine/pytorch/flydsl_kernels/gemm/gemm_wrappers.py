@@ -15,6 +15,7 @@ from .half_prec_gemm import bf16_matmul, fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
+from .mxfp4_gemm import mxfp4_matmul
 
 # TODO: Some backend-independent GEMM wrapper utilities overlap with the
 # Triton GEMM backend (PR#667), including operand classification, logical
@@ -173,6 +174,16 @@ def _classify_input(t):
         pass
 
     try:
+        from transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage import (
+            MXFP4TensorStorage,
+        )
+
+        if isinstance(t, MXFP4TensorStorage):
+            return "mxfp4", t
+    except ImportError:
+        pass
+
+    try:
         from transformer_engine.pytorch.quantized_tensor import (
             QuantizedTensorStorage,
         )
@@ -181,8 +192,8 @@ def _classify_input(t):
             raise ValueError(
                 "The FlyDSL GEMM backend does not support "
                 f"{type(t).__name__}. Only Float8Tensor / "
-                "Float8TensorStorage and MXFP8Tensor / "
-                "MXFP8TensorStorage are implemented."
+                "Float8TensorStorage, MXFP8Tensor / "
+                "MXFP8TensorStorage and MXFP4TensorStorage are implemented."
             )
     except ImportError:
         pass
@@ -1008,6 +1019,97 @@ def _run_mxfp8(
     return D, aux
 
 
+def _select_mxfp4_storage_for_layout(A, transa, B, transb):
+    """Select TE MXFP4 data and scales for a layout.
+
+    MXFP4 columnwise storage is a materialized transpose (as for tensor-wise FP8),
+    so every layout reduces to the TN kernel without transpose reads:
+
+        TN: B.rowwise    [M,K], A.rowwise    [N,K]
+        NN: B.rowwise    [M,K], A.columnwise [N,K]
+        NT: B.columnwise [M,K], A.columnwise [N,K]
+        TT: B.columnwise [M,K], A.rowwise    [N,K]
+    """
+
+    def select(t, rowwise, name):
+        orientation = "rowwise" if rowwise else "columnwise"
+        data = t._rowwise_data if rowwise else t._columnwise_data
+        scale = t._rowwise_scale_inv if rowwise else t._columnwise_scale_inv
+        if data is None or scale is None:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 requires existing {name} {orientation} data and scales"
+            )
+        if t._shuffle_rowwise_data if rowwise else t._shuffle_columnwise_data:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 requires plain FP4 data; {name} {orientation} data is shuffled"
+            )
+        if t._with_gemm_swizzled_scales:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 requires plain E8M0 scales; {name} scales are GEMM-swizzled"
+            )
+        if t._fp4_dtype != tex.DType.kFloat4E2M1:
+            raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 requires E2M1 {name}, got {t._fp4_dtype}")
+        flatten = _flatten_rowwise if rowwise else _flatten_columnwise
+        return flatten(data.view(torch.uint8), f"{name}.{orientation}"), scale, data
+
+    A_data, A_scale, _ = select(A, bool(transa), "A")
+    B_data, B_scale, B_payload = select(B, not bool(transb), "B")
+    return A_data, A_scale, B_data, B_scale, B_payload
+
+
+def _run_mxfp4(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    *,
+    output_dtype: torch.dtype,
+):
+    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT/TT."""
+    layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+    A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
+        A, transa, B, transb
+    )
+
+    # Kernel operand ownership is always swapped relative to TE
+    a_flydsl, a_scale = B_data, B_scale
+    b_flydsl, b_scale = A_data, A_scale
+    m, n = a_flydsl.shape[0], b_flydsl.shape[0]
+    if a_flydsl.shape[1] != b_flydsl.shape[1]:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP4 {layout} selected incompatible payloads: "
+            f"a={tuple(a_flydsl.shape)} and b={tuple(b_flydsl.shape)}"
+        )
+    if a_flydsl.device != b_flydsl.device:
+        raise ValueError(
+            f"FlyDSL MXFP4 {layout} operands must be on the same device, got "
+            f"{a_flydsl.device} and {b_flydsl.device}"
+        )
+
+    if D is not None:
+        output_shape = torch.Size(D.shape)
+    elif transb:
+        output_shape = torch.Size((m, n))
+    else:
+        output_shape = torch.Size((*B_payload.shape[:-1], n))
+    if _product(output_shape) != m * n:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP4 {layout} logical output shape "
+            f"{tuple(output_shape)} does not match kernel output {(m, n)}"
+        )
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=output_shape,
+        dtype=output_dtype,
+        device=a_flydsl.device,
+        backend_name=f"MXFP4 {layout}",
+    )
+    mxfp4_matmul(a_flydsl, a_scale, b_flydsl, b_scale, D.view(m, n))
+    return D
+
+
 def _select_fp8_storage_for_layout(A, transa, B, transb):
     """Select existing TE FP8 backings and normalize to one core contract.
 
@@ -1242,9 +1344,10 @@ def te_generic_gemm_flydsl(
       - NN: transa=False, transb=False
       - NT: transa=False, transb=True
 
-    TT is intentionally rejected.
+    TT is intentionally rejected, except for MXFP4.
 
     Supported dtypes:
+      - MXFP4 E2M1 A/B (gfx1250) with FP16, BF16, or FP32 output
       - MXFP8 E4M3/E5M2 A/B combinations with FP16, BF16, or FP32 output
       - tensor-wise E4M3/E5M2 FP8 A/B combinations with FP16, BF16, or FP32 output
       - BF16 input with FP16, BF16, or FP32 output
@@ -1273,11 +1376,11 @@ def te_generic_gemm_flydsl(
     ):
         raise FlyDSLUnsupportedError("FlyDSL GEMM does not support comm+GEMM overlap")
 
-    if transa and transb:
-        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
-
     a_kind, _ = _classify_input(A)
     b_kind, _ = _classify_input(B)
+
+    if transa and transb and a_kind != "mxfp4":
+        raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
     _validate_common_epilogue(
         quantizer=quantizer,
@@ -1288,6 +1391,35 @@ def te_generic_gemm_flydsl(
         alpha=alpha,
         beta=beta,
     )
+
+    if a_kind == "mxfp4" or b_kind == "mxfp4":
+        if a_kind != b_kind:
+            raise ValueError("Mixed MXFP4 and non-MXFP4 FlyDSL GEMM inputs are not supported")
+        if bias is not None:
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused bias is not implemented")
+        if gelu:
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused GELU is not implemented")
+
+        mxfp4_output_dtypes = {
+            None: torch.bfloat16,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat32: torch.float32,
+        }
+        if output_dtype not in mxfp4_output_dtypes:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 supports FP16, BF16, or FP32 output, got {output_dtype}"
+            )
+
+        D = _run_mxfp4(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            output_dtype=mxfp4_output_dtypes[output_dtype],
+        )
+        return D, None, None, None
 
     if a_kind == "mxfp8" or b_kind == "mxfp8":
         # Validate both are MXFP8
