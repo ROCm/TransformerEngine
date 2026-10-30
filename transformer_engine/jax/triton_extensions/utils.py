@@ -41,6 +41,7 @@ Environment Variables:
         module cache. Default is "1" (runs when more than one local device is visible).
 """
 
+import dataclasses
 import hashlib
 import os
 import tempfile
@@ -55,6 +56,7 @@ from jax import core
 from jaxlib.mlir import ir
 import jax
 import jax.numpy as jnp
+from transformer_engine.jax.util import is_hip_extension
 
 from ..version_utils import (
     TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
@@ -211,6 +213,12 @@ except ImportError as e:
     ) from e
 
 
+# AMD/HIP backend imports are additive: the NVIDIA path above is left untouched.
+if is_hip_extension():
+    from triton.backends.amd import compiler as cb_hip  # noqa: E402
+    from triton.backends.compiler import GPUTarget as _TritonGPUTarget  # noqa: E402
+
+
 __all__ = ["triton_call_lowering", "get_triton_info"]
 
 # Triton kernel cache (module-level, shared across all kernels)
@@ -356,6 +364,9 @@ def get_triton_dtype(aval):
         jnp.dtype("float16"): "fp16",
         jnp.dtype("float8_e4m3fn"): "fp8e4nv",
         jnp.dtype("float8_e5m2"): "fp8e5",
+        # AMD gfx942 "FNUZ" variants — Triton calls these fp8e4b8/fp8e5b16.
+        jnp.dtype("float8_e4m3fnuz"): "fp8e4b8",
+        jnp.dtype("float8_e5m2fnuz"): "fp8e5b16",
         jnp.dtype("int64"): "i64",
         jnp.dtype("int32"): "i32",
         jnp.dtype("int16"): "i16",
@@ -425,44 +436,43 @@ def compile_triton(
     if cache_key in _TRITON_KERNEL_CACHE:
         return _TRITON_KERNEL_CACHE[cache_key]
 
+    # AMD/HIP uses a separate compilation path; the NVIDIA path below is the
+    # unchanged upstream implementation.
+    if is_hip_extension():
+        kernel = _compile_triton_hip(
+            kernel_fn,
+            signature,
+            constants,
+            num_warps,
+            num_stages,
+            num_ctas,
+            compute_capability,
+            enable_fp_fusion,
+        )
+        _TRITON_KERNEL_CACHE[cache_key] = kernel
+        return kernel
+
     # Mark constants as constexpr in signature
     signature_with_constexpr = dict(signature)
     for const_name in constants.keys():
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
-    if is_hip:
-        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
-        import triton
-        from triton.compiler import make_backend
-
-        target = triton.runtime.driver.active.get_current_target()
-        backend = make_backend(target)
-        options = backend.parse_options(
-            {
-                "num_warps": num_warps,
-                "num_ctas": num_ctas,
-                "num_stages": num_stages,
-                "warp_size": target.warp_size,
-                "enable_fp_fusion": enable_fp_fusion,
-            }
-        )
-        binary_key = backend.binary_ext
-    else:
-        cuda_option_kwargs = {}
-        if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
-            cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-        # cb is bound whenever this branch runs; see the guarded import above.
-        options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
-            num_warps=num_warps,
-            num_stages=num_stages,
-            num_ctas=num_ctas,
-            debug=False,
-            enable_fp_fusion=enable_fp_fusion,
-            **cuda_option_kwargs,
-        )
-        target = tc.GPUTarget("cuda", compute_capability, 32)
-        binary_key = "ptx"
+    # Compile kernel
+    cuda_option_kwargs = {}
+    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
+        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
+    # cb is bound whenever this path runs; see the guarded import above.
+    options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
+        num_warps=num_warps,
+        num_stages=num_stages,
+        num_ctas=num_ctas,
+        debug=False,
+        enable_fp_fusion=enable_fp_fusion,
+        **cuda_option_kwargs,
+    )
+    target = tc.GPUTarget("cuda", compute_capability, 32)
+    binary_key = "ptx"
 
     # Gluon uses GluonASTSource, which (unlike ASTSource) requires every constexpr
     # parameter to be listed in the signature.
@@ -495,14 +505,7 @@ def compile_triton(
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
-    # The plugin's HIP branch takes a filename, not the blob; it reads the file once, unlinks it,
-    # and serves every later launch from its own cache.
     binary = compiled.asm[binary_key]
-    if is_hip:
-        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
-        with os.fdopen(fd, "wb") as f:
-            f.write(binary)
-        binary = hsaco_path
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
@@ -531,6 +534,95 @@ def compile_triton(
 
     _TRITON_KERNEL_CACHE[cache_key] = kernel
     return kernel
+
+
+def _compile_triton_hip(
+    kernel_fn,
+    signature,
+    constants,
+    num_warps,
+    num_stages,
+    num_ctas,
+    compute_capability,
+    enable_fp_fusion,
+):
+    # AMD/HIP returns an arch string like "gfx950:sramecc+:xnack-"; strip the
+    # target-feature suffix -> "gfx950".
+    arch = gpu_triton.get_arch_details(0).split(":", 1)[0]
+    # Mirror what triton's parse_options would do per-arch: the default
+    # HIPOptions.supported_fp8_dtypes is just ("fp8e5",), and constructing
+    # HIPOptions directly bypasses the per-arch augmentation. Set it
+    # explicitly so FP8 e4m3 kernels compile on gfx942/gfx950.
+    if arch == "gfx942":
+        fp8_dtypes = ("fp8e4b8", "fp8e4nv", "fp8e5", "fp8e5b16")
+    elif arch == "gfx950" or arch.startswith("gfx12"):
+        fp8_dtypes = ("fp8e4nv", "fp8e5")
+    else:
+        fp8_dtypes = ("fp8e5",)
+    hip_option_kwargs = dict(
+        num_warps=num_warps,
+        num_stages=num_stages,
+        num_ctas=num_ctas,
+        debug=False,
+        enable_fp_fusion=enable_fp_fusion,
+        arch=arch,
+        supported_fp8_dtypes=fp8_dtypes,
+    )
+
+    # Autotune configs may carry AMD compile hints (matrix_instr_nonkdim,
+    # waves_per_eu, kpack, ...) mixed in with real kernel constexprs. Route any
+    # constant that names a HIPOptions field into the compile options; the rest
+    # stay as kernel constexprs. (cluster_dims is gated the same way — it was
+    # dropped from HIPOptions in Triton 3.7.1.)
+    hip_option_fields = {f.name for f in dataclasses.fields(cb_hip.HIPOptions)}
+    kernel_constants = {}
+    for name, value in constants.items():
+        if name in hip_option_fields:
+            hip_option_kwargs[name] = value
+        else:
+            kernel_constants[name] = value
+    if "cluster_dims" in hip_option_fields:
+        hip_option_kwargs.setdefault("cluster_dims", (1, 1, 1))
+    options = cb_hip.HIPOptions(**hip_option_kwargs)
+
+    # Mark constants as constexpr in signature (mirrors the NVIDIA path).
+    signature_with_constexpr = dict(signature)
+    for const_name in kernel_constants:
+        if const_name in signature_with_constexpr:
+            signature_with_constexpr[const_name] = "constexpr"
+
+    src = tc.ASTSource(
+        fn=kernel_fn,
+        constexprs=kernel_constants,
+        signature=signature_with_constexpr,
+    )
+    compiled = tc.compile(
+        src,
+        target=_TritonGPUTarget("hip", arch, warp_size=64),
+        options=options.__dict__,
+    )
+
+    # jaxlib's HIP TritonKernel ctor takes a path to an HSACO blob, not bytes. The
+    # plugin reads the file once, unlinks it, and serves later launches from its own
+    # cache; writing into the process-scoped dir means a blob whose kernel is never
+    # launched still gets cleaned up at exit instead of lingering in /tmp.
+    fd, hsaco_path = tempfile.mkstemp(
+        suffix=".hsaco", prefix=f"te_{compiled.name}_", dir=_hsaco_dir()
+    )
+    with os.fdopen(fd, "wb") as f:
+        f.write(compiled.asm["hsaco"])
+
+    return gpu_triton.TritonKernel(
+        compiled.name,
+        num_warps,
+        compiled.metadata.shared,
+        hsaco_path,
+        str(compiled.asm.get("ttir", "")),
+        compute_capability,
+        1,
+        1,
+        1,
+    )
 
 
 def triton_call_lowering(
