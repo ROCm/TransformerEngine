@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -5,6 +7,7 @@
 
 import atexit
 import ctypes
+import os
 from functools import partial
 
 import jax
@@ -16,6 +19,7 @@ import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
+from transformer_engine.jax.util import is_hip_extension
 from transformer_engine.jax.sharding import (
     _get_mesh,
     get_num_devices_in_mesh,
@@ -134,11 +138,14 @@ def ep_bootstrap(
     cp, ...) are supported and replicated across EP tensors. Auto-selects
     between self-hosted NCCL and XLA's borrowed comm (see
     tex.ep.use_nccl_comm_from_xla).
+    Multiple local devices require the XLA borrowed communicator path.
 
     Args:
-        world_size: Total number of processes (product of all mesh axes).
+        world_size: Total number of devices (product of all mesh axes).
+            Pass None to use the active mesh size; an explicit value must match it.
         rank: Global rank of the calling process. Unused on the borrowed-comm
             path, where each device's identity comes from its mesh position.
+            Pass None to use jax.process_index().
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
@@ -150,21 +157,24 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+    if is_hip_extension():
+        raise NotImplementedError("Expert parallelism is not supported on ROCm.")
+    # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
+    # at prepare time for the combine backward. Respect an explicit user override.
+    os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
+
+    if rank is None:
+        rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
         )
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
-    if jax.local_device_count() != 1:
-        raise ValueError(
-            "ep_bootstrap requires one local device per process (got"
-            f" jax.local_device_count() = {jax.local_device_count()}); NCCL EP does not"
-            " support single-process multi-device setups."
+    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
+        raise RuntimeError(
+            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
+            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
+            " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
     gsr = global_mesh_resource()
@@ -179,6 +189,13 @@ def ep_bootstrap(
         raise ValueError(
             "ep_bootstrap must run inside an active jax.sharding.Mesh; enter"
             " `with mesh:` (or jax.set_mesh(mesh)) before calling it."
+        )
+    if world_size is None:
+        world_size = get_num_devices_in_mesh(mesh)
+    if world_size < 2:
+        raise ValueError(
+            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
+            " at least 2 ranks to form a group."
         )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
@@ -282,6 +299,9 @@ def ep_finalize():
     ``jax.clear_caches()`` so every cached executable releases the NCCL comm
     it pins, then frees the EP resources. Call outside any active EP
     computation.
+
+    Reinitialization must use the same communicator mode; switching modes
+    requires a process restart.
     """
     jax.clear_caches()
     transformer_engine_jax.release_ep_resources()
@@ -308,7 +328,7 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     """Scatter tokens and weights to expert ranks.
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
-    ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
+    ``cfg``. ``handle_mem`` may be relocated between calls (e.g. under ``lax.scan``).
     Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
     ``(dp, ep)``. Returns
     ``(recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)``;

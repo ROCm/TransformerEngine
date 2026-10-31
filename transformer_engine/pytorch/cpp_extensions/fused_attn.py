@@ -146,9 +146,11 @@ class FusedAttnBackend(IntEnum):
         # is a pybind11 enum. Compare by integer value so the two enums stay
         # equivalent regardless of the pybind11 version (the pybind ``__eq__``
         # handles the reverse order).
-        if isinstance(other, NVTE_Fused_Attn_Backend):
+        if isinstance(other, (NVTE_Fused_Attn_Backend, int)):
             return int(self) == int(other)
-        return int.__eq__(self, other)
+        # Not ``int.__eq__(self, other)``: Dynamo on Python 3.14 rejects that call
+        # ("expected 1 argument, got 2") when tracing backend selection.
+        return NotImplemented
 
     def __ne__(self, other: object) -> bool:
         result = self.__eq__(other)
