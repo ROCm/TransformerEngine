@@ -30,7 +30,7 @@ The sGPU queue learns per-item durations (`ci-weights/`) to order the next run. 
 Pull requests run only the suites their changes can affect; pushes to `dev` and release branches, and manual runs, always run every suite. The rules live in [`.github/scripts/change_scope.py`](../.github/scripts/change_scope.py) as a first-match-wins table of path patterns: documentation alone runs nothing, a change under `transformer_engine/pytorch` runs the PyTorch suites and the examples, a change to the core library or to shared CI scripts runs everything, and a path no rule names runs everything. The job summary of the "Select Test Suites" job lists the rule each changed path matched.
 
 * CI evaluates a PR with the PR's own copy of the rules, so a change that alters what a path affects (a new or renamed suite, moved tests) should update `change_scope.py` in the same PR.
-* Add the label `ci-skip-scope` next to the `ci-level` label to skip these rules and run every suite at that level. Adding it to a PR that already has a `ci-level` label starts that run.
+* Add the label `ci-skip-scope` next to the `ci-level` label to skip these rules and run every suite at that level. It starts no run of its own: it applies from the next run, started by adding a `ci-level` label or pushing a commit.
 * Check what a branch would run before pushing: `git diff --name-status --no-renames dev...HEAD | python3 .github/scripts/change_scope.py`
 * `run_queue.sh --suites "<label>..."` (or `TE_CI_SUITES`) runs a subset of a queue's suites locally the same way CI does; the rest get a passing "not selected" verdict.
 

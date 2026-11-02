@@ -34,13 +34,10 @@ jobs:
 
             let dispatch = false;
             if (action === 'labeled') {
-              const addedName = context.payload.label?.name || '';
-              const addedLevel = parseLevelLabel(addedName);
-              // Only dispatch when the newly added label is (or ties) the highest level,
-              // or is ci-skip-scope added to a PR that already has a level: the run
-              // without it skipped suites, and this one runs them all at that level.
-              dispatch = (addedLevel > 0 && addedLevel === currentLevel)
-                || (addedName === 'ci-skip-scope' && currentLevel > 0);
+              // A ci-level label was added: dispatch at the highest level on the PR. Any
+              // other label, ci-skip-scope included, leaves CI alone.
+              const addedLevel = parseLevelLabel(context.payload.label?.name);
+              dispatch = addedLevel > 0;
             } else {
               // synchronize, reopened, opened — dispatch at whatever level is set.
               dispatch = currentLevel > 0;
@@ -51,14 +48,15 @@ jobs:
             core.setOutput('test_level', level);
 
   dispatch:
-    # Run this job if there is a valid level to test, which requires
-    # that any of the following are true:
-    # - A ci-level label higher than any existing ci-level label(s) was added
-    # - A commit was pushed with existing ci-level label(s)
-    # - The PR was reopened or opened with existing ci-level label(s)
-    # - ci-skip-scope was added to a PR with existing ci-level label(s); the
-    #   run then skips .github/scripts/change_scope.py and runs every suite at
-    #   that level
+    # Run this job at the highest ci-level label on the PR, if it has one, when
+    # any of the following happens:
+    # - A ci-level label is added, whatever its level
+    # - A commit is pushed
+    # - The PR is reopened
+    # To run at a lower level, remove the higher label first: removing a label
+    # does not start a run. ci-skip-scope starts no run of its own; while it is
+    # on the PR, each run skips the path rules of .github/scripts/change_scope.py
+    # and runs every suite at its level.
     if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
