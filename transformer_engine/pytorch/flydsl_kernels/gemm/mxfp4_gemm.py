@@ -31,11 +31,12 @@ NUM_STAGES = 3  # LDS pages per operand
 TDM_GROUP_WAVES = NUM_WAVES // 2
 TDM_WAVES = 2
 PRO_SCALE_WAVES = 2
+# Scales stream through SCALE_STAGES LDS pages of SCALE_GROUP K tiles
+SCALE_GROUP = 8
+SCALE_STAGES = 2
 LDS_B_START = 64 * 1024
-LDS_BYTES = 320 * 1024
 C_HALF_ROWS = BLOCK_M // 2  # C is stored in two halves
 C_WAVE_ROWS = C_HALF_ROWS // NUM_WAVES
-SCALE_TDM_COLS = 32
 # Logical 16 B chunk c of row r is stored at chunk c ^ ((r >> 2) & 3) to avoid LDS bank conflicts
 SWZ_CHUNKS = 4
 SCHED_TAIL_MMAS = 8
@@ -43,17 +44,6 @@ SCHED_TAIL_MMAS = 8
 SCALE_LANE_ROWS_A = 32
 SCALE_LANE_ROWS_B = 64
 OUT_KINDS = {torch.float32: 0, torch.bfloat16: 1, torch.float16: 2}
-
-
-def _lds_bytes(K):
-    k_iters = K // BLOCK_K
-    return max(
-        LDS_B_START + NUM_STAGES * BLOCK_N * BLOCK_K // 2 + 2 * k_iters * BLOCK_M * 4,
-        C_HALF_ROWS * BLOCK_N * 4,
-    )
-
-
-MAX_K = max(k for k in range(2 * BLOCK_K, 64 * 1024 + 1, BLOCK_K) if _lds_bytes(k) <= LDS_BYTES)
 
 
 # Scale words (one BLOCK_K tile of a row) stored [rows // block_rows][K_iters][block_rows],
@@ -69,14 +59,6 @@ def iter_major_scale_words(t, rows, words_per_row, block_rows, lane_rows):
             (((reps, 1), words_per_row * block_rows), block_rows),
         ),
     )
-
-
-# The same words as 2D rows of SCALE_TDM_COLS for TDM; row block b is row-tile b
-def iter_major_scale_rows(t, rows, K_iters, block_rows):
-    src = fx.get_iter(t)
-    ptr = fx.recast_iter(fx.PointerType.get(fx.Int32.ir_type, src.memspace, 4), src)
-    tdm_rows = rows // block_rows * (K_iters * block_rows // SCALE_TDM_COLS)
-    return fx.make_view(ptr, fx.make_layout((tdm_rows, SCALE_TDM_COLS), (SCALE_TDM_COLS, 1)))
 
 
 @flyc.kernel
@@ -114,8 +96,6 @@ def gemm_kernel(
     l16, khalf = lane % 16, lane // 16
     wm, wn = wave % 2, wave // 2
 
-    sA_rows = iter_major_scale_rows(A_s, M, K_iters, BLOCK_M)
-    sB_rows = iter_major_scale_rows(B_s, N, K_iters, BLOCK_N)
     k_words = K // 8
     A_words = as_words(A, M, k_words)
     B_words = as_words(B, N, k_words)
@@ -146,21 +126,10 @@ def gemm_kernel(
         lds_B.ptr, fx.make_layout(((BLOCK_N, 16), NUM_STAGES), ((16, 1), BLOCK_N * 16))
     )
 
-    # all of the block's scales, loaded once
-    sc_rows_A = K_iters * BLOCK_M // SCALE_TDM_COLS
-    sc_rows_B = K_iters * BLOCK_N // SCALE_TDM_COLS
-    lds_As = smem.allocate(fx.Array[fx.Int32, K_iters * BLOCK_M]).peek()
-    lds_Bs = smem.allocate(fx.Array[fx.Int32, K_iters * BLOCK_N]).peek()
-    box_As = fx.make_layout((sc_rows_A, SCALE_TDM_COLS), (SCALE_TDM_COLS, 1))
-    sAs = fx.make_view(
-        lds_As.ptr,
-        fx.make_layout(((sc_rows_A, SCALE_TDM_COLS), 1), ((SCALE_TDM_COLS, 1), K_iters * BLOCK_M)),
-    )
-    box_Bs = fx.make_layout((sc_rows_B, SCALE_TDM_COLS), (SCALE_TDM_COLS, 1))
-    sBs = fx.make_view(
-        lds_Bs.ptr,
-        fx.make_layout(((sc_rows_B, SCALE_TDM_COLS), 1), ((SCALE_TDM_COLS, 1), K_iters * BLOCK_N)),
-    )
+    num_groups = (K_iters + SCALE_GROUP - 1) // SCALE_GROUP
+    tail_tiles = K_iters - (num_groups - 1) * SCALE_GROUP
+    lds_As = smem.allocate(fx.Array[fx.Int32, SCALE_STAGES * SCALE_GROUP * BLOCK_M]).peek()
+    lds_Bs = smem.allocate(fx.Array[fx.Int32, SCALE_STAGES * SCALE_GROUP * BLOCK_N]).peek()
 
     # C is staged from LDS offset 0 after the K loop
     if smem.allocated_bytes < c_stage_bytes:
@@ -169,8 +138,8 @@ def gemm_kernel(
 
     sA_base_ptr = fx.get_iter(sA)
     sB_base_ptr = fx.get_iter(sB)
-    sAs_base_ptr = fx.get_iter(sAs)
-    sBs_base_ptr = fx.get_iter(sBs)
+    sAs_base_ptr = lds_As.ptr
+    sBs_base_ptr = lds_Bs.ptr
 
     # K-loop TDM atoms over this wave's half tile; later K tiles are reached with imm_offset
     tdm_wave = wave % TDM_WAVES
@@ -208,29 +177,54 @@ def gemm_kernel(
     blk_cB1w = fx.zipped_divide(cB1w, (BLOCK_N, 16))[None, (bid_n, None)]
     tBsB1w, tBgB1w = fx.rocdl.cdna5.tdm_partition(tdm_B1w, 0, fx.make_layout(1, 1), sB, blk_cB1w)
 
+    # scale group g of a row block is contiguous: 1-D TDM, bumped to group g with imm_offset
+    def scale_ptr(t):
+        src = fx.get_iter(t)
+        return fx.recast_iter(fx.PointerType.get(fx.Int32.ir_type, src.memspace, 4), src)
+
+    sA_blk = fx.add_offset(scale_ptr(A_s), bid_m * K_iters * BLOCK_M)
+    sB_blk = fx.add_offset(scale_ptr(B_s), bid_n * K_iters * BLOCK_N)
+
+    def scale_box(tiles, block_rows):
+        return fx.make_layout(tiles * block_rows, 1)
+
+    # prologue: scale groups 0 and 1, half per wave
     sc_wave = wave % PRO_SCALE_WAVES
-    tdm_As, cAs = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorLoad(),
-        sA_rows,
-        box_As,
-        (sc_rows_A, SCALE_TDM_COLS),
-        num_warps=PRO_SCALE_WAVES,
+    pro_tiles = min(SCALE_STAGES * SCALE_GROUP, K_iters)
+    pro_half_A = pro_tiles * BLOCK_M // PRO_SCALE_WAVES
+    pro_half_B = pro_tiles * BLOCK_N // PRO_SCALE_WAVES
+    gAs_pro = fx.make_view(
+        fx.add_offset(sA_blk, sc_wave * pro_half_A), fx.make_layout(pro_half_A, 1)
     )
-    blk_cAs = fx.zipped_divide(cAs, (sc_rows_A, SCALE_TDM_COLS))[None, (None, 0)]
-    tAssAs, tAsgAs = fx.rocdl.cdna5.tdm_partition(
-        tdm_As, sc_wave, fx.make_layout(PRO_SCALE_WAVES, 1), sAs, blk_cAs
+    gBs_pro = fx.make_view(
+        fx.add_offset(sB_blk, sc_wave * pro_half_B), fx.make_layout(pro_half_B, 1)
+    )
+    tdm_As_pro = fx.rocdl.make_tdm_atom(gAs_pro, [None], num_warps=1)
+    tdm_Bs_pro = fx.rocdl.make_tdm_atom(gBs_pro, [None], num_warps=1)
+    lAs_pro = fx.make_view(
+        fx.add_offset(sAs_base_ptr, sc_wave * pro_half_A), fx.make_layout(pro_half_A, 1)
+    )
+    lBs_pro = fx.make_view(
+        fx.add_offset(sBs_base_ptr, sc_wave * pro_half_B), fx.make_layout(pro_half_B, 1)
     )
 
-    tdm_Bs, cBs = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorLoad(),
-        sB_rows,
-        box_Bs,
-        (sc_rows_B, SCALE_TDM_COLS),
-        num_warps=PRO_SCALE_WAVES,
+    gAs_grp = fx.make_view(sA_blk, scale_box(SCALE_GROUP, BLOCK_M))
+    gBs_grp = fx.make_view(sB_blk, scale_box(SCALE_GROUP, BLOCK_N))
+    tdm_As_grp = fx.rocdl.make_tdm_atom(gAs_grp, [None], num_warps=1)
+    tdm_Bs_grp = fx.rocdl.make_tdm_atom(gBs_grp, [None], num_warps=1)
+    gAs_tail = fx.make_view(sA_blk, scale_box(tail_tiles, BLOCK_M))
+    gBs_tail = fx.make_view(sB_blk, scale_box(tail_tiles, BLOCK_N))
+    tdm_As_tail = fx.rocdl.make_tdm_atom(gAs_tail, [None], num_warps=1)
+    tdm_Bs_tail = fx.rocdl.make_tdm_atom(gBs_tail, [None], num_warps=1)
+
+    # whole tiles, for K-loop iterations that also load a scale group
+    gA_full = fx.make_view(fx.add_offset(fx.get_iter(A_words), bid_m * BLOCK_M * k_words), box_A)
+    gB_full = fx.make_view(fx.add_offset(fx.get_iter(B_words), bid_n * BLOCK_N * k_words), box_B)
+    tdm_A_full = fx.rocdl.make_tdm_atom(
+        gA_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
     )
-    blk_cBs = fx.zipped_divide(cBs, (sc_rows_B, SCALE_TDM_COLS))[None, (None, 0)]
-    tBssBs, tBsgBs = fx.rocdl.cdna5.tdm_partition(
-        tdm_Bs, sc_wave, fx.make_layout(PRO_SCALE_WAVES, 1), sBs, blk_cBs
+    tdm_B_full = fx.rocdl.make_tdm_atom(
+        gB_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
     )
 
     # C store: each wave writes C_WAVE_ROWS rows of each half
@@ -283,15 +277,57 @@ def gemm_kernel(
                 else:
                     fx.rocdl.s_wait_tensorcnt(counts[2])
 
-    def issue_tdm(j):
+    # With scale_group g the group's waves load the A tile, A scale group g, the B tile and
+    # B scale group g, still one TDM op per wave; the scale op shares tile j's wait slot
+    def issue_tdm(j, scale_group=None):
         page = j % NUM_STAGES
         group = j % 2
         k_off = fx.Int64(j * BLOCK_K // 2)
-        if wave // TDM_GROUP_WAVES == group:
-            if wave % TDM_GROUP_WAVES < TDM_WAVES:
-                fx.copy(tdm_A, gA_half, lds_half(sA_base_ptr, page), imm_offset=k_off)
-            else:
-                fx.copy(tdm_B, gB_half, lds_half(sB_base_ptr, page), imm_offset=k_off)
+        if scale_group is None:
+            if wave // TDM_GROUP_WAVES == group:
+                if wave % TDM_GROUP_WAVES < TDM_WAVES:
+                    fx.copy(tdm_A, gA_half, lds_half(sA_base_ptr, page), imm_offset=k_off)
+                else:
+                    fx.copy(tdm_B, gB_half, lds_half(sB_base_ptr, page), imm_offset=k_off)
+        else:
+            g = scale_group
+            spage = g % SCALE_STAGES
+            tail = g == num_groups - 1 and tail_tiles < SCALE_GROUP
+            atom_As, atom_Bs = (tdm_As_tail, tdm_Bs_tail) if tail else (tdm_As_grp, tdm_Bs_grp)
+            g_As, g_Bs = (gAs_tail, gBs_tail) if tail else (gAs_grp, gBs_grp)
+            tiles = tail_tiles if tail else SCALE_GROUP
+            l_As = fx.make_view(
+                fx.add_offset(sAs_base_ptr, spage * SCALE_GROUP * BLOCK_M),
+                scale_box(tiles, BLOCK_M),
+            )
+            l_Bs = fx.make_view(
+                fx.add_offset(sBs_base_ptr, spage * SCALE_GROUP * BLOCK_N),
+                scale_box(tiles, BLOCK_N),
+            )
+            s_offA = fx.Int64(g * SCALE_GROUP * BLOCK_M * 4)
+            s_offB = fx.Int64(g * SCALE_GROUP * BLOCK_N * 4)
+            if wave // TDM_GROUP_WAVES == group:
+                gw = wave % TDM_GROUP_WAVES
+                if gw < 2:
+                    if gw == 0:
+                        fx.copy(
+                            tdm_A_full,
+                            gA_full,
+                            fx.make_view(fx.add_offset(sA_base_ptr, page * BLOCK_M * 16), box_A),
+                            imm_offset=k_off,
+                        )
+                    else:
+                        fx.copy(atom_As, g_As, l_As, imm_offset=s_offA)
+                else:
+                    if gw == 2:
+                        fx.copy(
+                            tdm_B_full,
+                            gB_full,
+                            fx.make_view(fx.add_offset(sB_base_ptr, page * BLOCK_N * 16), box_B),
+                            imm_offset=k_off,
+                        )
+                    else:
+                        fx.copy(atom_Bs, g_Bs, l_Bs, imm_offset=s_offB)
         for c in ((0, 1) if group == 0 else (2,)):
             tdm_issued[c].append(j)
 
@@ -310,9 +346,9 @@ def gemm_kernel(
                         fx.copy(tdm_B1w, tBgB1w[None, 1], tBsB1w[None, 1])
         else:
             if wave < 4 + PRO_SCALE_WAVES:
-                fx.copy(tdm_As, tAsgAs[None, bid_m], tAssAs[None, 0])
+                fx.copy(tdm_As_pro, gAs_pro, lAs_pro)
             else:
-                fx.copy(tdm_Bs, tBsgBs[None, bid_n], tBssBs[None, 0])
+                fx.copy(tdm_Bs_pro, gBs_pro, lBs_pro)
 
     def lds_to_regs(k):
         page, r = k % NUM_STAGES, k % 2
@@ -340,7 +376,7 @@ def gemm_kernel(
                     fx.add_offset(fx.get_iter(frag_B[r]), 4 * h), fx.make_layout((4, 4), (1, 8))
                 ),
             )
-        s_off = k
+        s_off = (k // SCALE_GROUP) % SCALE_STAGES * SCALE_GROUP + k % SCALE_GROUP
         src_sA = fx.make_view(
             fx.add_offset(sAs_base_ptr, s_off * BLOCK_M + as_lds_base),
             fx.make_layout((4, 2), (1, 4)),
@@ -399,7 +435,12 @@ def gemm_kernel(
             if k == 0 and NUM_STAGES - 1 < K_iters:
                 issue_tdm(NUM_STAGES - 1)
             if k + NUM_STAGES < K_iters:
-                issue_tdm(k + NUM_STAGES)
+                # scale group g >= SCALE_STAGES: issued at k = SCALE_GROUP * (g - 1)
+                g_next = k // SCALE_GROUP + 1
+                if k % SCALE_GROUP == 0 and SCALE_STAGES <= g_next < num_groups:
+                    issue_tdm(k + NUM_STAGES, scale_group=g_next)
+                else:
+                    issue_tdm(k + NUM_STAGES)
             lds_to_regs(k + 1)
             gemm_step(k)
             hot_loop_scheduler()
@@ -552,9 +593,9 @@ def check_mxfp4_shape(m, n, k):
         raise FlyDSLUnsupportedError(
             f"FlyDSL MXFP4 needs M, N multiples of {BLOCK_M}, got M={m}, N={n}"
         )
-    if k % BLOCK_K or k < 2 * BLOCK_K or k > MAX_K:
+    if k % BLOCK_K or k < 2 * BLOCK_K:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP4 needs K a multiple of {BLOCK_K} in [{2 * BLOCK_K}, {MAX_K}], got K={k}"
+            f"FlyDSL MXFP4 needs K a multiple of {BLOCK_K}, at least {2 * BLOCK_K}, got K={k}"
         )
 
 
@@ -573,7 +614,7 @@ def mxfp4_matmul(
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
-            f"FlyDSL MXFP4 expects rank-2 a, b, D; got "
+            "FlyDSL MXFP4 expects rank-2 a, b, D; got "
             f"{tuple(a.shape)}, {tuple(b.shape)}, {tuple(D.shape)}"
         )
     m, k2 = a.shape
@@ -612,7 +653,6 @@ __all__ = [
     "BLOCK_M",
     "BLOCK_N",
     "BLOCK_K",
-    "MAX_K",
     "MXFP4_BLOCK_SIZE",
     "check_mxfp4_shape",
     "mxfp4_matmul",
