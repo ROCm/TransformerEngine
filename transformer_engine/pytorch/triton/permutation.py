@@ -34,9 +34,9 @@ if IS_HIP_EXTENSION:
 
 
 def _use_token_blocks() -> bool:
-    """Whether to use the kernels over blocks of tokens, which gfx1250 needs for a correct
-    row_id_map."""
-    return IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5)
+    """Whether to make the row_id_map with the kernels over blocks of tokens, which are faster on
+    AMD GPUs and avoid a Triton 3.8 miscompile on gfx1250."""
+    return IS_HIP_EXTENSION
 
 
 def _token_block(num_experts: int):
@@ -320,8 +320,14 @@ def unpermute_with_mask_map(
         )
     else:
         unpermuted_probs = None
-    # A kernel of its own unpermutes the probs, which would otherwise hold up the first hidden blocks.
-    split_probs = permuted_probs is not None and num_tokens > 0 and _use_token_blocks()
+    # On gfx1250 a kernel of its own unpermutes the probs, which would otherwise hold up the first
+    # hidden blocks.
+    split_probs = (
+        permuted_probs is not None
+        and num_tokens > 0
+        and IS_HIP_EXTENSION
+        and get_device_compute_capability() == (12, 5)
+    )
     # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _unpermute_kernel[grid](

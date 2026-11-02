@@ -204,7 +204,7 @@ def _row_id_map_pass_3_kernel(
     )
 
 
-# The row_id_map from token-major passes over the routing map, used on gfx1250: block counts per
+# The row_id_map from token-major passes over the routing map, used on ROCm: block counts per
 # expert, their prefix sums, then each block's rows. Triton 3.8 on gfx1250 miscompiles multi-warp
 # kernels that both scan and reduce a block, as _row_id_map_pass_1_kernel does, so none of these
 # does both.
