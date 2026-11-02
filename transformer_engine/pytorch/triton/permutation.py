@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ from typing import Union
 
 import torch
 import triton
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_1_kernel,
@@ -19,6 +22,69 @@ from transformer_engine.common.triton.permutation import (
     _make_chunk_sort_map_kernel,
     _sort_chunks_by_map_kernel,
 )
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.common.triton.permutation import (
+        _row_id_map_block_counts_kernel,
+        _row_id_map_block_scan_kernel,
+        _row_id_map_block_rows_kernel,
+        _unpermute_probs_kernel,
+    )
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+
+def _use_token_blocks() -> bool:
+    """Whether to use the kernels over blocks of tokens, which gfx1250 needs for a correct
+    row_id_map."""
+    return IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5)
+
+
+def _token_block(num_experts: int):
+    """The tokens and experts of a block of the kernels over blocks of tokens."""
+    block_e = triton.next_power_of_2(num_experts)
+    # Blocks of more than 8192 routing map entries spill.
+    return max(1, min(16, 8192 // block_e)), block_e
+
+
+def _make_row_id_map_token_major(
+    routing_map: torch.Tensor, row_id_map: torch.Tensor, num_tokens: int, num_experts: int
+):
+    """make_row_id_map from coalesced passes over blocks of tokens, without sorting."""
+    block_t, block_e = _token_block(num_experts)
+    num_blocks = triton.cdiv(num_tokens, block_t)
+    block_counts = torch.empty((num_experts, num_blocks), dtype=torch.int32, device="cuda")
+    strides = (
+        routing_map.stride(0),
+        routing_map.stride(1),
+        row_id_map.stride(0),
+        row_id_map.stride(1),
+    )
+    _row_id_map_block_counts_kernel[(num_blocks,)](
+        routing_map,
+        block_counts,
+        row_id_map,
+        num_tokens,
+        num_blocks,
+        *strides,
+        num_experts,
+        block_t,
+        block_e,
+    )
+    _row_id_map_block_scan_kernel[(num_experts,)](
+        block_counts, num_blocks, triton.next_power_of_2(num_blocks)
+    )
+    _row_id_map_block_rows_kernel[(num_blocks,)](
+        routing_map,
+        block_counts,
+        row_id_map,
+        num_tokens,
+        num_blocks,
+        *strides,
+        num_experts,
+        block_t,
+        block_e,
+    )
+    return row_id_map
 
 
 def make_row_id_map(
@@ -50,6 +116,10 @@ def make_row_id_map(
         to the first n_routed row indices above.
     """
     row_id_map = torch.empty((num_tokens, num_experts * 2 + 1), dtype=torch.int32, device="cuda")
+    if _use_token_blocks():
+        if num_tokens == 0:
+            return row_id_map
+        return _make_row_id_map_token_major(routing_map, row_id_map, num_tokens, num_experts)
     block_size = 1024
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
     workspace_tensor = torch.empty(grid, dtype=torch.int32, device="cuda")
@@ -250,6 +320,8 @@ def unpermute_with_mask_map(
         )
     else:
         unpermuted_probs = None
+    # A kernel of its own unpermutes the probs, which would otherwise hold up the first hidden blocks.
+    split_probs = permuted_probs is not None and num_tokens > 0 and _use_token_blocks()
     # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _unpermute_kernel[grid](
@@ -279,9 +351,27 @@ def unpermute_with_mask_map(
         hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         WITH_MERGING_PROBS=merging_probs is not None,
-        PERMUTE_PROBS=permuted_probs is not None,
+        PERMUTE_PROBS=permuted_probs is not None and not split_probs,
         FUSION_UNPAD=pad_offsets is not None,
     )
+    if split_probs:
+        block_t, block_e = _token_block(num_experts)
+        _unpermute_probs_kernel[(triton.cdiv(num_tokens, block_t),)](
+            row_id_map,
+            permuted_probs,
+            pad_offsets,
+            unpermuted_probs,
+            num_tokens,
+            row_id_map.stride(0),
+            row_id_map.stride(1),
+            permuted_probs.stride(0),
+            unpermuted_probs.stride(0),
+            unpermuted_probs.stride(1),
+            num_experts,
+            FUSION_UNPAD=pad_offsets is not None,
+            BLOCK_T=block_t,
+            BLOCK_E=block_e,
+        )
     return output, unpermuted_probs
 
 
