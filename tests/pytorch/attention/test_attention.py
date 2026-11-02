@@ -4290,26 +4290,37 @@ def _ck_smallseq_ran(log):
     return "ck small-seq, BSHD" in log or "flow: ck-smallseq" in log
 
 
+def _ck_smallseq_configs():
+    """Layout, mask and window combinations, each with whether the CK small-seq kernels run it.
+    They take Q, K and V as separate tensors and apply no causal mask or sliding window; BSHD
+    takes no mask and THD a padding mask."""
+    layouts = ("bshd_bshd_bshd", "bs3hd", "bshd_bs2hd", "thd_thd_thd", "t3hd", "thd_t2hd")
+    for qkv_layout in layouts:
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        if qkv_format == "thd":
+            masks, supported_mask = ("padding", "padding_causal"), "padding"
+        else:
+            masks, supported_mask = ("no_mask", "padding", "causal", "padding_causal"), "no_mask"
+        for attn_mask_type in masks:
+            for swa in (False, True):
+                smallseq = (
+                    qkv_layout == "_".join([qkv_format] * 3)
+                    and attn_mask_type == supported_mask
+                    and not swa
+                )
+                yield qkv_layout, attn_mask_type, swa, smallseq
+
+
 @pytest.mark.skipif(
     not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
     reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
 )
-@pytest.mark.parametrize(
-    "qkv_layout, attn_mask_type, swa, smallseq",
-    [
-        ("bshd_bshd_bshd", "no_mask", False, True),
-        ("thd_thd_thd", "padding", False, True),
-        ("bshd_bshd_bshd", "padding", False, False),
-        ("thd_thd_thd", "padding_causal", False, False),
-        ("bs3hd", "no_mask", False, False),
-        ("thd_t2hd", "padding", False, False),
-        ("bshd_bshd_bshd", "no_mask", True, False),
-        ("thd_thd_thd", "padding", True, False),
-    ],
-)
+@pytest.mark.parametrize("qkv_layout, attn_mask_type, swa, smallseq", list(_ck_smallseq_configs()))
 def test_dpa_ck_smallseq(qkv_layout, attn_mask_type, swa, smallseq, monkeypatch, capfd):
     """Fused attention with the CK small-seq kernels enabled. Configs they do not support, like
     padded BSHD, causal masks, packed layouts or sliding windows, run the regular CK kernels."""
+    if attn_mask_type == "padding" and swa and qkv_layout.startswith("bs"):
+        pytest.skip("FlashAttention and the unfused backend disagree on padded BSHD with a window.")
     model_configs = {"smallseq": ModelConfig(2, 16, 16, 128, attn_mask_type=attn_mask_type)}
     _, _, fused_attn_backends = get_available_attention_backends(
         model_configs["smallseq"], qkv_dtype=torch.bfloat16, qkv_layout=qkv_layout
