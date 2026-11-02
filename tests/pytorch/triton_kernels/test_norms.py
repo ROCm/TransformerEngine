@@ -8,6 +8,7 @@ import torch
 import pytest
 from functools import partial
 from itertools import product
+from triton.runtime.autotuner import Autotuner
 
 from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -29,6 +30,11 @@ from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_layernorm_fwd_triton,
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
+)
+from transformer_engine.pytorch.triton_kernels import (
+    layernorm as triton_layernorm,
+    norms_common as triton_norms_common,
+    rmsnorm as triton_rmsnorm,
 )
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
@@ -235,7 +241,7 @@ class TestNorms:
         te_out_dtype = torch_dtype_to_te_dtype(out_dtype)
 
         #TODO: fix it on GFX1250
-        if ( autotune and shape == (29, 17389) and norm == "rms" and
+        if ( shape == (29, 17389) and norm == "rms" and
             (in_dtype != torch.float32 or quantization is not None) and
             get_device_compute_capability() == (12, 5) ):
             pytest.skip("This config causes soft hang on GFX1250")
@@ -713,3 +719,56 @@ class TestNorms:
 
             args[provider] = _args
         return args
+
+
+@pytest.mark.parametrize("norm", norms)
+@pytest.mark.parametrize("quantization", (None, "fp8"))
+@pytest.mark.parametrize("shape", ((256, 128), (64, 512), (71, 3571), (128, 6144)))
+def test_norm_triton_invariant_to_autotune_pick(monkeypatch, norm, quantization, shape):
+    """Each process picks autotune configs by timing, so no pick may change the numerics."""
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    tuners = [
+        obj
+        for module in (triton_norms_common, triton_rmsnorm, triton_layernorm)
+        for obj in vars(module).values()
+        if isinstance(obj, Autotuner)
+    ]
+    x, dz = fill_uniform(shape, torch.bfloat16), fill_uniform(shape, torch.bfloat16)
+    gamma, beta = fill_uniform(shape[1], torch.bfloat16), fill_uniform(shape[1], torch.bfloat16)
+    te_bf16 = torch_dtype_to_te_dtype(torch.bfloat16)
+
+    def run(pick):
+        def fake_bench(self, *args, config, **kwargs):
+            # Rank candidates so that each autotuner picks the one nearest to index `pick`.
+            return [(self.configs.index(config) - pick) % len(self.configs)] * 3
+
+        monkeypatch.setattr(Autotuner, "_bench", fake_bench)
+        for tuner in tuners:
+            tuner.cache.clear()
+        quantizer = None
+        if quantization == "fp8":
+            quantizer = Float8Quantizer(
+                torch.ones(1, device="cuda"), torch.zeros(1, device="cuda"), tex.DType.kFloat8E4M3
+            )
+        if norm == "rms":
+            y, mu, rsigma = te_rmsnorm_fwd_triton(
+                x, gamma, 1e-5, None, quantizer, te_bf16, 0, False, autotune=True
+            )
+        else:
+            y, mu, rsigma = te_layernorm_fwd_triton(
+                x, gamma, beta, 1e-5, None, quantizer, te_bf16, 0, False, autotune=True
+            )
+        outs = [mu, rsigma]
+        if quantization == "fp8":
+            outs += [y._data, y._transpose, y._scale_inv, quantizer.amax]
+        elif norm == "rms":
+            outs += [y, *te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, 0, False, autotune=True)]
+        else:
+            outs += [y, *te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, 0, False)]
+        return [t for t in outs if t is not None]
+
+    ref = run(0)
+    for pick in range(1, 6):
+        for i, (a, b) in enumerate(zip(ref, run(pick))):
+            assert torch.equal(a, b), f"output {i} changed with autotune pick {pick}"

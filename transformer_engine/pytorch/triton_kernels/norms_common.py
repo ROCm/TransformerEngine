@@ -20,12 +20,14 @@ from ..quantized_tensor import Quantizer, QuantizedTensor
 from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms, use_cuda_graph_autotune
 from .common import get_fp8_max
 from .rmsnorm import (
-    _rmsnorm_fwd_triton,
     _rmsnorm_fwd_triton_impl,
-    _rmsnorm_bwd_triton,
     _rmsnorm_bwd_triton_impl,
-    _rmsnorm_bwd_dg_reduce_triton,
     _rmsnorm_bwd_dg_reduce_triton_impl,
+    _rmsnorm_fwd_num_warps,
+    _rmsnorm_bwd_num_warps,
+    _DG_REDUCE_BLOCK_SIZE_M,
+    _DG_REDUCE_BLOCK_SIZE_N,
+    _DG_REDUCE_NUM_WARPS,
 )
 
 # --------------------------------------------------------------------------- #
@@ -96,33 +98,17 @@ _fp8_transpose_kernels = {
     False: _fp8_transpose_2d_impl,
 }
 from .layernorm import (
-    _layernorm_fwd_triton,
     _layernorm_fwd_triton_impl,
+    _layernorm_fwd_num_warps,
     _layernorm_fwd_reduce_triton,
     _layernorm_bwd_dwdb_triton,
     _layernorm_bwd_dwdb_triton_v2,
     _layernorm_bwd_dx_fused_triton,
 )
 
-_norm_kernels={
-    "rms":{
-        True: _rmsnorm_fwd_triton,
-        False: _rmsnorm_fwd_triton_impl,
-    },
-    "layer":{
-        True: _layernorm_fwd_triton,
-        False: _layernorm_fwd_triton_impl,
-    }
-}
-
-_rmsnorm_bwd_kernels = {
-    True: _rmsnorm_bwd_triton,
-    False: _rmsnorm_bwd_triton_impl,
-}
-
-_rmsnorm_bwd_dg_reduce_kernels = {
-    True: _rmsnorm_bwd_dg_reduce_triton,
-    False: _rmsnorm_bwd_dg_reduce_triton_impl,
+_norm_kernels = {
+    "rms": _rmsnorm_fwd_triton_impl,
+    "layer": _layernorm_fwd_triton_impl,
 }
 
 
@@ -323,7 +309,7 @@ def _te_norm_fwd_triton(
                 out_transpose_stride = out._transpose.stride(0)
 
     grid_fwd = lambda meta: (NUM_PRGMS,)
-    kernel_func = _norm_kernels[kernel][autotune]
+    kernel_func = _norm_kernels[kernel]
     input_row_stride = input_tensor.stride(0)
     output_row_stride=out_ptr.stride(0)
     kwargs = dict(
@@ -352,6 +338,8 @@ def _te_norm_fwd_triton(
         kwargs["out_transpose_ptr"]=out_transpose_ptr
         kwargs["out_transpose_stride"]=out_transpose_stride
         kwargs["MAKE_TRANSPOSE"]=MAKE_TRANSPOSE
+        kwargs["num_warps"] = _layernorm_fwd_num_warps(H)
+        kwargs["num_stages"] = 1
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
@@ -367,6 +355,7 @@ def _te_norm_fwd_triton(
         kwargs["HOIST_GAMMA"] = HOIST_GAMMA_FWD
         max_off = max(input_row_stride, output_row_stride) * N + H
         kwargs["NEEDS_I64_OFFSETS"] = max_off >= _I32_OFFSET_LIMIT
+        kwargs["num_warps"] = _rmsnorm_fwd_num_warps(H)
 
     kernel_func[grid_fwd](**kwargs)
 
@@ -420,6 +409,7 @@ def _te_norm_fwd_triton(
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
 def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, autotune: bool = True):
+    del autotune  # Kept for API compatibility; the bwd launch configs are fixed by width.
     # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
@@ -460,7 +450,6 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
     grid_bwd = lambda meta: (NUM_PRGMS, )
     # See forward: gate i64 offsets on actual overflow to stay on the fast i32 path.
     needs_i64_offsets_bwd = max(x_.stride(0), dz_.stride(0), dx.stride(0)) * M + N >= _I32_OFFSET_LIMIT
-    bwd_kernel = _rmsnorm_bwd_kernels[autotune]
     bwd_kwargs = dict(
         n_rows=M, n_cols=N,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
@@ -472,29 +461,21 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
         DG_ALIGNED_16=dg_aligned_16,
         ROWS_PER_PID=ROWS_PER_PID_BWD,
         NEEDS_I64_OFFSETS=needs_i64_offsets_bwd,
+        num_warps=_rmsnorm_bwd_num_warps(N),
     )
-    if not autotune:
-        bwd_kwargs["num_warps"] = 8
-    bwd_kernel[grid_bwd](
+    _rmsnorm_bwd_triton_impl[grid_bwd](
         dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
         x_.stride(0), dz_.stride(0),
         **bwd_kwargs,
     )
 
     if need_reduction:
-        reduce_kernel = _rmsnorm_bwd_dg_reduce_kernels[autotune]
-        if autotune:
-            grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
-            reduce_kernel[grid_reduce](
-                dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
-            )
-        else:
-            BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 64
-            grid_reduce = (triton.cdiv(N, BLOCK_SIZE_N),)
-            reduce_kernel[grid_reduce](
-                dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
-                BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
-            )
+        grid_reduce = (triton.cdiv(N, _DG_REDUCE_BLOCK_SIZE_N),)
+        _rmsnorm_bwd_dg_reduce_triton_impl[grid_reduce](
+            dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
+            BLOCK_SIZE_M=_DG_REDUCE_BLOCK_SIZE_M, BLOCK_SIZE_N=_DG_REDUCE_BLOCK_SIZE_N,
+            num_warps=_DG_REDUCE_NUM_WARPS,
+        )
 
     return dx, dgamma
 
