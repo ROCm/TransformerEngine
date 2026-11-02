@@ -240,14 +240,14 @@ __global__ void fmha_fwd_mfma_16x16_kernel(
             }
 
             // Log-sum-exp per row (matches FlashAttention-style LSE; pre-dropout)
-            float lse_row = (row_sum > 0.0f) ? (row_max + logf(row_sum)) : -INFINITY;
+            float lse_row = (row_sum != 0.0f) ? (row_max + logf(row_sum)) : -INFINITY;
             if(lane_col == 0 && q_row < actual_q)
             {
                 softmax_lse[((size_t)(q_offset + q_row) * head_num + head_idx)] = lse_row;
             }
 
             // Normalize and apply dropout; a row without keys keeps zero weights
-            float inv_sum = (row_sum > 0.0f) ? __builtin_amdgcn_rcpf(row_sum) : 0.0f;
+            float inv_sum = (row_sum != 0.0f) ? __builtin_amdgcn_rcpf(row_sum) : 0.0f;
             #pragma unroll
             for(int kvt = 0; kvt < kv_tiles; kvt++)
             {
