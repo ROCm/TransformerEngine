@@ -4,6 +4,7 @@
 
 import math
 import os
+import warnings
 import torch
 import pytest
 from functools import partial
@@ -287,7 +288,9 @@ class TestNorms:
                 hip_fwd_func = rmsnorm_fwd_ref
 
         # run the triton path
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if norm == "rms":
+            fwd_args["triton"]["autotune"] = autotune
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
         if quantization == "mxfp4" and ln_out_mode is not None:
             assert ln_out_triton is fwd_args["triton"]["ln_out"], "Expected the preallocated ln_out to be returned."
 
@@ -339,7 +342,7 @@ class TestNorms:
             triton_bwd_outs = triton_bwd_func(*args["triton"])
             dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
         elif norm == "rms":
-            triton_bwd_outs = triton_bwd_func(*args["triton"], autotune=autotune)
+            triton_bwd_outs = triton_bwd_func(*args["triton"])
             dx_triton, dgamma_triton = triton_bwd_outs
             dbeta_triton = None
 
@@ -411,7 +414,9 @@ class TestNorms:
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
 
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if norm == "rms":
+            fwd_args["triton"]["autotune"] = autotune
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
         if ln_out_triton.dtype != out_dtype:
@@ -757,13 +762,13 @@ def test_norm_triton_invariant_to_autotune_pick(monkeypatch, norm, quantization,
             )
         else:
             y, mu, rsigma = te_layernorm_fwd_triton(
-                x, gamma, beta, 1e-5, None, quantizer, te_bf16, 0, False, autotune=True
+                x, gamma, beta, 1e-5, None, quantizer, te_bf16, 0, False
             )
         outs = [mu, rsigma]
         if quantization == "fp8":
             outs += [y._data, y._transpose, y._scale_inv, quantizer.amax]
         elif norm == "rms":
-            outs += [y, *te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, 0, False, autotune=True)]
+            outs += [y, *te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, 0, False)]
         else:
             outs += [y, *te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, 0, False)]
         return [t for t in outs if t is not None]
@@ -772,3 +777,24 @@ def test_norm_triton_invariant_to_autotune_pick(monkeypatch, norm, quantization,
     for pick in range(1, 6):
         for i, (a, b) in enumerate(zip(ref, run(pick))):
             assert torch.equal(a, b), f"output {i} changed with autotune pick {pick}"
+
+
+def test_norm_triton_autotune_arg_deprecated():
+    """`autotune` warns where it has no effect (LayerNorm fwd, RMSNorm bwd), not on RMSNorm fwd."""
+    x = fill_uniform((64, 512), torch.bfloat16)
+    gamma, beta = fill_uniform(512, torch.bfloat16), fill_uniform(512, torch.bfloat16)
+    te_bf16 = torch_dtype_to_te_dtype(torch.bfloat16)
+    rms_fwd = partial(te_rmsnorm_fwd_triton, x, gamma, 1e-5, None, None, te_bf16, 0, False)
+    _, _, rsigma = rms_fwd()
+    deprecated = (
+        partial(te_layernorm_fwd_triton, x, gamma, beta, 1e-5, None, None, te_bf16, 0, False),
+        partial(te_rmsnorm_bwd_triton, x, x, rsigma, gamma, 0, False),
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*autotune", category=DeprecationWarning)
+        rms_fwd(autotune=True)
+        for call in deprecated:
+            call()
+    for call in deprecated:
+        with pytest.warns(DeprecationWarning, match="autotune"):
+            call(autotune=True)

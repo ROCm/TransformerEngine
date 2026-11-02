@@ -149,6 +149,16 @@ def _rows_per_pid(rows, hidden, num_sms, cap_ladder):
     return rpp
 
 
+def _warn_autotune_deprecated(func_name, autotune):
+    if autotune != "deprecated":
+        warnings.warn(
+            f"The `autotune` argument of {func_name} is deprecated and has no effect. "
+            "It will be removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=3,
+        )
+
+
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
 def te_rmsnorm_fwd_triton(
     input: torch.Tensor,
@@ -186,8 +196,9 @@ def te_layernorm_fwd_triton(
     otype: tex.DType,
     sm_margin: int,
     zero_centered_gamma: bool,
-    autotune: bool = True,
+    autotune="deprecated",
 ):
+    _warn_autotune_deprecated("te_layernorm_fwd_triton", autotune)
     return _te_norm_fwd_triton(
         kernel='layer',
         input_tensor=input,
@@ -199,7 +210,7 @@ def te_layernorm_fwd_triton(
         otype=otype,
         sm_margin=sm_margin,
         zero_centered_gamma=zero_centered_gamma,
-        autotune=autotune,
+        autotune=False,
     )
 
 def _te_norm_fwd_triton(
@@ -408,8 +419,8 @@ def _te_norm_fwd_triton(
 
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
-def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, autotune: bool = True):
-    del autotune  # Kept for API compatibility; the bwd launch configs are fixed by width.
+def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, autotune="deprecated"):
+    _warn_autotune_deprecated("te_rmsnorm_bwd_triton", autotune)
     # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
