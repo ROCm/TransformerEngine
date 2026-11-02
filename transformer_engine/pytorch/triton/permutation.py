@@ -24,7 +24,7 @@ from transformer_engine.common.triton.permutation import (
 )
 
 if IS_HIP_EXTENSION:
-    from transformer_engine.common.triton.permutation import (
+    from transformer_engine.common.triton.rocm_permutation import (
         _row_id_map_block_counts_kernel,
         _row_id_map_block_scan_kernel,
         _row_id_map_block_rows_kernel,
