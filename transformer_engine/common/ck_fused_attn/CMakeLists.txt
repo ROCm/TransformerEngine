@@ -26,15 +26,13 @@ set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
 if(NOT Python_EXECUTABLE)
   find_package(Python COMPONENTS Interpreter QUIET)
   if (NOT Python_EXECUTABLE)
-    #Don't fail the entire build if Python isn't found since it may pass if pre-built AITER is used
-    message(ERROR "Python interpreter not found. Some build steps will be skipped or fail. Please install Python and ensure it is on the PATH.")
+    message(FATAL_ERROR "Python interpreter not found. Please install Python and ensure it is on the PATH.")
   endif()
 endif()
 
 # TE keeps a single QoLA manifest so the whole build shares one AITER commit,
 # one patch set and one checkout.  Each consumer builds only its own module
-# group (see `qola build --group`).  aiter_prebuilt.cmake keys its cache on the
-# manifest-pinned commit, so resolve it here as AITER_SHA.
+# group (see `qola build --group`).
 set(__QOLA_MANIFEST "${TE_QOLA_MANIFEST}")
 set(__QOLA_GROUP "ck_fused_attn")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${__QOLA_MANIFEST}")
@@ -70,7 +68,6 @@ if(NOT EXISTS "${CK_INCLUDE_DIR}")
 endif()
 message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
 
-set(__AITER_CACHE_DIR "")
 set(__AITER_MHA_PATH "")
 set(__QOLA_INCLUDE_DIR "")
 if(NOT "$ENV{NVTE_CK_JIT}" STREQUAL "0")
@@ -82,16 +79,9 @@ endif()
 if(DEFINED ENV{AITER_MHA_PATH})
   message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=$ENV{AITER_MHA_PATH}")
   # use pre-built libraries and includes from a location specified by the user
-  set(__AITER_CACHE_DIR $ENV{AITER_MHA_PATH})
-elseif(NOT __USE_CK_JIT) # CK_JIT always builds from source; skip the prebuilt cache
-  include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
-  get_prebuilt_aiter(__AITER_CACHE_DIR)
-elseif(DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL})
-  message(WARNING "[AITER-BUILD] NVTE_AITER_PREBUILT_BASE_URL is set but will be ignored because CK_JIT is enabled.")
-endif()
-
-if(__AITER_CACHE_DIR STREQUAL "")
-  # If not available or not requested, build from source via QoLA
+  set(__AITER_MHA_PATH "$ENV{AITER_MHA_PATH}/lib")
+  set(__QOLA_INCLUDE_DIR "$ENV{AITER_MHA_PATH}/include")
+else()
   list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
   message(STATUS "[AITER-BUILD] Building AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
   if(__USE_CK_JIT)
@@ -125,7 +115,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
     if(NOT CKJIT_BUILD_RESULT EQUAL 0)
       message(FATAL_ERROR "[AITER-BUILD] CK-JIT build failed.")
     endif()
-    # CK_JIT emits the libs straight into the install dir; nothing to cache.
+    # CK_JIT emits the libs straight into the install dir.
     set(__AITER_MHA_PATH ${AITER_MHA_INSTALL_DIR})
     set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
   else()
@@ -140,21 +130,9 @@ if(__AITER_CACHE_DIR STREQUAL "")
       OUT_INCLUDE_DIR __QOLA_BUILT_INCLUDE_DIR
       OUT_LIB_DIR     __QOLA_BUILT_LIB_DIR)
 
-    # Copy the final .so libs and exported public headers into the aiter
-    # prebuilt cache so downstream consumers see a self-contained tree.
-    get_default_aiter_cache_dir(__AITER_CACHE_DIR)
-    set(__QOLA_CACHE_LIB "${__AITER_CACHE_DIR}/lib")
-    file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
-    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILT_LIB_DIR}/*.so")
-    file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
-    file(COPY "${__QOLA_BUILT_INCLUDE_DIR}" DESTINATION "${__AITER_CACHE_DIR}")
-    set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
-    set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
+    set(__AITER_MHA_PATH "${__QOLA_BUILT_LIB_DIR}")
+    set(__QOLA_INCLUDE_DIR "${__QOLA_BUILT_INCLUDE_DIR}")
   endif()
-else()
-  message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_CACHE_DIR}")
-  set(__AITER_MHA_PATH "${__AITER_CACHE_DIR}/lib")
-  set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
 endif()
 
 set(ck_fused_attn_SOURCES)
@@ -178,8 +156,7 @@ list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DENABLE_CK=1 -DFA_WITH_NATIVE_SPLITKV=1 -DFA_WITH_SINK=1 -Wno-unused-value -Wno-unknown-warning-option)
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
-# (emitted by qola.cli build, or copied from the QoLA build dir above for the
-# source-build path).
+# (emitted by qola.cli build).
 if(NOT EXISTS "${__QOLA_INCLUDE_DIR}/qola_config.h")
   message(FATAL_ERROR "Could not find QoLA public headers at ${__QOLA_INCLUDE_DIR}.")
 endif()

@@ -1763,4 +1763,150 @@ TEST(BlockwiseGEMMBoundaryTest, ScaleReadStaysInsideScaleTensor) {
               "blockwise-oob-probe: clean");
 }
 
+// ---- regression: gfx942 prefetch of operand rows not aligned to 128 B ----------------------
+//
+// K % 128 != 0 and 16-B-offset A/B bases must take the unswizzled prefetch.  The failure is
+// intermittent, so each case runs many GEMMs, alternating two operand sets.
+namespace {
+
+struct UnalignedRowsParams {
+  size_t k;
+  bool a_2d_scaled;
+  size_t a_offset;  // bytes
+  size_t b_offset;  // bytes
+};
+
+constexpr size_t kUnalignedRowsMN = 2048;
+constexpr int kUnalignedRowsRuns = 100;
+
+// Re-points t's rowwise data `offset` bytes into a fresh allocation.
+void move_rowwise_data(Tensor* t, size_t offset, CudaPtr<>* storage) {
+  *storage = cuda_alloc(bytes(t->rowwise_shape(), t->dtype()) + offset);
+  const NVTEBasicTensor data{static_cast<char*>(storage->get()) + offset,
+                             static_cast<NVTEDType>(t->dtype()), t->rowwise_shape()};
+  nvte_set_tensor_param_v2(t->data(), kNVTERowwiseData, &data, sizeof(data));
+}
+
+// Copies src's rowwise data and scales into dst.
+void copy_operand(const Tensor& src, Tensor* dst) {
+  NVTE_CHECK_CUDA(cudaMemcpy(dst->rowwise_dptr(), src.rowwise_dptr(),
+                             bytes(src.rowwise_shape(), src.dtype()), cudaMemcpyDeviceToDevice));
+  NVTE_CHECK_CUDA(cudaMemcpy(dst->rowwise_scale_inv_dptr(), src.rowwise_scale_inv_dptr(),
+                             bytes(src.rowwise_scale_inv_shape(), DType::kFloat32),
+                             cudaMemcpyDeviceToDevice));
+}
+
+void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 9 && prop.minor >= 4)) {
+    GTEST_SKIP() << "Blockwise FP8 GEMM is supported only on gfx942 and gfx950";
+  }
+  unsetenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES");
+
+  const size_t m = kUnalignedRowsMN;
+  const size_t n = kUnalignedRowsMN;
+  const NVTEScalingMode a_mode = p.a_2d_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  auto make_a = [&](const std::string& name) {
+    return make_blockwise_operand(name, {m, p.k}, a_mode, /*force_pow2=*/true,
+                                  /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
+  };
+  auto make_b = [&](const std::string& name) {
+    return make_blockwise_operand(name, {n, p.k}, NVTE_BLOCK_SCALING_1D, /*force_pow2=*/true,
+                                  /*amax_epsilon=*/1e-4f, /*degenerate=*/false, /*src_scale=*/0.0f);
+  };
+
+  // Two operand sets and their references.
+  const dim3 block(16, 16);
+  const dim3 grid(static_cast<unsigned>((n + block.x - 1) / block.x),
+                  static_cast<unsigned>((m + block.y - 1) / block.y));
+  Tensor A[2], B[2], RefD[2];
+  Tensor Product("Product", TShape{n, m}, DType::kFloat32);
+  for (int s = 0; s < 2; ++s) {
+    A[s] = make_a("A" + std::to_string(s));
+    B[s] = make_b("B" + std::to_string(s));
+    RefD[s] = Tensor("RefD" + std::to_string(s), TShape{n, m}, DType::kBFloat16);
+    blockwise_ref_kernel<<<grid, block, 0, 0>>>(
+        static_cast<const uint8_t*>(A[s].rowwise_dptr()),
+        static_cast<const uint8_t*>(B[s].rowwise_dptr()),
+        static_cast<const float*>(A[s].rowwise_scale_inv_dptr()),
+        static_cast<const float*>(B[s].rowwise_scale_inv_dptr()),
+        m, p.k, n, p.a_2d_scaled, /*a_e5m2=*/false, /*b_e5m2=*/false,
+        static_cast<float*>(Product.rowwise_dptr()));
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    blockwise_ref_epilogue<bf16><<<grid, block, 0, 0>>>(
+        static_cast<const float*>(Product.rowwise_dptr()), nullptr, nullptr, nullptr,
+        /*beta=*/0.0f, m, n, static_cast<bf16*>(RefD[s].rowwise_dptr()));
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    RefD[s].to_cpu();
+  }
+
+  // GEMM operands, refilled from one of the two sets before each run.
+  Tensor WorkA = make_a("WorkA");
+  Tensor WorkB = make_b("WorkB");
+  CudaPtr<> a_storage, b_storage;
+  if (p.a_offset != 0) {
+    move_rowwise_data(&WorkA, p.a_offset, &a_storage);
+  }
+  if (p.b_offset != 0) {
+    move_rowwise_data(&WorkB, p.b_offset, &b_storage);
+  }
+
+  Tensor D("D", TShape{n, m}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{static_cast<size_t>(67'108'864)}, DType::kByte);
+  for (int run = 0; run < kUnalignedRowsRuns; ++run) {
+    const int s = run % 2;
+    SCOPED_TRACE("GEMM run " + std::to_string(run + 1) + " on operand set " + std::to_string(s));
+    copy_operand(A[s], &WorkA);
+    copy_operand(B[s], &WorkB);
+    // Finite fill, so an unwritten D fails the comparison.
+    NVTE_CHECK_CUDA(cudaMemset(D.rowwise_dptr(), 0x7B, n * m * sizeof(bf16)));
+    nvte_cublas_gemm(WorkA.data(), WorkB.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                     /*transa=*/true, /*transb=*/false, /*grad=*/false, Workspace.data(),
+                     /*accumulate=*/false, /*use_split_accumulator=*/true,
+                     prop.multiProcessorCount, /*stream=*/0);
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    compareResults("D", D, RefD[s].rowwise_cpu_dptr<bf16>(), /*rowwise=*/true,
+                   /*atol=*/1e-3, /*rtol=*/6e-2);
+    // compareResults does not flag NaN.
+    const bf16* d = D.rowwise_cpu_dptr<bf16>();
+    size_t non_finite = 0;
+    for (size_t i = 0; i < n * m; ++i) {
+      non_finite += std::isfinite(static_cast<float>(d[i])) ? 0 : 1;
+    }
+    EXPECT_EQ(non_finite, 0u);
+    if (::testing::Test::HasFailure()) {
+      break;
+    }
+  }
+}
+
+}  // namespace
+
+class BlockwiseUnalignedRowsGEMMTestSuite
+    : public ::testing::TestWithParam<UnalignedRowsParams> {};
+
+TEST_P(BlockwiseUnalignedRowsGEMMTestSuite, TestFp8Blockwise) {
+  performBlockwiseUnalignedRowsTest(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestBlockwise, BlockwiseUnalignedRowsGEMMTestSuite,
+    ::testing::Values(UnalignedRowsParams{320, false, 0, 0}, UnalignedRowsParams{320, true, 0, 0},
+                      UnalignedRowsParams{256, false, 16, 0}, UnalignedRowsParams{256, false, 0, 16},
+                      UnalignedRowsParams{256, true, 16, 0}, UnalignedRowsParams{256, true, 0, 16}),
+    [](const testing::TestParamInfo<UnalignedRowsParams>& info) {
+      const auto& p = info.param;
+      std::string name = "K" + std::to_string(p.k) + (p.a_2d_scaled ? "x1Dx2D" : "x1Dx1D");
+      if (p.a_offset != 0) {
+        name += "xAoffset" + std::to_string(p.a_offset);
+      }
+      if (p.b_offset != 0) {
+        name += "xBoffset" + std::to_string(p.b_offset);
+      }
+      return name;
+    });
+
 #endif  // __HIP_PLATFORM_AMD__

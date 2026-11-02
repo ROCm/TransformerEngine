@@ -20,7 +20,7 @@ namespace = "te"
 rocm_versions = ["7.14"]
 
 [build]
-architectures = ["gfx950", "gfx942"]
+architectures = ["gfx950", "gfx942", "gfx1250"]
 
 [[modules]]
 name = "libmha_fwd"

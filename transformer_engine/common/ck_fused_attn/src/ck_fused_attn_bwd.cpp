@@ -314,7 +314,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args,
   log_value(log_file, "mask_type", fmha_args.mask_type);
   log_value(log_file, "bias_type", fmha_args.bias_type);
   log_value(log_file, "p_drop", fmha_args.p_drop);
-  log_value(log_file, "p_undrop", fmha_args.p_undrop);
   log_value(log_file, "dropout_seed_ptr",
     std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset))
   );
@@ -536,6 +535,8 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   fmha_args.p_undrop = 1.0 - args.dropout_probability;
   fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
   // gfx1250 deterministic only: number of dq_acc planes; 0 lets aiter pick from the shape.
+  fmha_args.det_split = 0;
+
   fmha_args.det_split = 0;
 
   return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
