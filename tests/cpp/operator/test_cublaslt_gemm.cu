@@ -1513,22 +1513,16 @@ void performBlockwiseUnalignedRowsTest(const UnalignedRowsParams& p) {
   const dim3 grid(static_cast<unsigned>((n + block.x - 1) / block.x),
                   static_cast<unsigned>((m + block.y - 1) / block.y));
   Tensor A[2], B[2], RefD[2];
-  Tensor Product("Product", TShape{n, m}, DType::kFloat32);
   for (int s = 0; s < 2; ++s) {
     A[s] = make_a("A" + std::to_string(s));
     B[s] = make_b("B" + std::to_string(s));
     RefD[s] = Tensor("RefD" + std::to_string(s), TShape{n, m}, DType::kBFloat16);
     blockwise_ref_kernel<<<grid, block, 0, 0>>>(
-        static_cast<const uint8_t*>(A[s].rowwise_dptr()),
-        static_cast<const uint8_t*>(B[s].rowwise_dptr()),
+        static_cast<const fp8e4m3*>(A[s].rowwise_dptr()),
+        static_cast<const fp8e4m3*>(B[s].rowwise_dptr()),
         static_cast<const float*>(A[s].rowwise_scale_inv_dptr()),
         static_cast<const float*>(B[s].rowwise_scale_inv_dptr()),
-        m, p.k, n, p.a_2d_scaled, /*a_e5m2=*/false, /*b_e5m2=*/false,
-        static_cast<float*>(Product.rowwise_dptr()));
-    NVTE_CHECK_CUDA(cudaGetLastError());
-    blockwise_ref_epilogue<bf16><<<grid, block, 0, 0>>>(
-        static_cast<const float*>(Product.rowwise_dptr()), nullptr, nullptr, nullptr,
-        /*beta=*/0.0f, m, n, static_cast<bf16*>(RefD[s].rowwise_dptr()));
+        m, p.k, n, p.a_2d_scaled, static_cast<bf16*>(RefD[s].rowwise_dptr()));
     NVTE_CHECK_CUDA(cudaGetLastError());
     RefD[s].to_cpu();
   }
