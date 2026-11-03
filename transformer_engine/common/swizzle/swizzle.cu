@@ -993,9 +993,8 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
 
 constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
 
-// Unified MX scale pre-swizzle kernel for both row-wise and column-wise.
-// Iterates only over valid (non-padded) elements; the caller must pre-fill
-// the output buffer with identity (127) to handle padding.
+// Unified MX scale pre-swizzle kernel for both row-wise and column-wise. Each thread writes the
+// group of 4 scales of one m, padding included, unless noop is set.
 //
 // kRowwise=true:  input is [orig_M, orig_K] row-major
 // kRowwise=false: input is [orig_K, orig_M] row-major (column-wise scales)
@@ -1003,34 +1002,33 @@ template <bool kRowwise>
 __global__ void __launch_bounds__(256)
     swizzle_scaling_mx_kernel(const uint8_t* __restrict__ input,
                               uint8_t* __restrict__ output,
-                              const int padded_M,
+                              const int padded_M, const int groups,
                               const int input_stride,
-                              const int orig_M, const int orig_K) {
+                              const int orig_M, const int orig_K, const float* noop) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const int total = orig_M * orig_K;
-  if (idx >= total) return;
+  if (idx >= groups * padded_M) return;
 
-  const int m = idx / orig_K;
-  const int k = idx % orig_K;
-
-  uint8_t val;
-  if constexpr (kRowwise) {
-    val = input[m * input_stride + k];
-  } else {
-    val = input[k * input_stride + m];
+  const int group = idx / padded_M;
+  const int m = idx % padded_M;
+  uint32_t packed = 0;
+#pragma unroll
+  for (int within = 0; within < MX_PRESWIZZLE_GROUP_SIZE; within++) {
+    const int k = group * MX_PRESWIZZLE_GROUP_SIZE + within;
+    uint8_t val = 127;
+    if (m < orig_M && k < orig_K) {
+      val = kRowwise ? input[m * input_stride + k] : input[k * input_stride + m];
+    }
+    packed |= static_cast<uint32_t>(val) << (8 * within);
   }
-
-  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
-  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
-  const int dst = group * (padded_M * MX_PRESWIZZLE_GROUP_SIZE)
-                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
-
-  output[dst] = val;
+  // dst = group * (padded_M * 4) + m * 4 + within
+  reinterpret_cast<uint32_t*>(output)[idx] = packed;
 }
 
 }  // namespace
 
-void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_t stream) {
+void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_t stream,
+                                const float* noop) {
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING,
@@ -1091,38 +1089,35 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
                output->columnwise_scale_inv.shape, ".");
   }
 
-  const int total = m * k;
+  const int groups = k / MX_PRESWIZZLE_GROUP_SIZE;
+  const int words = m * groups;
+  if (words == 0) {
+    return;
+  }
   constexpr int block = 256;
+  const int grid = DIVUP(words, block);
 
   // Row-wise swizzle
   if (has_rowwise_scale_inv) {
     const int original_M = input->flat_first_dim();
-    const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
+    const int original_K = DIVUP(input->flat_last_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
     const int input_stride = k;
-    // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
-    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 127, total, stream));
-    const int orig_total = original_M * original_K;
-    const int grid = (orig_total + block - 1) / block;
     swizzle_scaling_mx_kernel<true><<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
-        m, input_stride, original_M, original_K);
+        m, groups, input_stride, original_M, original_K, noop);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 
   // Column-wise swizzle
   if (has_columnwise_scale_inv) {
     const int original_M = input->flat_last_dim();
-    const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
+    const int original_K = DIVUP(input->flat_first_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
     const int input_stride = m;
-    // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
-    NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr, 127, total, stream));
-    const int orig_total = original_M * original_K;
-    const int grid = (orig_total + block - 1) / block;
     swizzle_scaling_mx_kernel<false><<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
-        m, input_stride, original_M, original_K);
+        m, groups, input_stride, original_M, original_K, noop);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }

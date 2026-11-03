@@ -186,8 +186,8 @@ struct Mxfp8Out {
   void *colwise;
   e8m0_t *scales_rowwise;
   e8m0_t *scales_colwise;
-  size_t scale_stride_rowwise;
-  size_t scale_stride_colwise;
+  mxfp8_tdm::ScaleLayout rowwise_scales;
+  mxfp8_tdm::ScaleLayout colwise_scales;
 };
 
 // LayerNorm, or RMSNorm with RMS, of the 128x128 chunk (blockIdx.y, blockIdx.x) of params.x into
@@ -259,17 +259,20 @@ __global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
     }
     v.store_to(&tile[y][lane * LANE_COLS]);
   }
-  const size_t scale_col = tile_col / SCALE_DIM;
+  const size_t first_scale = tile_col / SCALE_DIM;
+  // Like the MXFP8 TDM quantize, compact scales also fill the scale padding.
+  const size_t scales_end = out.rowwise_scales.preswizzled ? DIVUP<size_t>(cols, SCALE_DIM)
+                                                           : out.rowwise_scales.m_stride;
   mxfp8_tdm::quantize_band_rowwise<IType, OType, SCALE_DIM>(
-      tile, out_sh[wave][0], out.scales_rowwise + band_row0 * out.scale_stride_rowwise + scale_col,
-      out.scale_stride_rowwise, valid_rows, out.scale_stride_rowwise - scale_col);
+      tile, out_sh[wave][0], out.scales_rowwise + out.rowwise_scales.offset(band_row0, 0),
+      out.rowwise_scales, first_scale, valid_rows, scales_end - first_scale);
   tdm::store_2d(static_cast<OType *>(out.rowwise), out_sh[wave][0], rows, cols, cols, band_row0,
                 tile_col);
   if constexpr (COLWISE) {
     mxfp8_tdm::quantize_band_colwise<IType, OType>(
         tile, out_sh[wave][COLWISE],
-        out.scales_colwise + band_row0 / SCALE_DIM * out.scale_stride_colwise + tile_col,
-        cols - tile_col);
+        out.scales_colwise + out.colwise_scales.offset(tile_col, band_row0 / SCALE_DIM),
+        out.colwise_scales.m_stride, cols - tile_col);
     tdm::store_2d(static_cast<OType *>(out.colwise), out_sh[wave][COLWISE], rows, cols, cols,
                   band_row0, tile_col);
   }

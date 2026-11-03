@@ -8,6 +8,9 @@
 
 #include "../extensions.h"
 #include "common/util/system.h"
+#ifdef USE_ROCM
+#include "common/util/cuda_runtime.h"
+#endif
 #include "pybind.h"
 
 #include <torch/version.h>
@@ -121,7 +124,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       impl = Impl::FULLY_FUSED;
     }
 #ifdef USE_ROCM
-    // The gfx1250 kernel quantizes as it normalizes, into compact scales
+    // The gfx1250 kernel quantizes as it normalizes
     if (out.is_none() &&
         nvte_norm_fwd_mxfp8_fused_supported(input_nvte.data(), weight_nvte.data())) {
       impl = Impl::FULLY_FUSED;
@@ -149,9 +152,16 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper out_nvte;
   if (out.is_none()) {
     if (impl == Impl::FULLY_FUSED) {
+#ifdef USE_ROCM
+      // Only the gfx1250 MXFP8 kernel writes GEMM swizzled scales
+      if (!IsMXFP8Quantizers(quantizer.ptr()) || transformer_engine::cuda::sm_arch() != 125) {
+        quantizer_cpp->optimize_for_gemm = false;
+      }
+#else
       // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
       // kernel does not support GEMM swizzled scales
       quantizer_cpp->optimize_for_gemm = false;
+#endif
     }
     std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
   } else {
@@ -365,7 +375,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       impl = Impl::FULLY_FUSED;
     }
 #ifdef USE_ROCM
-    // The gfx1250 kernel quantizes as it normalizes, into compact scales
+    // The gfx1250 kernel quantizes as it normalizes
     if (out.is_none() &&
         nvte_norm_fwd_mxfp8_fused_supported(input_nvte.data(), weight_nvte.data())) {
       impl = Impl::FULLY_FUSED;
@@ -393,9 +403,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper out_nvte;
   if (out.is_none()) {
     if (impl == Impl::FULLY_FUSED) {
+#ifdef USE_ROCM
+      // Only the gfx1250 MXFP8 kernel writes GEMM swizzled scales
+      if (!IsMXFP8Quantizers(quantizer.ptr()) || transformer_engine::cuda::sm_arch() != 125) {
+        quantizer_cpp->optimize_for_gemm = false;
+      }
+#else
       // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
       // kernel does not support GEMM swizzled scales
       quantizer_cpp->optimize_for_gemm = false;
+#endif
     }
     std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
   } else {

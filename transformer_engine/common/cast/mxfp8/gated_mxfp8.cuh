@@ -737,9 +737,9 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 #ifdef __HIP_PLATFORM_AMD__
-  // TODO: rocm TE should not need swizzle
-  // ensure upstream does not pass swizzle=true down here
-  NVTE_CHECK(with_gemm_swizzled_scales != true, "ROCm TE does not support swizzling for gemm");
+  // Only the gfx1250 GEMM reads swizzled scales, in its pre-swizzled layout.
+  NVTE_CHECK(!with_gemm_swizzled_scales || cuda::sm_arch() == 125,
+             "ROCm TE does not support swizzling for gemm");
 #endif
 
   if (USE_ROWWISE_SCALING) {
@@ -766,6 +766,13 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
 
 #ifdef __HIP_PLATFORM_AMD__
   if (quantize_gated_tdm<IS_BWD, ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream)) {
+    return;
+  }
+  // The generic kernel writes compact scales.
+  if (with_gemm_swizzled_scales) {
+    quantize_preswizzled(output, nullptr, stream, [&](Tensor *compact) {
+      quantize_gated<IS_BWD, ParamOP, ActOP, DActOP>(gated_input, grad, compact, p, stream);
+    });
     return;
   }
 

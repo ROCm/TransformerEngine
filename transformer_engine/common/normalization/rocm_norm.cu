@@ -150,12 +150,23 @@ PlanKernel get_fwd_mxfp8_kernel(const bool rms, const DType itype, const DType o
     stats_kernel<<<stats_blocks, stats_threads, stats_smem, lp.stream>>>(lp.params, split,
                                                                           nullptr);
     NVTE_CHECK_CUDA(hipGetLastError());
+    // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where z asks for that.
+    const bool preswizzled = z.with_gemm_swizzled_scales;
+    if (preswizzled) {
+      mxfp8_tdm::fill_scale_padding(z.scale_inv, rows, DIVUP(cols, size_t{32}), false, nullptr,
+                                    lp.stream);
+      if (lp.training) {
+        mxfp8_tdm::fill_scale_padding(z.columnwise_scale_inv, cols, DIVUP(rows, size_t{32}), true,
+                                      nullptr, lp.stream);
+      }
+    }
     const Mxfp8Out out{z.data.dptr,
                        z.columnwise_data.dptr,
                        static_cast<e8m0_t *>(z.scale_inv.dptr),
                        static_cast<e8m0_t *>(z.columnwise_scale_inv.dptr),
-                       z.scale_inv.shape[1],
-                       lp.training ? z.columnwise_scale_inv.shape[1] : 1};
+                       mxfp8_tdm::scale_layout(z.scale_inv, false, preswizzled),
+                       lp.training ? mxfp8_tdm::scale_layout(z.columnwise_scale_inv, true, preswizzled)
+                                   : mxfp8_tdm::ScaleLayout{}};
     const Mxfp8Kernel kernel = lp.training ? both_kernel : rowwise_kernel;
     kernel<<<grid, mxfp8_tdm::THREADS_PER_CHUNK, 0, lp.stream>>>(lp.params, out);
     NVTE_CHECK_CUDA(hipGetLastError());

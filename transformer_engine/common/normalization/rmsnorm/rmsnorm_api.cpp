@@ -13,6 +13,9 @@
 
 #include "../../common.h"
 #include "../common.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#endif
 #include "transformer_engine/normalization.h"
 #include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
@@ -30,8 +33,14 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
   if (is_mxfp8_scaling(z->scaling_mode)) {
+#ifdef __HIP_PLATFORM_AMD__
+    // The gfx1250 GEMM reads swizzled scales pre-swizzled, which the ROCm kernels write.
+    NVTE_CHECK(!z->with_gemm_swizzled_scales || cuda::sm_arch() == 125,
+               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+#else
     NVTE_CHECK(!z->with_gemm_swizzled_scales,
                "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+#endif
   }
 
   NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");

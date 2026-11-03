@@ -438,6 +438,17 @@ bool use_cudnn_mxfp8_norm_output_in_input_dtype();
 #ifdef __HIP_PLATFORM_AMD__
 template <typename compute_t = float>
 void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
+  // The kernel writes compact scales.
+  Tensor *const z = launch_params.z_tensor;
+  if (dispatch::mxfp8::preswizzled_scales(*z)) {
+    dispatch::mxfp8::quantize_preswizzled(z, nullptr, launch_params.stream, [&](Tensor *compact) {
+      launch_params.z_tensor = compact;
+      rocm_norm_mxfp8_quantize<compute_t>(launch_params);
+      launch_params.z_tensor = z;
+    });
+    return;
+  }
+
   const size_t rows = launch_params.params.rows;
   const size_t cols = launch_params.params.cols;
   const size_t scale_dim_X_rowwise = 32;
