@@ -4,7 +4,7 @@
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
 D[M, N] = a[M, K] @ b[N, K]^T with K-contiguous packed FP4 operands and E8M0 scales along K. TE's
-MXFP4 columnwise storage is a materialized transpose, so this one kernel serves TN/NN/NT/TT.
+MXFP4 columnwise storage is a materialized transpose, so this one kernel serves TN/NN/NT.
 Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS by TDM.
 """
 
@@ -93,7 +93,7 @@ def gemm_kernel(
     # wave-uniform, so TDM descriptors derived from it stay in SGPRs
     lane = tid % 32
     wave = fx.Int32(fx.rocdl.readfirstlane(fx.Int32.ir_type, tid // 32))
-    l16, khalf = lane % 16, lane // 16
+    lane_mod16, khalf = lane % 16, lane // 16
     wm, wn = wave % 2, wave // 2
 
     k_words = K // 8
@@ -101,15 +101,15 @@ def gemm_kernel(
     B_words = as_words(B, N, k_words)
 
     # physical chunks of this lane's logical chunks khalf and khalf + 2 (same for all its rows)
-    swz = (l16 // 4) % SWZ_CHUNKS
+    swz = (lane_mod16 // 4) % SWZ_CHUNKS
     chunk_lo = khalf ^ swz
     chunk_hi = chunk_lo ^ 2
-    a_lds_lo = (wm * 16 + l16) * 16 + 4 * chunk_lo
-    a_lds_hi = (wm * 16 + l16) * 16 + 4 * chunk_hi
-    b_lds_lo = (wn * 16 + l16) * 16 + 4 * chunk_lo
-    b_lds_hi = (wn * 16 + l16) * 16 + 4 * chunk_hi
-    as_lds_base = (wm * 16 + l16) * (BLOCK_M // SCALE_LANE_ROWS_A)
-    bs_lds_base = (wn * 16 + l16) * (BLOCK_N // SCALE_LANE_ROWS_B)
+    a_lds_lo = (wm * 16 + lane_mod16) * 16 + 4 * chunk_lo
+    a_lds_hi = (wm * 16 + lane_mod16) * 16 + 4 * chunk_hi
+    b_lds_lo = (wn * 16 + lane_mod16) * 16 + 4 * chunk_lo
+    b_lds_hi = (wn * 16 + lane_mod16) * 16 + 4 * chunk_hi
+    as_lds_base = (wm * 16 + lane_mod16) * (BLOCK_M // SCALE_LANE_ROWS_A)
+    bs_lds_base = (wn * 16 + lane_mod16) * (BLOCK_N // SCALE_LANE_ROWS_B)
 
     # tile k lives in LDS page k % NUM_STAGES
     smem = fx.SharedAllocator(static=False)
@@ -453,10 +453,10 @@ def gemm_kernel(
         frag_c = fx.make_fragment_like(frag_acc, out_fx)
         frag_c.store(frag_acc.load().to(out_fx))
 
-    # accumulator (v, j, i) is tile row wm*16 + 8*khalf + v + 32*i, column wn*16 + l16 + 64*j
+    # accumulator (v, j, i) is tile row wm*16 + 8*khalf + v + 32*i, column wn*16 + lane_mod16 + 64*j
     fx.rocdl.s_wait_dscnt(0)
     fx.barrier()
-    lane_c = (wm * 16 + 8 * khalf) * BLOCK_N + wn * 16 + l16
+    lane_c = (wm * 16 + 8 * khalf) * BLOCK_N + wn * 16 + lane_mod16
     for h in range_constexpr(2):
         if h > 0:
             fx.rocdl.s_wait_tensorcnt(0)

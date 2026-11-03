@@ -1020,16 +1020,7 @@ def _run_mxfp8(
 
 
 def _select_mxfp4_storage_for_layout(A, transa, B, transb):
-    """Select TE MXFP4 data and scales for a layout.
-
-    MXFP4 columnwise storage is a materialized transpose (as for tensor-wise FP8),
-    so every layout reduces to the TN kernel without transpose reads:
-
-        TN: B.rowwise    [M,K], A.rowwise    [N,K]
-        NN: B.rowwise    [M,K], A.columnwise [N,K]
-        NT: B.columnwise [M,K], A.columnwise [N,K]
-        TT: B.columnwise [M,K], A.rowwise    [N,K]
-    """
+    """Select TE MXFP4 data and scales for a layout."""
 
     def select(t, rowwise, name):
         orientation = "rowwise" if rowwise else "columnwise"
@@ -1066,7 +1057,7 @@ def _run_mxfp4(
     *,
     output_dtype: torch.dtype,
 ):
-    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT/TT."""
+    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT."""
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
         A, transa, B, transb
@@ -1344,7 +1335,7 @@ def te_generic_gemm_flydsl(
       - NN: transa=False, transb=False
       - NT: transa=False, transb=True
 
-    TT is intentionally rejected, except for MXFP4.
+    TT is intentionally rejected.
 
     Supported dtypes:
       - MXFP4 E2M1 A/B (gfx1250) with FP16, BF16, or FP32 output
@@ -1379,7 +1370,7 @@ def te_generic_gemm_flydsl(
     a_kind, _ = _classify_input(A)
     b_kind, _ = _classify_input(B)
 
-    if transa and transb and a_kind != "mxfp4":
+    if transa and transb:
         raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
     _validate_common_epilogue(

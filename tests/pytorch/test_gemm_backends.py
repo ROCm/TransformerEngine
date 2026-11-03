@@ -33,7 +33,7 @@ FlyDSL coverage mirrors the Triton surface for the currently supported FlyDSL
 config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
-not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT / TT
+not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT
 with FP32 / BF16 / FP16 output against a torch.matmul reference only. FlyDSL kernels require tile-aligned
 launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
 rather than reusing the odd-sized Triton edge-mask cases.
@@ -181,9 +181,6 @@ FLYDSL_MXFP4_SHAPES = [
 
 LAYOUTS = ["TN", "NN", "NT"]
 
-# MXFP4 also supports TT (every layout runs the same TN kernel).
-MXFP4_LAYOUTS = ["TN", "NN", "NT", "TT"]
-
 MXFP4_OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 
 # Same-format FP8 combos, shared by both backends.
@@ -277,8 +274,6 @@ def get_shapes(layout, M, K, N):
         return (K, M), (N, K)
     if layout == "NT":  # A not transposed, B transposed
         return (K, M), (K, N)
-    if layout == "TT":  # both transposed
-        return (M, K), (K, N)
     raise ValueError(f"Unsupported layout: {layout}")
 
 
@@ -291,8 +286,6 @@ def compute_pytorch_reference(A_ref, B_ref, layout):
         return torch.matmul(B_ref, A_ref)
     if layout == "NT":
         return torch.matmul(B_ref.T, A_ref)
-    if layout == "TT":
-        return torch.matmul(B_ref.T, A_ref.T)
     raise ValueError(f"Unsupported layout: {layout}")
 
 
@@ -375,12 +368,7 @@ def _dequantize_mxfp4(data, scale):
 
 
 def create_mxfp4_tensors(M, K, N, layout):
-    """Create MXFP4 inputs and references dequantized from the buffers ``layout`` consumes.
-
-    MXFP4 rowwise and columnwise data are quantized separately (columnwise is the
-    rowwise quantization of the transposed tensor), so the reference must use the
-    buffer the GEMM reads: rowwise for a transposed operand, columnwise otherwise.
-    """
+    """Create MXFP4 inputs and references dequantized from the buffers ``layout`` consumes."""
     # the MXFP4 quantizer takes BF16 input
     A_bf16, B_bf16 = create_regular_tensors(M, K, N, layout, dtype=torch.bfloat16)
     quantizer = MXFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1, rowwise=True, columnwise=True)
@@ -1157,7 +1145,7 @@ def test_flydsl_mxfp8_unsupported_shape_falls_back():
 
 @requires_flydsl_mxfp4_backend
 @pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
-@pytest.mark.parametrize("layout", MXFP4_LAYOUTS)
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("out_dtype", MXFP4_OUT_DTYPES, ids=["fp32", "bf16", "fp16"])
 def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
     """Test MXFP4 FlyDSL GEMMs (gfx1250) against an FP32 PyTorch reference."""
