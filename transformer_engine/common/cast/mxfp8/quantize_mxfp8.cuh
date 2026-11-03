@@ -699,6 +699,17 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                                                            stream)) {
     return;
   }
+  // The generic kernel writes compact scales; the dbias workspace query writes none.
+  if (preswizzled_scales(*output) && !(IS_DBIAS && workspace->data.dptr == nullptr)) {
+    constexpr bool FUSED = IS_DBIAS || IS_DACT || IS_ACT;
+    quantize_preswizzled(
+        output, FUSED ? nullptr : reinterpret_cast<const float *>(noop->data.dptr), stream,
+        [&](Tensor *compact) {
+          quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, compact, dbias,
+                                                           workspace, use_2d_quantization, stream);
+        });
+    return;
+  }
 
   // Choose chunk size based on tensor dimensions
   const bool use_large_chunks = (rows * cols > 32 * 1024 * 1024);

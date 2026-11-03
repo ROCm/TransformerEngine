@@ -18,6 +18,9 @@
 
 #include "transformer_engine/normalization.h"
 #include "transformer_engine/transformer_engine.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_norm.h"
+#endif
 
 /*
 
@@ -93,7 +96,7 @@ TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
     const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-    , const NVTEScalingMode mode, const bool training
+    , const NVTEScalingMode mode, const bool training, const bool is_aligned
 #endif
   ) : _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
   _launch_params.multiprocessorCount = sm_count;
@@ -116,10 +119,22 @@ TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     kernel_params.fp8_out = is_fp8_dtype(otype);
 #endif
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
+    _kernel = rocm::get_fwd_kernel(NormType, wtype, itype, otype, _launch_params, is_aligned);
+  } else {
+    _kernel = rocm::get_bwd_kernel(NormType, NormStage, wtype, itype, otype, _launch_params,
+                                   is_aligned);
+  }
+  if (!_kernel) {
+#endif
   // TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
   auto key = get_key(NVTE_Norm_Backend::Te, NormType, NormStage, wtype, itype, otype, ctype, 0,
                      hidden_size, false, is_tuned);
   _kernel = KernelRegistry::getKernel(key);
+#ifdef __HIP_PLATFORM_AMD__
+  }
+#endif
 
   this->_build();
 }
@@ -143,8 +158,9 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
   kernel_params.scale_inv = z->scale_inv.dptr;
 
 #ifdef __HIP_PLATFORM_AMD__
+  _launch_params.z_tensor = z;
+  _launch_params.z_transpose_written = false;
   if (kernel_params.mxfp8_out) {
-    _launch_params.z_tensor = z;
     // z is used as a high precision buffer before quantization for MXFP8. Buffer is assigned in _set_workspace()
     kernel_params.z = nullptr;
   }
@@ -586,6 +602,10 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   auto key =
       get_key(NormBackend, NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size,
               zero_centered_gamma, is_tuned, mode, training, gamma_in_weight_dtype);
+#ifdef __HIP_PLATFORM_AMD__
+  // The ROCm kernels need aligned tensors, so plans for aligned ones must not serve the others.
+  std::get<0>(key) |= uint64_t(is_aligned) << 39;
+#endif
 
   auto it = normalizationPlanMap.find(key);
   if (it != normalizationPlanMap.end()) {
@@ -605,7 +625,7 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
         zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-        , mode, training
+        , mode, training, is_aligned
 #endif
       );
   } else {
@@ -613,7 +633,7 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
         zero_centered_gamma, is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-        , mode, training
+        , mode, training, is_aligned
 #endif
         );
   }

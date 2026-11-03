@@ -19,8 +19,8 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
       const IType *grad_ptr, const IType *input_act, const IType *input_gate,
       OType *output_act_rowwise, OType *output_gate_rowwise, OType *output_act_colwise,
       OType *output_gate_colwise, e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
-      const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-      const size_t scale_stride_colwise, const ParamOP p) {
+      const size_t rows, const size_t cols, const tdm_kernel::ScaleLayout rowwise_scales,
+      const tdm_kernel::ScaleLayout colwise_scales, const ParamOP p) {
 #ifdef __gfx1250__
   // These hide the chunk constants of the generic gated kernel.
   using tdm_kernel::BAND_Y;
@@ -99,10 +99,10 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
                            unsigned char *out_sh) {
     if constexpr (USE_ROWWISE_SCALING) {
       auto &out = *reinterpret_cast<band_t<OType> *>(out_sh);
-      const size_t scale_offset_X = scale_offset_rowwise + chunk_offset_X / SCALE_DIM_X;
       tdm_kernel::quantize_band_rowwise<IType, OType, SCALE_DIM_X>(
-          in, out, scales_rowwise + band_offset_Y * scale_stride_rowwise + scale_offset_X,
-          scale_stride_rowwise, rows - band_offset_Y, scale_cols - chunk_offset_X / SCALE_DIM_X);
+          in, out, scales_rowwise + rowwise_scales.offset(band_offset_Y, 0), rowwise_scales,
+          scale_offset_rowwise + chunk_offset_X / SCALE_DIM_X, rows - band_offset_Y,
+          scale_cols - chunk_offset_X / SCALE_DIM_X);
       tdm::store_2d(out_rowwise, out, rows, cols, out_ld, band_offset_Y, chunk_offset_X);
     }
     if constexpr (USE_COLWISE_SCALING) {
@@ -110,9 +110,9 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
           out_sh + (USE_ROWWISE_SCALING ? OUT_BAND_BYTES : 0));
       tdm_kernel::quantize_band_colwise<IType, OType>(
           in, out,
-          scales_colwise + band_offset_Y / SCALE_DIM_Y * scale_stride_colwise +
-              scale_offset_colwise + chunk_offset_X,
-          cols - chunk_offset_X);
+          scales_colwise + colwise_scales.offset(scale_offset_colwise + chunk_offset_X,
+                                                 band_offset_Y / SCALE_DIM_Y),
+          colwise_scales.m_stride, cols - chunk_offset_X);
       tdm::store_2d(out_colwise, out, rows, cols, out_ld, band_offset_Y, chunk_offset_X);
     }
   };
@@ -140,6 +140,26 @@ bool quantize_gated_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *o
     return false;
   }
   const dim3 grid(DIVUP(cols, tdm_kernel::CHUNK_DIM_X), DIVUP(rows, tdm_kernel::CHUNK_DIM_Y));
+  // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where the output asks for that.
+  const bool preswizzled = output->with_gemm_swizzled_scales;
+  const tdm_kernel::ScaleLayout rowwise_scales =
+      rowwise ? tdm_kernel::scale_layout(output->scale_inv, false, preswizzled)
+              : tdm_kernel::ScaleLayout{};
+  const tdm_kernel::ScaleLayout colwise_scales =
+      colwise ? tdm_kernel::scale_layout(output->columnwise_scale_inv, true, preswizzled)
+              : tdm_kernel::ScaleLayout{};
+  if (preswizzled) {
+    const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+    if (rowwise) {
+      tdm_kernel::fill_scale_padding(output->scale_inv, rows,
+                                     (IS_BWD ? 2 : 1) * DIVUP(cols, size_t{32}), false, nullptr,
+                                     stream);
+    }
+    if (colwise) {
+      tdm_kernel::fill_scale_padding(output->columnwise_scale_inv, output_cols,
+                                     DIVUP(rows, size_t{32}), true, nullptr, stream);
+    }
+  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       gated_input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -161,8 +181,7 @@ bool quantize_gated_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *o
                       output_colwise, colwise ? output_colwise + cols : nullptr,
                       reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
                       reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr), rows, cols,
-                      rowwise ? output->scale_inv.shape[1] : 1,
-                      colwise ? output->columnwise_scale_inv.shape[1] : 1, p);))));  // NOLINT(*)
+                      rowwise_scales, colwise_scales, p);))));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
   return true;
 }

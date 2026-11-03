@@ -187,6 +187,16 @@ void nvte_enable_cudnn_norm_bwd(bool enable);
  *  \param[in]  enable  Whether to enable zero-centered gamma.
  */
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable);
+#else
+/*! \brief Whether nvte_layernorm_fwd and nvte_rmsnorm_fwd quantize to MXFP8 as they normalize.
+ *
+ *  On ROCm, they do so where the gfx1250 normalization kernels apply; elsewhere, normalize in
+ *  high precision and quantize separately.
+ *
+ *  \param[in]  x      Input tensor of shape [N, H].
+ *  \param[in]  gamma  Gamma tensor of shape [H].
+ */
+bool nvte_norm_fwd_mxfp8_fused_supported(const NVTETensor x, const NVTETensor gamma);
 #endif
 
 #ifdef __cplusplus

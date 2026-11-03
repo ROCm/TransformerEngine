@@ -16,6 +16,9 @@
 
 #include "../../common.h"
 #include "../common.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#endif
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -34,8 +37,14 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
   if (is_mxfp8_scaling(z->scaling_mode)) {
+#ifdef __HIP_PLATFORM_AMD__
+    // The gfx1250 GEMM reads swizzled scales pre-swizzled, which the ROCm kernels write.
+    NVTE_CHECK(!z->with_gemm_swizzled_scales || cuda::sm_arch() == 125,
+               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+#else
     NVTE_CHECK(!z->with_gemm_swizzled_scales,
                "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
+#endif
   }
 
   NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
@@ -88,8 +97,13 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 #endif //__HIP_PLATFORM_AMD__
   {
     norm_backend = NVTE_Norm_Backend::Te;
+#ifdef __HIP_PLATFORM_AMD__
+    is_aligned = is_ptr_aligned(z->data.dptr, z->columnwise_data.dptr, x.data.dptr,
+                                gamma.data.dptr, beta.data.dptr, mu->data.dptr, rsigma->data.dptr);
+#else
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
                                 mu->data.dptr, rsigma->data.dptr);
+#endif
   }
 
   bool training =
@@ -120,7 +134,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                 workspace->data.dptr, stream);
 
   // Compute FP8 transpose if required
+#ifdef __HIP_PLATFORM_AMD__
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode) &&
+      !plan->wrote_z_transpose()) {
+#else
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+#endif
     NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
     Tensor& t = *convertNVTETensor(transpose_data);
     t.data = z->columnwise_data;

@@ -56,6 +56,8 @@ struct LaunchParams {
   // TE MXFP8 quantization parameters
   Tensor *z_tensor;
   bool training;
+  // Whether the kernel also wrote the FP8 transpose of a tensor-scaled z
+  bool z_transpose_written = false;
 #endif
 
   KernelParamsType params;
@@ -249,6 +251,11 @@ class NormalizationPlanBase {
                        void* dx_dptr, void* dz_dptr, void* add_dptr, void* dbeta_dptr,
                        void* dgamma_dptr, void* workspace_dptr, cudaStream_t stream) = 0;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // Whether the last forward execute also wrote the FP8 transpose of a tensor-scaled z
+  virtual bool wrote_z_transpose() const { return false; }
+#endif
+
  private:
   virtual void _build() = 0;
 };
@@ -260,7 +267,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
                       const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned
 #ifdef __HIP_PLATFORM_AMD__
-                      , const NVTEScalingMode mode, const bool training
+                      , const NVTEScalingMode mode, const bool training, const bool is_aligned
 #endif
                     );
   Shape getWorkspaceShape() const override;
@@ -272,6 +279,10 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
                void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
                void* workspace_dptr, cudaStream_t stream) override;
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool wrote_z_transpose() const override { return _launch_params.z_transpose_written; }
+#endif
 
  private:
   void _set_workspace();
@@ -427,6 +438,17 @@ bool use_cudnn_mxfp8_norm_output_in_input_dtype();
 #ifdef __HIP_PLATFORM_AMD__
 template <typename compute_t = float>
 void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) {
+  // The kernel writes compact scales.
+  Tensor *const z = launch_params.z_tensor;
+  if (dispatch::mxfp8::preswizzled_scales(*z)) {
+    dispatch::mxfp8::quantize_preswizzled(z, nullptr, launch_params.stream, [&](Tensor *compact) {
+      launch_params.z_tensor = compact;
+      rocm_norm_mxfp8_quantize<compute_t>(launch_params);
+      launch_params.z_tensor = z;
+    });
+    return;
+  }
+
   const size_t rows = launch_params.params.rows;
   const size_t cols = launch_params.params.cols;
   const size_t scale_dim_X_rowwise = 32;

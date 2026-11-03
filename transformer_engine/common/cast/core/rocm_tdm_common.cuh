@@ -41,6 +41,30 @@ __device__ __forceinline__ T cvt_from_float(const float x) {
   }
 }
 
+// Like the generic kernels, plain casts saturate as rocm_pack_4xfloat8 does, Inf included, and
+// fused ones as static_cast<OType>, which keeps Inf and NaN.
+template <typename OType, bool SATURATE_INF>
+__device__ __forceinline__ uint32_t cvt_4x_to_fp8(const float x0, const float x1, const float x2,
+                                                  const float x3) {
+  if constexpr (SATURATE_INF) {
+    return rocm_pack_4xfloat8<OType>(x0, x1, x2, x3);
+  } else {
+    constexpr float max = transformer_engine::detail::TypeExtrema<OType>::max;
+    const auto saturate = [](const float x) {
+      return __builtin_isfinite(x) ? __builtin_amdgcn_fmed3f(x, max, -max) : x;
+    };
+    int packed = 0;
+    if constexpr (std::is_same_v<OType, fp8e4m3>) {
+      packed = __builtin_amdgcn_cvt_pk_fp8_f32(saturate(x0), saturate(x1), packed, false);
+      packed = __builtin_amdgcn_cvt_pk_fp8_f32(saturate(x2), saturate(x3), packed, true);
+    } else {
+      packed = __builtin_amdgcn_cvt_pk_bf8_f32(saturate(x0), saturate(x1), packed, false);
+      packed = __builtin_amdgcn_cvt_pk_bf8_f32(saturate(x2), saturate(x3), packed, true);
+    }
+    return static_cast<uint32_t>(packed);
+  }
+}
+
 typedef float f32x8 __attribute__((ext_vector_type(8)));
 
 // x / scale for 8 values as FP4, rounded to nearest even, the first in the low nibble.

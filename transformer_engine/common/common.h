@@ -1304,6 +1304,13 @@ void CheckNoopTensor(const Tensor &t, std::string_view name);
 void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes = true);
 void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty = false);
 
+#ifdef __HIP_PLATFORM_AMD__
+// Writes the compact MXFP8 scales of input to output in the gfx1250 GEMM's pre-swizzled layout,
+// unless noop is set.
+void swizzle_scaling_factors_mx(const Tensor *input, Tensor *output, cudaStream_t stream,
+                                const float *noop = nullptr);
+#endif
+
 /*! \brief Update a tensor's FP8 scale-inverse
  *
  * The FP8 scale-inverse (dequantization scaling factor) is updated
