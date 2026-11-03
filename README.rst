@@ -363,7 +363,7 @@ Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
 It supports 1Dx2D and 1Dx1D scaling, e4m3/e5m2 inputs in any combination except e5m2 x e5m2, bf16/fp32/fp16 output, and bias/beta/DGELU epilogues.
-The K dimension must be a multiple of 128 and the N dimension a multiple of 16; other shapes raise an error.
+The K dimension must be a multiple of 128, the N dimension a multiple of 16, and the A and B data 128-byte aligned; other inputs raise an error.
 K is in_features in fprop and out_features in dgrad (per tensor-parallel rank), and the number of tokens in wgrad (per expert for grouped GEMMs), so callers must pad.
 Fp8Padding with align_size left unset pads each expert's tokens to a multiple of 128.
 The backend shares the existing USE_HIPKITTENS_GEMM build option with MXFP8:

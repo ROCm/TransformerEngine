@@ -331,6 +331,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const void* alpha_ptr, const void* beta_ptr, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset = -1);
+// Blockwise FP8 GEMM operand rules. The implementation is in rocm_gemm.cu
+void check_blockwise_fp8_gemm(const Tensor *inputA, const Tensor *inputB, bool transa, bool transb,
+                              size_t k);
 #else // Use cublasLt
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -1012,15 +1015,13 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
   using namespace transformer_engine;
 
 #ifdef __HIP_PLATFORM_AMD__
-  // Check the blockwise FP8 K rule of every GEMM before any is queued on the compute streams.
+  // Check the blockwise FP8 rules of every GEMM before any is queued on the compute streams.
   for (int i = 0; i < num_gemms; i++) {
     const Tensor *inputA = convertNVTETensorCheck(A[i]);
     const Tensor *inputB = convertNVTETensorCheck(B[i]);
     if (is_fp8_block_scaling(inputA->scaling_mode) || is_fp8_block_scaling(inputB->scaling_mode)) {
-      const size_t k = transa ? inputA->flat_last_dim() : inputA->flat_first_dim();
-      NVTE_CHECK(
-          k % 128 == 0,
-          "GEMM K dimension must be multiple of 128 for blockwise FP8 scaling (got K=", k, ")");
+      check_blockwise_fp8_gemm(inputA, inputB, transa, transb,
+                               transa ? inputA->flat_last_dim() : inputA->flat_first_dim());
     }
   }
 #endif

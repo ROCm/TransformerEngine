@@ -2193,6 +2193,21 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
 } // namespace
 
 
+// FP8 block scaling on ROCm: K must be a whole number of 128-element blocks (callers pad), and the
+// A/B data the GEMM reads must be 128-byte aligned.
+void check_blockwise_fp8_gemm(const Tensor *inputA, const Tensor *inputB, bool transa, bool transb,
+                              size_t k) {
+  NVTE_CHECK(k % 128 == 0,
+             "GEMM K dimension must be multiple of 128 for blockwise FP8 scaling (got K=", k, ")");
+  const uintptr_t a_offset =
+      reinterpret_cast<uintptr_t>(transa ? inputA->data.dptr : inputA->columnwise_data.dptr) % 128;
+  const uintptr_t b_offset =
+      reinterpret_cast<uintptr_t>(transb ? inputB->columnwise_data.dptr : inputB->data.dptr) % 128;
+  NVTE_CHECK(a_offset == 0 && b_offset == 0,
+             "Blockwise FP8 GEMM requires 128-byte aligned A and B data (got A offset ", a_offset,
+             ", B offset ", b_offset, " bytes)");
+}
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wmissing-declarations"
 
@@ -2265,10 +2280,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
 #endif
   }
-  // FP8 block scaling on ROCm: K must be a whole number of 128-element blocks; callers pad.
   if (is_fp8_block_scaling(inputA->scaling_mode) || is_fp8_block_scaling(inputB->scaling_mode)) {
-    NVTE_CHECK((k % 128) == 0,
-               "GEMM K dimension must be multiple of 128 for blockwise FP8 scaling (got K=", k, ")");
+    check_blockwise_fp8_gemm(inputA, inputB, is_transa, is_transb, k);
   }
 
   const int lda = is_transa ? k : m;
