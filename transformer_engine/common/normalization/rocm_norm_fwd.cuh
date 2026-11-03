@@ -8,9 +8,11 @@
 
 // LayerNorm and RMSNorm forward with rows split across the waves of a block, as
 // rocm_norm_common.cuh describes: norm_fwd_kernel for 16- and 32-bit and FP8 tensor-scaled outputs
-// and, after its statistics, norm_mxfp8_kernel for MXFP8. This expects its includer to have
-// included normalization/common.h, which brings the MXFP8 TDM quantize.
+// and, after its statistics, norm_mxfp8_kernel for MXFP8 and norm_fp8_transpose_kernel for FP8
+// tensor-scaled outputs with their transpose. This expects its includer to have included
+// normalization/common.h, which brings the MXFP8 TDM quantize.
 
+#include "../cast/fp8/rocm_quantize_fp8_tdm.cuh"
 #include "rocm_norm_common.cuh"
 
 namespace transformer_engine {
@@ -18,6 +20,7 @@ namespace normalization {
 namespace rocm {
 
 namespace mxfp8_tdm = dispatch::mxfp8::tdm_kernel;
+namespace fp8_tdm = dispatch::fp8::tdm_kernel;
 
 #ifdef __gfx1250__
 // The mean, 0 for RMSNorm, and the rsigma of a row whose part xv the wave holds, with all waves of
@@ -269,6 +272,159 @@ __global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
         cols - tile_col);
     tdm::store_2d(static_cast<OType *>(out.colwise), out_sh[wave][COLWISE], rows, cols, cols,
                   band_row0, tile_col);
+  }
+  // The block's LDS must outlive the stores.
+  tdm::wait<0>();
+#endif  // __gfx1250__
+}
+
+// LayerNorm, or RMSNorm with RMS, of the 128x128 chunk (blockIdx.y, blockIdx.x) of params.x into
+// the FP8 params.z and its cols x rows transpose z_t, with the statistics norm_fwd_kernel left in
+// params.mu and params.rs. The outputs and the amax are those of norm_fwd_kernel. As in the FP8
+// TDM quantize, each wave normalizes its band of the chunk and the waves assemble the chunk's
+// transpose in LDS, which stays at the quantize's 64 KB for 16-bit inputs.
+template <bool RMS, typename IType, typename WType, typename OType>
+__global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
+    norm_fp8_transpose_kernel(const ForwardKernelParams params, void *const z_t,
+                              float *const amax_slots) {
+#ifdef __gfx1250__
+  using fp8_tdm::band_t;
+  constexpr int WAVES = fp8_tdm::WAVES;
+  constexpr int BAND_Y = fp8_tdm::BAND_Y;
+  constexpr int LANE_COLS = fp8_tdm::COLS_PER_LANE;
+  constexpr int QUADS = fp8_tdm::QUADS;
+  // DPP8 selector: lane k of each group of 8 reads lane (k + 1) % 8.
+  constexpr unsigned NEXT_LANE = 1 | 2 << 3 | 3 << 6 | 4 << 9 | 5 << 12 | 6 << 15 | 7 << 18;
+  static_assert(QUADS == 8, "A group of DPP8 lanes holds the statistics of a band");
+  __shared__ alignas(128) band_t<IType> in_sh[WAVES];
+  __shared__ alignas(128) band_t<OType> out_sh[WAVES];
+  // Wave w stores rows [w * BAND_Y, (w + 1) * BAND_Y) of the transposed chunk.
+  __shared__ alignas(128) OType t_sh[WAVES][BAND_Y][fp8_tdm::CHUNK_DIM_Y];
+
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane = threadIdx.x % WAVE_SIZE;
+  const int lane_col = lane * LANE_COLS;
+  const uint64_t rows = params.rows;
+  const uint32_t cols = params.cols;
+  const uint64_t chunk_row = static_cast<uint64_t>(blockIdx.y) * fp8_tdm::CHUNK_DIM_Y;
+  const uint32_t chunk_col = blockIdx.x * fp8_tdm::CHUNK_DIM_X;
+  const uint64_t band_row0 = chunk_row + wave * BAND_Y;
+  const float scale = *static_cast<const float *>(params.scale);
+  float amax = 0.0f;
+
+  if (band_row0 < rows) {
+    auto &tile = in_sh[wave];
+    tdm::load_2d(tile, static_cast<const IType *>(params.x), rows, cols, cols, band_row0,
+                 chunk_col);
+
+    // As in the quantize, the lanes start at different quads of rows to spread their transposed
+    // writes over the banks. A lane holds the statistics of its quad's rows and takes those of its
+    // next quad from the next lane of its group of QUADS lanes. Rows past the tensor's take the
+    // statistics of its last row; their outputs are masked.
+    const uint64_t valid_rows = rows - band_row0 < BAND_Y ? rows - band_row0 : BAND_Y;
+    const int first_quad = lane % QUADS;
+    float mu[4] = {};
+    float rs[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      const uint64_t y = first_quad * 4 + i < valid_rows ? first_quad * 4 + i : valid_rows - 1;
+      if constexpr (!RMS) {
+        mu[i] = static_cast<const float *>(params.mu)[band_row0 + y];
+      }
+      rs[i] = static_cast<const float *>(params.rs)[band_row0 + y];
+    }
+    // Gamma, plus 1 when zero-centered, and beta as normalize reads them, in FP32 to keep the
+    // zero-centered branch out of the loop over rows.
+    const uint32_t col = chunk_col + lane_col;
+    const bool col_valid = col < cols;
+    Vec<float, LANE_COLS> g;
+    Vec<float, LANE_COLS> b;
+    g.clear();
+    b.clear();
+    if (col_valid) {
+      Vec<WType, LANE_COLS> w;
+      w.load_from(static_cast<const WType *>(params.gamma) + col);
+#pragma unroll
+      for (int j = 0; j < LANE_COLS; j++) {
+        const float gj = static_cast<float>(w.data.elt[j]);
+        g.data.elt[j] = params.zero_centered_gamma ? gj + 1.0f : gj;
+      }
+      if constexpr (!RMS) {
+        w.load_from(static_cast<const WType *>(params.beta) + col);
+#pragma unroll
+        for (int j = 0; j < LANE_COLS; j++) {
+          b.data.elt[j] = static_cast<float>(w.data.elt[j]);
+        }
+      }
+    }
+    tdm::wait<0>();
+
+#pragma unroll
+    for (int step = 0; step < QUADS; step++) {
+      const int quad = (first_quad + step) % QUADS;
+      uint32_t packed[4];
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        const int y = quad * 4 + i;
+        Vec<IType, LANE_COLS> v;
+        v.load_from(&tile[y][lane_col]);
+        float o[LANE_COLS];
+        normalize<RMS>(v, g, b, mu[i], rs[i], false, o);
+        // Elements outside the tensor leave the amax unchanged.
+        const bool valid = col_valid && y < valid_rows;
+#pragma unroll
+        for (int j = 0; j < LANE_COLS; j++) {
+          o[j] = valid ? o[j] : 0.0f;
+          __builtin_assume(amax >= 0);
+          amax = fmaxf(amax, fabsf(o[j]));
+        }
+        packed[i] = cvt_4x_to_fp8<OType, false>(o[0] * scale, o[1] * scale, o[2] * scale,
+                                                o[3] * scale);
+        *reinterpret_cast<uint32_t *>(&out_sh[wave][y][lane_col]) = packed[i];
+      }
+      fp8_tdm::store_transposed_quad(t_sh, packed, lane_col, wave, quad);
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        if constexpr (!RMS) {
+          mu[i] = __int_as_float(__builtin_amdgcn_mov_dpp8(__float_as_int(mu[i]), NEXT_LANE));
+        }
+        rs[i] = __int_as_float(__builtin_amdgcn_mov_dpp8(__float_as_int(rs[i]), NEXT_LANE));
+      }
+    }
+    tdm::store_2d(static_cast<OType *>(params.z), out_sh[wave], rows, cols, cols, band_row0,
+                  chunk_col);
+  }
+
+  // Every wave leaves its amax in its consumed in_sh band.
+  asm volatile("" ::: "memory");  // in_sh is reused as float
+  float *const wave_scratch = reinterpret_cast<float *>(in_sh[wave]);
+  if (params.amax != nullptr) {
+    amax = rocm_subwarp_allreduce<WAVE_SIZE>(amax, rocm_op::max{});
+    if (lane == 0) {
+      *wave_scratch = amax;
+    }
+  }
+  __syncthreads();
+  // Bands past the tensor's rows leave garbage in t_sh, but outside the transpose's columns.
+  const uint32_t t_row = chunk_col + wave * BAND_Y;
+  if (t_row < cols) {
+    tdm::store_2d(static_cast<OType *>(z_t), t_sh[wave], cols, rows, rows, t_row, chunk_row);
+  }
+  if (params.amax != nullptr && threadIdx.x == 0) {
+    float block_amax = 0.0f;
+#pragma unroll
+    for (int w = 0; w < WAVES; w++) {
+      block_amax = fmaxf(block_amax, *reinterpret_cast<const float *>(in_sh[w]));
+    }
+    float *const amax_dst = rocm_amax_target(static_cast<float *>(params.amax), amax_slots,
+                                             blockIdx.y * gridDim.x + blockIdx.x);
+    // As in the quantize, only atomics that may raise the amax are issued.
+    if (block_amax > *amax_dst) {
+      rocm_atomicMaxFloat(amax_dst, block_amax);
+    }
+  }
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
+    reciprocal<float>(static_cast<float *>(params.scale_inv), scale);
   }
   // The block's LDS must outlive the stores.
   tdm::wait<0>();

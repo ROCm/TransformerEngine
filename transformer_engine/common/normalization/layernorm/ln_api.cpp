@@ -125,7 +125,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                 workspace->data.dptr, stream);
 
   // Compute FP8 transpose if required
+#ifdef __HIP_PLATFORM_AMD__
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode) &&
+      !plan->wrote_z_transpose()) {
+#else
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+#endif
     NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
     Tensor& t = *convertNVTETensor(transpose_data);
     t.data = z->columnwise_data;

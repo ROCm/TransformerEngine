@@ -21,6 +21,7 @@ namespace {
 
 using FwdKernel = void (*)(ForwardKernelParams, RowSplit, float *);
 using Mxfp8Kernel = void (*)(ForwardKernelParams, Mxfp8Out);
+using Fp8TransposeKernel = void (*)(ForwardKernelParams, void *, float *);
 using BwdKernel = void (*)(BackwardKernelParams, RowSplit);
 using PlanKernel = std::function<void(LaunchParams<ForwardKernelParams> &, const bool)>;
 using BwdPlanKernel = std::function<void(LaunchParams<BackwardKernelParams> &, const bool)>;
@@ -86,6 +87,17 @@ Mxfp8Kernel mxfp8_kernel(const bool rms, const DType itype, const DType otype) {
           otype, OType,
           kernel = rms ? norm_mxfp8_kernel<true, IType, IType, OType, COLWISE>
                        : norm_mxfp8_kernel<false, IType, IType, OType, COLWISE>;););
+  return kernel;
+}
+
+Fp8TransposeKernel fp8_transpose_kernel(const bool rms, const DType itype, const DType otype) {
+  Fp8TransposeKernel kernel = nullptr;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      itype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          otype, OType,
+          kernel = rms ? norm_fp8_transpose_kernel<true, IType, IType, OType>
+                       : norm_fp8_transpose_kernel<false, IType, IType, OType>;););
   return kernel;
 }
 
@@ -206,11 +218,40 @@ PlanKernel get_fwd_kernel(const NVTE_Norm_Type norm_type, const DType wtype, con
   if (blocks == 0) {
     return {};
   }
+  // FP8 outputs with a transpose take the statistics, then norm_fp8_transpose_kernel.
+  Fp8TransposeKernel transpose_kernel = nullptr;
+  FwdKernel stats_kernel = nullptr;
+  size_t stats_blocks = 0;
+  if (params.fp8_out) {
+    transpose_kernel = fp8_transpose_kernel(rms, itype, otype);
+    stats_kernel = block_waves(split) <= SMALL_BLOCK_WAVES
+                       ? fwd_stats_kernel<SMALL_BLOCK_WAVES>(rms, itype)
+                       : fwd_stats_kernel<MAX_WAVES>(rms, itype);
+    stats_blocks = fwd_blocks(stats_kernel, split, params.rows, launch_params.multiprocessorCount);
+  }
+  const size_t rows = params.rows;
+  const dim3 chunks(DIVUP(static_cast<size_t>(params.cols), fp8_tdm::CHUNK_DIM_X),
+                    DIVUP(rows, fp8_tdm::CHUNK_DIM_Y));
   return [=](LaunchParams<ForwardKernelParams> &lp, const bool configure) {
     if (configure) {
       return;
     }
     float *const amax = static_cast<float *>(lp.params.amax);
+    void *const z_t = stats_blocks > 0 ? lp.z_tensor->columnwise_data.dptr : nullptr;
+    if (z_t != nullptr && rows > 0) {
+      stats_kernel<<<stats_blocks, threads, smem, lp.stream>>>(lp.params, split, nullptr);
+      NVTE_CHECK_CUDA(hipGetLastError());
+      float *const amax_slots =
+          amax != nullptr ? rocm_amax_slots(chunks.x * chunks.y, lp.stream) : nullptr;
+      transpose_kernel<<<chunks, fp8_tdm::THREADS_PER_CHUNK, 0, lp.stream>>>(lp.params, z_t,
+                                                                             amax_slots);
+      NVTE_CHECK_CUDA(hipGetLastError());
+      if (amax_slots != nullptr) {
+        rocm_amax_finalize(amax_slots, amax, nullptr, lp.stream);
+      }
+      lp.z_transpose_written = true;
+      return;
+    }
     float *const amax_slots = amax != nullptr ? rocm_amax_slots(blocks, lp.stream) : nullptr;
     kernel<<<blocks, threads, smem, lp.stream>>>(lp.params, split, amax_slots);
     NVTE_CHECK_CUDA(hipGetLastError());

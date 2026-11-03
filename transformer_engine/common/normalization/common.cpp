@@ -158,8 +158,9 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
   kernel_params.scale_inv = z->scale_inv.dptr;
 
 #ifdef __HIP_PLATFORM_AMD__
+  _launch_params.z_tensor = z;
+  _launch_params.z_transpose_written = false;
   if (kernel_params.mxfp8_out) {
-    _launch_params.z_tensor = z;
     // z is used as a high precision buffer before quantization for MXFP8. Buffer is assigned in _set_workspace()
     kernel_params.z = nullptr;
   }

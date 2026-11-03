@@ -56,6 +56,8 @@ struct LaunchParams {
   // TE MXFP8 quantization parameters
   Tensor *z_tensor;
   bool training;
+  // Whether the kernel also wrote the FP8 transpose of a tensor-scaled z
+  bool z_transpose_written = false;
 #endif
 
   KernelParamsType params;
@@ -249,6 +251,11 @@ class NormalizationPlanBase {
                        void* dx_dptr, void* dz_dptr, void* add_dptr, void* dbeta_dptr,
                        void* dgamma_dptr, void* workspace_dptr, cudaStream_t stream) = 0;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // Whether the last forward execute also wrote the FP8 transpose of a tensor-scaled z
+  virtual bool wrote_z_transpose() const { return false; }
+#endif
+
  private:
   virtual void _build() = 0;
 };
@@ -272,6 +279,10 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
                void* dz_dptr, void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
                void* workspace_dptr, cudaStream_t stream) override;
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool wrote_z_transpose() const override { return _launch_params.z_transpose_written; }
+#endif
 
  private:
   void _set_workspace();
