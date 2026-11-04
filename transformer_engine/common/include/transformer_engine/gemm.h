@@ -300,6 +300,32 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
 
+/*! \brief Compute the workspace sizes nvte_multi_tensor_gemm needs for the given GEMMs.
+ *
+ * On ROCm, some backends need scratch space that grows with the problem size: the
+ * HipKittens grouped MXFP8 GEMM packs block scales into workspace[0], and NVFP4 GEMMs
+ * stage dequantized operands in the workspace of the compute stream they run on.
+ * Each entry of workspace_sizes holds the size the caller would otherwise provide and
+ * is raised to the minimum required size; entries are never lowered. No-op on CUDA.
+ *
+ *  \param[in]     A                The list of A matrices.
+ *  \param[in]     B                The list of B matrices.
+ *  \param[in]     D                The list of output matrices.
+ *  \param[in]     bias             List of bias tensors.
+ *  \param[in]     pre_gelu_out     List of output matrices before GELU activation.
+ *  \param[in]     num_gemms        Number of GEMMs.
+ *  \param[in]     transa           Whether A matrix is transposed.
+ *  \param[in]     transb           Whether B matrix is transposed.
+ *  \param[in]     accumulate       Whether to accumulate the result into the D matrix.
+ *  \param[in,out] workspace_sizes  Size in bytes of each workspace passed to nvte_multi_tensor_gemm.
+ *  \param[in]     num_workspaces   Number of entries in workspace_sizes.
+ */
+void nvte_multi_tensor_gemm_workspace_sizes(const NVTETensor *A, const NVTETensor *B,
+                                            const NVTETensor *D, const NVTETensor *bias,
+                                            const NVTETensor *pre_gelu_out, const int num_gemms,
+                                            bool transa, bool transb, bool accumulate,
+                                            size_t *workspace_sizes, const int num_workspaces);
+
 /*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
  *
  * The setup workspace stores pointer arrays and per-matrix dimension arrays used

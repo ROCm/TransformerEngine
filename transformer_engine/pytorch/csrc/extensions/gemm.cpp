@@ -684,11 +684,26 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out_wrappers[i].data());
   }
 
+  std::vector<size_t> workspace_sizes(workspace.size(), workspaceSize);
+  nvte_multi_tensor_gemm_workspace_sizes(
+      te_A_vector.data(), te_B_vector.data(), te_D_vector.data(), te_bias_vector.data(),
+      te_pre_gelu_out_vector.data(), te_A_vector.size(), transa, transb, accumulate,
+      workspace_sizes.data(), workspace_sizes.size());
+
+  // Scratch that outgrows the cached workspaces comes from the caching allocator per call,
+  // which keeps it valid under CUDA graph capture.
+  std::vector<at::Tensor> grown_workspaces;
   std::vector<NVTETensor> te_workspace_vector;
   std::vector<TensorWrapper> te_workspace_wrappers;
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
-                                           std::vector<size_t>{workspaceSize}, DType::kByte);
+    void* workspace_ptr = workspace[i].data_ptr();
+    if (workspace_sizes[i] > workspaceSize) {
+      grown_workspaces.emplace_back(
+          allocateSpace(std::vector<size_t>{workspace_sizes[i]}, DType::kByte, false));
+      workspace_ptr = grown_workspaces.back().data_ptr();
+    }
+    auto wsp = makeTransformerEngineTensor(workspace_ptr, std::vector<size_t>{workspace_sizes[i]},
+                                           DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }
