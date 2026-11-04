@@ -23,7 +23,9 @@ CI does not run the suite scripts one after another; `run_queue.sh` expands them
 * `run_queue.sh --queue sgpu` runs the single-GPU tests of the suites in [`ci_sgpu_queue.conf`](ci_sgpu_queue.conf), one item per GPU.
 * `run_queue.sh --queue mgpu` runs the multi-GPU tests of the suites in [`ci_mgpu_queue.conf`](ci_mgpu_queue.conf), each item on the whole box, one after another.
 
-The sGPU queue learns per-item durations (`ci-weights/`) to order the next run. On a re-run of a failed job, both queues queue only the items, and where possible the individual tests, that failed (`ci-rerun/`).
+The sGPU queue learns per-item durations (`weights/`) to order the next run. On a re-run of a failed job, both queues queue only the items, and where possible the individual tests, that failed (`rerun/`).
+
+Everything the queue reads and writes at run time is under one directory, `ci-data/` in the repo root (set `TE_CI_DATA_DIR` to move it): `test-results/` holds one run's JUnit XML, logs and schedule report, and `weights/` and `rerun/` hold the state above, which CI keeps across runs and attempts with `actions/cache`.
 
 ## Which suites a pull request runs
 

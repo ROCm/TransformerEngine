@@ -47,6 +47,10 @@ concurrency:
 
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
+  # Where CI runtime data lives, relative to the repo root: test-results/ (one
+  # run's results and logs), weights/ and rerun/ (kept across runs and attempts
+  # by actions/cache). ci/run_queue.sh reads the same variable.
+  TE_CI_DATA_DIR: ci-data
 
 jobs:
   select_image:
@@ -247,7 +251,7 @@ jobs:
       - name: Restore learned test weights
         uses: actions/cache/restore@v4
         with:
-          path: ci-weights
+          path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
 
@@ -259,7 +263,7 @@ jobs:
       - name: Restore the previous attempt's failed items
         uses: actions/cache/restore@v4
         with:
-          path: ci-rerun
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
 
@@ -274,38 +278,39 @@ jobs:
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
-          rm -rf test-results
+          rm -rf "$TE_CI_DATA_DIR/test-results"
 
-          mkdir -p ci-weights
-          wc -l ci-weights/*.txt 2>/dev/null \
+          mkdir -p "$TE_CI_DATA_DIR/weights"
+          wc -l "$TE_CI_DATA_DIR"/weights/*.txt 2>/dev/null \
             || echo "no weight table restored; this run will be unordered"
 
-          mkdir -p ci-rerun
-          wc -l ci-rerun/sgpu/*.tsv 2>/dev/null \
+          mkdir -p "$TE_CI_DATA_DIR/rerun"
+          wc -l "$TE_CI_DATA_DIR"/rerun/sgpu/*.tsv 2>/dev/null \
             || echo "no failed-item list restored; this run queues every suite"
           # Present only for items the last attempt could narrow to single
           # tests; the rest of the failed list re-runs whole.
-          wc -l ci-rerun/sgpu/tests/*.txt 2>/dev/null \
+          wc -l "$TE_CI_DATA_DIR"/rerun/sgpu/tests/*.txt 2>/dev/null \
             || echo "no per-test lists restored; any queued item re-runs whole"
 
           # No core dumps: a crashing test would leave one in its working
-          # directory under test-results/, and ROCm's GPU core dump is mode 0600
-          # and root-owned there, which fails the whole log upload with EACCES.
+          # directory under the uploaded test results, and ROCm's GPU core dump is
+          # mode 0600 and root-owned there, which fails the whole log upload with EACCES.
           docker exec \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e TE_CI_DATA_DIR \
+            -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
             -e TE_CI_SUITES="${{ needs.scope.outputs.sgpu_suites }}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue sgpu \
-              --log-dir /workspace/test-results/logs"
+              --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
       - name: Save learned test weights
-        if: always() && hashFiles('ci-weights/*') != ''
+        if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
         uses: actions/cache/save@v4
         with:
-          path: ci-weights
+          path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
@@ -329,14 +334,14 @@ jobs:
           # schedule report below names it as not selected.
           report() {
             [[ " $SUITES " == *" $1 "* ]] || return 0
-            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2" --attempt "$ATTEMPT"
           }
           report torch "sGPU PyTorch (${{ matrix.arch_label }})"
           report jax "sGPU JAX (${{ matrix.arch_label }})"
           report examples "sGPU Examples (${{ matrix.arch_label }})"
           report core "sGPU Core (${{ matrix.arch_label }})"
-          if [ -f test-results/logs/report/schedule.md ]; then
-            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" ]; then
+            cat "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::no schedule.md -- the queue did not reach its report phase"
           fi
@@ -345,10 +350,10 @@ jobs:
       # Saved even when the queue passed: the file is then empty, and restoring
       # an empty list is what stops a third attempt re-running the second's work.
       - name: Save this attempt's failed items
-        if: always() && hashFiles('ci-rerun/**') != ''
+        if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
         uses: actions/cache/save@v4
         with:
-          path: ci-rerun
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Check suite failure status
@@ -359,11 +364,11 @@ jobs:
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line//[[:space:]]/}" ]] && continue
             read -r label logfile rest <<< "$line"
-            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            rc=$(cat "$TE_CI_DATA_DIR/test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
             [[ "$rc" == "0" ]] && continue
             echo "::error::${label} tests FAILED (rc=${rc})."
             EXIT_STATUS=1
-            for f in test-results/logs/items/"${label}".*.log; do
+            for f in "$TE_CI_DATA_DIR"/test-results/logs/items/"${label}".*.log; do
               [[ -e "$f" ]] || continue
               irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
               [[ "$irc" == "0" ]] && continue
@@ -379,10 +384,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
-          path: |
-            test-results/**
-            ci-weights/*.txt
-            ci-rerun/sgpu/**
+          path: ${{ env.TE_CI_DATA_DIR }}/**
           if-no-files-found: ignore
           retention-days: 5
           # A re-run uploads under a name the first attempt already used, which
@@ -457,7 +459,7 @@ jobs:
       - name: Restore the previous attempt's failed items
         uses: actions/cache/restore@v4
         with:
-          path: ci-rerun
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
 
@@ -469,23 +471,24 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          rm -rf test-results
+          rm -rf "$TE_CI_DATA_DIR/test-results"
 
-          mkdir -p ci-rerun
-          wc -l ci-rerun/mgpu/*.tsv 2>/dev/null \
+          mkdir -p "$TE_CI_DATA_DIR/rerun"
+          wc -l "$TE_CI_DATA_DIR"/rerun/mgpu/*.tsv 2>/dev/null \
             || echo "no failed-item list restored; this run queues every suite"
-          wc -l ci-rerun/mgpu/tests/*.txt 2>/dev/null \
+          wc -l "$TE_CI_DATA_DIR"/rerun/mgpu/tests/*.txt 2>/dev/null \
             || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e TE_CI_DATA_DIR \
+            -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
             -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
-              --log-dir /workspace/test-results/logs"
+              --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
       - name: Generate test report
         if: always()
@@ -498,21 +501,21 @@ jobs:
           # schedule report below names it as not selected.
           report() {
             [[ " $SUITES " == *" $1 "* ]] || return 0
-            python3 ci/junit_report.py "test-results/$1" --title "$2" --attempt "$ATTEMPT"
+            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2" --attempt "$ATTEMPT"
           }
           report torch-mgpu "mGPU PyTorch (${{ matrix.arch_label }})"
           report jax-mgpu "mGPU JAX (${{ matrix.arch_label }})"
-          if [ -f test-results/logs/report/schedule.md ]; then
-            cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" ]; then
+            cat "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::no schedule.md -- the queue did not reach its report phase"
           fi
 
       - name: Save this attempt's failed items
-        if: always() && hashFiles('ci-rerun/**') != ''
+        if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
         uses: actions/cache/save@v4
         with:
-          path: ci-rerun
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Check suite failure status
@@ -523,11 +526,11 @@ jobs:
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line//[[:space:]]/}" ]] && continue
             read -r label logfile rest <<< "$line"
-            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            rc=$(cat "$TE_CI_DATA_DIR/test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
             [[ "$rc" == "0" ]] && continue
             echo "::error::${label} tests FAILED (rc=${rc})."
             EXIT_STATUS=1
-            for f in test-results/logs/items/"${label}".*.log; do
+            for f in "$TE_CI_DATA_DIR"/test-results/logs/items/"${label}".*.log; do
               [[ -e "$f" ]] || continue
               irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
               [[ "$irc" == "0" ]] && continue
@@ -543,9 +546,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: logs-mgpu-${{ matrix.arch_label }}
-          path: |
-            test-results/**
-            ci-rerun/mgpu/**
+          path: ${{ env.TE_CI_DATA_DIR }}/**
           if-no-files-found: ignore
           retention-days: 5
           overwrite: true

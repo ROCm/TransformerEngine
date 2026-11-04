@@ -326,7 +326,7 @@ def render_report_md(
 def main():
     """Parse arguments, render the report, and never fail the run over it."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("log_dir", help="the queue's log directory, e.g. test-results/logs")
+    parser.add_argument("log_dir", help="the queue's log directory, e.g. ci-data/test-results/logs")
     parser.add_argument(
         "--title", default="Queue schedule", help='report heading, e.g. "mGPU queue schedule"'
     )

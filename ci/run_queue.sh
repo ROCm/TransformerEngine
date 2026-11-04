@@ -44,12 +44,15 @@ if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 
-# Three directories in the repo root:
+# Everything a run reads and writes lives under one directory, TE_CI_DATA_DIR
+# (ci-data/ in the repo root unless set; a relative path is taken from the root):
 #
 #   test-results/  everything one run produced; this script adds logs/ under it
-#   ci-weights/    the learned weight table (sGPU queue only)
-#   ci-rerun/      what failed, so a re-run of this job can queue only that
-: "${LOG_DIR:=${REPO_ROOT}/test-results/logs}"
+#   weights/       the learned weight table (sGPU queue only)
+#   rerun/         what failed, so a re-run of this job can queue only that
+: "${TE_CI_DATA_DIR:=ci-data}"
+[[ "$TE_CI_DATA_DIR" == /* ]] || TE_CI_DATA_DIR="${REPO_ROOT}/${TE_CI_DATA_DIR}"
+: "${LOG_DIR:=${TE_CI_DATA_DIR}/test-results/logs}"
 
 # Items with no recorded weight sort first: an unknown item is more likely to be
 # a new (or newly slow) one, and a long item started late is what stretches the
@@ -282,14 +285,8 @@ echo "== Arch: ${ARCH} =="
 # TEST_LEVEL and GPU count.
 WEIGHTS_FILE=""
 if [[ "$QUEUE" == "sgpu" ]]; then
-    WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
+    WEIGHTS_FILE="${TE_CI_DATA_DIR}/weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
     mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
-    # One-time migration: the sGPU table predates the queue and GPU-count keys. Pick
-    # it up under the new name so the first run after the rename is still ordered.
-    LEGACY_WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
-    if [[ ! -e "$WEIGHTS_FILE" && -s "$LEGACY_WEIGHTS_FILE" ]]; then
-        mv "$LEGACY_WEIGHTS_FILE" "$WEIGHTS_FILE"
-    fi
 fi
 
 # What failed last time, keyed the same way. Phase 5 writes it; Phase 2 reads it
@@ -297,7 +294,7 @@ fi
 # failed tests. Nothing here decides whether this is a re-run -- the file is
 # present only when something put the previous attempt's copy in place, so the
 # scheduler needs no flag to tell the two cases apart.
-RERUN_DIR="${REPO_ROOT}/ci-rerun/${QUEUE}"
+RERUN_DIR="${TE_CI_DATA_DIR}/rerun/${QUEUE}"
 RERUN_FILE="${RERUN_DIR}/failed.${ARCH}.l${TEST_LEVEL:-99}.tsv"
 mkdir -p "$RERUN_DIR" 2>/dev/null
 RERUN_MODE=""   # set by Phase 2 once it has actually narrowed the queue
