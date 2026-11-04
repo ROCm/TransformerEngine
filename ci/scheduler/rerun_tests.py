@@ -181,7 +181,7 @@ def main():
         label, _, tag = line.rstrip("\n").partition("\t")
         if not label or not tag:
             # An opaque whole-suite item has no tag and no pytest nodeids to
-            # narrow to -- core and examples always re-run whole.
+            # narrow to -- the examples suite always re-runs whole.
             continue
         base = f"{args.junit_prefix}{label}/{tag}{args.junit_suffix}"
         tests, why = rerun_set(base)

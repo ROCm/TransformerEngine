@@ -281,10 +281,8 @@ def render_report_md(
     # legend, because the words in its Result / Run vs weight column are the whole point
     # of the table and are not self-explanatory.
     #
-    # The schedule stays on a re-run even though the sections above it go. It is
-    # the only place an opaque whole-suite item -- `examples/whole`, `core/whole`
-    # -- reports its verdict at all, since those produce no per-test JUnit XML
-    # for the suite reports to pick up. Dropping it would hide their failures.
+    # The schedule stays on a re-run even though the sections above it go: it is
+    # the record of what the re-run queued and where.
     tables = [
         (
             "Schedule -- what ran where, in execution order",
