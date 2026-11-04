@@ -18,13 +18,15 @@ op fuser threads the Quantize op's input quantizer into the norm, so the norm
 writes the quantized output directly under ``autocast``. The Quantize op is an
 identity outside ``autocast``, so the bf16 baseline uses the same harness.
 
-Forward only: the quantize epilogue is a forward-pass phenomenon; the norm
-backward reads/writes high precision and is precision-independent. On ROCm,
+The backward (input and weight gradients) runs for bf16 only: the norm saves
+its bf16 input and the Quantize op passes the gradient through, so the backward
+reads and writes bf16 whatever the forward output precision. On ROCm,
 MXFP8/MXFP4/NVFP4 norms run unfused (bf16 norm + separate cast kernel), so
-those rows measure norm + cast as LayerNormLinear sees it. Precisions
+those forward rows measure norm + cast as LayerNormLinear sees it. Precisions
 unsupported on the current device are skipped.
 
-These are memory-bound; we report GB/s (input read + output write).
+These are memory-bound; we report GB/s (forward: input read + output write;
+backward: input and output-gradient read + input-gradient write).
 Output: benchmark_normalization.csv (written to cwd)
 """
 
@@ -47,7 +49,7 @@ from transformer_engine.pytorch import ops
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     build_recipes,
-    apply_backend_env, time_func_dual, compute_gbps, make_metric_record,
+    apply_backend_env, compute_gbps, direction_records,
     make_input, te_honors_env,
 )
 
@@ -56,7 +58,7 @@ NORM_TYPES = [
     ("LayerNorm", ops.LayerNorm),
 ]
 
-BENCHMARK_LABEL = "Normalization Forward"
+BENCHMARK_LABEL = "Normalization"
 
 # bf16 is the plain baseline (Quantize is an identity outside autocast).
 RECIPES = build_recipes()
@@ -102,29 +104,33 @@ def _triton_norm_handles_mxfp4():
 
 
 def generate_cases():
-    """Cross models x norm type x precision x backend x M (forward only)."""
+    """Cross models x norm type x precision x backend x direction x M (bwd for bf16 only)."""
     cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
         for norm_name in _NORM_CLS:
             for precision in RECIPES:
+                directions = ("fwd", "bwd") if precision == "bf16" else ("fwd",)
                 for backend in NORM_BACKENDS:
-                    for M in M_SIZE_LIST:
-                        cases.append({
-                            "Case": model_name,
-                            "NormType": norm_name,
-                            "Precision": precision,
-                            "Backend": backend,
-                            "M": M,
-                            "hidden_size": hidden,
-                        })
+                    for direction in directions:
+                        for M in M_SIZE_LIST:
+                            cases.append({
+                                "Case": model_name,
+                                "NormType": norm_name,
+                                "Precision": precision,
+                                "Backend": backend,
+                                "Direction": direction,
+                                "M": M,
+                                "hidden_size": hidden,
+                            })
     return cases
 
 
 def _case_id(c):
-    return f"{c['Case']}-{c['NormType']}-{c['Precision']}-{c['Backend']}-M{c['M']}"
+    return (f"{c['Case']}-{c['NormType']}-{c['Precision']}-{c['Backend']}-{c['Direction']}"
+            f"-M{c['M']}")
 
 
-def bench_norm(NormType, Precision, M, hidden_size):
+def bench_norm(NormType, Precision, Direction, M, hidden_size):
     device = "cuda"
     dtype = torch.bfloat16
 
@@ -138,24 +144,35 @@ def bench_norm(NormType, Precision, M, hidden_size):
         norm_op_cls(hidden_size, device=device, dtype=dtype),
         ops.Quantize(),
     )
-    next_x = make_input((M, hidden_size), dtype, device=device, requires_grad=False)
+    params = list(model.parameters())
+    next_x = make_input((M, hidden_size), dtype, device=device,
+                        requires_grad=Direction == "bwd")
 
     def fwd_func():
+        xb = next_x()
         with te.autocast(enabled=use_fp8, recipe=recipe):
-            return model(next_x())
+            return model(xb), xb
+
+    grad_out = torch.randn((M, hidden_size), dtype=dtype, device=device)
+
+    def bwd_func(fwd_out):
+        out, xb = fwd_out
+        out.backward(grad_out)
+        xb.grad = None
+        for p in params:
+            p.grad = None
 
     fwd_func()
 
     # BF16 read + quantized write.
     fwd_bytes = int(M * hidden_size * (2 + _FWD_WRITE_BYTES[Precision]))
+    # BF16 x and dy read + dx write; the weight-sized terms are negligible.
+    bwd_bytes = M * hidden_size * 6
 
-    fwd_ms, fwd_measurement, fwd_kernel_ms = time_func_dual(fwd_func)
-    return [make_metric_record(
-        BENCHMARK_LABEL, fwd_ms, "GB/s", compute_gbps(fwd_bytes, fwd_ms),
-        measurement=fwd_measurement,
-        kernel_ms=fwd_kernel_ms,
-        kernel_throughput=compute_gbps(fwd_bytes, fwd_kernel_ms) if fwd_kernel_ms else None,
-    )]
+    return direction_records(
+        Direction, BENCHMARK_LABEL, "GB/s", compute_gbps,
+        fwd_func, bwd_func, fwd_bytes, bwd_bytes,
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -183,5 +200,6 @@ def test_norm(request, microbench, case, monkeypatch):
     apply_backend_env(monkeypatch, NORM_BACKENDS[case["Backend"]])
     microbench.run(
         case,
-        lambda: bench_norm(case["NormType"], case["Precision"], case["M"], case["hidden_size"]),
+        lambda: bench_norm(case["NormType"], case["Precision"], case["Direction"], case["M"],
+                           case["hidden_size"]),
     )

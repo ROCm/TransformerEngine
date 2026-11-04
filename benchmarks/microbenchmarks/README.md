@@ -12,8 +12,8 @@ For how to read the results and why the harness measures the way it does, see
 - `benchmark_grouped_gemm.py`: grouped GEMM benchmark for MoE-style shapes
 - `benchmark_casting.py`: quantize / dequantize benchmark across FP8, MXFP8, NVFP4, and MXFP4
   (MXFP4 quantize only)
-- `benchmark_normalization.py`: LayerNorm / RMSNorm forward benchmark with BF16 output and each
-  supported quantized output (FP8, MXFP8, MXFP4, NVFP4)
+- `benchmark_normalization.py`: LayerNorm / RMSNorm benchmark: forward with BF16 output and each
+  supported quantized output (FP8, MXFP8, MXFP4, NVFP4), and the BF16 backward
 
 ## Running
 
@@ -210,13 +210,13 @@ if __name__ == "__main__":
 
 `microbench.run(case, bench_callable)` prints the case, records its metrics, and
 `conftest.py` collects them per family and writes the CSV. Each metric record
-represents one line such as `Normalization Forward` and expands into two CSV columns:
+represents one line such as `Normalization` and expands into two CSV columns:
 
 - `<label> Wall Time (ms)`
 - `<label> Wall <unit>`
 
-For example, a `Normalization Forward` metric with unit `GB/s` becomes
-`Normalization Forward Wall Time (ms)` and `Normalization Forward Wall GB/s`. Passing
+For example, a `Normalization` metric with unit `GB/s` becomes
+`Normalization Wall Time (ms)` and `Normalization Wall GB/s`. Passing
 `--kernel-profile` adds matching `<label> Kernel Time (ms)` / `<label> Kernel <unit>` columns.
 
 ## Comparing results
