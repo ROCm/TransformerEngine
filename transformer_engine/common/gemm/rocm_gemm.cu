@@ -1848,6 +1848,14 @@ void hipblaslt_gemm(const Tensor *inputA,
   const bool algo_cached =
       algoCache.find(gemm_cfg, workspaceSize, cached_algo) && cached_algo.algo.has_value();
 
+  // Native NVFP4 host alpha: read c0 back, which synchronizes the stream.
+  auto use_nvfp4_host_alpha = [&]() {
+    NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
+                                   stream));
+    NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+    alpha_ptr = static_cast<const void*>(&nvfp4_c0);
+  };
+
   if (use_nvfp4_native) {
     cached_algo.device_scalar_alpha = use_device_scalar_alpha(
         handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg,
@@ -1855,10 +1863,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     if (cached_algo.device_scalar_alpha) {
       alpha_ptr = static_cast<const void*>(nvfp4_c0_dev);
     } else {
-      NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
-                                     stream));
-      NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-      alpha_ptr = static_cast<const void*>(&nvfp4_c0);
+      use_nvfp4_host_alpha();
     }
   }
 
@@ -1874,27 +1879,35 @@ void hipblaslt_gemm(const Tensor *inputA,
       
       if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
           algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
-        size_t ws_size_min = 0;
-        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
-          handle,
-          operationDesc, 
-          alpha_ptr,
-          Adesc, 
-          Bdesc, 
-          beta_ptr,
-          Ddesc,
-          Ddesc,
-          algo_arr[0].algo,
-          ws_size_min
-        )) {
-
-          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
-            cached_algo.algo = algo_arr[0].algo;
-            if (cached_algo.ws_size_min != algo_arr[0].workspaceSize) {
-              cached_algo.ws_size_min = algo_arr[0].workspaceSize;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
+        auto algo_usable = [&](const void* alpha_p) {
+          size_t ws_size_min = 0;
+          return HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+                     handle, operationDesc, alpha_p, Adesc, Bdesc, beta_ptr, Ddesc, Ddesc,
+                     algo_arr[0].algo, ws_size_min) &&
+                 ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize;
+        };
+        bool usable = algo_usable(alpha_ptr);
+#ifdef NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA
+        if (!usable && use_nvfp4_native && cached_algo.device_scalar_alpha) {
+          // The stored algo may have been tuned with host alpha.
+          int32_t pointer_mode = HIPBLASLT_POINTER_MODE_HOST;
+          NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+              operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+          usable = algo_usable(&nvfp4_c0);
+          if (usable) {
+            cached_algo.device_scalar_alpha = false;
+            use_nvfp4_host_alpha();
+          } else {
+            pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT;
+            NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+                operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
           }
+        }
+#endif
+        if (usable) {
+          cached_algo.algo = algo_arr[0].algo;
+          cached_algo.ws_size_min = algo_arr[0].workspaceSize;
+          algoCache.store(gemm_cfg, cached_algo);
         }
       }
 
