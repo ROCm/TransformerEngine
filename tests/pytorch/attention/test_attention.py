@@ -4316,11 +4316,19 @@ def _ck_smallseq_configs():
     reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
 )
 @pytest.mark.parametrize("qkv_layout, attn_mask_type, swa, smallseq", list(_ck_smallseq_configs()))
-def test_dpa_ck_smallseq(qkv_layout, attn_mask_type, swa, smallseq, monkeypatch, capfd):
+def test_dpa_ck_smallseq(qkv_layout, attn_mask_type, swa, smallseq, request, monkeypatch, capfd):
     """Fused attention with the CK small-seq kernels enabled. Configs they do not support, like
     padded BSHD, causal masks, packed layouts or sliding windows, run the regular CK kernels."""
     if attn_mask_type == "padding" and swa and qkv_layout.startswith("bs"):
-        pytest.skip("FlashAttention and the unfused backend disagree on padded BSHD with a window.")
+        request.node.add_marker(
+            pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "The unfused backend disagrees with flash and fused attention on padded BSHD "
+                    "with a sliding window at short lengths."
+                ),
+            )
+        )
     model_configs = {"smallseq": ModelConfig(2, 16, 16, 128, attn_mask_type=attn_mask_type)}
     _, _, fused_attn_backends = get_available_attention_backends(
         model_configs["smallseq"], qkv_dtype=torch.bfloat16, qkv_layout=qkv_layout
