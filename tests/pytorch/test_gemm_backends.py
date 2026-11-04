@@ -181,8 +181,6 @@ FLYDSL_MXFP4_SHAPES = [
 
 LAYOUTS = ["TN", "NN", "NT"]
 
-MXFP4_OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
-
 # Same-format FP8 combos, shared by both backends.
 FP8_FORMAT_COMBOS = [
     (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
@@ -1146,7 +1144,9 @@ def test_flydsl_mxfp8_unsupported_shape_falls_back():
 @requires_flydsl_mxfp4_backend
 @pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("out_dtype", MXFP4_OUT_DTYPES, ids=["fp32", "bf16", "fp16"])
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
 def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
     """Test MXFP4 FlyDSL GEMMs (gfx1250) against an FP32 PyTorch reference."""
     torch.manual_seed(42)
