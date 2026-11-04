@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,9 +11,11 @@ instead of lazily swizzling inside every GEMM.
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import MXFP8BlockScaling, NVFP4BlockScaling
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
@@ -138,7 +142,10 @@ def test_weight_swizzling_with_workspace_caching(layer_type, recipe_name):
     # is_first_microbatch=True caches the quantized weight.
     weight_quantizers = _forward_backward(module, x, True, recipe, m_splits)
 
-    expect_preswizzle = recipe_name != "nvfp4-1d"
+    # gfx1250 MXFP8 weights keep compact scales; the GEMM swizzles them for hipBLASLt.
+    expect_preswizzle = recipe_name != "nvfp4-1d" and not (
+        IS_HIP_EXTENSION and recipe_name == "mxfp8" and get_device_compute_capability() == (12, 5)
+    )
     for weight_quantizer in weight_quantizers:
         assert weight_quantizer is not None
         assert (

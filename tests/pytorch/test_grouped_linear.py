@@ -205,6 +205,21 @@ if torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
 
 
+def hipkittens_grouped16_default(dtype):
+    """BF16/FP16 grouped GEMMs go to HipKittens on gfx950 unless NVTE_USE_HIPKITTENS_GROUPED_GEMM=0
+    or NVTE_USE_CK_GROUPED_GEMM=1 (without =1 for HK); it is not bit-exact against per-GEMM
+    Linear/general_gemm."""
+    use_hk = os.environ.get("NVTE_USE_HIPKITTENS_GROUPED_GEMM")
+    use_ck = os.environ.get("NVTE_USE_CK_GROUPED_GEMM", "0") == "1"
+    return (
+        IS_HIP_EXTENSION
+        and dtype in (torch.bfloat16, torch.float16)
+        and get_device_compute_capability() == (9, 5)
+        and use_hk != "0"
+        and (use_hk == "1" or not use_ck)
+    )
+
+
 class TorchGroupedLinearWithPadding(nn.Module):
 
     def __init__(
@@ -357,8 +372,9 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION and fp8 and recipe.mxfp8() and bias:
         # Dense HipKittens handles MXFP8 bias only for 256-aligned token counts; else hipBLASLt.
         hipkittens_takes_all = (
-            get_device_compute_capability() == (9, 5)
+            get_device_compute_capability() in ((9, 5), (12, 5))
             and os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
+            and os.environ.get("NVTE_ROCM_USE_HIPBLASLT", "0") != "1"
             and get_align_size_for_quantization(recipe) * bs % 256 == 0
         )
         if not hipkittens_takes_all:
@@ -433,7 +449,7 @@ def test_grouped_linear_accuracy(
     )
 
     atol, rtol = 0, 0
-    if use_cutlass:
+    if use_cutlass or (not fp8 and hipkittens_grouped16_default(dtype)):
         atol, rtol = 1e-3, 1e-3
         if IS_HIP_EXTENSION:
             atol, rtol = 1e-3, 8e-3
@@ -653,7 +669,13 @@ def test_grouped_linear_accuracy_rocm_backends(
         and recipe is None
         and dtype in (torch.bfloat16, torch.float16)
     )
-    if expect_ck_no_fallback:
+    # The HipKittens BF16/FP16 grouped GEMM takes every grouped GEMM of this model.
+    expect_hk_bf16 = (
+        grouped_gemm_backend == "hipkittens"
+        and recipe is None
+        and hipkittens_grouped16_default(dtype)
+    )
+    if expect_ck_no_fallback or expect_hk_bf16:
         monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
     test_grouped_linear_accuracy(
@@ -680,14 +702,21 @@ def test_grouped_linear_accuracy_rocm_backends(
             f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
             f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
         )
+    if expect_hk_bf16:
+        captured = capfd.readouterr()
+        assert (
+            "[HK-grouped16]" not in captured.err
+        ), f"HipKittens BF16/FP16 grouped GEMM declined (dtype={dtype}):\n{captured.err}"
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backend")
-@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_cuda_graph_hipkittens_mxfp8(monkeypatch, capfd):
-    """HipKittens grouped MXFP8 fwd/dgrad/wgrad GEMMs must replay correctly from a CUDA graph."""
+@pytest.mark.parametrize("precision", ["mxfp8", "bf16"])
+def test_grouped_linear_cuda_graph_hipkittens(precision, monkeypatch, capfd):
+    """HipKittens grouped fwd/dgrad/wgrad GEMMs must replay correctly from a CUDA graph."""
     if get_device_compute_capability() != (9, 5):
-        pytest.skip("HipKittens grouped MXFP8 GEMM is only built for gfx950.")
+        pytest.skip("HipKittens grouped GEMMs are only built for gfx950.")
+    if precision == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
@@ -696,7 +725,7 @@ def test_grouped_linear_cuda_graph_hipkittens_mxfp8(monkeypatch, capfd):
     # All dims 256-aligned so that every GEMM qualifies for HipKittens.
     num_gemms, tokens_per_gemm, in_features, out_features = 4, 256, 512, 512
     m_splits = [tokens_per_gemm] * num_gemms
-    fp8_recipe = recipe.MXFP8BlockScaling()
+    fp8_recipe = recipe.MXFP8BlockScaling() if precision == "mxfp8" else None
     model = GroupedLinear(
         num_gemms, in_features, out_features, bias=False, params_dtype=torch.bfloat16, device="cuda"
     )
@@ -709,7 +738,7 @@ def test_grouped_linear_cuda_graph_hipkittens_mxfp8(monkeypatch, capfd):
         x.grad = None
         for param in model.parameters():
             param.grad = None
-        with autocast(enabled=True, recipe=fp8_recipe):
+        with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             out = model(x, m_splits)
         out.backward(dy)
         return [out, x.grad] + [param.grad for param in model.parameters()]
@@ -734,7 +763,9 @@ def test_grouped_linear_cuda_graph_hipkittens_mxfp8(monkeypatch, capfd):
     for graph_out, expected in zip(graph_outputs, expected_outputs):
         torch.testing.assert_close(graph_out, expected, rtol=0, atol=0)
 
-    assert "Fallback to cuBLAS grouped GEMM" not in capfd.readouterr().err
+    err = capfd.readouterr().err
+    assert "Fallback to cuBLAS grouped GEMM" not in err
+    assert "[HK-grouped16]" not in err
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -841,9 +872,12 @@ def test_grouped_linear_accuracy_save_original_input(
         delay_wgrad_compute,
     )
 
-    # Should be bit-wise match
+    # Should be bit-wise match, except for the HipKittens grouped GEMM
+    tols = dict(rtol=0, atol=0)
+    if not fp8 and hipkittens_grouped16_default(dtype):
+        tols = dict(rtol=8e-3, atol=1e-3)
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        torch.testing.assert_close(o, o_ref, **tols)
 
 
 @pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
@@ -1192,7 +1226,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass, monkeypatch
     )
 
     for o, o_ref in zip(out, out_ref):
-        if not use_cutlass:
+        if not use_cutlass and not hipkittens_grouped16_default(dtype):
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
         else:

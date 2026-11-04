@@ -64,10 +64,8 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   }
 
 #ifdef USE_ROCM
-  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
-  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
-    return {std::nullopt, std::nullopt};
-  }
+  // ROCm GEMMs take compact MXFP8 scales; rocm_gemm.cu swizzles them for hipBLASLt.
+  return {std::nullopt, std::nullopt};
 #endif
 
   // Return early if scales are already swizzled
@@ -182,10 +180,8 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   }
 
 #ifdef USE_ROCM
-  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
-  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
-    return std::nullopt;
-  }
+  // ROCm GEMMs take compact MXFP8 scales; rocm_gemm.cu swizzles them for hipBLASLt.
+  return std::nullopt;
 #endif
 
   // Filter out tensors that already have swizzled scales
@@ -654,10 +650,8 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   }
 
 #ifdef USE_ROCM
-  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
-  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
-    return;
-  }
+  // ROCm GEMMs take compact MXFP8 scales; rocm_gemm.cu swizzles them for hipBLASLt.
+  return;
 #endif
 
   // Return early if scales are already swizzled

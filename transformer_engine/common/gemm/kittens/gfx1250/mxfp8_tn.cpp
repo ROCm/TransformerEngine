@@ -1,0 +1,34 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
+
+#include "hip/hip_runtime.h"
+#include "mxfp8_gemm.cuh"
+
+namespace te_kittens::gfx1250 {
+
+// Forward: e4m3 x e4m3. Bias: Linear, LayerNormLinear (bf16 with an fp32 D); beta: te.ops
+// ForwardLinear{Bias,Scale}Add (bias in the parameter type); GELU: LayerNormMLP fc1 with
+// NVTE_GEMM_GELU_FUSION=1 (aux = bias dtype, bf16 without a bias).
+template <>
+struct mxfp8_gemm::Instances<TN> {
+    using formats  = List<Formats<0, 0>>;
+    using variants = List<Variant<NONE, false, __bf16>, Variant<NONE, false, _Float16>,
+                          Variant<NONE, false, float>, Variant<NONE, true, __bf16>,
+                          Variant<NONE, true, _Float16>, Variant<NONE, true, float>,
+                          Variant<BIAS, false, __bf16>, Variant<BIAS, false, _Float16>,
+                          Variant<BIAS, false, float>, Variant<BIAS, false, float, __bf16>,
+                          Variant<BIAS, true, __bf16>, Variant<BIAS, true, _Float16>,
+                          Variant<BIAS, true, float>, Variant<BIAS, true, float, __bf16>,
+                          Variant<GELU_AUX, false, __bf16>,
+                          Variant<GELU_AUX, false, _Float16, __bf16>,
+                          Variant<GELU_AUX, false, float, __bf16>,
+                          Variant<GELU_AUX_BIAS, false, __bf16>,
+                          Variant<GELU_AUX_BIAS, false, _Float16>,
+                          Variant<GELU_AUX_BIAS, false, float, __bf16>>;
+};
+
+template bool launch_mxfp8<TN>(const Launch &l);
+
+}  // namespace te_kittens::gfx1250

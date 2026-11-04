@@ -1115,6 +1115,9 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
 bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream);
+bool try_kittens_grouped16_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    const NVTETensor *bias, int num_gemms, bool transa, bool transb, bool grad,
+    NVTETensor *workspace, bool accumulate, int math_sm_count, cudaStream_t stream);
 }
 #endif
 
@@ -1144,6 +1147,25 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (transformer_engine::convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
+
+#ifdef USE_HIPKITTENS_GEMM
+  // gfx950 BF16/FP16 grouped GEMMs take HipKittens also without NVTE_USE_*_GROUPED_GEMM
+  // (rocm_gemm.cu), with a fprop bias (TN) and a wgrad dbias (NT).
+  if (is_empty_arr(pre_gelu_out) &&
+      transformer_engine::try_kittens_grouped16_gemm(A, B, D, bias, num_gemms, transa, transb,
+                                                     grad, workspace, accumulate, math_sm_count,
+                                                     stream)) {
+    return;
+  }
+#endif
+
 #ifdef __HIP_PLATFORM_AMD__
   if (!use_cutlass || num_gemms == 1) {
 #else
@@ -1153,14 +1175,6 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     cublas_path();
     return;
   }
-
-  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
-    if (p == nullptr) return true;
-    for (int i = 0; i < num_gemms; ++i) {
-      if (transformer_engine::convertNVTETensor(p[i])->has_data()) return false;
-    }
-    return true;
-  };
 
 #ifndef __HIP_PLATFORM_AMD__
   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {
@@ -1241,7 +1255,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
         return;
       }
 #endif
-      handled_by_ck = ck_tile_mx_grouped_gemm(
+      // CK's MX grouped GEMM ignores accumulate.
+      handled_by_ck = !accumulate && ck_tile_mx_grouped_gemm(
           A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
     } else {
       handled_by_ck = ck_tile_grouped_gemm(

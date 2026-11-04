@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -21,6 +22,10 @@ enum KittensDType {
     KITTENS_FP8E4M3  = 7,
     KITTENS_FP8E5M2  = 8,
 };
+
+inline bool kittens_is_fp8(int dtype) {
+    return dtype == KITTENS_FP8E4M3 || dtype == KITTENS_FP8E5M2;
+}
 
 // MFMA cbsz/blgp operand format code, fixed by v_mfma_scale_f32_16x16x128_f8f6f4.
 inline int fp8_code(KittensDType dt) {
@@ -100,7 +105,8 @@ inline void kittens_blockwise_fp8_gemm(
     backend->run(args);
 }
 
-struct MXFP8GemmArgs {
+// D = alpha * op(A) op(B) + beta * D plus the epilogue, column-major (cdna4 ignores alpha, grad).
+struct GemmArgs {
     const void *A;
     const void *B;
     void *C;
@@ -109,11 +115,15 @@ struct MXFP8GemmArgs {
     int M, N, K;
     bool transa, transb;
     int a_dtype, b_dtype;
+    bool mxfp8_compact;    // A and B are MXFP8 and neither is tagged GEMM-swizzled
     const void *bias;
     int bias_dtype;
     void *aux_gelu;
     int out_dtype, aux_dtype;
-    float beta;
+    bool grad;             // bias is the dbias output (BGRADB), aux_gelu an input (DGELU)
+    float alpha, beta;
+    int splitk;            // NVTE_HK_SPLITK: 0 auto, 1 off, S > 1 forced
+    int cu_count;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
@@ -152,43 +162,61 @@ struct MXFP8WgradArgs {
     hipStream_t stream;
 };
 
-class MXFP8GemmBackend {
+/* BF16/FP16 grouped GEMM, D_e = alpha op(A_e) op(B_e) (+ beta D_e) (+ bias_e) for every expert e with
+ * m_splits[e] tokens. Operands as TE passes them (row-major, contiguous rows), weight dims N, K uniform:
+ *   TN fprop: A_e = W_e [N][K], B_e = X_e [m_e][K],  D_e [m_e][N], bias_e [N] input (bias_dtype)
+ *   NN dgrad: A_e = W_e [N][K], B_e = dY_e [m_e][N], D_e [m_e][K]
+ *   NT wgrad: A_e = X_e [m_e][K], B_e = dY_e [m_e][N], D_e [N][K], grad: bias_e = dbias_e [N] output
+ * Experts with m_e == 0 may have null operands; an NT one still gets D_e zeroed (unless accumulating)
+ * and its dbias zeroed. */
+struct Grouped16GemmArgs {
+    const void *const *A;
+    const void *const *B;
+    void *const *D;
+    const void *const *bias;    // null: no bias
+    const int64_t *m_splits;    // host
+    int num_gemms;
+    int N, K;
+    bool transa, transb;
+    int in_dtype;               // A and B
+    int out_dtype;
+    int bias_dtype;
+    bool grad;
+    bool accumulate;
+    float alpha, beta;
+    int cu_count;               // workgroup cap; 0: every CU
+    void *workspace;
+    size_t workspace_size;
+    hipStream_t stream;
+};
+
+// A backend returns false, before any launch, when it does not take the GEMM.
+class GemmBackend {
  public:
-    virtual ~MXFP8GemmBackend() = default;
-    virtual bool gemm(const MXFP8GemmArgs &args) = 0;
+    virtual ~GemmBackend() = default;
+    virtual bool gemm(const GemmArgs &args) = 0;
     virtual bool grouped_gemm(const MXFP8GroupedGemmArgs &args) = 0;
     virtual bool grouped_wgrad(const MXFP8WgradArgs &args) = 0;
+    // On a decline *why gets the reason.
+    virtual bool grouped16_gemm(const Grouped16GemmArgs &args, const char **why) = 0;
 
-    static MXFP8GemmBackend *get() {
+    static GemmBackend *get() {
         return get_for_arch(transformer_engine::cuda::sm_arch());
     }
 
  private:
-    static MXFP8GemmBackend *get_for_arch(int sm_arch);
-    static MXFP8GemmBackend *get_cdna4();
+    static GemmBackend *get_for_arch(int sm_arch);
+    static GemmBackend *get_cdna4();
+    static GemmBackend *get_gfx1250();
 };
 
-inline bool kittens_mxfp8_supported() { return MXFP8GemmBackend::get() != nullptr; }
+inline bool kittens_gemm_supported() { return GemmBackend::get() != nullptr; }
 
-inline bool kittens_mxfp8_gemm(
-    const void *A, const void *B, void *C,
-    const void *scale_A, const void *scale_B,
-    int M, int N, int K,
-    bool transa, bool transb,
-    int a_dtype, int b_dtype,
-    const void *bias, int bias_dtype,
-    void *aux_gelu, int out_dtype, int aux_dtype,
-    float beta, void *workspace, size_t workspace_size,
-    hipStream_t stream) {
-    MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
+inline bool kittens_gemm(const GemmArgs &args) {
+    GemmBackend *backend = GemmBackend::get();
     if (backend == nullptr) {
         return false;
     }
-
-    MXFP8GemmArgs args{
-        A, B, C, scale_A, scale_B, M, N, K, transa, transb,
-        a_dtype, b_dtype, bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
-        beta, workspace, workspace_size, stream};
     return backend->gemm(args);
 }
 
@@ -198,7 +226,7 @@ inline bool kittens_grouped_mxfp8_gemm(
     int M, const int *N_array, int K, int num_experts,
     bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
     void *workspace, size_t workspace_size, hipStream_t stream) {
-    MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
+    GemmBackend *backend = GemmBackend::get();
     if (backend == nullptr) {
         return false;
     }
@@ -217,7 +245,7 @@ inline bool kittens_grouped_mxfp8_wgrad(
     int a_dtype, int b_dtype, int out_dtype,
     bool accumulate,
     void *workspace, size_t workspace_size, hipStream_t stream) {
-    MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
+    GemmBackend *backend = GemmBackend::get();
     if (backend == nullptr) {
         return false;
     }
@@ -227,4 +255,13 @@ inline bool kittens_grouped_mxfp8_wgrad(
         N, K, M_array, num_experts, a_dtype, b_dtype, out_dtype, accumulate,
         workspace, workspace_size, stream};
     return backend->grouped_wgrad(args);
+}
+
+inline bool kittens_grouped16_gemm(const Grouped16GemmArgs &args, const char **why) {
+    GemmBackend *backend = GemmBackend::get();
+    if (backend == nullptr) {
+        *why = "no HipKittens backend for this GPU";
+        return false;
+    }
+    return backend->grouped16_gemm(args, why);
 }
