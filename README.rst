@@ -47,7 +47,7 @@ for quick kernels rebuild if needed fully utilizing parallel multi-CPU compilati
 
 AITER rebuilding
 ^^^^^^^^^^^^^^^^
-If CK JIT is disabled, rebuilding of AITER library takes a long time so build scripts caches the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
+If CK JIT is disabled, the AITER library is built ahead of time via QoLA in the CMake build directory and rebuilt incrementally. To force a full AITER rebuild, delete the build directory and rebuild TE.
 
 Test
 ====
