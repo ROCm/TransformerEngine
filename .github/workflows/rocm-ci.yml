@@ -102,6 +102,10 @@ jobs:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
+    with:
+      rocm_arch: gfx942,gfx950
+      use_ccache: true
+      save_ccache: ${{ github.event_name != 'pull_request' }}
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
