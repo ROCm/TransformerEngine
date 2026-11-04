@@ -44,18 +44,12 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl._mlir.dialects import vector
-
-from flydsl.expr.rocdl import _to_ir
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import AddressSpace, PointerType, T
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator
 
-from ..gemm.gemm_common_utils import _i64
 from ..tensor_shim import ptr_rsrc
 
 __all__ = ["compile_moe_wgrad_v2", "WGRAD_BLOCK_M"]
@@ -74,37 +68,26 @@ WGRAD_BLOCK_M = 32  # contraction (slot) step; matches the align block_size
 NUM_BUF = 3         # triple-buffered DMA pipeline (pipe_stages == 3)
 
 
-def _i32_zero():
-    return arith.constant(0, type=T.i32)
-
-
-def _as_i32(offset):
-    if isinstance(offset, int):
-        return arith.constant(offset, type=T.i32)
-    raw = arith.unwrap(offset)
-    if isinstance(raw.type, ir.IntegerType) and raw.type.width == 32:
-        return raw
-    return arith.index_cast(T.i32, offset)
+def _align_up(x, align):
+    return (x + align - 1) // align * align
 
 
 def raw_buffer_load(rsrc, offset, dtype):
     """Element-offset ``rocdl.raw_ptr_buffer_load`` (flydsl 0.3 aux is an i32 operand)."""
-    ty = dtype.ir_type if hasattr(dtype, "ir_type") else dtype
-    byte_off = arith.muli(_as_i32(offset), arith.constant(ty.width // 8, type=T.i32))
-    z = _i32_zero()
-    return rocdl.raw_ptr_buffer_load(ty, _to_ir(rsrc), _to_ir(byte_off), _to_ir(z), _to_ir(z))
+    ty = dtype.ir_type
+    byte_off = fx.Int32(offset) * (ty.width // 8)
+    z = fx.Int32(0).ir_value()
+    return dtype(rocdl.raw_ptr_buffer_load(ty, rsrc, byte_off.ir_value(), z, z))
 
 
 def buffer_load_i32(rsrc, offset):
-    return raw_buffer_load(rsrc, offset, T.i32)
+    return raw_buffer_load(rsrc, offset, fx.Int32)
 
 
 def raw_buffer_store(data, rsrc, offset):
-    data = arith.unwrap(data)
-    elem = data.type.element_type if hasattr(data.type, "element_type") else data.type
-    byte_off = arith.muli(_as_i32(offset), arith.constant(elem.width // 8, type=T.i32))
-    z = _i32_zero()
-    rocdl.raw_ptr_buffer_store(_to_ir(data), _to_ir(rsrc), _to_ir(byte_off), _to_ir(z), _to_ir(z))
+    byte_off = fx.Int32(offset) * (type(data).width // 8)
+    z = fx.Int32(0).ir_value()
+    rocdl.raw_ptr_buffer_store(data.ir_value(), rsrc, byte_off.ir_value(), z, z)
 
 
 
@@ -140,7 +123,6 @@ def compile_moe_wgrad_v2(
     if (WGRAD_BLOCK_M * block_k) % (n_threads * FILL_V) != 0:
         raise ValueError("32*block_k must be a multiple of n_threads*FILL_V")
 
-    gpu_arch = get_rocm_arch()
     WN = block_n // warps_n          # per-warp grad-feature span
     WK = block_k // warps_k          # per-warp x-feature span
     M_STEPS = WN // WMMA_M           # grad-feature atoms per warp (MFMA-M)
@@ -169,15 +151,12 @@ def compile_moe_wgrad_v2(
         f"{'_sg' if swap_gather else ''}_dsz_s3_dsa_v2"
     )
 
-    # LDS allocation: NUM_BUF-buffered grad tile + x tile (2 bytes/bf16).
-    allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem")
-    g_lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = g_lds_off + G_TILE_ELEMS * 2 * NUM_BUF
-    x_lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = x_lds_off + X_TILE_ELEMS * 2 * NUM_BUF
-    # The DMA path backs LDS with a raw llvm addrspace(3) global (buffer_load_lds needs a
-    # real global for M0; the memref allocator does not work). Same offsets/size.
-    LDS_TOTAL_BYTES = allocator._align(allocator.ptr, 128)
+    # LDS layout: NUM_BUF-buffered grad tile + x tile (2 bytes/bf16), each 16B-aligned. The DMA
+    # path backs LDS with a raw llvm addrspace(3) global, since buffer_load_lds needs its LDS
+    # pointer to be a GEP off a real global (see ``_gep_lds``), so the offsets are laid out by hand.
+    g_lds_off = 0
+    x_lds_off = _align_up(g_lds_off + G_TILE_ELEMS * 2 * NUM_BUF, 16)
+    LDS_TOTAL_BYTES = _align_up(x_lds_off + X_TILE_ELEMS * 2 * NUM_BUF, 128)
     LDS_SYM = KERNEL_NAME + "_lds"
 
     @flyc.kernel(known_block_size=[n_threads, 1, 1])
@@ -194,8 +173,7 @@ def compile_moe_wgrad_v2(
         num_recv_tokens: fx.Int32,
         sorted_numel: fx.Int32,  # SORTED (sorted_slot_ids) element count, to bound its SRD
     ):
-        bf16 = T.bf16
-        c0 = arith.constant(0, index=True)
+        c0 = fx.Index(0)
 
         dW_rsrc = ptr_rsrc(dW)
         x_rsrc = ptr_rsrc(X)
@@ -205,8 +183,7 @@ def compile_moe_wgrad_v2(
         # reach the full R_block allocation). Bound the SRD to the real [sorted_numel] i32 extent
         # so those overruns read hardware zero (-> sentinel token -> zeroed gather) instead of
         # reading past the end of ``sorted_slot_ids``. Mirrors the x_rsrc/grad_rsrc bounds below.
-        sorted_bytes = arith.index_cast(T.index, sorted_numel * fx.Int32(4))
-        sorted_rsrc = ptr_rsrc(SORTED, num_records_bytes=sorted_bytes)
+        sorted_rsrc = ptr_rsrc(SORTED, num_records_bytes=fx.Index(sorted_numel * 4))
         bstart_rsrc = ptr_rsrc(BLOCK_START)
         bpe_rsrc = ptr_rsrc(BLOCKS_PER_EXPERT)
         gbase_rsrc = ptr_rsrc(GRAD_BASE)
@@ -214,10 +191,10 @@ def compile_moe_wgrad_v2(
         # DMA path: raw addrspace(3) global backs LDS; reads + DMA both GEP off it.
         smem_raw_ptr = _llvm.mlir_addressof(ir.Type.parse("!llvm.ptr<3>"), LDS_SYM)
 
-        tid = fx.Int32(gpu.thread_id("x"))
-        n_tile = fx.Int32(gpu.block_id("x"))   # along N (grad feature)
-        k_tile = fx.Int32(gpu.block_id("y"))   # along K (x feature)
-        expert = fx.Int32(gpu.block_id("z"))   # expert id
+        tid = fx.Int32(fx.thread_idx.x)
+        n_tile = fx.Int32(fx.block_idx.x)   # along N (grad feature)
+        k_tile = fx.Int32(fx.block_idx.y)   # along K (x feature)
+        expert = fx.Int32(fx.block_idx.z)   # expert id
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -269,9 +246,9 @@ def compile_moe_wgrad_v2(
                 "noalias_scopes": _NOALIAS_SCOPE[sid],
             }
 
-        N_idx = arith.index_cast(T.index, N)
-        K_idx = arith.index_cast(T.index, K)
-        nrecv_idx = arith.index_cast(T.index, num_recv_tokens)
+        N_idx = fx.Index(N)
+        K_idx = fx.Index(K)
+        nrecv_idx = fx.Index(num_recv_tokens)
 
         # DMA fill cannot mask padding slots in registers, so bound the *token-gathered*
         # operand's resource to its real [num_recv, feat] extent: the sentinel token
@@ -281,26 +258,23 @@ def compile_moe_wgrad_v2(
         # garbage (clamped to row 0) for those slots. FC1 gathers ``x`` (stride K); FC2
         # (``swap_gather``) gathers ``grad`` (stride N).
         if swap_gather:
-            grad_nrec_bytes = nrecv_idx * N_idx * arith.index(2)
-            grad_rsrc = ptr_rsrc(GRAD, num_records_bytes=grad_nrec_bytes)
+            grad_rsrc = ptr_rsrc(GRAD, num_records_bytes=nrecv_idx * N_idx * 2)
         else:
-            x_nrec_bytes = nrecv_idx * K_idx * arith.index(2)
-            x_rsrc = ptr_rsrc(X, num_records_bytes=x_nrec_bytes)
+            x_rsrc = ptr_rsrc(X, num_records_bytes=nrecv_idx * K_idx * 2)
 
         n_block_base = n_tile * block_n
         k_block_base = k_tile * block_k
-        n_base_idx = arith.index_cast(T.index, n_block_base)
-        k_base_idx = arith.index_cast(T.index, k_block_base)
+        n_base_idx = fx.Index(n_block_base)
+        k_base_idx = fx.Index(k_block_base)
 
         # Per-expert routed-slot range. ``base_slot`` is the wgrad-align slot offset into
-        # ``SORTED`` (holds the received-token row for the ``x`` gather); ``grad_base_idx`` is
+        # ``SORTED`` (holds the received-token row for the ``x`` gather); ``gbase`` is
         # expert ``e``'s block-padded first-slot row into the ``[R_block, N]`` grad buffer.
         bstart = buffer_load_i32(bstart_rsrc, expert)
         nblocks = buffer_load_i32(bpe_rsrc, expert)
         gbase = buffer_load_i32(gbase_rsrc, expert)
-        base_slot = arith.index_cast(T.index, bstart) * arith.index(WGRAD_BLOCK_M)
-        num_slots = arith.index_cast(T.index, nblocks) * arith.index(WGRAD_BLOCK_M)
-        grad_base_idx = arith.index_cast(T.index, gbase)
+        base_slot = fx.Index(bstart) * WGRAD_BLOCK_M
+        num_slots = fx.Index(nblocks) * WGRAD_BLOCK_M
 
         # The contiguous operand's i32 per-slot offset wraps once the buffer exceeds 2 GiB, so fold
         # the expert's row offset into the SRD base in i64 (as pf_fwd/pf_dgrad do per tile); the i32
@@ -317,19 +291,19 @@ def compile_moe_wgrad_v2(
             # FC2: ``x`` (the [R_block, K] block-padded activation) is the contiguous walk.
             # ``X`` is a raw ``fx.Pointer`` kernel arg (not a tensor), so ``ptrtoint`` applies
             # directly -- ``get_iter`` is only for memref/tensor operands (cf. pf_dgrad).
-            _contig_base = fx.arith.ArithValue(
-                arith.index_cast(fx.T.i64, fx.ptrtoint(X)), signed=True
-            )
+            _contig_base = fx.Int64(fx.ptrtoint(X))
             x_rsrc = ptr_rsrc(
-                fx.inttoptr(_pool_ptr_ty, _contig_base + _i64(gbase_u) * _i64(K) * fx.Int64(2))
+                fx.inttoptr(
+                    _pool_ptr_ty, _contig_base + fx.Int64(gbase_u) * fx.Int64(K) * fx.Int64(2)
+                )
             )
         else:
             # FC1: ``grad`` (the [R_block, N] block-padded gradient) is the contiguous walk.
-            _contig_base = fx.arith.ArithValue(
-                arith.index_cast(fx.T.i64, fx.ptrtoint(GRAD)), signed=True
-            )
+            _contig_base = fx.Int64(fx.ptrtoint(GRAD))
             grad_rsrc = ptr_rsrc(
-                fx.inttoptr(_pool_ptr_ty, _contig_base + _i64(gbase_u) * _i64(N) * fx.Int64(2))
+                fx.inttoptr(
+                    _pool_ptr_ty, _contig_base + fx.Int64(gbase_u) * fx.Int64(N) * fx.Int64(2)
+                )
             )
 
         CPR_G = block_n // FILL_V
@@ -339,9 +313,7 @@ def compile_moe_wgrad_v2(
             chunk = tid + fx.Int32(i * n_threads)
             slot_i32 = chunk // fx.Int32(cpr)
             feat_i32 = (chunk % fx.Int32(cpr)) * fx.Int32(FILL_V)
-            slot_idx = arith.index_cast(T.index, slot_i32)
-            feat_idx = arith.index_cast(T.index, feat_i32)
-            return slot_idx, feat_idx, slot_i32, feat_i32
+            return fx.Index(slot_i32), fx.Index(feat_i32), slot_i32, feat_i32
 
         # ``load_slot_ids`` issues the (indirect) ``sorted`` index loads. These are
         # prefetched *two* steps ahead and carried across the loop as iter_args.
@@ -367,19 +339,14 @@ def compile_moe_wgrad_v2(
                 phys = tid + fx.Int32(i * n_threads)
                 slot = phys // fx.Int32(cpr)
                 chunk = phys % fx.Int32(cpr)
-                slot_idx = arith.index_cast(T.index, slot)
-                token = arith.index_cast(T.index, ids[i])
-                in_range = arith.cmpi(
-                    arith.CmpIPredicate.ult, slot_base_idx + slot_idx, num_slots
-                )
-                valid = arith.andi(
-                    in_range, arith.cmpi(arith.CmpIPredicate.ult, token, nrecv_idx)
-                )
+                slot_idx = fx.Index(slot)
+                token = fx.Index(ids[i])
+                valid = (slot_base_idx + slot_idx < num_slots) & (token < nrecv_idx)
                 if const_expr(clamp_row):
                     # grad: contiguous route walk; clamp overrun to (expert-relative) row 0 for
                     # fault safety (its padding contribution is cancelled by the zeroed x column).
-                    # ``grad_base_idx`` is *not* added here: the operand's SRD base was already
-                    # rebased by ``grad_base_idx*feat`` in i64 above, so this offset is
+                    # ``gbase`` is *not* added here: the operand's SRD base was already
+                    # rebased by ``gbase*feat`` in i64 above, so this offset is
                     # expert-relative and stays within int32.
                     row_idx = valid.select(slot_base_idx + slot_idx, c0)
                 else:
@@ -391,9 +358,8 @@ def compile_moe_wgrad_v2(
                     row_idx = valid.select(token, nrecv_idx)
                 swz = slot & fx.Int32(cpr - 1)
                 glob_feat = (chunk ^ swz) * fx.Int32(FILL_V)
-                glob_feat_idx = arith.index_cast(T.index, glob_feat)
-                voff_elem = row_idx * dim_idx + feat_base_idx + glob_feat_idx
-                voff_byte = arith.index_cast(T.i32, voff_elem * arith.index(2))
+                voff_elem = row_idx * dim_idx + feat_base_idx + fx.Index(glob_feat)
+                voff_byte = fx.Int32(voff_elem * 2)
                 lds_perlane = fx.Int32(lds_off) + buf_byte + phys * fx.Int32(FILL_V * 2)
                 lds_base = rocdl.readfirstlane(T.i32, lds_perlane)
                 rocdl.raw_ptr_buffer_load_lds(
@@ -425,11 +391,14 @@ def compile_moe_wgrad_v2(
             # just-issued tile's DMA streaming across the barrier so it overlaps the next
             # iteration's MFMA too (only the tile read next is fully drained). lgkmcnt(0)
             # retires this wave's ds_reads before the buffer is recycled NUM_BUF steps on.
-            asm = f"s_waitcnt vmcnt({keep}) lgkmcnt(0)\ns_barrier"
-            _llvm.InlineAsmOp(
-                res=None, operands_=[], asm_string=asm,
-                constraints="", has_side_effects=True, is_align_stack=False,
-            )
+            rocdl.s_waitcnt(vmcnt=keep, lgkmcnt=0)
+            rocdl.s_barrier()
+
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(WMMA_M, WMMA_N, WMMA_K, fx.BFloat16))
+        acc_ty = fx.Vector.make_type(C_FRAG, fx.Float32)
+
+        def mfma(a, b, c):
+            return fly_dialect.mma_atom_call_ssa([acc_ty], mma_atom, a, b, c)
 
         def compute(accs, g_buf_byte, x_buf_byte, dma_prefetch=None, slot=None):
             # A fragments are read one-per-mi to keep VGPR pressure low. B fragments are
@@ -471,10 +440,7 @@ def compile_moe_wgrad_v2(
                 for mi in range_constexpr(M_STEPS):
                     for nj in range_constexpr(N_STEPS):
                         idx = mi * N_STEPS + nj
-                        new_accs[idx] = rocdl.mfma_f32_16x16x32_bf16(
-                            T.vec(C_FRAG, T.f32),
-                            [a_frags[mi], b_frags[nj], accs[idx], 0, 0, 0],
-                        )
+                        new_accs[idx] = mfma(a_frags[mi], b_frags[nj], accs[idx])
                     rocdl.sched_barrier(0)
                 rocdl.s_setprio(0)
                 return new_accs
@@ -492,18 +458,12 @@ def compile_moe_wgrad_v2(
                     if const_expr(mi == 0 and nj + 1 < N_STEPS):
                         b_frags[nj + 1] = read_b(nj + 1)
                     idx = mi * N_STEPS + nj
-                    new_accs[idx] = rocdl.mfma_f32_16x16x32_bf16(
-                        T.vec(C_FRAG, T.f32), [a_cur, b_frags[nj], accs[idx], 0, 0, 0]
-                    )
+                    new_accs[idx] = mfma(a_cur, b_frags[nj], accs[idx])
                 rocdl.sched_barrier(0)
             rocdl.s_setprio(0)
             return new_accs
 
-        acc_init = [
-            arith.constant_vector(0.0, T.vec(C_FRAG, T.f32))
-            for _ in range(NACC)
-        ]
-        acc_iter_args = NACC
+        acc_init = [fx.Vector.filled(C_FRAG, 0.0, fx.Float32) for _ in range(NACC)]
 
         # NUM_BUF-stage ping-pong pipeline: MFMA the current LDS buffer while the next
         # step's global gather is in flight. Prefetch distance D == NUM_BUF - 1: stage D
@@ -514,7 +474,6 @@ def compile_moe_wgrad_v2(
         # Graduated ``vmcnt`` kept in flight across each sub-tile's barrier: leaves the
         # just-issued tile's DMA streaming (only the tile read next is fully drained).
         KEEP = (NUM_BUF - 2) * PER_TILE_DMA
-        acc_ty = T.vec(C_FRAG, T.f32)
 
         # Static NUM_BUF-buffer ring, distance-D, slot-loop unrolled by NUM_BUF. Sub-tile j
         # always reads buffer j and prefetches tile (base+j+D) into buffer (j+D) % NUM_BUF --
@@ -552,36 +511,32 @@ def compile_moe_wgrad_v2(
 
         # Prologue: stage tiles 0..D-1 into buffers 0..D-1 (distance-D), then drain fully.
         for j in range_constexpr(D):
-            j_slot = arith.index(j * WMMA_K)
+            j_slot = fx.Index(j * WMMA_K)
             gidj, xidj = load_slot_ids(j_slot)
             dma_fill(gidj, xidj, j_slot, g_byte(j), x_byte(j), wbuf=j)
         _dma_barrier()
 
         # Initial carried id-sets: iteration 0 prefetches tiles D..D+NUM_BUF-1.
         init_sets = [
-            load_slot_ids(arith.index((D + j) * WMMA_K))
+            load_slot_ids(fx.Index((D + j) * WMMA_K))
             for j in range_constexpr(NUM_BUF)
         ]
 
-        ntiles = fx.Int32(arith.index_cast(T.i32, num_slots)) // fx.Int32(WMMA_K)
-        group_end = arith.index_cast(
-            T.index, (ntiles // fx.Int32(NUM_BUF)) * fx.Int32(NUM_BUF * WMMA_K)
-        )
-        step_big = arith.index(NUM_BUF * WMMA_K)
+        ntiles = fx.Int32(num_slots) // WMMA_K
+        group_end = fx.Index((ntiles // NUM_BUF) * (NUM_BUF * WMMA_K))
 
-        loop = scf.ForOp(
-            c0, group_end, step_big, iter_args=acc_init + pack_idsets(init_sets)
-        )
-        with ir.InsertionPoint(loop.body):
-            s_base = loop.induction_variable
-            accs = [loop.body.arguments[1 + i] for i in range(NACC)]
-            cur_sets = unpack_idsets(loop.body.arguments, 1 + acc_iter_args)
+        for s_iv, state in range(
+            c0, group_end, NUM_BUF * WMMA_K, init=acc_init + pack_idsets(init_sets)
+        ):
+            s_base = fx.Index(s_iv)
+            accs = state[:NACC]
+            cur_sets = unpack_idsets(state, NACC)
 
             # sub-tile j: read buffer j (tile s_base+j), prefetch tile s_base+j+D into
             # buffer (j+D) % NUM_BUF using its carried id-set.
             for j in range_constexpr(NUM_BUF):
                 g_ids_j, x_ids_j = cur_sets[j]
-                pf_slot = s_base + arith.index((j + D) * WMMA_K)
+                pf_slot = s_base + (j + D) * WMMA_K
                 accs = compute(
                     accs, g_byte(j), x_byte(j),
                     dma_prefetch=mk_prefetch(g_ids_j, x_ids_j, pf_slot, j + D),
@@ -590,29 +545,23 @@ def compile_moe_wgrad_v2(
                 _dma_barrier(KEEP)
 
             nxt_sets = [
-                load_slot_ids(s_base + arith.index((NUM_BUF + D + j) * WMMA_K))
+                load_slot_ids(s_base + (NUM_BUF + D + j) * WMMA_K)
                 for j in range_constexpr(NUM_BUF)
             ]
-            scf.YieldOp(accs + pack_idsets(nxt_sets))
+            results = yield accs + pack_idsets(nxt_sets)
 
-        accs = [loop.results[i] for i in range(NACC)]
+        accs = results[:NACC]
 
         # Tail: rem in 0..NUM_BUF-1 leftover tiles, already prefetched into buffers
         # 0..rem-1 by the last group. Drain any in-flight DMA, then consume read-only.
         _dma_barrier()
-        rem = ntiles - (ntiles // fx.Int32(NUM_BUF)) * fx.Int32(NUM_BUF)
+        rem = fx.Uint32(ntiles - (ntiles // NUM_BUF) * NUM_BUF)
 
         def _tail(j, accs):
-            if const_expr(j >= NUM_BUF - 1):
-                return accs
-            has_j = arith.cmpi(arith.CmpIPredicate.ugt, rem, fx.Int32(j))
-            tif = scf.IfOp(has_j, results_=[acc_ty] * NACC, has_else=True)
-            with ir.InsertionPoint(tif.then_block):
-                a2 = compute(accs, g_byte(j), x_byte(j), dma_prefetch=None, slot=j)
-                scf.YieldOp(_tail(j + 1, a2))
-            with ir.InsertionPoint(tif.else_block):
-                scf.YieldOp(accs)
-            return [tif.results[i] for i in range(NACC)]
+            if const_expr(j < NUM_BUF - 1):
+                if rem > j:
+                    accs = _tail(j + 1, compute(accs, g_byte(j), x_byte(j), slot=j))
+            return accs
 
         accs = _tail(0, accs)
 
@@ -621,37 +570,26 @@ def compile_moe_wgrad_v2(
         # ``accumulate`` is set the read-modify-write into the destination is race-free.
         # ``out_ty`` is the ``dW`` element type: bf16 truncates the f32 accumulator on store;
         # fp32 stores it directly (and accumulates without the bf16 round-trip).
-        out_ty = T.f32 if out_is_f32 else bf16
-        E_NK_row = arith.index_cast(T.index, expert) * N_idx * K_idx
+        out_ty = fx.Float32 if out_is_f32 else fx.BFloat16
+        E_NK_row = fx.Index(expert) * N_idx * K_idx
         for mi in range_constexpr(M_STEPS):
             for nj in range_constexpr(N_STEPS):
-                acc_idx = mi * N_STEPS + nj
-                acc = accs[acc_idx]
+                acc = fx.Vector(accs[mi * N_STEPS + nj])
                 c_n = k_block_base + warp_k_base + fx.Int32(nj * WMMA_N) + lane_n
-                c_n_idx = arith.index_cast(T.index, c_n)
-                k_ok = arith.cmpi(arith.CmpIPredicate.ult, c_n_idx, K_idx)
+                c_n_idx = fx.Index(c_n)
+                k_ok = c_n_idx < K_idx
                 for ii in range_constexpr(C_FRAG):
                     n_out = (
                         n_block_base + warp_n_base + fx.Int32(mi * WMMA_M)
                         + lane_m_base * C_FRAG + fx.Int32(ii)
                     )
-                    n_out_idx = arith.index_cast(T.index, n_out)
-                    in_bounds = arith.andi(
-                        arith.cmpi(arith.CmpIPredicate.ult, n_out_idx, N_idx), k_ok
-                    )
-                    store_if = scf.IfOp(in_bounds, results_=[], has_else=False)
-                    with ir.InsertionPoint(store_if.then_block):
-                        val = vector.extract(
-                            acc, static_position=[ii], dynamic_position=[]
-                        )  # f32 accumulator
+                    n_out_idx = fx.Index(n_out)
+                    if (n_out_idx < N_idx) & k_ok:
+                        val = acc[ii]  # f32 accumulator
                         out_off = E_NK_row + n_out_idx * K_idx + c_n_idx
                         if const_expr(accumulate):
-                            prev = raw_buffer_load(dW_rsrc, out_off, out_ty)
-                            prev_f32 = prev if const_expr(out_is_f32) else arith.extf(T.f32, prev)
-                            val = arith.addf(val, prev_f32)
-                        store_val = val if const_expr(out_is_f32) else arith.truncf(bf16, val)
-                        raw_buffer_store(store_val, dW_rsrc, out_off)
-                        scf.YieldOp([])
+                            val = val + raw_buffer_load(dW_rsrc, out_off, out_ty).to(fx.Float32)
+                        raw_buffer_store(val.to(out_ty), dW_rsrc, out_off)
 
     @flyc.jit
     def launch_wgrad(
@@ -699,7 +637,7 @@ def _gep_lds(base_ptr, byte_i32):
     transpose reads.
     """
     return _llvm.getelementptr(
-        ir.Type.parse("!llvm.ptr<3>"), rocdl._to_ir(base_ptr), [rocdl._to_ir(byte_i32)],
+        ir.Type.parse("!llvm.ptr<3>"), base_ptr, [fx.Int32(byte_i32).ir_value()],
         [-(2 ** 31)], T.i8, None,
     )
 

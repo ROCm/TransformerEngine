@@ -37,11 +37,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.fp16_gemm_utils import ceildiv
-from ..gemm.gemm_common_utils import _i64, make_value_attrs, require_launch_size
+from ..gemm.gemm_common_utils import make_value_attrs, require_launch_size
 from ..gemm.pf_gemm_utils import (
     RouteI32Loader,
     _make_shared_storage,
@@ -116,12 +115,8 @@ def compile_grouped_gemm_dgrad_bf16(
         pool_ptr_ty = PointerType.get(
             elem_ty=fx.BFloat16.ir_type, address_space=AddressSpace.Global, alignment=16
         )
-        gy_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(GRAD_Y))), signed=True
-        )
-        dx_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(DX))), signed=True
-        )
+        gy_base = fx.Int64(fx.ptrtoint(fx.get_iter(GRAD_Y)))
+        dx_base = fx.Int64(fx.ptrtoint(fx.get_iter(DX)))
         # Flat 1D grad view (gather source; bounded to A_ELEMS so the sentinel row reads 0).
         # Built unconditionally: the route-read variant simply ignores it.
         GY_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, gy_base), fx.make_layout(A_ELEMS, 1))
@@ -134,7 +129,7 @@ def compile_grouped_gemm_dgrad_bf16(
             pid_in_group = pid % num_pid_in_group
             first_pid_m = group_id * GROUP_M
             remaining_m = num_pid_m - first_pid_m
-            group_size_m = arith.select(remaining_m < GROUP_M, remaining_m, fx.Int32(GROUP_M))
+            group_size_m = (remaining_m < GROUP_M).select(remaining_m, fx.Int32(GROUP_M))
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
             g_idx = group_res.load(block_m)
@@ -143,14 +138,14 @@ def compile_grouped_gemm_dgrad_bf16(
                 gbase = g_idx * fx.Int32(N) * fx.Int32(Kout)
                 sorted_row_base = block_m * fx.Int32(BLOCK_M)
 
-                dx_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(fx.Int32(Kout)) * fx.Int64(2)
+                dx_byte_off = fx.Int64(block_m * fx.Int32(BLOCK_M)) * fx.Int64(Kout) * fx.Int64(2)
                 DX_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, dx_base + dx_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * fx.Int32(Kout), 1),
                 )
                 # Route-read grad tile: rebased per tile in i64 so the base pointer (not an i32
                 # offset) carries block_m -- read contiguously. Ignored by the gather variant.
-                gy_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(fx.Int32(N)) * fx.Int64(2)
+                gy_byte_off = fx.Int64(block_m * fx.Int32(BLOCK_M)) * fx.Int64(N) * fx.Int64(2)
                 GY_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, gy_base + gy_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * fx.Int32(N), 1),

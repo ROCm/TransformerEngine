@@ -27,11 +27,9 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
 from .gemm_common_utils import barrier
@@ -43,12 +41,12 @@ BLOCK_K = 64
 def _inttoptr_lds(byte_addr):
     """Integer byte address -> !llvm.ptr<3> (LDS). Parsed per call: the type is
     bound to the current MLIRContext and cannot be cached across compiles."""
-    return _llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), _raw(fx.Int64(byte_addr)))
+    return _llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), fx.Int64(byte_addr).ir_value())
 
 
 def _lds_ptr_from_i32(addr_i32, byte_offset=0):
     """Build an LDS pointer (ptr<3>) from an i32 byte address + optional static offset."""
-    ptr = _inttoptr_lds(ArithValue(addr_i32).extui(T.i64))
+    ptr = _inttoptr_lds(fx.Uint32(addr_i32))
     if byte_offset != 0:
         ptr = _llvm.getelementptr(
             ir.Type.parse("!llvm.ptr<3>"), ptr, [], [int(byte_offset)], T.i8, None
@@ -64,7 +62,7 @@ def _packed_ds_read_tr16(base_ptr, byte_offsets):
     constraints = ",".join(["=&v"] * n + ["v"] + ["~{memory}"])
     op = _llvm.InlineAsmOp(
         res=struct_t,
-        operands_=[_raw(base_ptr)],
+        operands_=[base_ptr],
         asm_string=asm,
         constraints=constraints,
         has_side_effects=True,
@@ -197,7 +195,7 @@ class StoreCBf16:
 
     def _store_masked(self, value, c_index, valid):
         """Store one element to c_index (masked to the OOB sink when invalid)."""
-        idx = arith.select(valid, c_index, self.oob)
+        idx = valid.select(c_index, self.oob)
         val = value.to(self.out_ty)
         fx.memref_store_vec(Vec.filled(1, val, self.out_ty), self.reg_out_1)
         fx.copy(self.out_atom_1, self.reg_out_1, fx.slice(self.c_div, (None, fx.Int32(idx))))
@@ -321,7 +319,7 @@ def xcd_remap_pid(pid, total_pids, num_xcd):
     rem = total_pids - per_xcd * num_xcd
     xcd = pid % num_xcd
     local = pid // num_xcd
-    offset = xcd * per_xcd + arith.select(xcd < rem, xcd, rem)
+    offset = xcd * per_xcd + (xcd < rem).select(xcd, rem)
     return offset + local
 
 
@@ -452,13 +450,7 @@ def dense_mma_pipeline_bf16(
         rocdl.s_barrier()
 
         if const_expr(nt_vmcnt >= 0):
-            _llvm.inline_asm(
-                res=None,
-                operands_=[],
-                asm_string=f"s_waitcnt vmcnt({nt_vmcnt})",
-                constraints="",
-                has_side_effects=True,
-            )
+            rocdl.s_waitcnt(vmcnt=nt_vmcnt)
         a_cur0, a_next0 = a_next0, a_cur0
         a_cur1, a_next1 = a_next1, a_cur1
         b_cur0, b_next0 = b_next0, b_cur0

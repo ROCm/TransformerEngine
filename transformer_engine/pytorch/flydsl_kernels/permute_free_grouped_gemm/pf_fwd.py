@@ -33,11 +33,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.fp16_gemm_utils import ceildiv
-from ..gemm.gemm_common_utils import _i64, make_value_attrs, require_launch_size
+from ..gemm.gemm_common_utils import make_value_attrs, require_launch_size
 from ..gemm.pf_gemm_utils import (
     RouteI32Loader,
     _make_shared_storage,
@@ -103,7 +102,7 @@ def compile_grouped_gemm_gather_bf16(
         # gather offsets index this row-major buffer directly; the buffer resource clamps the
         # padding sentinel (src_row == num_recv) to an OOB read of 0. (int32 element count:
         # holds up to 2^31 elems; larger A needs a per-lane i64 rebase like Mega's fp8 path.)
-        a_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(A))), signed=True)
+        a_base = fx.Int64(fx.ptrtoint(fx.get_iter(A)))
         A_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, a_base), fx.make_layout(A_ELEMS, 1))
 
         def _emit():
@@ -114,7 +113,7 @@ def compile_grouped_gemm_gather_bf16(
             pid_in_group = pid % num_pid_in_group
             first_pid_m = group_id * GROUP_M
             remaining_m = num_pid_m - first_pid_m
-            group_size_m = arith.select(remaining_m < GROUP_M, remaining_m, fx.Int32(GROUP_M))
+            group_size_m = (remaining_m < GROUP_M).select(remaining_m, fx.Int32(GROUP_M))
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
             g_idx = group_res.load(block_m)
@@ -123,8 +122,8 @@ def compile_grouped_gemm_gather_bf16(
                 gbase = g_idx * fx.Int32(K) * c_n
                 # Worst-case pool (cap*N > 2^31): rebase C per tile in int64, int32 in-resource
                 # offset. Mirrors the fused nt path.
-                c_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(c_n) * fx.Int64(2)
-                c_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, fx.ptrtoint(fx.get_iter(C))), signed=True)
+                c_byte_off = fx.Int64(block_m * fx.Int32(BLOCK_M)) * fx.Int64(c_n) * fx.Int64(2)
+                c_base = fx.Int64(fx.ptrtoint(fx.get_iter(C)))
                 C_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, c_base + c_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * c_n, 1),

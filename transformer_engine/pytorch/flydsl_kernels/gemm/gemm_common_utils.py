@@ -13,9 +13,7 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 """
 
 import flydsl.expr as fx
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
-from flydsl.expr.utils.arith import ArithValue
-
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from .exceptions import FlyDSLUnsupportedError
 
 
@@ -91,53 +89,12 @@ def divmod(a, b):  # pylint: disable=redefined-builtin
 
 
 def min(a, b):  # pylint: disable=redefined-builtin
-    return arith.select(a < b, a, b)
-
-
-def encode_waitcnt(vmcnt=63, lgkmcnt=15):
-    """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
-
-    ``rocdl.s_waitcnt`` accepts the raw 16-bit immediate operand of the
-    32-bit ``S_WAITCNT`` ISA instruction. On CDNA4, that SIMM16 field is:
-
-        SIMM16[3:0]   = vmcnt[3:0]
-        SIMM16[6:4]   = expcnt[2:0]
-        SIMM16[11:8]  = lgkmcnt[3:0]
-        SIMM16[15:14] = vmcnt[5:4]
-
-    ``vmcnt`` is therefore one six-bit counter split across two noncontiguous
-    fields; bits [5:4] are placed in SIMM16[15:14], while bits [3:0] remain
-    in SIMM16[3:0].
-
-    A wait-counter field set to its maximum representable value is effectively
-    unconstrained: the instruction does not wait on that counter. This helper
-    always encodes ``expcnt=7`` and defaults to ``vmcnt=63`` and ``lgkmcnt=15``,
-    so callers specify only the counters on which they intend to wait.
-
-    For example, ``encode_waitcnt(lgkmcnt=0)`` returns ``0xC07F``, which the
-    assembler renders as ``s_waitcnt lgkmcnt(0)``.
-    See: https://llvm.org/docs/AMDGPU/gfx9_waitcnt.html
-    """
-    if not 0 <= vmcnt <= 63:
-        raise ValueError(f"vmcnt must be in [0, 63], got {vmcnt}")
-    if not 0 <= lgkmcnt <= 15:
-        raise ValueError(f"lgkmcnt must be in [0, 15], got {lgkmcnt}")
-
-    return (
-        (7 << 4)  # expcnt=7 -> SIMM16[6:4] (unconstrained)
-        | (vmcnt & 0x0F)  # vmcnt[3:0] -> SIMM16[3:0]
-        | ((lgkmcnt & 0x0F) << 8)  # lgkmcnt[3:0] -> SIMM16[11:8]
-        | ((vmcnt & 0x30) << 10)  # vmcnt[5:4] -> SIMM16[15:14]
-    )
-
-
-# Keep the documented gfx950 encoding invariant executable and import-time cheap.
-assert encode_waitcnt(lgkmcnt=0) == 0xC07F
+    return (a < b).select(a, b)
 
 
 def barrier(vmcnt=63, lgkmcnt=15):
     if vmcnt != 63 or lgkmcnt != 15:
-        rocdl.s_waitcnt(encode_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt))
+        rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt)
     rocdl.s_barrier()
 
 
@@ -165,10 +122,7 @@ def xcd_swizzle(num_pid_m, num_pid_n):
     pid_m = first_pid_m + intra_group_m
 
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (
-        arith.select(use_simple, simple_m, pid_m),
-        arith.select(use_simple, simple_n, pid_n),
-    )
+    return use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n)
 
 
 # XOR swizzle over a 128-wide tile: col ^= ((row//2) % 8) * 16, row unchanged.
@@ -221,11 +175,6 @@ def compute_global_swizzle(lane_id, wave_id, row_stride, n_rounds, preshuffled=F
             r, c = swizzle_128(row, col)
             offsets.append(r * row_stride + c)
     return offsets
-
-
-def _i64(v):
-    """Widen an i32/index runtime value to signed i64 (tile base offsets)."""
-    return ArithValue(arith.unwrap(v)).extsi(fx.T.i64)
 
 
 def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
