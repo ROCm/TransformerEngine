@@ -78,7 +78,7 @@ def _run_dpa(
 
     for key in [
         "NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
-        "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
+        "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_MI450",
         "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3",
     ]:
         os.environ.pop(key, None)
@@ -243,7 +243,7 @@ def _compare(config: ModelConfig, dtype: torch.dtype = torch.bfloat16, is_traini
     reset_rng_states()
     for _evar in [
         "NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
-        "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
+        "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_MI450",
         "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3",
     ]:
         os.environ.pop(_evar, None)
@@ -377,3 +377,170 @@ _fwd_v3_d128["d128_sq128_sk2300_b1_mha"] = ModelConfig(
 def test_gfx1250_fwd_v3_d128(model):
     """FWD V3 D128 correctness — run_d128 configs from smoke_test_fwd_v3_gfx1250.sh."""
     _compare(_fwd_v3_d128[model], dtype=torch.bfloat16, is_training=False)
+
+
+# ---------------------------------------------------------------------------
+# MI450 backend (3rdparty/te-mi450-attn-kernels, opt-in via NVTE_FUSED_ATTN_MI450=1)
+#
+# Selection has two layers: TE maps its config onto the library's C ABI (kernels/attn_abi.h),
+# rejecting what the ABI cannot express, then asks the library's dispatcher (attn_fwd_supported,
+# attn_bwd_supported when training) whether any of its backends implements it. With CK and
+# AOTriton off, a declined config reports MI450's reason in the backend query's message, which
+# tells the two layers apart.
+# ---------------------------------------------------------------------------
+
+import transformer_engine.pytorch.attention.dot_product_attention.utils as _dpa_utils  # noqa: E402
+from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionParams  # noqa: E402
+
+_MI450_ENV = {
+    "NVTE_FUSED_ATTN": "1",
+    "NVTE_FLASH_ATTN": "0",
+    "NVTE_UNFUSED_ATTN": "0",
+    "NVTE_FUSED_ATTN_CK": "0",
+    "NVTE_FUSED_ATTN_AOTRITON": "0",
+    "NVTE_FUSED_ATTN_MI450": "1",
+}
+_LIBRARY_REASONS = ("attn_fwd_supported:", "attn_bwd_supported:")
+
+
+def _mi450_selection(config: ModelConfig, qkv_layout: str, dtype=torch.bfloat16, is_training=True, env=None):
+    """``(selected, reason)``: whether MI450 is picked for ``config``, else MI450's reason (None if
+    fused attention was ruled out before the backend query)."""
+    env = _MI450_ENV if env is None else env
+    saved = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    messages = []
+    query = _dpa_utils._get_fused_attn_backend
+
+    def recording_query(**kwargs):
+        backend, message = query(**kwargs)
+        messages.append(message)
+        return backend, message
+
+    _dpa_utils._get_fused_attn_backend = recording_query
+    try:
+        is_thd = qkv_layout.startswith("thd")
+        params = AttentionParams(
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            batch_size=config.batch_size,
+            num_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
+            head_dim_qk=config.head_dim_qk,
+            head_dim_v=config.head_dim_v,
+            num_tokens_q=config.batch_size * config.max_seqlen_q if is_thd else 0,
+            num_tokens_kv=config.batch_size * config.max_seqlen_kv if is_thd else 0,
+            attn_mask_type=config.attn_mask_type,
+            window_size=config.window_size,
+            attention_dropout=config.dropout_p,
+            is_training=is_training,
+        )
+        _, _, use_fused, fused_backend, _, _ = _dpa_utils.get_attention_backend(params)
+    finally:
+        _dpa_utils._get_fused_attn_backend = query
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        _attention_backends["backend_selection_requires_update"] = True
+    if use_fused and FusedAttnBackend.cast(fused_backend) == FusedAttnBackend["MI450"]:
+        return True, None
+    reason = next((m.split(" MI450: ", 1)[1] for m in messages if " MI450: " in m), None)
+    return False, reason
+
+
+_mi450_base = ModelConfig(2, 256, 8, 128, num_gqa_groups=2)
+
+
+def _require_mi450_built():
+    _, reason = _mi450_selection(_mi450_base, "bshd_bshd_bshd")
+    if reason is not None and "not compiled" in reason:
+        pytest.skip("MI450 backend not built (needs gfx1250 and 3rdparty/te-mi450-attn-kernels)")
+
+
+# (config, qkv_layout, dtype) -> whether the C ABI can express the config, i.e. whether TE hands it to the
+# library's support queries (which then decide)
+_mi450_selection_cases = {
+    "bshd_no_mask": (_mi450_base, "bshd_bshd_bshd", torch.bfloat16, True),
+    "sbhd_causal": (
+        ModelConfig(2, 256, 8, 64, attn_mask_type="causal"), "sbhd_sbhd_sbhd", torch.bfloat16, True),
+    "bshd_cross_causal_br": (
+        ModelConfig(2, 128, 8, 128, max_seqlen_kv=512, attn_mask_type="causal_bottom_right"),
+        "bshd_bshd_bshd", torch.bfloat16, True),
+    "bshd_swa": (
+        ModelConfig(2, 256, 8, 128, attn_mask_type="causal", window_size=(64, 0)),
+        "bshd_bshd_bshd", torch.bfloat16, True),
+    "thd_padding_causal_br": (
+        ModelConfig(2, 256, 8, 128, attn_mask_type="padding_causal_bottom_right"),
+        "thd_thd_thd", torch.bfloat16, True),
+    # top-left causal is only the ABI's bottom-right mask when s_q == s_kv for every sequence
+    "bshd_cross_causal_tl": (
+        ModelConfig(2, 128, 8, 128, max_seqlen_kv=512, attn_mask_type="causal"),
+        "bshd_bshd_bshd", torch.bfloat16, False),
+    "thd_padding_causal_tl": (
+        ModelConfig(2, 256, 8, 128, attn_mask_type="padding_causal"), "thd_thd_thd", torch.bfloat16, False),
+    "bshd_padding": (
+        ModelConfig(2, 256, 8, 128, attn_mask_type="padding"), "bshd_bshd_bshd", torch.bfloat16, False),
+    "bshd_fp16": (_mi450_base, "bshd_bshd_bshd", torch.float16, False),
+    "bshd_dropout": (ModelConfig(2, 256, 8, 128, dropout_p=0.1), "bshd_bshd_bshd", torch.bfloat16, False),
+    "bshd_mla": (ModelConfig(2, 256, 8, 128, head_dim_v=64), "bshd_bshd_bshd", torch.bfloat16, False),
+    "bshd_packed": (_mi450_base, "bs3hd", torch.bfloat16, False),
+}
+
+
+@pytest.mark.parametrize("is_training", [False, True], ids=["inference", "training"])
+@pytest.mark.parametrize("case", sorted(_mi450_selection_cases))
+def test_gfx1250_mi450_selection(case, is_training):
+    """Configs the ABI cannot express never reach the library; the rest are selected exactly when the
+    library's support queries accept them. Never selected without the opt-in."""
+    _require_mi450_built()
+    config, qkv_layout, dtype, abi_ok = _mi450_selection_cases[case]
+    selected, reason = _mi450_selection(config, qkv_layout, dtype, is_training)
+    if abi_ok:
+        assert selected or (reason is not None and reason.startswith(_LIBRARY_REASONS)), reason
+    else:
+        assert not selected
+        assert reason is None or not reason.startswith(_LIBRARY_REASONS), reason
+    opted_out = {**_MI450_ENV, "NVTE_FUSED_ATTN_MI450": "0"}
+    assert not _mi450_selection(config, qkv_layout, dtype, is_training, env=opted_out)[0]
+
+
+_mi450_correctness = {
+    "d128_mha": ModelConfig(2, 256, 8, 128),
+    "d128_gqa4": ModelConfig(2, 200, 16, 128, num_gqa_groups=4),
+    "d64_mha": ModelConfig(2, 256, 8, 64),
+    "d128_causal": ModelConfig(2, 256, 8, 128, attn_mask_type="causal"),
+    "d128_cross_causal_br": ModelConfig(
+        2, 120, 8, 128, max_seqlen_kv=330, attn_mask_type="causal_bottom_right"),
+    "d128_swa": ModelConfig(2, 256, 8, 128, attn_mask_type="causal", window_size=(64, 0)),
+}
+
+
+@pytest.mark.parametrize("is_training", [False, True], ids=["fwd", "fwd_bwd"])
+@pytest.mark.parametrize("model", sorted(_mi450_correctness))
+def test_gfx1250_mi450(model, is_training):
+    """MI450 fwd (and bwd) against a float32 PyTorch SDPA reference, bshd, for configs the library supports."""
+    _require_mi450_built()
+    config = _mi450_correctness[model]
+    selected, reason = _mi450_selection(config, "bshd_bshd_bshd", is_training=is_training)
+    if not selected:
+        pytest.skip(f"MI450 not selected: {reason}")
+    tols = dict(atol=2e-2, rtol=2e-2)
+    b, sq, hq, d = config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk
+    q = torch.randn(b, sq, hq, d, dtype=torch.bfloat16, device="cuda")
+    k = torch.randn(b, config.max_seqlen_kv, config.num_gqa_groups, d, dtype=torch.bfloat16, device="cuda")
+    v = torch.randn_like(k)
+    ref_out, ref_grads = _pytorch_ref(config, q, k, v, is_training)
+    try:
+        out, grads = _run_dpa(config, _MI450_ENV, torch.bfloat16, is_training, q=q, k=k, v=v)
+    finally:
+        for key in _MI450_ENV:
+            os.environ.pop(key, None)
+        _attention_backends["backend_selection_requires_update"] = True
+    torch.testing.assert_close(out.view(b, sq, hq, d), ref_out, **tols)
+    if is_training:
+        for got, ref in zip(grads, ref_grads):
+            torch.testing.assert_close(got, ref, **tols)

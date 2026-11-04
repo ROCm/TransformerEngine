@@ -28,6 +28,7 @@
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
         .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)                            \
         .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)                                        \
+        .value("NVTE_MI450", NVTE_Fused_Attn_Backend::NVTE_MI450)                                  \
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend); 
 #endif
 

@@ -131,6 +131,11 @@ def setup_common_extension() -> CMakeExtension:
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
 
+        # Built when gfx1250 is targeted and 3rdparty/te-mi450-attn-kernels is checked out; used at
+        # runtime only with NVTE_FUSED_ATTN_MI450=1.
+        if int(os.getenv("NVTE_FUSED_ATTN_MI450", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
+            cmake_flags.append("-DUSE_FUSED_ATTN_MI450=OFF")
+
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
             os.environ["NVTE_ENABLE_NVSHMEM"] = '0'

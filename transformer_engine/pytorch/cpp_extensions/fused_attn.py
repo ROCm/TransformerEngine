@@ -126,6 +126,7 @@ class FusedAttnBackend(IntEnum):
     else:
         AOTriton = int(NVTE_Fused_Attn_Backend.NVTE_AOTriton)
         CK = int(NVTE_Fused_Attn_Backend.NVTE_CK)
+        MI450 = int(NVTE_Fused_Attn_Backend.NVTE_MI450)
 
     @classmethod
     def cast(

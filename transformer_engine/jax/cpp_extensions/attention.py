@@ -604,7 +604,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             if backend == NVTE_Fused_Attn_Backend.NVTE_AOTriton:
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-            elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
+            elif backend in (NVTE_Fused_Attn_Backend.NVTE_CK, NVTE_Fused_Attn_Backend.NVTE_MI450):
                 if config.qkv_layout.is_thd():
                     softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
                 else:

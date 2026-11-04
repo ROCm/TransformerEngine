@@ -33,3 +33,7 @@
 [submodule "3rdparty/nccl-extensions"]
 	path = 3rdparty/nccl-extensions
 	url = https://github.com/NVIDIA/nccl-extensions.git
+[submodule "3rdparty/te-mi450-attn-kernels"]
+	path = 3rdparty/te-mi450-attn-kernels
+	url = https://github.com/AMD-BRAIN-Internal/te-mi450-attn-kernels.git
+	update = none

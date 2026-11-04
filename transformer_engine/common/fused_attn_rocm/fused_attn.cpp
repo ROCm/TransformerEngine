@@ -10,6 +10,7 @@
 #include "transformer_engine/fused_attn.h"
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
+#include "fused_attn_mi450.h"
 #include "../common.h"
 #include "../fused_attn/config_and_params.h"
 #include "../util/cuda_runtime.h" //cuda::sm_arch
@@ -293,12 +294,32 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const bool nvte_fused_attn_ck = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_CK", true);
   const bool nvte_fused_attn_aotriton =
       nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_AOTRITON", true);
+  // the mi450 backend is opt-in while its kernels are under development
+  const bool nvte_fused_attn_mi450 =
+      nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_MI450", false);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
-  // first check whether ck can be used, then check aotriton
-  if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
+  // when opted in, mi450 takes precedence; then check ck, then aotriton
+  if(nvte_fused_attn_mi450 && fused_attn_rocm::is_mi450_backend_supported(
+        is_training,
+        deterministic,
+        q_dtype,
+        kv_dtype,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout,
+        num_attn_heads, num_gqa_groups,
+        max_seqlen_q, max_seqlen_kv,
+        head_dim_qk,
+        head_dim_v,
+        window_size_left,
+        window_size_right)){
+    return NVTE_Fused_Attn_Backend::NVTE_MI450;
+  }else if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         is_training,
         q_dtype,
         kv_dtype,
@@ -421,6 +442,21 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state,
       wkspace,
       stream);
+  } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_MI450){
+    fused_attn_mi450_fwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
+      attn_scale,
+      window_size_left, window_size_right, bottom_right_diagonal,
+      qkv_layout,
+      input_Q, input_K, input_V,
+      output_O, Aux_CTX_Tensors,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      input_rng_state,
+      wkspace,
+      stream);
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
@@ -540,6 +576,22 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state,
       wkspace,
       stream);
+  } else if(fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_MI450){
+    fused_attn_mi450_bwd(
+      b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk,
+      attn_scale,
+      window_size_left, window_size_right, bottom_right_diagonal,
+      deterministic,
+      qkv_layout,
+      input_Q, input_K, input_V, input_O, input_dO,
+      output_S,
+      output_dQ, output_dK, output_dV,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      input_cu_seqlens_q_padded,
+      input_cu_seqlens_kv_padded,
+      wkspace,
+      stream);
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
@@ -556,9 +608,25 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.head_dim_qk, cfg.head_dim_v, cfg.window_size_left,
       cfg.window_size_right, cfg.return_max_logit, cfg.cuda_graph, cfg.deterministic);
   if (message != nullptr) {
-    *message = (backend == NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-                   ? "No ROCm fused attention backend (CK, AOTriton) supports this configuration."
-                   : "";
+    static thread_local std::string reject_message;
+    reject_message.clear();
+    if (backend == NVTE_Fused_Attn_Backend::NVTE_No_Backend) {
+      reject_message = "No ROCm fused attention backend (MI450, CK, AOTriton) supports this configuration.";
+      // MI450 is opt-in: when it was asked for, say why it declined (the library's own reason included)
+      if (transformer_engine::getenv<bool>("NVTE_FUSED_ATTN", true) &&
+          transformer_engine::getenv<bool>("NVTE_FUSED_ATTN_MI450", false) && !cfg.return_max_logit) {
+        const auto [window_left, window_right] = check_set_window_size(
+            cfg.attn_mask_type, std::make_pair(cfg.window_size_left, cfg.window_size_right));
+        std::string mi450_reason;
+        transformer_engine::fused_attn_rocm::is_mi450_backend_supported(
+            cfg.is_training, cfg.deterministic, cfg.qkv_dtype, cfg.qkv_dtype, cfg.qkv_layout, cfg.bias_type,
+            cfg.attn_mask_type, cfg.softmax_type, cfg.dropout, cfg.num_attn_heads, cfg.num_gqa_groups,
+            cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.head_dim_qk, cfg.head_dim_v, window_left, window_right,
+            &mi450_reason);
+        reject_message += " MI450: " + mi450_reason;
+      }
+    }
+    *message = reject_message.c_str();
   }
   return backend;
 }

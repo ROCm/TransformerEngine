@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.21)
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
+option(USE_FUSED_ATTN_MI450 "Use gfx1250 (MI450) backend from 3rdparty/te-mi450-attn-kernels" ON)
 option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels" ON)
 set(USE_CUDA OFF)
 
@@ -152,6 +153,7 @@ if(USE_ROCM)
   message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
   message(STATUS "USE_FUSED_ATTN_CK ${USE_FUSED_ATTN_CK}")
   message(STATUS "USE_FUSED_ATTN_AOTRITON ${USE_FUSED_ATTN_AOTRITON}")
+  message(STATUS "USE_FUSED_ATTN_MI450 ${USE_FUSED_ATTN_MI450}")
 endif()
 
 # Python
@@ -397,6 +399,7 @@ if(USE_ROCM)
       fused_attn_rocm/fused_attn.cpp
       fused_attn_rocm/fused_attn_aotriton.cpp
       fused_attn_rocm/fused_attn_ck.cpp
+      fused_attn_rocm/fused_attn_mi450.cpp
       fused_attn_rocm/utils.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
@@ -736,6 +739,10 @@ else() # USE_ROCM
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   endif()
 
+  if(USE_FUSED_ATTN_MI450)
+    add_subdirectory(mi450_attn ${CMAKE_CURRENT_BINARY_DIR}/mi450_attn)
+  endif()
+
   if(USE_HIPKITTENS_GEMM)
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
   endif()
@@ -753,6 +760,10 @@ else() # USE_ROCM
   if(USE_FUSED_ATTN_CK)
     target_compile_definitions(transformer_engine PUBLIC USE_FUSED_ATTN_CK)
     list(APPEND transformer_engine_LINKER_LIBS ck_fused_attn)
+  endif()
+  if(USE_FUSED_ATTN_MI450)
+    target_compile_definitions(transformer_engine PUBLIC USE_FUSED_ATTN_MI450)
+    list(APPEND transformer_engine_LINKER_LIBS mi450_attn)
   endif()
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
