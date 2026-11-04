@@ -8,11 +8,11 @@
 
 namespace te_kittens::cdna5 {
 
-// Forward, e4m3 x e4m3: bias (Linear; bf16 with fp32 D), beta (te.ops ForwardLinear*Add), GELU (LayerNormMLP fc1
-// with NVTE_GEMM_GELU_FUSION=1; aux = bias dtype, bf16 without a bias).
+// Forward, e4m3/e5m2 x e4m3/e5m2: bias (Linear; bf16 with fp32 D), beta (te.ops ForwardLinear*Add),
+// GELU (LayerNormMLP fc1 with NVTE_GEMM_GELU_FUSION=1; aux = bias dtype, bf16 without a bias).
 template <>
 struct mxfp8_gemm::Instances<TN> {
-    using formats  = List<Formats<0, 0>>;
+    using formats  = List<Formats<0, 0>, Formats<0, 1>, Formats<1, 0>, Formats<1, 1>>;
     using variants = List<Variant<NONE, false, __bf16>, Variant<NONE, false, _Float16>,
                           Variant<NONE, false, float>, Variant<NONE, true, __bf16>,
                           Variant<NONE, true, _Float16>, Variant<NONE, true, float>,

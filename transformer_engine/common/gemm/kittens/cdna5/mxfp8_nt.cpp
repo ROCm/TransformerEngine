@@ -8,11 +8,11 @@
 
 namespace te_kittens::cdna5 {
 
-// Wgrad: x e4m3 x dy e4m3 or e5m2 (HYBRID). Beta: gradient accumulation into main_grad (fp32) or
+// Wgrad: e4m3/e5m2 x e4m3/e5m2. Beta: gradient accumulation into main_grad (fp32) or
 // a 16-bit weight gradient.
 template <>
 struct mxfp8_gemm::Instances<NT> {
-    using formats  = List<Formats<0, 0>, Formats<0, 1>>;
+    using formats  = List<Formats<0, 0>, Formats<0, 1>, Formats<1, 0>, Formats<1, 1>>;
     using variants = List<Variant<NONE, false, __bf16>, Variant<NONE, false, _Float16>,
                           Variant<NONE, false, float>, Variant<NONE, true, __bf16>,
                           Variant<NONE, true, _Float16>, Variant<NONE, true, float>>;

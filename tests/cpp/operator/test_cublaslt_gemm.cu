@@ -616,7 +616,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 
 
 std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop,
-                                             DType atype, DType btype, DType dtype) {
+                                             DType dtype) {
   if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
@@ -646,10 +646,10 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
     if (params.m % 256 || params.n % 256 || params.k % 128) {
       return "HipKittens on gfx1250 requires M and N 256-aligned, K 128-aligned";
     }
-    const bool tn = params.transa && !params.transb;
-    if (atype != DType::kFloat8E4M3 || (tn && btype != DType::kFloat8E4M3) || isFp8Type(dtype)) {
-      return "HipKittens on gfx1250 requires e4m3 A (and B for TN) and a non-FP8 output";
+    if (isFp8Type(dtype)) {
+      return "HipKittens on gfx1250 requires a non-FP8 output";
     }
+    const bool tn = params.transa && !params.transb;
     if (!tn && (params.use_bias || params.use_gelu)) {
       return "HipKittens on gfx1250 has bias and GELU epilogues for TN only";
     }
@@ -688,7 +688,7 @@ void performTest(const TestParams& params) {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
-    if (auto reason = checkMxFP8Support(params, prop, atype, btype, dtype))
+    if (auto reason = checkMxFP8Support(params, prop, dtype))
     {
       GTEST_SKIP() << *reason;
     }
@@ -911,7 +911,7 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  if (auto reason = checkMxFP8Support(params, prop, atype, btype, dtype))
+  if (auto reason = checkMxFP8Support(params, prop, dtype))
   {
     GTEST_SKIP() << *reason;
   }
