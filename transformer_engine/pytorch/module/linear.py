@@ -84,6 +84,7 @@ from ..cpp_extensions import (
     general_gemm,
     get_cublas_workspace,
 )
+from ..gemm_autotune import autotuned_gemm
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..graph import is_graph_capturing
 from ..jit import no_torch_dynamo
@@ -670,7 +671,7 @@ def _linear_forward_impl(
             "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
     nvtx_range_push(f"{nvtx_label}.gemm")
-    gemm_out, *_, reduce_scatter_out = general_gemm(
+    gemm_out, *_, reduce_scatter_out = autotuned_gemm(
         weightmat,
         inputmat_total,
         quantization_params=output_quantizer,
@@ -1525,7 +1526,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 weight_for_dgrad = saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-            gemm_out, *_, reduce_scatter_out = general_gemm(
+            gemm_out, *_, reduce_scatter_out = autotuned_gemm(
                 weight_for_dgrad,
                 grad_output,
                 layout="NN",
@@ -1737,7 +1738,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
 
                 """
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
+                dw, db, *_ = autotuned_gemm(x, dy, **wgrad_gemm_kwargs)
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
                 return dw, db
 
