@@ -790,9 +790,6 @@ else() # USE_ROCM
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
   endif()
 
-  # There is no TE-side wrapper library any more: QoLA exports a C ABI that
-  # libtransformer_engine.so links against directly, so all this needs is the
-  # include dir and the built .so files.
   if(__BUILD_AITER_GEMM)
     qola_build_modules(
       GROUP           aiter_gemm

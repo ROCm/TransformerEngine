@@ -537,8 +537,6 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   // gfx1250 deterministic only: number of dq_acc planes; 0 lets aiter pick from the shape.
   fmha_args.det_split = 0;
 
-  fmha_args.det_split = 0;
-
   return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
 }
 
