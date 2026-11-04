@@ -481,13 +481,14 @@ def _mxfp4_quantize_32x32_block(
     abs_qx = tl.abs(qx)
     sign = (qx < 0.0).to(tl.uint8)
     idx = tl.zeros([BLOCK_SIZE, BLOCK_SIZE], dtype=tl.uint8)
-    idx = tl.where(abs_qx >= 0.25, 1, idx)
+    # round half to even: a tie only rounds up into an even code
+    idx = tl.where(abs_qx > 0.25, 1, idx)
     idx = tl.where(abs_qx >= 0.75, 2, idx)
-    idx = tl.where(abs_qx >= 1.25, 3, idx)
+    idx = tl.where(abs_qx > 1.25, 3, idx)
     idx = tl.where(abs_qx >= 1.75, 4, idx)
-    idx = tl.where(abs_qx >= 2.5, 5, idx)
+    idx = tl.where(abs_qx > 2.5, 5, idx)
     idx = tl.where(abs_qx >= 3.5, 6, idx)
-    idx = tl.where(abs_qx >= 5.0, 7, idx)
+    idx = tl.where(abs_qx > 5.0, 7, idx)
 
     e2m1 = (sign << 3) | idx
     pairs = tl.reshape(e2m1, [BLOCK_SIZE, BLOCK_SIZE // 2, 2])
