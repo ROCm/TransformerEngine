@@ -2,7 +2,11 @@
 #
 # See LICENSE for license information.
 #
-# Build .github/scripts/Dockerfile.ci.deps and push to the container registry.
+# Build .github/scripts/Dockerfile.ci.deps and publish it.
+#
+# Always pushes to GitHub Container Registry (ghcr.io) using the built-in
+# GITHUB_TOKEN. Additionally pushes to Artifactory, but only when the run is
+# on the main branch.
 #
 # Required repository secrets:
 #   ARTIFACTORY_DOCKER_USERNAME / ARTIFACTORY_DOCKER_PASSWORD — registry basic auth
@@ -17,9 +21,16 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Tag to push to the registry"
+        description: "Tag to push to the registries"
         required: true
         type: string
+
+env:
+  DOCKER_IMAGE_NAME: te-ci-deps
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-and-push:
@@ -40,23 +51,54 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
-            echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
-            exit 1
-          fi
           if [ -z "${IMAGE_TAG}" ]; then
             echo "image_tag input must be non-empty." >&2
             exit 1
           fi
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
+              echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
+              exit 1
+            fi
+          fi
 
-      - name: Log in to container registry
+      - name: Build image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker build \
+            -f .github/scripts/Dockerfile.ci.deps \
+            -t "${DOCKER_IMAGE_NAME}:${IMAGE_TAG}" \
+            .
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GitHub Container Registry
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${DOCKER_IMAGE_NAME}"
+          docker tag "${DOCKER_IMAGE_NAME}:${IMAGE_TAG}" "${GHCR_IMAGE}:${IMAGE_TAG}"
+          docker push "${GHCR_IMAGE}:${IMAGE_TAG}"
+          echo "Pushed ${GHCR_IMAGE}:${IMAGE_TAG}"
+
+      - name: Log in to Artifactory
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           username: ${{ secrets.ARTIFACTORY_DOCKER_USERNAME }}
           password: ${{ secrets.ARTIFACTORY_DOCKER_PASSWORD }}
 
-      - name: Build and push image
+      - name: Push to Artifactory
+        if: github.ref == 'refs/heads/main'
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
@@ -64,9 +106,6 @@ jobs:
         run: |
           set -euo pipefail
           FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
-          docker build \
-            -f .github/scripts/Dockerfile.ci.deps \
-            -t "${FULL_IMAGE}:${IMAGE_TAG}" \
-            .
+          docker tag "${DOCKER_IMAGE_NAME}:${IMAGE_TAG}" "${FULL_IMAGE}:${IMAGE_TAG}"
           docker push "${FULL_IMAGE}:${IMAGE_TAG}"
           echo "Pushed ${FULL_IMAGE}:${IMAGE_TAG}"
