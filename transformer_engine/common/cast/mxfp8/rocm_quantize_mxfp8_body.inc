@@ -21,7 +21,10 @@
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
 
-  constexpr bool COMPUTE_DBIAS_IN_ROWWISE_SECTION = !USE_COLWISE_SCALING;
+  // With both scalings and an activation, the colwise pass reads activations cached in IType;
+  // reduce dbias in the rowwise pass instead, before that truncation.
+  constexpr bool COMPUTE_DBIAS_IN_ROWWISE_SECTION =
+      !USE_COLWISE_SCALING || (USE_ROWWISE_SCALING && (IS_ACT || IS_DACT));
 
   constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;
   constexpr size_t SHMEM_DIM_Y  = MXFP8_BUFFER_DIM_Y;
@@ -393,7 +396,7 @@
               elt *= OP(act_in_elt, {});
             }
           }
-          if constexpr (IS_DBIAS) {
+          if constexpr (IS_DBIAS && !COMPUTE_DBIAS_IN_ROWWISE_SECTION) {
             if (!out_of_bounds) {
               partial_dbias_colwise += elt;
             }
