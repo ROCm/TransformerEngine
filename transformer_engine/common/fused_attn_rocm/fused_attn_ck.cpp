@@ -21,6 +21,7 @@ namespace fused_attn_rocm {
 // check the fused attn config to see whether it's ck backend supported
 // single filtering followed by joint filtering
 bool is_ck_backend_supported(
+  bool is_training,
   NVTEDType q_dtype,
   NVTEDType kv_dtype,
   NVTE_QKV_Layout qkv_layout,
@@ -49,11 +50,13 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // filter based on data type
-  // Q and KV must have the same data type, in fp16 or bf16
-  if((q_dtype!=kv_dtype) || !((q_dtype==NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16))){
+  const bool is_fp8 = q_dtype == NVTEDType::kNVTEFloat8E4M3;
+  const bool is_16bit =
+      q_dtype == NVTEDType::kNVTEFloat16 || q_dtype == NVTEDType::kNVTEBFloat16;
+  //  q and kv have to have same dtype: FP16/BF16  or FP8 E4M3 
+  if(q_dtype != kv_dtype || (!is_16bit && !is_fp8)){
     if(nvte_log_ck_config){
-      std::cout<<"q, k, v data type has to be fp16 or bf16"<<std::endl;
+      std::cout<<"q, k, v data type has to be fp16, bf16, or fp8 e4m3"<<std::endl;
     }
     return false;
   }
@@ -136,6 +139,33 @@ bool is_ck_backend_supported(
     }
     return false;
   }
+  if(is_fp8){
+    // FP8 is wired to AITER v3 ASM only. CK tile FP8 is not enabled, so turning
+    // ASM off must report unsupported and let the caller select NVTE_No_Backend.
+    // A later PR that enables CK FP8 can fall back to that path here instead.
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 1) == 0){
+      if(nvte_log_ck_config){
+        std::cout<<"AITER FP8 ASM fwd is disabled by NVTE_CK_USES_FWD_V3=0"<<std::endl;
+      }
+      return false;
+    }
+    const bool fp8_hdim_supported =
+        (head_dim_qk == 128 && head_dim_v == 128) ||
+        (head_dim_qk == 256 && head_dim_v == 256);
+    const bool fp8_window_supported =
+        is_causal ? (window_size_left == -1 && window_size_right == 0)
+                  : (window_size_left == -1 && window_size_right == -1);
+    if(cuda::sm_arch() != 95 || is_training || !fp8_hdim_supported ||
+       !fp8_window_supported || dropout != 0.f ||
+       bias_type != NVTE_Bias_Type::NVTE_NO_BIAS ||
+       (is_padding && !is_ragged)){
+      if(nvte_log_ck_config){
+        std::cout<<"AITER FP8 ASM fwd requires gfx950 inference, hd128/hd256, "
+                   "no bias/dropout/sliding-window, and THD for padding masks"<<std::endl;
+      }
+      return false;
+    }
+  }
   return true;
 #else
   return false;
@@ -176,6 +206,7 @@ ck_fused_attn::DType nvte_to_ck_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return ck_fused_attn::DType::dtname
   CAST_TYPE(kFloat16, kFloat16);
   CAST_TYPE(kBFloat16, kBFloat16);
+  CAST_TYPE(kFloat8E4M3, kFloat8);
   return ck_fused_attn::DType::kNumTypes;
 #undef CAST_TYPE
 }
@@ -490,7 +521,8 @@ void fused_attn_ck_fwd_impl(
   void* devPtrDropoutSeed, void* devPtrDropoutOffset,
   void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
   void* devPtrSeqOffsetsQ, void* devPtrSeqOffsetsKV,
-  DType dtype,
+  void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+  DType dtype, DType output_dtype,
   void *workspace, 
   size_t *workspace_size,
   cudaStream_t stream){
@@ -499,7 +531,8 @@ void fused_attn_ck_fwd_impl(
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   // ASM v3 does not support sink; force CK tile path
-  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
+  bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1) &&
+                             (cuda::sm_arch() != 125 || !cuda::sm_arch_name().starts_with("gfx1250-strict"));
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
@@ -520,11 +553,18 @@ void fused_attn_ck_fwd_impl(
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
   size_t k_storage_bytes = max_tokens_kv*hg*d_qk*nvte_dtype_size(dtype);
   size_t v_storage_bytes = max_tokens_kv*hg*d_v*nvte_dtype_size(dtype);
-  size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(dtype);
+  size_t o_storage_bytes = max_tokens_q*h*d_v*nvte_dtype_size(output_dtype);
 
   // Reserve workspace chunks. Same allocation sequence runs in sizing mode
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
+  // A real FP8 launch must carry the inverse scale with each input. Workspace
+  // sizing passes null tensors, so that pass does not require scales.
+  if(dtype == DType::kFloat8E4M3 && !planner.is_sizing()){
+    NVTE_CHECK(devPtrDescaleQ != nullptr && devPtrDescaleK != nullptr &&
+                   devPtrDescaleV != nullptr,
+               "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, and V.");
+  }
 
   if(ck_small_seq_env_enabled) {
     if(cuda::sm_arch() == 94 || cuda::sm_arch() == 95) {
@@ -589,6 +629,10 @@ void fused_attn_ck_fwd_impl(
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CKAttnFwdArgs ck_args;
   ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.o_dtype = nvte_to_ck_dtype(output_dtype);
+  ck_args.q_descale_ptr = devPtrDescaleQ;
+  ck_args.k_descale_ptr = devPtrDescaleK;
+  ck_args.v_descale_ptr = devPtrDescaleV;
   ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
   ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
   ck_args.is_training = is_training;
@@ -611,7 +655,10 @@ void fused_attn_ck_fwd_impl(
     ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
   }
 
-  ck_args.num_splits = (ck_args.uses_fwd_v3 && !has_sink) ? ck_attn_fwd_num_splits(ck_args) : 0;
+  ck_args.num_splits =
+      (ck_args.uses_fwd_v3 && !has_sink && dtype != DType::kFloat8E4M3)
+          ? ck_attn_fwd_num_splits(ck_args)
+          : 0;
   if (ck_args.num_splits > 0)
   {
     size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
@@ -856,7 +903,8 @@ void fused_attn_ck_bwd_impl(
   // ASM v3 bwd does not compute the sink gradient; force the CK tile path so
   // has_sink users still get a correct (if slower) d_sink, mirroring the fwd
   // ASM v3 sink guard above.
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1) && !has_sink;
+  bool nvte_ck_uses_bwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_BWD_V3", 1) &&
+                             (cuda::sm_arch() != 125 || !cuda::sm_arch_name().starts_with("gfx1250-strict"));
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
@@ -1056,8 +1104,9 @@ void fused_attn_ck_bwd_impl(
   //k and v are having the same seqlen but k has the same head_dim with q
   //x and dx are having the same shape and stride
 
-  // Initialize user-output dq/dk/dv buffers (CK uses atomic ops on dq).
-  //TODO: remove the memset afer ck fixes the atomic operations
+  // Initialize user-output dq/dk/dv buffers (CK uses atomic ops on dq, and the small-seq backward
+  // skips sequences without keys, leaving their dQ rows to this memset).
+  //TODO: remove the memset after ck fixes the atomic operations, but keep zeroing dq for the small-seq path
   if((layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) || (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D)){
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQ, 0, q_storage_bytes + k_storage_bytes+ v_storage_bytes, stream));
   }else{
@@ -1352,11 +1401,41 @@ void fused_attn_ck_fwd(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
+  const DType O_type = output_O->data.dtype;
+  const bool is_fp8 = QKV_type == DType::kFloat8E4M3;
+
+  NVTE_CHECK(input_K->data.dtype == QKV_type && input_V->data.dtype == QKV_type,
+             "ROCm fused attention requires Q, K, and V to have the same dtype.");
+  if(is_fp8){
+    NVTE_CHECK(!is_training, "AITER FP8 ASM fused attention is forward-inference only.");
+    // FP8 E4M3 input is accepted only with BF16 output for AITER fp8bf16 kernels.
+    NVTE_CHECK(O_type == DType::kBFloat16,
+               "AITER fp8bf16 fused attention requires BF16 output.");
+    NVTE_CHECK(input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
+                   input_K->scaling_mode == NVTE_DELAYED_TENSOR_SCALING &&
+                   input_V->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
+               "AITER FP8 ASM fused attention supports delayed tensor scaling only.");
+    auto valid_descale = [](const Tensor* tensor) {
+      return tensor->scale_inv.dptr != nullptr &&
+             tensor->scale_inv.dtype == DType::kFloat32 &&
+             tensor->scale_inv.numel() == 1;
+    };
+    const bool all_descales_present =
+        valid_descale(input_Q) && valid_descale(input_K) && valid_descale(input_V);
+    // Workspace sizing uses null tensors. A real launch must carry the scales.
+    if(input_Q->data.dptr != nullptr){
+      NVTE_CHECK(all_descales_present,
+                 "AITER FP8 ASM fused attention requires one FP32 scale_inv for each of Q, K, and V.");
+    }
+  }
 
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
   void *devPtrO = output_O->data.dptr;
+  void *devPtrDescaleQ = is_fp8 ? input_Q->scale_inv.dptr : nullptr;
+  void *devPtrDescaleK = is_fp8 ? input_K->scale_inv.dptr : nullptr;
+  void *devPtrDescaleV = is_fp8 ? input_V->scale_inv.dptr : nullptr;
   void *devPtrS = nullptr;
   void *devPtrBias = nullptr;
   size_t bias_b = 0;
@@ -1444,7 +1523,8 @@ void fused_attn_ck_fwd(
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
+    devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+    QKV_type, O_type,
     workspace->data.dptr,
     &workspace_size,
     stream);
