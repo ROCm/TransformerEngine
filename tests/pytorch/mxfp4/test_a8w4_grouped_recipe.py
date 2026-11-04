@@ -15,6 +15,12 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 
+from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4 import (
+    _FWD_CONFIGS_BAD_SCALE_TRANSPOSED,
+    _FWD_TRITON_CONFIGS,
+    _grouped_mxfp4_persistent_gemm_kernel,
+    _prune_fwd_by_k,
+)
 from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
     MXFP4_GEMM_ARCHS,
     _col_operand_grouped_padded,
@@ -392,6 +398,60 @@ def test_grouped_prequantized_out_buffer():
     )
     assert got.data_ptr() == buf.data_ptr(), "the caller's out buffer was not used"
     assert torch.equal(buf, ref), "out-buffer result differs from the allocating path"
+
+
+@pytest.mark.parametrize("a_is_mxfp8", [True, False], ids=["a8w4", "a4w4"])
+def test_grouped_prequantized_transposed_scales_match_plain(a_is_mxfp8):
+    """Transposed (a8w4 swizzle) scales must give bit-identical, deterministic output vs
+    plain scales at a K3 shape. The transposed call runs first so it autotunes its own config."""
+    _isolate()
+    device = "cuda"
+    G, m, N, K = 8, 256, 4096, 7168
+    total_M = G * m
+    torch.manual_seed(0)
+    if a_is_mxfp8:
+        a = (torch.randn(total_M, K, device=device) * 4).to(torch.float8_e4m3fn)
+    else:
+        a = torch.randint(0, 256, (total_M, K // 2), dtype=torch.uint8, device=device)
+    a_scale = torch.randint(124, 131, (total_M, K // 32), dtype=torch.uint8, device=device)
+    b = torch.randint(0, 256, (G, N, K // 2), dtype=torch.uint8, device=device)
+    b_scale = torch.randint(124, 131, (G, N, K // 32), dtype=torch.uint8, device=device)
+
+    def run(transposed):
+        a_s = a_scale.t().contiguous() if transposed else a_scale
+        b_s = b_scale.transpose(1, 2).contiguous() if transposed else b_scale
+        return grouped_gemm_mxfp4_fprop_prequantized(
+            a, a_s, b, b_s, [m] * G, a_is_mxfp8=a_is_mxfp8, scale_transposed=transposed
+        )
+
+    outs_t = [run(True) for _ in range(3)]
+    plain = run(False)
+    for i, out_t in enumerate(outs_t):
+        assert torch.equal(out_t, plain), f"transposed-scale call {i} differs from plain scales"
+
+
+def test_fwd_autotune_excludes_unsafe_transposed_scale_configs():
+    """gfx950: configs that miscompile with SCALE_TRANSPOSED are never autotuned for that
+    layout, and the layout is part of the autotune key so plain tunings are not reused."""
+    if get_device_compute_capability() != (9, 5):
+        pytest.skip("gfx950-specific config exclusion")
+
+    def specs(transposed):
+        cfgs = _prune_fwd_by_k(_FWD_TRITON_CONFIGS, {"K": 7168}, SCALE_TRANSPOSED=transposed)
+        return {
+            (
+                c.kwargs["BLOCK_SIZE_K"],
+                c.num_warps,
+                c.num_stages,
+                c.kwargs["matrix_instr_nonkdim"],
+                c.kwargs["waves_per_eu"],
+            )
+            for c in cfgs
+        }
+
+    assert not specs(True) & _FWD_CONFIGS_BAD_SCALE_TRANSPOSED
+    assert _FWD_CONFIGS_BAD_SCALE_TRANSPOSED <= specs(False)
+    assert "SCALE_TRANSPOSED" in _grouped_mxfp4_persistent_gemm_kernel.keys
 
 
 def test_grouped_linear_a8w4_out_buffer():

@@ -106,6 +106,8 @@ _FWD_CONFIGS = [
     (128, 8, 2, 32, 0),
     (128, 8, 3, 32, 2),
 ]
+# gfx950: wrong, nondeterministic output with SCALE_TRANSPOSED (plain scales are exact).
+_FWD_CONFIGS_BAD_SCALE_TRANSPOSED = {(128, 8, 2, 16, 0)}
 _VARK_CONFIGS = [
     (128, 8, 3, 16, 2),
     (128, 8, 2, 16, 0),
@@ -154,6 +156,10 @@ def _make_configs(specs):
 
 
 _FWD_TRITON_CONFIGS = _make_configs(_FWD_CONFIGS)
+_FWD_TRITON_CONFIGS_SCALE_TRANSPOSED = [
+    c for spec, c in zip(_FWD_CONFIGS, _FWD_TRITON_CONFIGS)
+    if spec not in _FWD_CONFIGS_BAD_SCALE_TRANSPOSED
+]
 _FWD_TRITON_CONFIGS_GFX1250 = _make_configs(_FWD_CONFIGS_GFX1250)
 _VARK_TRITON_CONFIGS = _make_configs(_VARK_CONFIGS)
 _VARK_TRITON_CONFIGS_GFX1250 = _make_configs(_VARK_CONFIGS_GFX1250)
@@ -161,10 +167,14 @@ _VARK_TRITON_CONFIGS_GFX1250 = _make_configs(_VARK_CONFIGS_GFX1250)
 
 def _prune_fwd_by_k(configs, named_args, **kwargs):
     """Keep only the current arch's configs whose BLOCK_K divides K (the fwd
-    reduction loop is unmasked)."""
+    reduction loop is unmasked), minus those unsafe for the scale layout."""
     K = named_args["K"]
-    is_gfx1250 = get_device_compute_capability() == (12, 5)
-    configs = _FWD_TRITON_CONFIGS_GFX1250 if is_gfx1250 else _FWD_TRITON_CONFIGS
+    if get_device_compute_capability() == (12, 5):
+        configs = _FWD_TRITON_CONFIGS_GFX1250
+    elif kwargs.get("SCALE_TRANSPOSED", False):
+        configs = _FWD_TRITON_CONFIGS_SCALE_TRANSPOSED
+    else:
+        configs = _FWD_TRITON_CONFIGS
     return [c for c in configs if K % c.kwargs["BLOCK_SIZE_K"] == 0]
 
 
@@ -194,7 +204,7 @@ def _fwd_do_bench(kernel_call, quantiles):
 
 @triton.autotune(
     configs=_FWD_TRITON_CONFIGS + _FWD_TRITON_CONFIGS_GFX1250,
-    key=["N", "K", "G", "A_PACK", "B_PACK"],
+    key=["N", "K", "G", "A_PACK", "B_PACK", "SCALE_TRANSPOSED"],
     prune_configs_by={"early_config_prune": _prune_fwd_by_k},
     do_bench=_fwd_do_bench,
 )
