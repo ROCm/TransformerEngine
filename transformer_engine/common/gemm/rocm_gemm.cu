@@ -31,6 +31,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "rocm_fp4_e2m1_table.h"
 
 #ifdef USE_HIPKITTENS_GEMM
@@ -47,6 +48,8 @@ static_assert(static_cast<int>(KITTENS_BLOCK_SCALING_2D) == static_cast<int>(NVT
 #endif
 
 namespace transformer_engine {
+
+void swizzle_scaling_factors(const Tensor *input, Tensor *output, cudaStream_t stream);
 
 namespace {
 
@@ -332,6 +335,20 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
   output.scale_inv = SimpleTensor(rowwise_scale, std::vector<size_t>{padded_m, k_scale},
                                   input.columnwise_scale_inv.dtype);
   output.with_gemm_swizzled_scales = true;
+  return output;
+}
+
+Tensor make_mxfp8_swizzled_rowwise(const Tensor& input, std::vector<void*>& buffers,
+                                   hipStream_t stream) {
+  Tensor compact;
+  compact.scaling_mode = NVTE_MXFP8_1D_SCALING;
+  compact.data      = input.data;
+  compact.scale_inv = input.scale_inv;
+
+  Tensor output = compact;
+  output.scale_inv.dptr = allocate_async_temp(buffers, input.scale_inv.buffer_size_bytes(), stream);
+  output.with_gemm_swizzled_scales = true;
+  swizzle_scaling_factors(&compact, &output, stream);
   return output;
 }
 
@@ -2190,6 +2207,7 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
   return launched;
 }
 
+
 } // namespace
 
 
@@ -2360,30 +2378,60 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
 
 #ifdef USE_HIPKITTENS_GEMM
-  bool use_hipkittens = false;
-  if (is_mxfp8 && kittens_mxfp8_supported()) {
-    bool force_hipblaslt = false;
-    if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
-      force_hipblaslt = (strcmp(env_p, "1") == 0);
+  const bool gfx1250  = cuda::sm_arch() == 125;
+  const DType a_dtype = inputA->data.dtype;
+  const bool is_16bit = gfx1250 && is_tensor_scaling(inputA->scaling_mode) &&
+                        is_tensor_scaling(inputB->scaling_mode) &&
+                        (a_dtype == DType::kBFloat16 || a_dtype == DType::kFloat16) &&
+                        inputB->data.dtype == a_dtype;
+  const char *legacy = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8");
+  if (legacy != nullptr) {
+    static bool warned = false;
+    if (!warned) {
+      NVTE_WARN("NVTE_ROCM_USE_HIPBLASLT_MXFP8 is deprecated and will be removed in a future "
+                "release. Please migrate to NVTE_ROCM_USE_HIPBLASLT, which applies to all GEMMs.");
+      warned = true;
     }
-    use_hipkittens = !force_hipblaslt;
   }
+  bool use_hipkittens = (is_16bit ? kittens_bf16_supported() : is_mxfp8 && kittens_mxfp8_supported()) &&
+                        !getenv<bool>("NVTE_ROCM_USE_HIPBLASLT", false) &&
+                        !(legacy != nullptr && strcmp(legacy, "1") == 0);
 
   if (use_hipkittens) {
     auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
-    use_hipkittens = kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
-                                        param.A_scale_inv, param.B_scale_inv,
-                                        m, n, k, is_transa, is_transb,
-                                        static_cast<int>(param.Atype),
-                                        static_cast<int>(param.Btype),
-                                        inputBias->data.dptr,
-                                        static_cast<int>(inputBias->data.dtype),
-                                        outputPreGelu->data.dptr,
-                                        static_cast<int>(outputD->data.dtype),
-                                        static_cast<int>(outputPreGelu->data.dtype),
-                                        beta,
-                                        workspace, workspaceSize, gemm_stream);
+    int splitk = 0;
+    const char *splitk_env = std::getenv("NVTE_HK_SPLITK");
+    if (gfx1250 && splitk_env != nullptr && splitk_env[0] != '\0' && strcmp(splitk_env, "auto") != 0) {
+      splitk = getenv<int>("NVTE_HK_SPLITK");
+      NVTE_CHECK(splitk >= 0, "NVTE_HK_SPLITK must be auto or a non-negative integer, got ", splitk_env);
+      splitk = splitk > 1 ? splitk : 1;
+    }
+    const int cu_count = use_service_stream ? math_sm_count : cuda::sm_count();
+    if (is_16bit) {
+      use_hipkittens = kittens_bf16_gemm(param.A, param.B, outputD->data.dptr, m, n, k, is_transa, is_transb,
+                                         static_cast<int>(param.Atype), static_cast<int>(param.Btype),
+                                         inputBias->data.dptr, static_cast<int>(inputBias->data.dtype),
+                                         outputPreGelu->data.dptr, static_cast<int>(outputD->data.dtype),
+                                         static_cast<int>(outputPreGelu->data.dtype), grad, alpha, beta,
+                                         splitk, cu_count, workspace, workspaceSize, gemm_stream);
+    } else {
+      const bool mxfp8_compact = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                                 inputB->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                                 !inputA->with_gemm_swizzled_scales && !inputB->with_gemm_swizzled_scales;
+      use_hipkittens = kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
+                                          param.A_scale_inv, param.B_scale_inv,
+                                          m, n, k, is_transa, is_transb,
+                                          static_cast<int>(param.Atype),
+                                          static_cast<int>(param.Btype), mxfp8_compact,
+                                          inputBias->data.dptr,
+                                          static_cast<int>(inputBias->data.dtype),
+                                          outputPreGelu->data.dptr,
+                                          static_cast<int>(outputD->data.dtype),
+                                          static_cast<int>(outputPreGelu->data.dtype),
+                                          grad, alpha, beta, splitk, cu_count,
+                                          workspace, workspaceSize, gemm_stream);
+    }
   }
 
   if (!use_hipkittens) {
@@ -2392,18 +2440,38 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  "hipBLASLt MXFP8 GEMM does not support bias");
     }
 #endif
-    // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
-    // layouts for MXFP8 on gfx1250.
-    bool handled = try_mxfp8_non_tn_transpose_to_tn(inputA, inputB, outputD, inputBias,
-                                                    outputPreGelu, transa, transb, grad,
-                                                    workspace, workspaceSize, alpha, beta,
-                                                    use_split_accumulator, math_sm_count,
-                                                    gemm_stream, handle, m, n, k);
-    if (!handled) {
-      hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
-                     transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                     math_sm_count, gemm_stream, handle);
+    std::vector<void*> swizzle_buffers;
+    std::optional<Tensor> A_swizzled, B_swizzled;
+    try {
+      if (is_mxfp8 && cuda::sm_arch() == 125) {
+        if (is_transa && inputA->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+            !inputA->with_gemm_swizzled_scales) {
+          A_swizzled = make_mxfp8_swizzled_rowwise(*inputA, swizzle_buffers, gemm_stream);
+        }
+        if (!is_transb && inputB->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+            !inputB->with_gemm_swizzled_scales) {
+          B_swizzled = make_mxfp8_swizzled_rowwise(*inputB, swizzle_buffers, gemm_stream);
+        }
+      }
+      const Tensor *A_gemm = A_swizzled ? &*A_swizzled : inputA;
+      const Tensor *B_gemm = B_swizzled ? &*B_swizzled : inputB;
+      // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
+      // layouts for MXFP8 on gfx1250.
+      bool handled = try_mxfp8_non_tn_transpose_to_tn(A_gemm, B_gemm, outputD, inputBias,
+                                                      outputPreGelu, transa, transb, grad,
+                                                      workspace, workspaceSize, alpha, beta,
+                                                      use_split_accumulator, math_sm_count,
+                                                      gemm_stream, handle, m, n, k);
+      if (!handled) {
+        hipblaslt_gemm(A_gemm, B_gemm, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd,
+                       transa, transb, grad, workspace, workspaceSize, alpha, beta,
+                       use_split_accumulator, math_sm_count, gemm_stream, handle);
+      }
+    } catch (...) {
+      free_async_temps(swizzle_buffers, gemm_stream);
+      throw;
     }
+    free_async_temps(swizzle_buffers, gemm_stream);
 #ifdef USE_HIPKITTENS_GEMM
   }
 #endif
@@ -2423,7 +2491,9 @@ static bool kittens_env_set(const char *name) {
 
 static bool kittens_grouped_mxfp8_enabled() {
     static bool enabled = [] {
-        if (!kittens_mxfp8_supported()) return false;
+        if (!kittens_mxfp8_supported() || cuda::sm_arch() != 95) {
+            return false;
+        }
         bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
         bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
         bool use_ck = kittens_env_set("NVTE_USE_CK_GROUPED_GEMM");
