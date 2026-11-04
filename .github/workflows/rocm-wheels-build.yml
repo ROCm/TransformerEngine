@@ -231,8 +231,10 @@ jobs:
         run: mkdir -p "${{ runner.temp }}/wheelhouse"
 
       - name: Install ccache
+        id: ccache
         if: ${{ inputs.use_ccache }}
         run: |
+          echo "key_prefix=te-ccache-${ROCM_ARCH//,/-}-${{ hashFiles(env.ROCM_DOCKERFILE) }}-" >> "$GITHUB_OUTPUT"
           CCACHE_TARBALL="ccache-${CCACHE_VERSION}-linux-x86_64-musl-static.tar.xz"
           curl -fsSL -o "${{ runner.temp }}/${CCACHE_TARBALL}" \
             "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/${CCACHE_TARBALL}"
@@ -247,9 +249,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/ccache
-          key: te-ccache-${{ env.ROCM_ARCH }}-${{ hashFiles(env.ROCM_DOCKERFILE) }}-${{ github.run_id }}
+          key: ${{ steps.ccache.outputs.key_prefix }}${{ github.run_id }}
           restore-keys: |
-            te-ccache-${{ env.ROCM_ARCH }}-${{ hashFiles(env.ROCM_DOCKERFILE) }}-
+            ${{ steps.ccache.outputs.key_prefix }}
 
       - name: Reset ccache statistics
         if: ${{ inputs.use_ccache }}
@@ -298,7 +300,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/ccache
-          key: te-ccache-${{ env.ROCM_ARCH }}-${{ hashFiles(env.ROCM_DOCKERFILE) }}-${{ github.run_id }}
+          key: ${{ steps.ccache.outputs.key_prefix }}${{ github.run_id }}
 
       - name: List built artifacts
         if: always()
