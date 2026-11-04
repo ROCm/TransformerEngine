@@ -6,11 +6,10 @@
 #include "hip/hip_runtime.h"
 #include "mxfp8_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
-// Forward: e4m3 x e4m3. Bias: Linear, LayerNormLinear (bf16 with an fp32 D); beta: te.ops
-// ForwardLinear{Bias,Scale}Add (bias in the parameter type); GELU: LayerNormMLP fc1 with
-// NVTE_GEMM_GELU_FUSION=1 (aux = bias dtype, bf16 without a bias).
+// Forward, e4m3 x e4m3: bias (Linear; bf16 with fp32 D), beta (te.ops ForwardLinear*Add), GELU (LayerNormMLP fc1
+// with NVTE_GEMM_GELU_FUSION=1; aux = bias dtype, bf16 without a bias).
 template <>
 struct mxfp8_gemm::Instances<TN> {
     using formats  = List<Formats<0, 0>>;
@@ -31,4 +30,4 @@ struct mxfp8_gemm::Instances<TN> {
 
 template bool launch_mxfp8<TN>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

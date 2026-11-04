@@ -6,11 +6,10 @@
 #include "hip/hip_runtime.h"
 #include "bf16_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
-// Forward, D in the input type or fp32. Bias: Linear and LayerNormLinear; beta: te.ops
-// ForwardLinear{Bias,Scale}Add; GELU: LayerNormMLP fc1 without bias-GELU fusion. fp32 D: the MoE
-// router (bias in the input type) and fp32 residuals.
+// Forward, D in the input type or fp32: bias (Linear), beta (te.ops ForwardLinear*Add), GELU (LayerNormMLP fc1),
+// fp32 D with an input-type bias (MoE router).
 template <>
 struct bf16_gemm::Instances<TN> {
     using variants = List<Variant<NONE, false, In>, Variant<NONE, true, In>,
@@ -22,4 +21,4 @@ struct bf16_gemm::Instances<TN> {
 
 template bool launch_bf16<TN>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

@@ -6,7 +6,7 @@
 #include "hip/hip_runtime.h"
 #include "bf16_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 // Wgrad into a weight gradient of the input type or fp32 main_grad, with beta for gradient
 // accumulation; BGRADB also writes dbias (Linear, LayerNormLinear, LayerNormMLP with bias).
@@ -20,4 +20,4 @@ struct bf16_gemm::Instances<NT> {
 
 template bool launch_bf16<NT>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

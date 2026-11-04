@@ -3,10 +3,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-/* gfx1250 MXFP8 GEMM, column-major D (M x N); A, B: TN [M][K] [N][K], NN [K][M] [N][K], NT
- * [K][M] [K][N]; e8m0 scales [rows][K/32], [K/32][rows] if M/N-contiguous, with rows of K/32
- * padded to 4 bytes. M, N % 4, K % 32: the TDM zero-fills past D's edge and edge tiles store
- * masked. */
+// gfx1250 MXFP8 GEMM, column-major D (M x N); e8m0 scales [rows][K/32] or [K/32][rows] if M/N-contiguous, rows
+// padded to 4 B. M, N % 4, K % 32: the TDM zero-fills past D's edge and edge tiles store masked.
 
 #pragma once
 
@@ -18,7 +16,7 @@
 #include "kittens.cuh"
 #include "gemm.h"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 namespace mxfp8_gemm {
 
 constexpr int BLOCK_M      = 256;
@@ -379,9 +377,8 @@ __device__ __forceinline__ void store8(T *p, const V &v, int n, bool vec) {
     }
 }
 
-// Copy-out of the C tile staged column-major in LDS: D as staged (times alpha with PLAIN_ALPHA), or
-// alpha * C (+ beta * D) (+ bias), with GELU after storing that to aux. EDGE: D's rows and columns
-// only, element-wise where a thread's 8 rows are not all in D or M % 8 != 0.
+// Copy-out of the C tile staged in LDS: D = alpha * C (+ beta * D) (+ bias), then GELU (pre-GELU to aux).
+// EDGE stores only D's rows and columns, element-wise where 8 rows do not fit.
 template <Epi E, bool ACC, typename OutT, typename SideT, bool PLAIN_ALPHA, bool EDGE>
 __device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d,
                                          const SideT *__restrict__ bias, SideT *__restrict__ aux,
@@ -860,4 +857,4 @@ bool launch_mxfp8(const Launch &l) {
     });
 }
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

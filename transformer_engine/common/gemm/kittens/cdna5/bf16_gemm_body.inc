@@ -67,9 +67,8 @@
         b_mask = ((1u << in_x) - 1u) << (4u * cy);
     }
 
-    /* One whole A tile (wave 0) and B tile (wave 1) per block; a K-major tile is indexed (k, row).
-     * The extents count from the tile origin: kx K of the head, rows to M and N. Blocks after the
-     * head start back elements early, through operands moved back by that much. */
+    // Wave 0 fills A, wave 1 B, one whole tile per block. Extents count from the tile origin; blocks after the
+    // K head start back elements early, through operands moved back by that much.
     const int m_rem = M - tile_m * BLOCK_M;
     const int n_rem = N - tile_n * BLOCK_N;
     const int kh    = K % BLOCK_K;

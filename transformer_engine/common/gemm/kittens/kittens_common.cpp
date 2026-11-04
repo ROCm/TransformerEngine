@@ -152,9 +152,9 @@ GemmBackend *GemmBackend::get_for_arch(int sm_arch) {
         return get_cdna4();
     }
 #endif
-#ifdef KITTENS_HAVE_GFX1250
+#ifdef KITTENS_HAVE_CDNA5
     if (sm_arch == 125) {
-        return get_gfx1250();
+        return get_cdna5();
     }
 #endif
     static_cast<void>(sm_arch);

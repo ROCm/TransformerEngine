@@ -6,7 +6,7 @@
 #include "hip/hip_runtime.h"
 #include "bf16_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 // Dgrad, D in the input type or fp32. Beta: te.ops BackwardLinearAdd; DGELU: LayerNormMLP fc2
 // dgrad without bias-GELU fusion.
@@ -19,4 +19,4 @@ struct bf16_gemm::Instances<NN> {
 
 template bool launch_bf16<NN>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

@@ -6,7 +6,7 @@
 #include "hip/hip_runtime.h"
 #include "mxfp8_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 // Dgrad: weight e4m3 x dy e4m3 or e5m2 (HYBRID). Beta: te.ops BackwardLinearAdd into a
 // grad_input of any dtype.
@@ -20,4 +20,4 @@ struct mxfp8_gemm::Instances<NN> {
 
 template bool launch_mxfp8<NN>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

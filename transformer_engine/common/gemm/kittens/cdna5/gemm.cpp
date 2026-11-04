@@ -8,7 +8,7 @@
 #include <cstdint>
 #include "gemm.h"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 constexpr int TILE           = 256;
 constexpr int K_BLOCK        = 128;
@@ -57,9 +57,8 @@ void splitk_reduce(const Launch &l) {
     }
 }
 
-/* Split-K factor S for fp32 partials of S whole k_block slices, which take M % 8 == 0.
- * NVTE_HK_SPLITK forces S when legal; auto picks S in {1,2,4,8,16} minimising the one-wave cost
- * K/S + a + b*tiles*S/cus. */
+// Split-K factor S (whole k_block slices, M % 8 == 0): NVTE_HK_SPLITK forces S when legal, auto picks S in
+// {1,2,4,8,16} minimising the one-wave cost K/S + a + b*tiles*S/cus.
 static int splitk_pick(const GemmArgs &args, size_t workspace_size, int k_block) {
     constexpr double a = 512;
     constexpr double b = 2048;
@@ -83,7 +82,7 @@ static int splitk_pick(const GemmArgs &args, size_t workspace_size, int k_block)
     return best;
 }
 
-class GemmGfx1250 final : public GemmBackend {
+class GemmCdna5 final : public GemmBackend {
  public:
     bool gemm(const GemmArgs &args) override {
         const bool mxfp8 = args.mxfp8_compact && kittens_is_fp8(args.a_dtype) &&
@@ -149,15 +148,11 @@ class GemmGfx1250 final : public GemmBackend {
     // No gfx1250 grouped kernels: grouped GEMMs take CK or the per-expert path.
     bool grouped_gemm(const MXFP8GroupedGemmArgs &) override { return false; }
     bool grouped_wgrad(const MXFP8WgradArgs &) override { return false; }
-    bool grouped16_gemm(const Grouped16GemmArgs &, const char **why) override {
-        *why = "no gfx1250 BF16/FP16 grouped kernel";
-        return false;
-    }
 };
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5
 
-GemmBackend *GemmBackend::get_gfx1250() {
-    static te_kittens::gfx1250::GemmGfx1250 impl;
+GemmBackend *GemmBackend::get_cdna5() {
+    static te_kittens::cdna5::GemmCdna5 impl;
     return &impl;
 }

@@ -2594,163 +2594,32 @@ static bool kittens_env_set(const char *name) {
     return v && v[0] == '1';
 }
 
-// HipKittens grouped GEMMs exist for gfx950 only: gfx1250 grouped GEMMs take CK or the per-expert
-// path whatever the variables say.
-static bool kittens_grouped_supported() {
-    return kittens_gemm_supported() && cuda::sm_arch() == 95;
-}
-
-// HipKittens runs grouped GEMMs with NVTE_USE_HIPKITTENS_GROUPED_GEMM=1, or with
-// NVTE_USE_CUTLASS_GROUPED_GEMM=1 unless NVTE_USE_CK_GROUPED_GEMM=1. Read per call.
-static bool kittens_grouped_enabled() {
-    if (!kittens_grouped_supported()) {
-        return false;
-    }
-    const bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
-    const bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
-    const bool use_ck = kittens_env_set("NVTE_USE_CK_GROUPED_GEMM");
-    if (use_hk && use_ck) {
-        static std::once_flag warned;
-        std::call_once(warned, [] {
+static bool kittens_grouped_mxfp8_enabled() {
+    static bool enabled = [] {
+        // No gfx1250 grouped kernels: its grouped GEMMs take CK or the per-expert path.
+        if (!kittens_gemm_supported() || cuda::sm_arch() != 95) return false;
+        bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
+        bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
+        bool use_ck = kittens_env_set("NVTE_USE_CK_GROUPED_GEMM");
+        if (use_hk && use_ck) {
             fprintf(stderr, "[HK-grouped] both NVTE_USE_HIPKITTENS_GROUPED_GEMM and "
                     "NVTE_USE_CK_GROUPED_GEMM set; defaulting to HipKittens\n");
-        });
-    }
-    return use_hk || (use && !use_ck);
-}
-
-// gfx950 BF16/FP16 grouped GEMMs run on HipKittens by default: also with no variable set, unless
-// NVTE_USE_HIPKITTENS_GROUPED_GEMM=0, or NVTE_USE_CK_GROUPED_GEMM=1 selects CK.
-static bool kittens_grouped16_enabled() {
-    const char *hk = std::getenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
-    if (hk != nullptr && hk[0] == '0') {
-        return false;
-    }
-    return kittens_grouped_enabled() ||
-           (kittens_grouped_supported() && !kittens_env_set("NVTE_USE_CK_GROUPED_GEMM"));
+        }
+        return use_hk || (use && !use_ck);
+    }();
+    return enabled;
 }
 
 static bool kittens_grouped_warn_fallback() {
-    return kittens_env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
-}
-
-// BF16/FP16 grouped GEMM: TN fprop (+ bias), NN dgrad, NT wgrad (+ dbias with grad).
-bool try_kittens_grouped16_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-    const NVTETensor *bias, int num_gemms, bool transa, bool transb, bool grad,
-    NVTETensor *workspace, bool accumulate, int math_sm_count, cudaStream_t stream) {
-    if (num_gemms <= 1 || !kittens_grouped16_enabled()) {
-        return false;
-    }
-
-    const auto *tA0 = convertNVTETensorCheck(A[0]);
-    const auto *tB0 = convertNVTETensorCheck(B[0]);
-    const DType in_dtype = tA0->data.dtype;
-    if (!is_tensor_scaling(tA0->scaling_mode) || !is_tensor_scaling(tB0->scaling_mode) ||
-        (in_dtype != DType::kBFloat16 && in_dtype != DType::kFloat16)) {
-        return false;
-    }
-
-    const bool warn_fallback = kittens_grouped_warn_fallback();
-    auto decline = [&](const char *why) {
-        if (warn_fallback) {
-            fprintf(stderr, "[HK-grouped16] %s\n", why);
-        }
-        return false;
-    };
-    if (transa && transb) {
-        return decline("TT layout");
-    }
-
-    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), bias_ptrs(num_gemms);
-    std::vector<void *>       d_ptrs(num_gemms);
-    std::vector<int64_t>      m_splits(num_gemms);
-    const DType out_dtype = convertNVTETensorCheck(D[0])->data.dtype;
-    DType bias_dtype = in_dtype;
-    bool any_bias = false;
-    int64_t N = -1, K = -1;
-    for (int i = 0; i < num_gemms; i++) {
-        const auto *tA = convertNVTETensorCheck(A[i]);
-        const auto *tB = convertNVTETensorCheck(B[i]);
-        const auto *tD = convertNVTETensorCheck(D[i]);
-        if (!is_tensor_scaling(tA->scaling_mode) || !is_tensor_scaling(tB->scaling_mode) ||
-            tA->data.dtype != in_dtype || tB->data.dtype != in_dtype ||
-            tD->data.dtype != out_dtype) {
-            return decline("mixed operand types");
-        }
-        const int64_t A0 = tA->flat_first_dim(), A1 = tA->flat_last_dim();
-        const int64_t B0 = tB->flat_first_dim(), B1 = tB->flat_last_dim();
-        // Weight dims (N, K) and tokens m as Grouped16GemmArgs lays the operands out.
-        const int64_t n_i = transb ? B1 : A0;
-        const int64_t k_i = A1;
-        const int64_t m_i = transb ? A0 : B0;
-        const int64_t b_k = transb ? B0 : B1;
-        const int64_t d0  = transb ? n_i : m_i;
-        const int64_t d1  = transa ? n_i : k_i;
-        if (b_k != (transa ? k_i : transb ? m_i : n_i) ||
-            static_cast<int64_t>(tD->flat_first_dim()) != d0 ||
-            static_cast<int64_t>(tD->flat_last_dim()) != d1) {
-            return decline("operand shapes do not match");
-        }
-        if (i == 0) {
-            N = n_i;
-            K = k_i;
-        } else if (n_i != N || k_i != K) {
-            return decline("weight dims vary across experts");
-        }
-        const Tensor *tBias = bias != nullptr ? convertNVTETensorCheck(bias[i]) : nullptr;
-        if (tBias != nullptr && tBias->has_data()) {
-            if (tBias->data.numel() != static_cast<size_t>(N) ||
-                (any_bias && tBias->data.dtype != bias_dtype)) {
-                return decline("bias shape or type");
-            }
-            any_bias     = true;
-            bias_dtype   = tBias->data.dtype;
-            bias_ptrs[i] = tBias->data.dptr;
-        }
-        a_ptrs[i]   = tA->data.dptr;
-        b_ptrs[i]   = tB->data.dptr;
-        d_ptrs[i]   = tD->data.dptr;
-        m_splits[i] = m_i;
-    }
-    if (N != static_cast<int>(N) || K != static_cast<int>(K)) {
-        return decline("weight dims too large");
-    }
-
-    auto *ws = convertNVTETensorCheck(workspace[0]);
-    Grouped16GemmArgs args;
-    args.A              = a_ptrs.data();
-    args.B              = b_ptrs.data();
-    args.D              = d_ptrs.data();
-    args.bias           = any_bias ? bias_ptrs.data() : nullptr;
-    args.m_splits       = m_splits.data();
-    args.num_gemms      = num_gemms;
-    args.N              = static_cast<int>(N);
-    args.K              = static_cast<int>(K);
-    args.transa         = transa;
-    args.transb         = transb;
-    args.in_dtype       = static_cast<int>(in_dtype);
-    args.out_dtype      = static_cast<int>(out_dtype);
-    args.bias_dtype     = static_cast<int>(bias_dtype);
-    args.grad           = grad;
-    args.accumulate     = accumulate;
-    args.alpha          = 1.f;
-    args.beta           = accumulate ? 1.f : 0.f;
-    args.cu_count       = math_sm_count > 0 ? math_sm_count : 0;
-    args.workspace      = ws->data.dptr;
-    args.workspace_size = ws->data.shape[0];
-    args.stream         = stream;
-    const char *why = nullptr;
-    if (!kittens_grouped16_gemm(args, &why)) {
-        return decline(why);
-    }
-    return true;
+    static bool warn = kittens_env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+    return warn;
 }
 
 bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream) {
     if (accumulate || num_gemms <= 1) return false;
-    if (!kittens_grouped_enabled()) return false;
+    if (!kittens_grouped_mxfp8_enabled()) return false;
 
     const bool warn_fallback = kittens_grouped_warn_fallback();
 
@@ -2848,7 +2717,7 @@ bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, N
     if (transa || !transb) return false;
     if (num_gemms <= 1) return false;
 
-    if (!kittens_grouped_enabled()) return false;
+    if (!kittens_grouped_mxfp8_enabled()) return false;
 
     const bool warn_fallback = kittens_grouped_warn_fallback();
 

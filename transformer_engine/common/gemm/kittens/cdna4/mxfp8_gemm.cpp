@@ -7,7 +7,6 @@
 #include "../kittens_common.h"
 #include "../kittens_kernel_common.cuh"
 #include "mxfp8_gemm_helper.cuh"
-#include "grouped16.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -1757,10 +1756,6 @@ class MXFP8GemmCdna4 final : public GemmBackend {
                                    args.N, args.K, args.M_array, args.num_experts,
                                    args.a_dtype, args.b_dtype, args.out_dtype, args.accumulate,
                                    args.workspace, args.workspace_size, args.stream);
-    }
-
-    bool grouped16_gemm(const Grouped16GemmArgs &args, const char **why) override {
-        return grouped16::gemm(args, why);
     }
 };
 

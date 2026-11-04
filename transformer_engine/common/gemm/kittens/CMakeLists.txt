@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# gfx1250-strict is gfx1250 A0; it builds the gfx1250 sources.
+# gfx1250-strict is gfx1250 A0; it builds the cdna5 sources.
 set(KITTENS_SUPPORTED_ARCHS gfx942 gfx950 gfx1250 gfx1250-strict)
 
 # The gfx1250 kernels need cluster launches and the gfx1250 WMMA-scale/LDS-transpose builtins.
@@ -116,20 +116,19 @@ else()
 
     kittens_add_arch(TAG cdna4 GFX gfx950
                      SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp
-                             cdna4/overlap/comm_gemm.cpp cdna4/grouped16.cpp cdna4/grouped16_tn.cpp
-                             cdna4/grouped16_nn.cpp cdna4/grouped16_nt.cpp
+                             cdna4/overlap/comm_gemm.cpp
                      FLAGS -gline-tables-only)
 
     # NVTE_HK_GFX1250_MCAST=0/1 at build time fixes TDM multicast on or off (default: off on A0).
-    set(_gfx1250_flags -DKITTENS_CDNA5)
+    set(_cdna5_flags "")
     if(DEFINED ENV{NVTE_HK_GFX1250_MCAST})
-        list(APPEND _gfx1250_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
+        list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
     endif()
-    kittens_add_arch(TAG gfx1250 GFX gfx1250 gfx1250-strict
-                     SOURCES gfx1250/gemm.cpp gfx1250/mxfp8_tn.cpp gfx1250/mxfp8_nn.cpp
-                             gfx1250/mxfp8_nt.cpp gfx1250/bf16_tn.cpp gfx1250/bf16_nn.cpp
-                             gfx1250/bf16_nt.cpp
-                     FLAGS ${_gfx1250_flags})
+    kittens_add_arch(TAG cdna5 GFX gfx1250 gfx1250-strict
+                     SOURCES cdna5/gemm.cpp cdna5/mxfp8_tn.cpp cdna5/mxfp8_nn.cpp
+                             cdna5/mxfp8_nt.cpp cdna5/bf16_tn.cpp cdna5/bf16_nn.cpp
+                             cdna5/bf16_nt.cpp
+                     FLAGS ${_cdna5_flags})
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)

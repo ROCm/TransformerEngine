@@ -61,7 +61,6 @@ if(USE_ROCM)
               test_cublaslt_gemm.cu
               test_ck_grouped_gemm.cu
               test_ck_grouped_mxfp8.cu
-              test_hk_grouped16_gemm.cu
               test_cast_mxfp4_transpose.cu
               test_multi_quantize_mxfp8.cu)
 

@@ -11,7 +11,7 @@
 #include <type_traits>
 #include "../kittens_common.h"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 // TE BLAS layouts: TN forward, NN dgrad, NT wgrad.
 enum Layout { TN, NN, NT };
@@ -91,4 +91,4 @@ constexpr int dtype_of = std::is_same_v<T, float>      ? KITTENS_FLOAT32
                          : std::is_same_v<T, _Float16> ? KITTENS_FLOAT16
                                                        : KITTENS_BFLOAT16;
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

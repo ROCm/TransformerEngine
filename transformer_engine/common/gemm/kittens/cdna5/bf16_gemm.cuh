@@ -3,9 +3,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-/* gfx1250 BF16/FP16 GEMM, column-major D (M x N); A, B: TN [M][K] [N][K], NN [K][M] [N][K], NT
- * [K][M] [K][N]. 256x256 tiles, grid rounded up to 4x4 clusters with multicast, else unclustered.
- * Any M, N, K: the TDM zero-fills past D's edge and edge tiles store masked. */
+// gfx1250 BF16/FP16 GEMM, column-major D (M x N), 256x256 tiles, 4x4 clusters with multicast or unclustered.
+// Any M, N, K: the TDM zero-fills past D's edge and edge tiles store masked.
 
 #pragma once
 
@@ -17,7 +16,7 @@
 #include "kittens.cuh"
 #include "gemm.h"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 namespace bf16_gemm {
 
 constexpr int BLOCK_M     = 256;
@@ -223,9 +222,8 @@ __device__ __forceinline__ void store8(T *p, const V &v, int n, bool vec) {
     }
 }
 
-/* Copy-out of the C tile staged column-major in LDS: D as staged (times alpha with PLAIN_ALPHA), or
- * alpha * C (+ beta * D) (+ bias), with GELU after storing that to aux, or times dgelu(aux). EDGE:
- * D's rows and columns only, element-wise where a thread's 8 rows are not all in D or M % 8 != 0. */
+// Copy-out of the C tile staged in LDS: D = alpha * C (+ beta * D) (+ bias), then GELU (pre-GELU to aux) or
+// times dgelu(aux). EDGE stores only D's rows and columns, element-wise where 8 rows do not fit.
 template <typename StT, Epi E, bool ACC, typename OutT, typename SideT, bool PLAIN_ALPHA, bool EDGE>
 __device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d,
                                          const SideT *__restrict__ bias, SideT *__restrict__ aux,
@@ -287,11 +285,8 @@ __device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d,
     }
 }
 
-/* SPLIT: workgroup z stores its fp32 partial of K-blocks [nb z / S, nb (z+1) / S) to D + z M N.
- * BGRADB: the tile_m = 0 workgroups also write bias[n] = sum_k B(n, k), in a fixed order. A K %
- * BLOCK_K head is K-block 0; the TDM zero-fills it and the rows past M and N.
- * Both kernels include one body (bf16_gemm_body.inc): a shared __device__ function changed the
- * cluster kernel's K-loop schedule. MC: 4x4 cluster with multicast fills; else plain fills. */
+// SPLIT: workgroup z writes its fp32 partial to D + z M N; BGRADB: tile_m = 0 also writes bias[n] = sum_k B(n, k).
+// Both kernels include one body: a shared __device__ function changed the cluster kernel's K-loop schedule.
 template <Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
 __global__ __cluster_dims__(CLUSTER_DIM, CLUSTER_DIM, 1) __launch_bounds__(NUM_THREADS, 1)
 void bf16_gemm_kernel(const gl_e<T> ga, const gl_e<T> gb, OutT *__restrict__ D,
@@ -372,4 +367,4 @@ bool launch_bf16(const Launch &l) {
                                         : run(std::type_identity<kittens::bf16>{});
 }
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5

@@ -8,7 +8,6 @@
 #include <hip/hip_runtime.h>
 #include <cassert>
 #include <cstddef>
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -162,34 +161,6 @@ struct MXFP8WgradArgs {
     hipStream_t stream;
 };
 
-/* BF16/FP16 grouped GEMM, D_e = alpha op(A_e) op(B_e) (+ beta D_e) (+ bias_e) for every expert e with
- * m_splits[e] tokens. Operands as TE passes them (row-major, contiguous rows), weight dims N, K uniform:
- *   TN fprop: A_e = W_e [N][K], B_e = X_e [m_e][K],  D_e [m_e][N], bias_e [N] input (bias_dtype)
- *   NN dgrad: A_e = W_e [N][K], B_e = dY_e [m_e][N], D_e [m_e][K]
- *   NT wgrad: A_e = X_e [m_e][K], B_e = dY_e [m_e][N], D_e [N][K], grad: bias_e = dbias_e [N] output
- * Experts with m_e == 0 may have null operands; an NT one still gets D_e zeroed (unless accumulating)
- * and its dbias zeroed. */
-struct Grouped16GemmArgs {
-    const void *const *A;
-    const void *const *B;
-    void *const *D;
-    const void *const *bias;    // null: no bias
-    const int64_t *m_splits;    // host
-    int num_gemms;
-    int N, K;
-    bool transa, transb;
-    int in_dtype;               // A and B
-    int out_dtype;
-    int bias_dtype;
-    bool grad;
-    bool accumulate;
-    float alpha, beta;
-    int cu_count;               // workgroup cap; 0: every CU
-    void *workspace;
-    size_t workspace_size;
-    hipStream_t stream;
-};
-
 // A backend returns false, before any launch, when it does not take the GEMM.
 class GemmBackend {
  public:
@@ -197,8 +168,6 @@ class GemmBackend {
     virtual bool gemm(const GemmArgs &args) = 0;
     virtual bool grouped_gemm(const MXFP8GroupedGemmArgs &args) = 0;
     virtual bool grouped_wgrad(const MXFP8WgradArgs &args) = 0;
-    // On a decline *why gets the reason.
-    virtual bool grouped16_gemm(const Grouped16GemmArgs &args, const char **why) = 0;
 
     static GemmBackend *get() {
         return get_for_arch(transformer_engine::cuda::sm_arch());
@@ -207,7 +176,7 @@ class GemmBackend {
  private:
     static GemmBackend *get_for_arch(int sm_arch);
     static GemmBackend *get_cdna4();
-    static GemmBackend *get_gfx1250();
+    static GemmBackend *get_cdna5();
 };
 
 inline bool kittens_gemm_supported() { return GemmBackend::get() != nullptr; }
@@ -255,13 +224,4 @@ inline bool kittens_grouped_mxfp8_wgrad(
         N, K, M_array, num_experts, a_dtype, b_dtype, out_dtype, accumulate,
         workspace, workspace_size, stream};
     return backend->grouped_wgrad(args);
-}
-
-inline bool kittens_grouped16_gemm(const Grouped16GemmArgs &args, const char **why) {
-    GemmBackend *backend = GemmBackend::get();
-    if (backend == nullptr) {
-        *why = "no HipKittens backend for this GPU";
-        return false;
-    }
-    return backend->grouped16_gemm(args, why);
 }

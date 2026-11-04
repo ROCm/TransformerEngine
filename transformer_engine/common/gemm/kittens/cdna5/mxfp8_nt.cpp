@@ -6,7 +6,7 @@
 #include "hip/hip_runtime.h"
 #include "mxfp8_gemm.cuh"
 
-namespace te_kittens::gfx1250 {
+namespace te_kittens::cdna5 {
 
 // Wgrad: x e4m3 x dy e4m3 or e5m2 (HYBRID). Beta: gradient accumulation into main_grad (fp32) or
 // a 16-bit weight gradient.
@@ -20,4 +20,4 @@ struct mxfp8_gemm::Instances<NT> {
 
 template bool launch_mxfp8<NT>(const Launch &l);
 
-}  // namespace te_kittens::gfx1250
+}  // namespace te_kittens::cdna5
