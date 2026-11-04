@@ -1092,6 +1092,7 @@ public:
     int index;
     size_t ws_size_min;
     size_t ws_size_max;
+    bool device_scalar_alpha = false;  // Native NVFP4: algo was selected with a device scalar alpha
     Algo(): algo(), index(-1), algoId(), ws_size_min(0), ws_size_max(0) {}
     Algo(int idx, int64_t id, size_t ws_min, size_t ws_max): algo(), index(idx), algoId(id), ws_size_min(ws_min), ws_size_max(ws_max) {}
     inline bool hasId() { return index>=0; } const
@@ -1145,7 +1146,7 @@ public:
 
     //Merge to adjusted entry if possible
     auto* pentry = find_(cfg, ws_size_min - 1, ws_size_min);
-    if (pentry && pentry->algoId == algo.algoId)
+    if (pentry && pentry->algoId == algo.algoId && pentry->device_scalar_alpha == algo.device_scalar_alpha)
     {
       pentry->algo = algo.algo;
       pentry->ws_size_max = ws_size_max;
@@ -1442,56 +1443,59 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
   }
 }
 
-// Select device scalar alpha if hipBLASLt has a kernel for this GEMM config (not all NVFP4 kernels
-// support it yet), probed once per config. Returns false and leaves host pointer mode otherwise.
+// Select device scalar alpha for a native NVFP4 GEMM if hipBLASLt has a kernel for this config (not all
+// NVFP4 kernels support it yet). `cached` is the choice recorded with a cached algo; without one, hipBLASLt
+// is probed. Returns false and leaves host pointer mode otherwise.
 static bool use_device_scalar_alpha(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t operationDesc,
                                     hipblasLtMatrixLayout_t Adesc, hipblasLtMatrixLayout_t Bdesc,
                                     hipblasLtMatrixLayout_t Ddesc, size_t workspaceSize,
-                                    const GemmAlgoCache::Key& cfg) {
+                                    const GemmAlgoCache::Key& cfg, std::optional<bool> cached) {
 #ifdef NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA
-  static std::mutex mt;
-  static std::map<GemmAlgoCache::Key, bool, GemmAlgoCache::Key::Comp> supported;
-
+  if (cached.has_value() && !*cached) {
+    return false;
+  }
   int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT;
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
       operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+  if (cached.has_value()) {
+    return true;
+  }
 
-  std::lock_guard<std::mutex> lock(mt);
-  auto it = supported.find(cfg);
-  if (it == supported.end()) {
-    hipblasLtMatmulPreference_t preference = nullptr;
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
-        preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
-    hipblasLtMatmulHeuristicResult_t result;
-    int count = 0;
-    const hipblasStatus_t status = hipblasLtMatmulAlgoGetHeuristic(
-        handle, operationDesc, Adesc, Bdesc, Ddesc, Ddesc, preference, 1, &result, &count);
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-    it = supported.emplace(cfg, status == HIPBLAS_STATUS_SUCCESS && count > 0).first;
-    if (!it->second) {
-      // Shapes vary with MoE routing but kernel availability does not, so warn once per shape-free config.
-      static std::set<GemmAlgoCache::Key, GemmAlgoCache::Key::Comp> warned;
-      GemmAlgoCache::Key family = cfg;
-      family.m = family.n = family.k = family.lda = family.ldb = family.ldd = 0;
-      if (warned.insert(family).second) {
-        // std::string because concat_strings would print a string_view char by char.
-        const std::string d_type(typeNameMapper.getName(cfg.d_type));
-        const std::string epilogue(cfg.epilogue == HIPBLASLT_EPILOGUE_DEFAULT
-                                       ? "none" : epilogueNameMapper.getName(cfg.epilogue));
-        NVTE_WARN("hipBLASLt has no device scalar alpha kernel for NVFP4 GEMM d_type=", d_type,
-                  " epilogue=", epilogue, " (first seen at m=", cfg.m, " n=", cfg.n, " k=", cfg.k,
-                  "); falling back to host alpha, which synchronizes the stream on every call.");
-      }
+  hipblasLtMatmulPreference_t preference = nullptr;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
+      preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+  hipblasLtMatmulHeuristicResult_t result;
+  int count = 0;
+  const hipblasStatus_t status = hipblasLtMatmulAlgoGetHeuristic(
+      handle, operationDesc, Adesc, Bdesc, Ddesc, Ddesc, preference, 1, &result, &count);
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
+  if (status == HIPBLAS_STATUS_SUCCESS && count > 0) {
+    return true;
+  }
+
+  {
+    // Shapes vary with MoE routing but kernel availability does not, so warn once per shape-free config.
+    static std::mutex mt;
+    static std::set<GemmAlgoCache::Key, GemmAlgoCache::Key::Comp> warned;
+    GemmAlgoCache::Key family = cfg;
+    family.m = family.n = family.k = family.lda = family.ldb = family.ldd = 0;
+    std::lock_guard<std::mutex> lock(mt);
+    if (warned.insert(family).second) {
+      // std::string because concat_strings would print a string_view char by char.
+      const std::string d_type(typeNameMapper.getName(cfg.d_type));
+      const std::string epilogue(cfg.epilogue == HIPBLASLT_EPILOGUE_DEFAULT
+                                     ? "none" : epilogueNameMapper.getName(cfg.epilogue));
+      NVTE_WARN("hipBLASLt has no device scalar alpha kernel for NVFP4 GEMM d_type=", d_type,
+                " epilogue=", epilogue, " (first seen at m=", cfg.m, " n=", cfg.n, " k=", cfg.k,
+                "); falling back to host alpha, which synchronizes the stream on every call.");
     }
   }
 
-  if (!it->second) {
-    pointer_mode = HIPBLASLT_POINTER_MODE_HOST;
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-        operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
-  }
-  return it->second;
+  pointer_mode = HIPBLASLT_POINTER_MODE_HOST;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+      operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+  return false;
 #else
   return false;
 #endif
@@ -1840,8 +1844,15 @@ void hipblaslt_gemm(const Tensor *inputA,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
     use_nvfp4 && !use_nvfp4_native);
 
+  GemmAlgoCache::Algo cached_algo;
+  const bool algo_cached =
+      algoCache.find(gemm_cfg, workspaceSize, cached_algo) && cached_algo.algo.has_value();
+
   if (use_nvfp4_native) {
-    if (use_device_scalar_alpha(handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg)) {
+    cached_algo.device_scalar_alpha = use_device_scalar_alpha(
+        handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg,
+        algo_cached ? std::optional<bool>(cached_algo.device_scalar_alpha) : std::nullopt);
+    if (cached_algo.device_scalar_alpha) {
       alpha_ptr = static_cast<const void*>(nvfp4_c0_dev);
     } else {
       NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
@@ -1851,8 +1862,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     }
   }
 
-  GemmAlgoCache::Algo cached_algo;
-  if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
+  if (!algo_cached)
   {
     bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
