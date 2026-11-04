@@ -15,6 +15,11 @@ set(USE_CUDA OFF)
 
 if (USE_ROCM)
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+  # AOTriton does not support gfx1250-strict
+  if(USE_FUSED_ATTN_AOTRITON AND "gfx1250-strict" IN_LIST CMAKE_HIP_ARCHITECTURES)
+    message(STATUS "Disabling AOTriton: gfx1250-strict is in the target architectures")
+    set(USE_FUSED_ATTN_AOTRITON OFF)
+  endif()
 else()
   #Check if CUDA exists
   if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
@@ -735,7 +740,8 @@ else() # USE_ROCM
   endif()
 
   # AITER a4w4 (FP4) GEMM is gfx950-only; skip cleanly on other arches so a
-  # default-on USE_AITER_GEMM does not break gfx942/gfx1250 builds.  The NVTE
+  # default-on USE_AITER_GEMM does not break gfx942/gfx1250/gfx1250-strict
+  # builds. Mixed arch lists build the kernels for gfx950 only. The NVTE
   # C API in gemm/aiter_a4w4_gemm.cpp keeps stub symbols when disabled.
   list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _aiter_gemm_gfx950_idx)
   if(USE_AITER_GEMM AND NOT _aiter_gemm_gfx950_idx EQUAL -1)

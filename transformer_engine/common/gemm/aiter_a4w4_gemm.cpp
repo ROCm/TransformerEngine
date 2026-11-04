@@ -100,6 +100,9 @@ void nvte_aiter_gemm_a4w4(const NVTETensor A, const NVTETensor B, NVTETensor D,
              "AITER a4w4 GEMM: output must be BF16 or FP16");
 
   const int device_id = cuda::current_device();
+  // Kernels are built for gfx950 only.
+  NVTE_CHECK(cuda::sm_arch(device_id) == 95, "AITER a4w4 GEMM requires gfx950, got ",
+             cuda::sm_arch_name(device_id));
   const qola_tensor_t a_data  = make_qola_data(a, device_id);
   const qola_tensor_t b_data  = make_qola_data(b, device_id);
   const qola_tensor_t a_scale = make_qola_scale(a, device_id);
