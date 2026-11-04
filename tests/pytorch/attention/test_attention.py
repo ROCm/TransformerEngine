@@ -478,111 +478,6 @@ def test_dot_product_mem_calc(monkeypatch):
     torch.cuda.synchronize()
 
 
-def _ck_smallseq_setup(monkeypatch):
-    """Skips without the CK backend, then selects it and turns on its log"""
-    config = ModelConfig(2, 16, 16, 128, attn_mask_type="padding")
-    _, _, fused_attn_backends = get_available_attention_backends(
-        config, qkv_dtype=torch.bfloat16, qkv_layout="thd_thd_thd"
-    )
-    if FusedAttnBackend["CK"] not in fused_attn_backends:
-        pytest.skip("This test requires the CK fused attention backend.")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
-    monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
-    monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
-    monkeypatch.setenv("NVTE_LOG_CK_CONFIG", "1")
-
-
-def _ck_smallseq_fwd_bwd(smallseq, monkeypatch, capfd, max_seqlen, q, k, v, d_o, **kwargs):
-    """THD forward and backward on the CK backend, with the small-seq kernels enabled or disabled.
-    Returns the output and the Q, K and V grads."""
-    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1" if smallseq else "0")
-    capfd.readouterr()
-    kwargs.update(attn_scale=q.shape[-1] ** -0.5, qkv_layout="thd_thd_thd", o_format="thd")
-    lengths = (max_seqlen, max_seqlen, kwargs.pop("cu_seqlens_q"), kwargs.pop("cu_seqlens_kv"))
-    backend = FusedAttnBackend["CK"]
-    out, aux = fused_attn_fwd(True, *lengths, q, k, v, q.dtype, backend, **kwargs)[:2]
-    kwargs.update(do_format="thd", dqkv_layout="thd_thd_thd")
-    grads = fused_attn_bwd(*lengths, q, k, v, out, d_o, q.dtype, aux, backend, **kwargs)[:3]
-    # one log line for the forward and one for the backward
-    runs = capfd.readouterr().out.count("flow: ck-smallseq")
-    assert runs == (2 if smallseq else 0), "the small-seq kernels did not run as expected"
-    return (out, *grads)
-
-
-@pytest.mark.skipif(
-    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
-    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
-)
-def test_ck_smallseq_empty_kv(monkeypatch, capfd):
-    """THD where the last sequence has queries but no keys: those queries get a zero output and
-    gradient, and the other rows match the regular CK kernels"""
-    _ck_smallseq_setup(monkeypatch)
-
-    def cu(lengths):
-        return make_cu_seqlens(torch.tensor(lengths, dtype=torch.int32, device="cuda"))
-
-    # queries of 12 and 9 tokens in segments of 14; keys of 10 tokens in a segment of 14, then none
-    kwargs = dict(
-        attn_mask_type="padding",
-        cu_seqlens_q=cu([12, 9]),
-        cu_seqlens_q_padded=cu([14, 14]),
-        cu_seqlens_kv=cu([10, 0]),
-        cu_seqlens_kv_padded=cu([14, 0]),
-    )
-    reset_rng_states()
-    q, d_o = (torch.randn(28, 16, 128, device="cuda").bfloat16() for _ in range(2))
-    # a row of NaN right after K and V shows up in the results if a kernel reads past them
-    kv = torch.full((2, 15, 16, 128), float("nan"), dtype=torch.bfloat16, device="cuda")
-    kv[:, :14] = torch.randn(2, 14, 16, 128, device="cuda")
-    k, v = kv[:, :14].unbind()
-
-    expected = _ck_smallseq_fwd_bwd(
-        False, monkeypatch, capfd, 16, q, k.clone(), v.clone(), d_o, **kwargs
-    )
-    actual = _ck_smallseq_fwd_bwd(True, monkeypatch, capfd, 16, q, k, v, d_o, **kwargs)
-    rows_q, rows_kv = torch.arange(12), torch.arange(10)
-    rows = (rows_q, rows_q, rows_kv, rows_kv)
-    for name, x, y, r in zip(("O", "dQ", "dK", "dV"), actual, expected, rows):
-        torch.testing.assert_close(
-            x[r], y[r], atol=2e-2, rtol=2e-2, msg=lambda m: f"{name} differs: {m}"
-        )
-    # the queries without keys get a zero output and gradient
-    out, dq = (x[14:23] for x in actual[:2])
-    assert not out.any(), "the queries without keys have a nonzero output"
-    assert not dq.any(), "the queries without keys have a nonzero dQ"
-
-
-@pytest.mark.skipif(
-    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
-    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
-)
-def test_ck_smallseq_large(monkeypatch, capfd):
-    """The CK small-seq kernels with more than 2^31 elements per tensor: the last sequences match
-    the same sequences run on their own"""
-    _ck_smallseq_setup(monkeypatch)
-    torch.cuda.empty_cache()
-    if torch.cuda.mem_get_info()[0] < 48 * 1024**3:
-        pytest.skip("This test needs 48 GiB of free device memory.")
-    seqlen, num_heads, head_dim = 16, 32, 256
-    batch = 2**31 // (seqlen * num_heads * head_dim) + 2
-
-    def run(num_seqs, q, k, v, d_o):
-        cu_seqlens = torch.arange(num_seqs + 1, dtype=torch.int32, device="cuda") * seqlen
-        names = ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded")
-        kwargs = dict.fromkeys(names, cu_seqlens)
-        kwargs.update(attn_mask_type="padding")
-        return _ck_smallseq_fwd_bwd(True, monkeypatch, capfd, seqlen, q, k, v, d_o, **kwargs)
-
-    reset_rng_states()
-    shape = (batch * seqlen, num_heads, head_dim)
-    q, k, v, d_o = (torch.randn(shape, dtype=torch.bfloat16, device="cuda") for _ in range(4))
-    actual = run(batch, q, k, v, d_o)
-    tail = slice((batch - 2) * seqlen, None)
-    expected = run(2, *(x[tail] for x in (q, k, v, d_o)))
-    for name, x, y in zip(("O", "dQ", "dK", "dV"), actual, expected):
-        torch.testing.assert_close(x[tail], y, atol=0, rtol=0, msg=lambda m: f"{name} differs: {m}")
-
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -4540,3 +4435,266 @@ def test_deterministic_bwd_ck(
                 rtol=tol,
                 msg=lambda m, name=name: f"{name} does not match the unfused reference\n{m}",
             )
+
+
+# ---------------------- CK Small-Seq Tests ----------------------
+
+
+def _ck_smallseq_count(log):
+    """How many forward or backward passes ran the CK small-seq kernels, from the
+    NVTE_LOG_CK_CONFIG output"""
+    return log.count("ck small-seq, BSHD") + log.count("flow: ck-smallseq")
+
+
+def _ck_smallseq_ran(log):
+    """Whether the NVTE_LOG_CK_CONFIG output shows that the CK small-seq kernels ran"""
+    return _ck_smallseq_count(log) > 0
+
+
+def _ck_smallseq_setup(monkeypatch):
+    """Skips without the CK backend, then selects it and turns on its log"""
+    config = ModelConfig(2, 16, 16, 128, attn_mask_type="padding")
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config, qkv_dtype=torch.bfloat16, qkv_layout="thd_thd_thd"
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_AOTRITON", "0")
+    monkeypatch.setenv("NVTE_LOG_CK_CONFIG", "1")
+
+
+def _ck_smallseq_fwd_bwd(smallseq, monkeypatch, capfd, max_seqlen, q, k, v, d_o, **kwargs):
+    """THD forward and backward on the CK backend, with the small-seq kernels enabled or disabled.
+    Returns the output, the LSE and the Q, K and V grads."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1" if smallseq else "0")
+    capfd.readouterr()
+    kwargs.update(attn_scale=q.shape[-1] ** -0.5, qkv_layout="thd_thd_thd", o_format="thd")
+    lengths = (max_seqlen, max_seqlen, kwargs.pop("cu_seqlens_q"), kwargs.pop("cu_seqlens_kv"))
+    backend = FusedAttnBackend["CK"]
+    out, aux = fused_attn_fwd(True, *lengths, q, k, v, q.dtype, backend, **kwargs)[:2]
+    kwargs.update(do_format="thd", dqkv_layout="thd_thd_thd")
+    grads = fused_attn_bwd(*lengths, q, k, v, out, d_o, q.dtype, aux, backend, **kwargs)[:3]
+    # one log line for the forward and one for the backward
+    runs = _ck_smallseq_count(capfd.readouterr().out)
+    assert runs == (2 if smallseq else 0), "the small-seq kernels did not run as expected"
+    return (out, aux[0].squeeze(-1), *grads)
+
+
+def _ck_smallseq_configs():
+    """Layout, mask and window combinations, each with whether the CK small-seq kernels run it.
+    They take Q, K and V as separate tensors and apply no causal mask or sliding window; BSHD
+    takes no mask and THD a padding mask."""
+    layouts = ("bshd_bshd_bshd", "bs3hd", "bshd_bs2hd", "thd_thd_thd", "t3hd", "thd_t2hd")
+    for qkv_layout in layouts:
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        if qkv_format == "thd":
+            masks, supported_mask = ("padding", "padding_causal"), "padding"
+        else:
+            masks, supported_mask = ("no_mask", "padding", "causal", "padding_causal"), "no_mask"
+        for attn_mask_type in masks:
+            for swa in (False, True):
+                smallseq = (
+                    qkv_layout == "_".join([qkv_format] * 3)
+                    and attn_mask_type == supported_mask
+                    and not swa
+                )
+                yield qkv_layout, attn_mask_type, swa, smallseq
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
+    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
+)
+@pytest.mark.parametrize("qkv_layout, attn_mask_type, swa, smallseq", list(_ck_smallseq_configs()))
+def test_dpa_ck_smallseq(qkv_layout, attn_mask_type, swa, smallseq, request, monkeypatch, capfd):
+    """Fused attention with the CK small-seq kernels enabled. Configs they do not support, like
+    padded BSHD, causal masks, packed layouts or sliding windows, run the regular CK kernels."""
+    if attn_mask_type == "padding" and swa and qkv_layout.startswith("bs"):
+        request.node.add_marker(
+            pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "The unfused backend disagrees with flash and fused attention on padded BSHD "
+                    "with a sliding window at short lengths."
+                ),
+            )
+        )
+    model_configs = {"smallseq": ModelConfig(2, 16, 16, 128, attn_mask_type=attn_mask_type)}
+    _, _, fused_attn_backends = get_available_attention_backends(
+        model_configs["smallseq"], qkv_dtype=torch.bfloat16, qkv_layout=qkv_layout
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
+    monkeypatch.setenv("NVTE_LOG_CK_CONFIG", "1")
+    test_dot_product_attention(
+        torch.bfloat16, model_configs, "smallseq", False, qkv_layout, swa, False
+    )
+    ran_smallseq = _ck_smallseq_ran(capfd.readouterr().out)
+    assert ran_smallseq == smallseq, "the small-seq kernels did not run as expected"
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
+    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
+)
+@pytest.mark.parametrize(
+    "qkv_format, short_cu_seqlens", [("bshd", False), ("bshd", True), ("thd", False)]
+)
+def test_ck_smallseq_lse(qkv_format, short_cu_seqlens, monkeypatch, capfd):
+    """The CK small-seq kernels save the softmax LSE in the same layout as the regular CK kernels,
+    so either forward can be followed by either backward. BSHD without a mask ignores cu_seqlens,
+    as the regular kernels do."""
+    _ck_smallseq_setup(monkeypatch)
+    batch, seqlen, num_heads, head_dim = 2, 16, 16, 128
+    dtype, scale = torch.bfloat16, head_dim**-0.5
+
+    # THD sequences of 12 and 9 tokens in segments of 14, with 4 unused rows at the end
+    seqlens = [seqlen] * batch if qkv_format == "bshd" else [12, 9]
+    segment = seqlen if qkv_format == "bshd" else 14
+    lengths = torch.tensor(seqlens, dtype=torch.int32, device="cuda")
+    cu_seqlens = make_cu_seqlens(lengths)
+    cu_seqlens_padded = make_cu_seqlens(torch.full_like(lengths, segment))
+    if short_cu_seqlens:
+        # without a mask every row counts, whatever cu_seqlens say
+        cu_seqlens = make_cu_seqlens(torch.tensor([5, seqlen], dtype=torch.int32, device="cuda"))
+
+    def tokens(x, i):
+        if qkv_format == "bshd":
+            return x[i, : seqlens[i]]
+        return x[i * segment : i * segment + seqlens[i]]
+
+    reset_rng_states()
+    shape = (batch, seqlen) if qkv_format == "bshd" else (batch * segment + 4,)
+    shape += (num_heads, head_dim)
+    # A different scale per head spreads the LSE, so a mixed-up layout gives wrong results.
+    gain = torch.linspace(0.25, 3.0, num_heads, device="cuda").view(num_heads, 1)
+    q = (torch.randn(shape, device="cuda") * gain).to(dtype)
+    k, v, d_o = (torch.randn(shape, device="cuda").to(dtype) for _ in range(3))
+
+    qf, kf, vf = (x.float().requires_grad_() for x in (q, k, v))
+    ref_out, ref_lse = [], []
+    for i in range(batch):
+        scores = torch.einsum("shd,thd->hst", tokens(qf, i), tokens(kf, i)) * scale
+        ref_lse.append(torch.logsumexp(scores, -1).detach())
+        ref_out.append(torch.einsum("hst,thd->shd", torch.softmax(scores, -1), tokens(vf, i)))
+    torch.autograd.backward(ref_out, [tokens(d_o, i).float() for i in range(batch)])
+    ref_grads = [qf.grad, kf.grad, vf.grad]
+
+    layout = "_".join([qkv_format] * 3)
+    kwargs = dict(
+        attn_scale=scale,
+        qkv_layout=layout,
+        o_format=qkv_format,
+        attn_mask_type="no_mask" if qkv_format == "bshd" else "padding",
+    )
+    if qkv_format == "thd":
+        kwargs.update(cu_seqlens_q_padded=cu_seqlens_padded, cu_seqlens_kv_padded=cu_seqlens_padded)
+
+    def run(smallseq, fn, *args, **extra):
+        monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1" if smallseq else "0")
+        capfd.readouterr()
+        result = fn(*args, **kwargs, **extra)
+        ran_smallseq = _ck_smallseq_ran(capfd.readouterr().out)
+        assert ran_smallseq == smallseq, "the small-seq kernels did not run as expected"
+        return result
+
+    backend = FusedAttnBackend["CK"]
+    fwd_args = (True, seqlen, seqlen, cu_seqlens, cu_seqlens, q, k, v, dtype, backend)
+    for fwd_smallseq in (False, True):
+        out, aux = run(fwd_smallseq, fused_attn_fwd, *fwd_args)[:2]
+        # [b, h, s] for BSHD, [tokens, h] for THD
+        lse = aux[0].squeeze(-1)
+        for i in range(batch):
+            torch.testing.assert_close(
+                tokens(out, i).float(), ref_out[i].detach(), atol=2e-2, rtol=2e-2
+            )
+            lse_i = lse[i, :, : seqlens[i]] if qkv_format == "bshd" else tokens(lse, i).T
+            torch.testing.assert_close(lse_i, ref_lse[i], atol=1e-3, rtol=1e-3)
+        bwd_args = (seqlen, seqlen, cu_seqlens, cu_seqlens, q, k, v, out, d_o, dtype, aux, backend)
+        for bwd_smallseq in (False, True):
+            grads = run(
+                bwd_smallseq, fused_attn_bwd, *bwd_args, do_format=qkv_format, dqkv_layout=layout
+            )[:3]
+            for grad, ref_grad in zip(grads, ref_grads):
+                for i in range(batch):
+                    torch.testing.assert_close(
+                        tokens(grad, i).float(), tokens(ref_grad, i), atol=5e-2, rtol=5e-2
+                    )
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
+    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
+)
+def test_ck_smallseq_empty_kv(monkeypatch, capfd):
+    """THD where the last sequence has queries but no keys: those queries get a zero output and
+    gradient and an LSE of -inf, and the other rows match the regular CK kernels"""
+    _ck_smallseq_setup(monkeypatch)
+
+    def cu(lengths):
+        return make_cu_seqlens(torch.tensor(lengths, dtype=torch.int32, device="cuda"))
+
+    # queries of 12 and 9 tokens in segments of 14; keys of 10 tokens in a segment of 14, then none
+    kwargs = dict(
+        attn_mask_type="padding",
+        cu_seqlens_q=cu([12, 9]),
+        cu_seqlens_q_padded=cu([14, 14]),
+        cu_seqlens_kv=cu([10, 0]),
+        cu_seqlens_kv_padded=cu([14, 0]),
+    )
+    reset_rng_states()
+    q, d_o = (torch.randn(28, 16, 128, device="cuda").bfloat16() for _ in range(2))
+    # a row of NaN right after K and V shows up in the results if a kernel reads past them
+    kv = torch.full((2, 15, 16, 128), float("nan"), dtype=torch.bfloat16, device="cuda")
+    kv[:, :14] = torch.randn(2, 14, 16, 128, device="cuda")
+    k, v = kv[:, :14].unbind()
+
+    expected = _ck_smallseq_fwd_bwd(
+        False, monkeypatch, capfd, 16, q, k.clone(), v.clone(), d_o, **kwargs
+    )
+    actual = _ck_smallseq_fwd_bwd(True, monkeypatch, capfd, 16, q, k, v, d_o, **kwargs)
+    rows_q, rows_kv = torch.arange(12), torch.arange(10)
+    rows = (rows_q, rows_q, rows_q, rows_kv, rows_kv)
+    for name, x, y, r in zip(("O", "LSE", "dQ", "dK", "dV"), actual, expected, rows):
+        torch.testing.assert_close(
+            x[r], y[r], atol=2e-2, rtol=2e-2, msg=lambda m: f"{name} differs: {m}"
+        )
+    # the queries without keys get a zero output and gradient and an LSE of -inf
+    out, lse, dq = (x[14:23] for x in actual[:3])
+    assert not out.any(), "the queries without keys have a nonzero output"
+    assert not dq.any(), "the queries without keys have a nonzero dQ"
+    assert torch.isneginf(lse).all(), "the queries without keys have a finite LSE"
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION or device_compute_capability not in ((9, 4), (9, 5)),
+    reason="The CK small-seq kernels run on gfx942 and gfx950 only.",
+)
+def test_ck_smallseq_large(monkeypatch, capfd):
+    """The CK small-seq kernels with more than 2^31 elements per tensor: the last sequences match
+    the same sequences run on their own"""
+    _ck_smallseq_setup(monkeypatch)
+    torch.cuda.empty_cache()
+    if torch.cuda.mem_get_info()[0] < 48 * 1024**3:
+        pytest.skip("This test needs 48 GiB of free device memory.")
+    seqlen, num_heads, head_dim = 16, 32, 256
+    batch = 2**31 // (seqlen * num_heads * head_dim) + 2
+
+    def run(num_seqs, q, k, v, d_o):
+        cu_seqlens = torch.arange(num_seqs + 1, dtype=torch.int32, device="cuda") * seqlen
+        names = ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded")
+        kwargs = dict.fromkeys(names, cu_seqlens)
+        kwargs.update(attn_mask_type="padding")
+        return _ck_smallseq_fwd_bwd(True, monkeypatch, capfd, seqlen, q, k, v, d_o, **kwargs)
+
+    reset_rng_states()
+    shape = (batch * seqlen, num_heads, head_dim)
+    q, k, v, d_o = (torch.randn(shape, dtype=torch.bfloat16, device="cuda") for _ in range(4))
+    actual = run(batch, q, k, v, d_o)
+    tail = slice((batch - 2) * seqlen, None)
+    expected = run(2, *(x[tail] for x in (q, k, v, d_o)))
+    for name, x, y in zip(("O", "LSE", "dQ", "dK", "dV"), actual, expected):
+        torch.testing.assert_close(x[tail], y, atol=0, rtol=0, msg=lambda m: f"{name} differs: {m}")
