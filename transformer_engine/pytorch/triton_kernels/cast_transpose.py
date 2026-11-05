@@ -481,13 +481,14 @@ def _mxfp4_quantize_32x32_block(
     abs_qx = tl.abs(qx)
     sign = (qx < 0.0).to(tl.uint8)
     idx = tl.zeros([BLOCK_SIZE, BLOCK_SIZE], dtype=tl.uint8)
-    idx = tl.where(abs_qx >= 0.25, 1, idx)
+    # round half to even: a tie only rounds up into an even code
+    idx = tl.where(abs_qx > 0.25, 1, idx)
     idx = tl.where(abs_qx >= 0.75, 2, idx)
-    idx = tl.where(abs_qx >= 1.25, 3, idx)
+    idx = tl.where(abs_qx > 1.25, 3, idx)
     idx = tl.where(abs_qx >= 1.75, 4, idx)
-    idx = tl.where(abs_qx >= 2.5, 5, idx)
+    idx = tl.where(abs_qx > 2.5, 5, idx)
     idx = tl.where(abs_qx >= 3.5, 6, idx)
-    idx = tl.where(abs_qx >= 5.0, 7, idx)
+    idx = tl.where(abs_qx > 5.0, 7, idx)
 
     e2m1 = (sign << 3) | idx
     pairs = tl.reshape(e2m1, [BLOCK_SIZE, BLOCK_SIZE // 2, 2])
@@ -867,6 +868,45 @@ def te_cast_transpose_mxfp8_triton(input, out, noop_flag=None):
         colwise_scale_inv_ptr, colwise_scale_stride_M, colwise_scale_stride_N,
         colwise_scale_M, colwise_scale_N,
         max_fp8, BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE, USE_ROWWISE_SCALING, USE_COLWISE_SCALING)
+
+
+def mxfp8_e4m3_rowwise_downcast(x, transpose_scale=False):
+    """Fused single-pass MXFP8 e4m3 row-wise downcast (Kimi-K3 a8w4 activation).
+
+    ``x`` [M, K] (K a multiple of 32) -> (data [M, K] e4m3, scale uint8 E8M0), using the
+    ceil scale rule ``ceil(log2(amax_block / 448))``.
+    """
+    assert x.shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0, "K must be a multiple of 32"
+    x = x.contiguous()
+    M, K = x.shape
+    grid_k = K // MXFP8_BLOCK_SCALING_SIZE
+    fp8_dtype = tex.DType.kFloat8E4M3
+    data = torch.empty((M, K), dtype=te_dtype_to_torch_dtype(fp8_dtype), device=x.device)
+    if transpose_scale:
+        scale = torch.empty((grid_k, M), dtype=torch.uint8, device=x.device)
+        scale_stride_m, scale_stride_k = scale.stride(1), scale.stride(0)
+    else:
+        scale = torch.empty((M, grid_k), dtype=torch.uint8, device=x.device)
+        scale_stride_m, scale_stride_k = scale.stride(0), scale.stride(1)
+    if M == 0:  # empty MoE routing batch: nothing to quantize, skip the zero-sized grid
+        return data, scale
+    rowwise_y = triton.reinterpret(data, te_dtype_to_triton_dtype(fp8_dtype))
+    BLOCK_X = BLOCK_Y = 64
+    GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_Y"]) * triton.cdiv(K, META["BLOCK_X"]),)
+    _cast_transpose_triton_mxfp8[grid](
+        x, rowwise_y, None,
+        x.stride(0), x.stride(1),
+        M, K,
+        scale, scale_stride_m, scale_stride_k,
+        M, grid_k,
+        None, 1, 1,
+        1, 1,
+        get_fp8_max(fp8_dtype), BLOCK_X, BLOCK_Y, GROUP_Y, MXFP8_BLOCK_SCALING_SIZE,
+        True, False,
+    )
+    return data, scale
+
 
 def te_dequantize_mxfp8_triton(input, dtype):
     input_metadata = input.get_metadata()
