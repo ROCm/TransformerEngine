@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL GEMM kernels (dense, non-grouped) for BF16/FP16/FP32/FP8/MXFP8."""
+"""FlyDSL GEMM kernels: dense BF16/FP16/FP32/FP8/MXFP8, grouped BF16/FP16/FP8/MXFP8."""
 
 # Supported flydsl release series. Single source of truth for the version
 # requirement, since flydsl is user-installed (not a declared dependency). A
@@ -41,9 +41,10 @@ def _check_flydsl_version() -> None:
 _check_flydsl_version()
 
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_wrappers import te_generic_gemm_flydsl
+from .gemm_wrappers import general_grouped_gemm_flydsl, te_generic_gemm_flydsl
 
 __all__ = [
     "FlyDSLUnsupportedError",
+    "general_grouped_gemm_flydsl",
     "te_generic_gemm_flydsl",
 ]
