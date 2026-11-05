@@ -356,7 +356,10 @@ __device__ __forceinline__ void mxfp8_gemm(const uint8_t *A, const uint8_t *B, c
                                 fa[o + 1] = load_frag<!TRANSA>(a_src, o + 1, ks);
                             }
                             if (o + 2 == A_FRAGS) {
-                                fb[j]     = load_frag<TRANSB>(b_src, j, ks);
+                                fb[j] = load_frag<TRANSB>(b_src, j, ks);
+                                if constexpr (TRANSA) {
+                                    kittens::sched::compiler_fence();
+                                }
                                 fb[j + 1] = load_frag<TRANSB>(b_src, j + 1, ks);
                             }
                             kittens::sched::compiler_fence();

@@ -140,9 +140,6 @@ void bf16_gemm_kernel(const kittens::gl<T, -1, -1, -1, -1> ga, const kittens::gl
         kittens::cluster::sync();
     } else {
         kittens::sync::arrive();
-        if (wid == 0) {
-            asm volatile("");
-        }
         kittens::sync::wait();
     }
     kittens::sched::compiler_fence();
@@ -252,12 +249,8 @@ void bf16_gemm_kernel(const kittens::gl<T, -1, -1, -1, -1> ga, const kittens::gl
         kittens::sync::wait_tdm<0>();
         kittens::sched::compiler_fence();
         kittens::sync::arrive();
-        if (wid == 0) {
-            if constexpr (CLUSTER) {
-                kittens::cluster::arrive();
-            } else {
-                asm volatile("");
-            }
+        if (CLUSTER && wid == 0) {
+            kittens::cluster::arrive();
         }
         kittens::sched::compiler_fence();
         kittens::sync::wait();
