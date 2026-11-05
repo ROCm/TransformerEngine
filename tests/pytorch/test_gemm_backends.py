@@ -177,6 +177,8 @@ FLYDSL_MXFP4_SHAPES = [
     (512, 1024, 512),
     (512, 512, 1024),  # M != N
     (512, 640, 512),  # odd K tile count
+    (512, 4096, 512),  # K > 2048: scales streamed in the K loop
+    (512, 3200, 512),  # streamed scales with a partial last scale group
 ]
 
 LAYOUTS = ["TN", "NN", "NT"]
