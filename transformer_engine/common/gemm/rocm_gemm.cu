@@ -31,7 +31,6 @@
 #include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
-#include "../util/math.h"
 #include "../util/system.h"
 #include "rocm_fp4_e2m1_table.h"
 
@@ -344,12 +343,11 @@ Tensor make_mxfp8_swizzled_rowwise(const Tensor& input, std::vector<void*>& buff
                                    hipStream_t stream) {
   Tensor compact;
   compact.scaling_mode = NVTE_MXFP8_1D_SCALING;
-  compact.data         = input.data;
-  compact.scale_inv    = input.scale_inv;
+  compact.data      = input.data;
+  compact.scale_inv = input.scale_inv;
 
-  Tensor output                    = compact;
-  output.scale_inv.dptr            = allocate_async_temp(buffers, input.scale_inv.buffer_size_bytes(),
-                                                         stream);
+  Tensor output = compact;
+  output.scale_inv.dptr = allocate_async_temp(buffers, input.scale_inv.buffer_size_bytes(), stream);
   output.with_gemm_swizzled_scales = true;
   swizzle_scaling_factors(&compact, &output, stream);
   return output;
@@ -2211,48 +2209,9 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
 }
 
 #ifdef USE_HIPKITTENS_GEMM
-// D = acc (+ beta * D) (+ bias[row]), column-major with m rows; with aux, aux = that, D = gelu(it).
-template <typename OType, typename SType>
-__global__ void bias_gelu_epilogue_kernel(const float *acc, OType *d, const SType *bias, SType *aux,
-                                          float beta, size_t m, size_t mn) {
-  for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < mn;
-       i += size_t(gridDim.x) * blockDim.x) {
-    float v = acc[i];
-    if (beta != 0.f) {
-      v += beta * static_cast<float>(d[i]);
-    }
-    if (bias != nullptr) {
-      v += static_cast<float>(bias[i % m]);
-    }
-    if (aux != nullptr) {
-      aux[i] = static_cast<SType>(v);
-      v      = gelu<float, float>(v, {});
-    }
-    d[i] = static_cast<OType>(v);
-  }
-}
-
-// gfx1250 hipBLASLt has no MXFP8 bias or GELU epilogue: D is formed here from its fp32 acc, rounded once.
-void bias_gelu_epilogue(const Tensor &acc, Tensor *outputD, const Tensor *inputBias,
-                        Tensor *outputPreGelu, float beta, int m, int n, hipStream_t stream) {
-  const bool bias   = inputBias->data.dptr != nullptr;
-  const bool gelu   = outputPreGelu->data.dptr != nullptr;
-  const DType stype = bias ? inputBias->data.dtype : outputPreGelu->data.dtype;
-  NVTE_CHECK(!(bias && gelu) || outputPreGelu->data.dtype == stype,
-             "MXFP8 GEMM bias and GELU input must have the same dtype");
-  const size_t mn = static_cast<size_t>(m) * n;
-  if (mn == 0) {
-    return;
-  }
-  constexpr int threads = 256;
-  const size_t blocks = std::min<size_t>((mn + threads - 1) / threads, 65536);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(outputD->data.dtype, OType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(stype, SType,
-      bias_gelu_epilogue_kernel<OType, SType><<<blocks, threads, 0, stream>>>(
-          static_cast<const float *>(acc.data.dptr), static_cast<OType *>(outputD->data.dptr),
-          static_cast<const SType *>(inputBias->data.dptr),
-          static_cast<SType *>(outputPreGelu->data.dptr), beta, m, mn);););
-  NVTE_CHECK_CUDA(hipGetLastError());
+void warn_legacy_hipblaslt_env() {
+  NVTE_WARN("NVTE_ROCM_USE_HIPBLASLT_MXFP8 is deprecated and will be removed in a future "
+            "release. Please migrate to NVTE_ROCM_USE_HIPBLASLT, which applies to all GEMMs.");
 }
 
 // NVTE_ROCM_USE_HIPBLASLT=1 routes dense non-blockwise GEMMs to hipBLASLt; grouped GEMMs follow the
@@ -2261,10 +2220,7 @@ bool use_hipblaslt() {
   const char *legacy = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8");
   if (legacy != nullptr) {
     static std::once_flag warned;
-    std::call_once(warned, [] {
-      NVTE_WARN("NVTE_ROCM_USE_HIPBLASLT_MXFP8 is deprecated and will be removed in a future "
-                "release. Please migrate to NVTE_ROCM_USE_HIPBLASLT, which applies to all GEMMs.");
-    });
+    std::call_once(warned, warn_legacy_hipblaslt_env);
   }
   return getenv<bool>("NVTE_ROCM_USE_HIPBLASLT", false) ||
          (legacy != nullptr && strcmp(legacy, "1") == 0);
@@ -2301,33 +2257,33 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
 
   const GemmParam p = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
   GemmArgs args;
-  args.A              = p.A;
-  args.B              = p.B;
-  args.C              = outputD->data.dptr;
-  args.scale_A        = is_16bit ? nullptr : p.A_scale_inv;
-  args.scale_B        = is_16bit ? nullptr : p.B_scale_inv;
-  args.M              = m;
-  args.N              = n;
-  args.K              = k;
-  args.transa         = transa == CUBLAS_OP_T;
-  args.transb         = transb == CUBLAS_OP_T;
-  args.a_dtype        = static_cast<int>(p.Atype);
-  args.b_dtype        = static_cast<int>(p.Btype);
-  args.mxfp8_compact  = a_mxfp8 && b_mxfp8 && !inputA->with_gemm_swizzled_scales &&
-                        !inputB->with_gemm_swizzled_scales;
-  args.bias           = inputBias->data.dptr;
-  args.bias_dtype     = static_cast<int>(inputBias->data.dtype);
-  args.aux_gelu       = outputPreGelu->data.dptr;
-  args.out_dtype      = static_cast<int>(outputD->data.dtype);
-  args.aux_dtype      = static_cast<int>(outputPreGelu->data.dtype);
-  args.grad           = grad;
-  args.alpha          = alpha;
-  args.beta           = beta;
-  args.splitk         = gfx1250 ? hk_splitk() : 0;
-  args.cu_count       = cu_count;
-  args.workspace      = workspace;
+  args.A = p.A;
+  args.B = p.B;
+  args.C = outputD->data.dptr;
+  args.scale_A = is_16bit ? nullptr : p.A_scale_inv;
+  args.scale_B = is_16bit ? nullptr : p.B_scale_inv;
+  args.M = m;
+  args.N = n;
+  args.K = k;
+  args.transa = transa == CUBLAS_OP_T;
+  args.transb = transb == CUBLAS_OP_T;
+  args.a_dtype = static_cast<int>(p.Atype);
+  args.b_dtype = static_cast<int>(p.Btype);
+  args.mxfp8_compact = a_mxfp8 && b_mxfp8 && !inputA->with_gemm_swizzled_scales &&
+                       !inputB->with_gemm_swizzled_scales;
+  args.bias = inputBias->data.dptr;
+  args.bias_dtype = static_cast<int>(inputBias->data.dtype);
+  args.aux_gelu = outputPreGelu->data.dptr;
+  args.out_dtype = static_cast<int>(outputD->data.dtype);
+  args.aux_dtype = static_cast<int>(outputPreGelu->data.dtype);
+  args.grad = grad;
+  args.alpha = alpha;
+  args.beta = beta;
+  args.splitk   = gfx1250 ? hk_splitk() : 0;
+  args.cu_count = cu_count;
+  args.workspace = workspace;
   args.workspace_size = workspaceSize;
-  args.stream         = stream;
+  args.stream = stream;
   return kittens_gemm(args);
 }
 #endif
@@ -2506,27 +2462,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const int cu_count = use_service_stream ? math_sm_count : cuda::sm_count();
   if (!try_kittens_gemm(inputA, transa, inputB, transb, outputD, inputBias, outputPreGelu, m, n, k,
                         grad, alpha, beta, workspace, workspaceSize, cu_count, gemm_stream)) {
-    // gfx1250: hipBLASLt writes alpha * op(A) op(B) to an fp32 acc, then beta, the forward bias and
-    // GELU are applied. NN/NT also take beta this way: their transpose-to-TN path has none.
-    const bool has_epi        = inputBias->data.dptr != nullptr ||
-                                outputPreGelu->data.dptr != nullptr;
-    const bool split_epilogue = is_mxfp8 && cuda::sm_arch() == 125 &&
-                                ((!grad && has_epi) ||
-                                 (!has_epi && beta != 0.f && !(is_transa && !is_transb)));
     if (is_mxfp8) {
-      NVTE_CHECK(split_epilogue || inputBias->data.dptr == nullptr,
+      NVTE_CHECK(inputBias->data.dptr == nullptr,
                  "hipBLASLt MXFP8 GEMM does not support bias");
-    }
-    Tensor *epi_D = outputD;
-    const Tensor *epi_bias = inputBias;
-    Tensor *epi_pre_gelu = outputPreGelu;
-    const float epi_beta = beta;
-    Tensor acc, no_bias, no_pre_gelu;
-    if (split_epilogue) {
-      outputD       = &acc;
-      inputBias     = &no_bias;
-      outputPreGelu = &no_pre_gelu;
-      beta          = 0.f;
     }
 #endif
     // gfx1250 hipBLASLt runs MXFP8 only as TN on swizzled scales: row-wise operands are swizzled
@@ -2534,13 +2472,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     std::vector<void*> swizzle_buffers;
     std::optional<Tensor> A_swizzled, B_swizzled;
     try {
-#ifdef USE_HIPKITTENS_GEMM
-      if (split_epilogue) {
-        acc.data = SimpleTensor(allocate_async_temp(swizzle_buffers, sizeof(float) * m * n, gemm_stream),
-                                std::vector<size_t>{static_cast<size_t>(n), static_cast<size_t>(m)},
-                                DType::kFloat32);
-      }
-#endif
       if (is_mxfp8 && cuda::sm_arch() == 125) {
         if (is_transa && inputA->scaling_mode == NVTE_MXFP8_1D_SCALING &&
             !inputA->with_gemm_swizzled_scales) {
@@ -2561,17 +2492,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                       use_split_accumulator, math_sm_count,
                                                       gemm_stream, handle, m, n, k);
       if (!handled) {
-        NVTE_CHECK(!is_mxfp8 || cuda::sm_arch() != 125 || (is_transa && !is_transb),
-                   "gfx1250 hipBLASLt does not support NN/NT MXFP8 GEMMs with accumulate or GELU.");
         hipblaslt_gemm(A_gemm, B_gemm, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd,
                        transa, transb, grad, workspace, workspaceSize, alpha, beta,
                        use_split_accumulator, math_sm_count, gemm_stream, handle);
       }
-#ifdef USE_HIPKITTENS_GEMM
-      if (split_epilogue) {
-        bias_gelu_epilogue(acc, epi_D, epi_bias, epi_pre_gelu, epi_beta, m, n, gemm_stream);
-      }
-#endif
     } catch (...) {
       free_async_temps(swizzle_buffers, gemm_stream);
       throw;
@@ -2597,7 +2521,9 @@ static bool kittens_env_set(const char *name) {
 static bool kittens_grouped_mxfp8_enabled() {
     static bool enabled = [] {
         // No gfx1250 grouped kernels: its grouped GEMMs take CK or the per-expert path.
-        if (!kittens_gemm_supported() || cuda::sm_arch() != 95) return false;
+        if (!kittens_gemm_supported() || cuda::sm_arch() != 95) {
+            return false;
+        }
         bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
         bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
         bool use_ck = kittens_env_set("NVTE_USE_CK_GROUPED_GEMM");

@@ -357,9 +357,8 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION and fp8 and recipe.mxfp8() and bias:
         # Dense HipKittens handles MXFP8 bias only for 256-aligned token counts; else hipBLASLt.
         hipkittens_takes_all = (
-            get_device_compute_capability() in ((9, 5), (12, 5))
+            get_device_compute_capability() == (9, 5)
             and os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
-            and os.environ.get("NVTE_ROCM_USE_HIPBLASLT", "0") != "1"
             and get_align_size_for_quantization(recipe) * bs % 256 == 0
         )
         if not hipkittens_takes_all:

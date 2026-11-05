@@ -3,36 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# gfx1250-strict is gfx1250 A0; it builds the cdna5 sources.
 set(KITTENS_SUPPORTED_ARCHS gfx942 gfx950 gfx1250 gfx1250-strict)
-
-# The gfx1250 kernels need cluster launches and the gfx1250 WMMA-scale/LDS-transpose builtins.
-function(kittens_check_gfx1250_toolchain arch result)
-    set(CMAKE_HIP_ARCHITECTURES ${arch})
-    include(CheckSourceCompiles)
-    check_source_compiles(HIP [[
-        #include <hip/hip_runtime.h>
-        typedef int v2i __attribute__((ext_vector_type(2)));
-        typedef int v16i __attribute__((ext_vector_type(16)));
-        typedef float v8f __attribute__((ext_vector_type(8)));
-        typedef __attribute__((address_space(3))) v2i lds_v2i;
-        __global__ __cluster_dims__(2, 1, 1) void k(v8f *c, const v16i *a, lds_v2i *s) {
-            v2i t = __builtin_amdgcn_ds_load_tr8_b64_v2i32(s);
-            *c = __builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
-                0, *a, 0, *a, (short)0, *c, 0, 0, t.x, 0, 0, t.y, false, false);
-        }
-        int main() { return 0; }]] ${result})
-endfunction()
-foreach(_arch gfx1250 gfx1250-strict)
-    if(_arch IN_LIST CMAKE_HIP_ARCHITECTURES)
-        string(MAKE_C_IDENTIFIER "KITTENS_${_arch}_TOOLCHAIN" _toolchain)
-        kittens_check_gfx1250_toolchain(${_arch} ${_toolchain})
-        if(NOT ${_toolchain})
-            message(STATUS "HipKittens GEMM for ${_arch} disabled (HIP compiler lacks ${_arch} support)")
-            list(REMOVE_ITEM KITTENS_SUPPORTED_ARCHS ${_arch})
-        endif()
-    endif()
-endforeach()
 
 set(_kittens_enabled_archs "")
 foreach(_arch IN LISTS KITTENS_SUPPORTED_ARCHS)
@@ -119,15 +90,13 @@ else()
                              cdna4/overlap/comm_gemm.cpp
                      FLAGS -gline-tables-only)
 
-    # NVTE_HK_GFX1250_MCAST=0/1 at build time fixes TDM multicast on or off (default: off on A0).
     set(_cdna5_flags "")
     if(DEFINED ENV{NVTE_HK_GFX1250_MCAST})
         list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
     endif()
     kittens_add_arch(TAG cdna5 GFX gfx1250 gfx1250-strict
                      SOURCES cdna5/gemm.cpp cdna5/mxfp8_tn.cpp cdna5/mxfp8_nn.cpp
-                             cdna5/mxfp8_nt.cpp cdna5/bf16_tn.cpp cdna5/bf16_nn.cpp
-                             cdna5/bf16_nt.cpp
+                             cdna5/mxfp8_nt.cpp cdna5/bf16.cpp
                      FLAGS ${_cdna5_flags})
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})

@@ -8,16 +8,6 @@
 
 namespace te_kittens::cdna5 {
 
-// Wgrad: e4m3/e5m2 x e4m3/e5m2. Beta: gradient accumulation into main_grad (fp32) or
-// a 16-bit weight gradient.
-template <>
-struct mxfp8_gemm::Instances<NT> {
-    using formats  = List<Formats<0, 0>, Formats<0, 1>, Formats<1, 0>, Formats<1, 1>>;
-    using variants = List<Variant<NONE, false, __bf16>, Variant<NONE, false, _Float16>,
-                          Variant<NONE, false, float>, Variant<NONE, true, __bf16>,
-                          Variant<NONE, true, _Float16>, Variant<NONE, true, float>>;
-};
-
-template bool launch_mxfp8<NT>(const Launch &l);
+template bool launch_mxfp8<NT>(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast);
 
 }  // namespace te_kittens::cdna5

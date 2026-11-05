@@ -615,8 +615,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
-std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop,
-                                             DType dtype) {
+std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop, DType dtype) {
   if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
@@ -643,25 +642,22 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
   }
 #ifdef __HIP_PLATFORM_AMD__
   if (prop.major == 12 && prop.minor == 5) {
-    if (params.m % 256 || params.n % 256 || params.k % 128) {
-      return "HipKittens on gfx1250 requires M and N 256-aligned, K 128-aligned";
-    }
     if (isFp8Type(dtype)) {
       return "HipKittens on gfx1250 requires a non-FP8 output";
     }
     const bool tn = params.transa && !params.transb;
-    if (!tn && (params.use_bias || params.use_gelu)) {
-      return "HipKittens on gfx1250 has bias and GELU epilogues for TN only";
+    if (!tn && params.use_gelu) {
+      return "HipKittens on gfx1250 has GELU epilogues for TN only";
     }
     return std::nullopt;
-  }
-  if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
+  } else if (prop.major == 9 && (prop.minor == 4 || prop.minor == 5)) {
+    if (params.m % 256 || params.n % 256 || params.k < 256) {
+      return "HipKittens requires M and N 256-aligned, K >= 256";
+    }
+    return std::nullopt;
+  } else {
     return "HipKittens requires gfx942, gfx950 or gfx1250";
   }
-  if (params.m % 256 || params.n % 256 || params.k < 256) {
-    return "HipKittens requires M and N 256-aligned, K >= 256";
-  }
-  return std::nullopt;
 #else
   return "HipKittens requires ROCm";
 #endif
@@ -695,11 +691,9 @@ void performTest(const TestParams& params) {
   }
 
 #ifdef __HIP_PLATFORM_AMD__
-  // Non-MXFP8 GEMMs run on HipKittens only for bf16/fp16 on gfx1250.
-  const bool hk_16bit = prop.major == 12 && prop.minor == 5 &&
-                        (atype == DType::kBFloat16 || atype == DType::kFloat16);
-  if (!use_mxfp8 && !params.force_hipblaslt && !hk_16bit) {
-    GTEST_SKIP() << "HipKittens does not take this config";
+  if (!use_mxfp8 && !params.force_hipblaslt &&
+      !(prop.major == 12 && prop.minor == 5 && (atype == DType::kBFloat16 || atype == DType::kFloat16))) {
+    GTEST_SKIP();
   }
 
   #if HIP_VERSION < 70200000
@@ -848,7 +842,7 @@ void performTest(const TestParams& params) {
     RefD,
     params.use_gelu ? &RefPreGeluOut : nullptr);
 
-  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales; HipKittens takes compact ones.
+  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   if (use_mxfp8 && params.force_hipblaslt && prop.major == 12 && prop.minor == 5) {
     swizzle_mxfp8_scales(A, !a_colwise);
     swizzle_mxfp8_scales(B, !b_colwise);
@@ -951,7 +945,7 @@ void performDqTest(const TestParams &params) {
   nvte_dequantize(A_fp8.data(), A_ref.data(), 0);
   nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
 
-  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales; HipKittens takes compact ones.
+  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   const bool a_colwise = !params.transa;
   const bool b_colwise = params.transb;
   if (params.force_hipblaslt && prop.major == 12 && prop.minor == 5) {
@@ -974,18 +968,9 @@ void performDqTest(const TestParams &params) {
 
   //perform non-FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D_ref("D", TShape{params.n, params.m}, dtype);
-  // hipBLASLt reference, independent of the HipKittens GEMM under test.
-  const char* use_hipblaslt = std::getenv("NVTE_ROCM_USE_HIPBLASLT");
-  const std::string saved = use_hipblaslt ? use_hipblaslt : "";
-  setenv("NVTE_ROCM_USE_HIPBLASLT", "1", 1);
   nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
                    params.transa, params.transb, false, Workspace.data(), false, false,
                    prop.multiProcessorCount, 0);
-  if (use_hipblaslt) {
-    setenv("NVTE_ROCM_USE_HIPBLASLT", saved.c_str(), 1);
-  } else {
-    unsetenv("NVTE_ROCM_USE_HIPBLASLT");
-  }
   D_ref.to_cpu();
 
   // check if error message happens in running

@@ -16,28 +16,21 @@ namespace te_kittens::cdna5 {
 // TE BLAS layouts: TN forward, NN dgrad, NT wgrad.
 enum Layout { TN, NN, NT };
 
-// Epilogue of a dense kernel, fixed at compile time. SPLIT writes raw fp32 partials [S][N][M].
+// Epilogue of a dense kernel, fixed at compile time. SPLIT writes raw fp32 partials [splits][N][M].
 enum Epi { NONE, BIAS, GELU_AUX, GELU_AUX_BIAS, DGELU, BGRADB, SPLIT };
 
-// D = alpha * op(A) op(B) (+ beta * D with acc), column-major M x N, then the epilogue; BGRADB
-// writes bias[n] = sum_k B(n, k). D is out_dtype, bias and aux side_dtype.
-struct Launch {
-    const void *A;
-    const void *B;
-    const void *scale_A;
-    const void *scale_B;
-    void *D;
-    const void *bias;      // dbias output for BGRADB
-    void *aux;
-    void *workspace;       // fp32 partials [splits][N][M] when splits > 1
-    float alpha, beta;
-    int M, N, K, splits;
-    int a_dtype, b_dtype, out_dtype, side_dtype;
-    Epi epi;
-    bool acc;
-    bool mcast;            // cluster kernels with TDM multicast, else no cluster
-    hipStream_t stream;
-};
+constexpr int BLOCK_M       = 256;
+constexpr int BLOCK_N       = 256;
+constexpr int NUM_THREADS   = 256;
+constexpr int BF16_BLOCK_K  = 128;
+constexpr int MXFP8_BLOCK_K = 256;
+constexpr int LDS_MAX_BYTES = 320 * 1024;
+
+typedef int v4i __attribute__((ext_vector_type(4)));
+typedef float v8f __attribute__((ext_vector_type(8)));
+template <typename T> using vec8 = T __attribute__((ext_vector_type(8)));
+
+__host__ __device__ constexpr int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
 // TDM cluster multicast runs on B0 only; A0 reports gfx1250-strict. A build with
 // NVTE_HK_GFX1250_MCAST=0/1 fixes the choice.
@@ -56,12 +49,14 @@ constexpr bool ARCH_MCAST = false;
 constexpr bool ARCH_MCAST = true;
 #endif
 
-// false (before any launch) when no instance matches; launch failures throw.
-template <Layout L> bool launch_mxfp8(const Launch &l);
-template <Layout L> bool launch_bf16(const Launch &l);
+// D = alpha * op(A) op(B) (+ beta * D) then the epilogue; false, before any launch, when no kernel matches.
+template <Layout L>
+bool launch_mxfp8(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast);
+template <Layout L>
+bool launch_bf16(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast);
 
-// D = alpha * (sum of the l.splits partials in split order) (+ beta * D).
-void splitk_reduce(const Launch &l);
+// D = alpha * (sum of the splits fp32 partials in workspace, in split order) (+ beta * D).
+void splitk_reduce(const GemmArgs &args, const void *workspace, int splits);
 
 inline void kittens_check(hipError_t err, const char *what) {
     if (err != hipSuccess) {
@@ -69,21 +64,12 @@ inline void kittens_check(hipError_t err, const char *what) {
     }
 }
 
-// One instantiated epilogue variant of a dense kernel family; bias and aux hold SideT.
-template <Epi E_, bool ACC_, typename OutT_, typename SideT_ = OutT_>
-struct Variant {
-    static constexpr Epi E = E_;
-    static constexpr bool ACC = ACC_;
-    using OutT  = OutT_;
-    using SideT = SideT_;
-};
-
-template <typename... T>
-struct List {};
-
-template <typename... T, typename F>
-bool any_of(List<T...>, F &&f) {
-    return (f(T{}) || ...);
+// Bias and aux share one dtype.
+inline int side_dtype(const GemmArgs &args) {
+    if (args.bias != nullptr) {
+        return args.bias_dtype;
+    }
+    return args.aux_gelu != nullptr ? args.aux_dtype : args.out_dtype;
 }
 
 template <typename T>

@@ -22,10 +22,6 @@ enum KittensDType {
     KITTENS_FP8E5M2  = 8,
 };
 
-inline bool kittens_is_fp8(int dtype) {
-    return dtype == KITTENS_FP8E4M3 || dtype == KITTENS_FP8E5M2;
-}
-
 // MFMA cbsz/blgp operand format code, fixed by v_mfma_scale_f32_16x16x128_f8f6f4.
 inline int fp8_code(KittensDType dt) {
     switch (dt) {
@@ -104,7 +100,6 @@ inline void kittens_blockwise_fp8_gemm(
     backend->run(args);
 }
 
-// D = alpha * op(A) op(B) + beta * D plus the epilogue, column-major (cdna4 ignores alpha, grad).
 struct GemmArgs {
     const void *A;
     const void *B;
@@ -114,14 +109,14 @@ struct GemmArgs {
     int M, N, K;
     bool transa, transb;
     int a_dtype, b_dtype;
-    bool mxfp8_compact;    // A and B are MXFP8 and neither is tagged GEMM-swizzled
+    bool mxfp8_compact;
     const void *bias;
     int bias_dtype;
     void *aux_gelu;
     int out_dtype, aux_dtype;
-    bool grad;             // bias is the dbias output (BGRADB), aux_gelu an input (DGELU)
+    bool grad;
     float alpha, beta;
-    int splitk;            // NVTE_HK_SPLITK: 0 auto, 1 off, S > 1 forced
+    int splitk;
     int cu_count;
     void *workspace;
     size_t workspace_size;
@@ -161,7 +156,6 @@ struct MXFP8WgradArgs {
     hipStream_t stream;
 };
 
-// A backend returns false, before any launch, when it does not take the GEMM.
 class GemmBackend {
  public:
     virtual ~GemmBackend() = default;

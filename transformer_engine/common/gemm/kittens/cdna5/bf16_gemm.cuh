@@ -3,145 +3,115 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// gfx1250 BF16/FP16 GEMM, column-major D (M x N), 256x256 tiles, 4x4 clusters with multicast or unclustered.
-// Any M, N, K: the TDM zero-fills past D's edge and edge tiles store masked.
+// gfx1250 BF16/FP16 GEMM: 256x256 tiles, 4x4 multicast clusters or none, any M, N, K.
 
 #pragma once
 
 #include "hip/hip_runtime.h"
-#include <algorithm>
 #include <cstdint>
 #include <type_traits>
-#include <utility>
-#include "kittens.cuh"
-#include "gemm.h"
+#include "common.cuh"
 
 namespace te_kittens::cdna5 {
 namespace bf16_gemm {
 
-constexpr int BLOCK_M     = 256;
-constexpr int BLOCK_N     = 256;
-constexpr int BLOCK_K     = 128;
+constexpr int BLOCK_K     = BF16_BLOCK_K;
 constexpr int K_STEP      = 32;
 constexpr int WARPS_M     = 4;
 constexpr int WARPS_N     = 2;
 constexpr int WARP_M      = BLOCK_M / WARPS_M;
 constexpr int WARP_N      = BLOCK_N / WARPS_N;
 constexpr int NUM_WARPS   = WARPS_M * WARPS_N;
-constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
-constexpr int S           = 2;
+constexpr int STAGES      = 2;
 constexpr int CLUSTER_DIM = 4;
 constexpr int A_FRAGS     = WARP_M / 16;
 constexpr int B_FRAGS     = WARP_N / 16;
-constexpr int DS_SUBSTEP  = 2 * (A_FRAGS + B_FRAGS);      // ds_load_b128 per K step
+constexpr int DS_STEP     = 2 * (A_FRAGS + B_FRAGS);
 constexpr int WMMA_STEP   = A_FRAGS * B_FRAGS;
+constexpr int PIN_WMMA    = 8;
+constexpr int PIN_REP     = WMMA_STEP / PIN_WMMA;
+constexpr int PIN_DS      = DS_STEP / PIN_REP;
+// WMMAs of the last K step issued before the stage barrier.
+constexpr int PRE_BAR     = 12;
 
-// Interleave groups of PIN_WMMA matrix ops and PIN_DS reads, PIN_REP per K step.
-constexpr int PIN_WMMA = 8;
-constexpr int PIN_REP  = WMMA_STEP / PIN_WMMA;
-constexpr int PIN_DS   = DS_SUBSTEP / PIN_REP;
-// Matrix ops of the last K step issued before the stage flip; they read registers loaded earlier.
-constexpr int PRE_BAR  = 12;
+// SchedGroup masks.
+constexpr int SCHED_DS_READ = 0x100;
+constexpr int SCHED_WMMA    = 0x008;
 
-static_assert(K_STEP * 4 == BLOCK_K && WMMA_STEP == 32 && A_FRAGS == 4 && B_FRAGS == 8);
+static_assert(NUM_WARPS * kittens::WARP_THREADS == NUM_THREADS);
+static_assert(K_STEP * 4 == BLOCK_K && A_FRAGS == 4 && B_FRAGS == 8);
 static_assert((WMMA_STEP - PRE_BAR) % PIN_REP == 0);
-
-typedef int   v4i __attribute__((ext_vector_type(4)));
-typedef float v8f __attribute__((ext_vector_type(8)));
-template <typename T> using vec8 = T __attribute__((ext_vector_type(8)));
 
 template <typename T, int R, int C>
 using st_e = kittens::st<T, R, C, kittens::ducks::st_shape::st_16x32_padded<>>;
 template <typename T, int R, int C>
-using rt_e = kittens::rt<T, R, C, kittens::ducks::rt_layout::row,
-                         kittens::ducks::rt_shape::rt_16x32>;
+using rt_e = kittens::rt<T, R, C, kittens::ducks::rt_layout::row, kittens::ducks::rt_shape::rt_16x32>;
 template <typename T>
-using gl_e  = kittens::gl<T, -1, -1, -1, -1>;
+using gl_e = kittens::gl<T, -1, -1, -1, -1>;
 using C_acc = kittens::rt_fl<WARP_M, WARP_N, kittens::col_l, kittens::rt_16x16_s>;
 
 // The clang element type of an input type (HK's bf16 and half are structs).
 template <typename T>
 using native_t = std::conditional_t<std::is_same_v<T, kittens::half>, _Float16, __bf16>;
 
-template <int N, typename F>
-__device__ __forceinline__ void static_for(F &&f) {
-    [&]<int... I>(std::integer_sequence<int, I...>) {
-        (f(std::integral_constant<int, I>{}), ...);
-    }(std::make_integer_sequence<int, N>{});
-}
-
-template <typename T>
-__device__ __forceinline__ __attribute__((address_space(3))) T *lds_ptr(uint32_t addr) {
-    return reinterpret_cast<__attribute__((address_space(3))) T *>(static_cast<uintptr_t>(addr));
-}
-
-// An M/N-contiguous operand's stage keeps its global orientation, K-major.
+// TRANS: the operand is M/N-contiguous and its LDS stage is [BLOCK_K][rows].
 template <typename T, Layout L>
 struct Tiles {
     static constexpr bool TRANS_A = L != TN;
     static constexpr bool TRANS_B = L == NT;
-    using A_deep = std::conditional_t<TRANS_A, st_e<T, BLOCK_K, BLOCK_M>,
-                                      st_e<T, BLOCK_M, BLOCK_K>>;
-    using B_deep = std::conditional_t<TRANS_B, st_e<T, BLOCK_K, BLOCK_N>,
-                                      st_e<T, BLOCK_N, BLOCK_K>>;
-    using A_reg  = rt_e<T, WARP_M, K_STEP>;
-    using B_reg  = rt_e<T, WARP_N, K_STEP>;
+    using A_stage = std::conditional_t<TRANS_A, st_e<T, BLOCK_K, BLOCK_M>, st_e<T, BLOCK_M, BLOCK_K>>;
+    using B_stage = std::conditional_t<TRANS_B, st_e<T, BLOCK_K, BLOCK_N>, st_e<T, BLOCK_N, BLOCK_K>>;
+    using A_reg = rt_e<T, WARP_M, K_STEP>;
+    using B_reg = rt_e<T, WARP_N, K_STEP>;
 
-    static constexpr int LDS_BYTES = S * (sizeof(A_deep) + sizeof(B_deep));
+    static constexpr int LDS_BYTES = STAGES * (sizeof(A_stage) + sizeof(B_stage));
 
-    static_assert(A_deep::shape::pad_interval % WARP_M == 0 &&
-                      B_deep::shape::pad_interval % WARP_N == 0,
+    static_assert(A_stage::shape::pad_interval % WARP_M == 0 && B_stage::shape::pad_interval % WARP_N == 0,
                   "a warp's operand rows must not straddle a pad interval of a K-major stage");
-    static_assert(BLOCK_N * (BLOCK_M * 4 + 16) <= LDS_BYTES, "fp32 C staging fits the operand LDS");
-    static_assert(LDS_BYTES <= 327680, "LDS is 320 KiB per workgroup");
+    static_assert(BLOCK_N * staged_stride(sizeof(float)) <= LDS_BYTES, "fp32 C staging fits the operand LDS");
+    static_assert(LDS_BYTES <= LDS_MAX_BYTES);
 };
 
-/* Issue order of ND reads then NW matrix ops, PIN_REP times (SchedGroup masks: DS read 1<<8, matrix
- * 1<<3). Kept in a function: written inline four times it spilled. */
-template <int NW = PIN_WMMA, int ND = PIN_DS>
+// Kept in a function: written inline four times it spilled.
+template <int NW = PIN_WMMA>
 __device__ __forceinline__ void pin_interleave() {
 #pragma unroll
     for (int i = 0; i < PIN_REP; i++) {
-        __builtin_amdgcn_sched_group_barrier(0x100, ND, 0);
-        __builtin_amdgcn_sched_group_barrier(0x008, NW, 0);
+        __builtin_amdgcn_sched_group_barrier(SCHED_DS_READ, PIN_DS, 0);
+        __builtin_amdgcn_sched_group_barrier(SCHED_WMMA, NW, 0);
     }
 }
 
-// K-major stage [BLOCK_K][C]: (k, c) is at k * tr_row_elems + c + c / pad_interval * pad_amount.
 template <typename ST>
 constexpr int tr_row_elems = ST::cols + ST::cols / ST::shape::pad_interval * ST::shape::pad_amount;
 
-// Byte offset of a lane's first ds_load_tr16_b128 for a warp whose operand rows start at w0;
-// lane half h gets K 16h + 0..7 of row L % 16, the order the K-contiguous load produces.
+// Byte offset of a lane's first ds_load_tr16_b128 for warp rows from w0: lane half h gets K 16h + 0..7 of
+// row L % 16, the order the K-contiguous load produces.
 template <typename ST>
 __device__ __forceinline__ uint32_t tr_lane_offset(int w0) {
     using Shape = typename ST::shape;
     const int L   = kittens::laneid();
     const int g   = L / 8;
     const int col = w0 + 8 * (g % 2);
-    return 2 * ((L % 8 + 16 * (g / 2)) * tr_row_elems<ST> + col +
-                col / Shape::pad_interval * Shape::pad_amount);
+    return 2 * ((L % 8 + 16 * (g / 2)) * tr_row_elems<ST> + col + col / Shape::pad_interval * Shape::pad_amount);
 }
 
-// Sub-step KS of a warp's fragments from a K-major stage: two ds_load_tr16_b128 per 16x32 fragment.
+// Two ds_load_tr16_b128 per 16x32 fragment.
 template <int KS, typename RT, typename ST>
 __device__ __forceinline__ void load_tr(RT &dst, const ST &src, uint32_t lane_off) {
-    static_assert(std::is_same_v<typename RT::shape, kittens::ducks::rt_shape::rt_16x32> &&
-                  RT::cols == K_STEP);
+    static_assert(std::is_same_v<typename RT::shape, kittens::ducks::rt_shape::rt_16x32> && RT::cols == K_STEP);
     static_assert(ST::rows == BLOCK_K && ST::cols % ST::shape::pad_interval == 0);
-    using v8s      = short __attribute__((ext_vector_type(8)));
-    using lds_v8s  = v8s __attribute__((address_space(3)));
+    typedef short v8s __attribute__((ext_vector_type(8)));
     using packed_t = std::remove_cvref_t<decltype(dst.tiles[0][0].data[0])>;
-    constexpr int ROW_B = 2 * tr_row_elems<ST>;
+    constexpr int ROW_BYTES = 2 * tr_row_elems<ST>;
 
     const uint32_t base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(src.data)) + lane_off;
 #pragma unroll
     for (int ti = 0; ti < RT::height; ti++) {
 #pragma unroll
         for (int x = 0; x < 2; x++) {
-            const uint32_t addr = base + (KS * K_STEP + 8 * x) * ROW_B + ti * 16 * 2;
-            v8s v = __builtin_amdgcn_ds_load_tr16_b128_v8i16(
-                reinterpret_cast<lds_v8s *>(static_cast<uintptr_t>(addr)));
+            const uint32_t addr = base + (KS * K_STEP + 8 * x) * ROW_BYTES + ti * 16 * 2;
+            const v8s v = __builtin_amdgcn_ds_load_tr16_b128_v8i16(lds_ptr<v8s>(addr));
             const packed_t *p = reinterpret_cast<const packed_t *>(&v);
 #pragma unroll
             for (int i = 0; i < 4; i++) {
@@ -151,7 +121,6 @@ __device__ __forceinline__ void load_tr(RT &dst, const ST &src, uint32_t lane_of
     }
 }
 
-// Sub-step KS of a warp's operand from stage st: transposing reads for a K-major stage.
 template <bool TRANS, int KS, typename RT, typename ST>
 __device__ __forceinline__ void load_step(RT &dst, const ST &st, uint32_t warp_off) {
     if constexpr (TRANS) {
@@ -161,210 +130,445 @@ __device__ __forceinline__ void load_step(RT &dst, const ST &st, uint32_t warp_o
     }
 }
 
-/* Matrix ops T0..T1-1 of a K step in zigzag order: op t uses A fragment t / 8 and B fragment t % 8,
- * reversed on odd rows, and reuses A except at the start of a row. */
-template <int T0, int T1, typename RA, typename RB>
+// WMMAs T..T1-1 of a K step in zigzag order: op t uses A fragment t / 8 and B fragment t % 8, reversed on odd
+// rows, and reuses A except at the start of a row.
+template <int T, int T1, typename RA, typename RB>
 __device__ __forceinline__ void mma_zigzag(C_acc &c, const RA &a, const RB &b) {
-    static_for<T1 - T0>([&](auto x) {
-        constexpr int t = T0 + decltype(x)::value, i = t / B_FRAGS;
-        constexpr int j = i % 2 ? B_FRAGS - 1 - t % B_FRAGS : t % B_FRAGS;
-        kittens::mma_ABt_base<t % B_FRAGS != 0, false>(c.tiles[i][j], a.tiles[i][0], b.tiles[j][0],
-                                                       c.tiles[i][j]);
-    });
+    constexpr int i = T / B_FRAGS;
+    constexpr int j = i % 2 ? B_FRAGS - 1 - T % B_FRAGS : T % B_FRAGS;
+    kittens::mma_ABt_base<T % B_FRAGS != 0, false>(c.tiles[i][j], a.tiles[i][0], b.tiles[j][0], c.tiles[i][j]);
+    if constexpr (T + 1 < T1) {
+        mma_zigzag<T + 1, T1>(c, a, b);
+    }
 }
 
-// Adds the K values this lane holds of each B fragment row (one dbias column per row) to s.
-template <typename RT>
-__device__ __forceinline__ void colsum(float *s, const RT &b) {
+// BGRAD: adds this lane's K values of each B fragment row (one dbias column per row) to s.
+template <bool BGRAD, typename RT>
+__device__ __forceinline__ void colsum(float *s, const RT &b, bool active) {
     using base = std::remove_cvref_t<decltype(b.tiles[0][0])>;
-    static_for<RT::height>([&](auto t) {
-        static_for<base::packed_per_thread>([&](auto d) {
-            const float2 f = kittens::base_types::convertor<float2, typename base::dtype>::convert(
-                b.tiles[t][0].data[d]);
-            s[t] += f.x + f.y;
-        });
-    });
+    if constexpr (BGRAD) {
+        if (active) {
+#pragma unroll
+            for (int t = 0; t < RT::height; t++) {
+#pragma unroll
+                for (int d = 0; d < base::packed_per_thread; d++) {
+                    const float2 f = kittens::base_types::convertor<float2, typename base::dtype>::convert(
+                        b.tiles[t][0].data[d]);
+                    s[t] += f.x + f.y;
+                }
+            }
+        }
+    }
+}
+
+// Wave 0 fills A, wave 1 B: one K-block of the operand from tile origin (tile, kblock), kx K and rem rows.
+template <bool TRANS, typename ST, typename T>
+__device__ __forceinline__ void fill(ST &dst, const gl_e<T> &src, int tile, int kblock, int kx, int rem, int rows,
+                                     int K, uint32_t mask, uint32_t count) {
+    if constexpr (TRANS) {
+        kittens::tdm::load_async(dst, src, {0, 0, kblock, tile}, kx, rem, rows, mask, count);
+    } else {
+        kittens::tdm::load_async(dst, src, {0, 0, tile, kblock}, rem, kx, K, mask, count);
+    }
 }
 
 // C is staged in LDS as D itself for a D of the input type without epilogue, else as fp32.
 template <typename T, Epi E, bool ACC, typename OutT>
-using staged_t = std::conditional_t<(E == NONE || E == BGRADB) && !ACC &&
-                                        std::is_same_v<OutT, native_t<T>>,
-                                    OutT, float>;
+using staged_t =
+    std::conditional_t<(E == NONE || E == BGRADB) && !ACC && std::is_same_v<OutT, native_t<T>>, OutT, float>;
 
-// The first n of the 8 elements at p, one vector access when vec (then n is 8).
-template <typename T>
-__device__ __forceinline__ v8f load8(const T *p, int n, bool vec) {
-    if (vec) {
-        return __builtin_convertvector(*reinterpret_cast<const vec8<T> *>(p), v8f);
-    }
-    v8f v{};
+// The SPLIT partial straight from the accumulators; EDGE stores only rows < m_rem and columns < n_rem.
+template <bool EDGE>
+__device__ __forceinline__ void store_split(float *ws, const C_acc &C, int row0, int col0, int m_rem, int n_rem,
+                                            int M) {
 #pragma unroll
-    for (int e = 0; e < 8; e++) {
-        if (e < n) {
-            v[e] = static_cast<float>(p[e]);
+    for (int i = 0; i < A_FRAGS; i++) {
+#pragma unroll
+        for (int j = 0; j < B_FRAGS; j++) {
+            const auto &d = C.tiles[i][j].data;
+            const v8f v{d[0].x, d[0].y, d[1].x, d[1].y, d[2].x, d[2].y, d[3].x, d[3].y};
+            const int row = row0 + 16 * i;
+            const int col = col0 + 16 * j;
+            if (!EDGE || (row < m_rem && col < n_rem)) {
+                *reinterpret_cast<v8f *>(ws + size_t(col) * M + row) = v;
+            }
         }
     }
-    return v;
 }
 
-template <typename T, typename V>
-__device__ __forceinline__ void store8(T *p, const V &v, int n, bool vec) {
-    if (vec) {
-        *reinterpret_cast<vec8<T> *>(p) = __builtin_convertvector(v, vec8<T>);
+// MC: cluster with multicast fills.
+template <bool MC, Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
+__device__ __forceinline__ void bf16_gemm_body(const gl_e<T> &ga, const gl_e<T> &gb, OutT *__restrict__ D,
+                                               SideT *__restrict__ bias, SideT *__restrict__ aux, float alpha,
+                                               float beta, int M, int N, int K) {
+    using Tl = Tiles<T, L>;
+    using A_stage = typename Tl::A_stage;
+    using B_stage = typename Tl::B_stage;
+    using A_reg = typename Tl::A_reg;
+    using B_reg = typename Tl::B_reg;
+    constexpr bool BGRAD = E == BGRADB;
+    static_assert(!BGRAD || Tl::TRANS_B, "BGRADB is the NT (wgrad) epilogue");
+
+    extern __shared__ kittens::alignment_dummy __shm[];
+    kittens::shared_allocator al(reinterpret_cast<int *>(&__shm[0]));
+    A_stage &a0 = al.allocate_in<kittens::segment<0>, A_stage>();
+    B_stage &b0 = al.allocate_in<kittens::segment<0>, B_stage>();
+    A_stage &a1 = al.allocate_in<kittens::segment<0>, A_stage>();
+    B_stage &b1 = al.allocate_in<kittens::segment<0>, B_stage>();
+    A_stage *A_st[STAGES] = {&a0, &a1};
+    B_stage *B_st[STAGES] = {&b0, &b1};
+
+    kittens::sched::lock_simd();
+
+    C_acc C;
+    kittens::zero(C);
+    float bsum[BGRAD ? B_FRAGS : 1] = {};
+
+    const int tile_m  = blockIdx.x;
+    const int tile_n  = blockIdx.y;
+    const int tiles_m = ceil_div(M, BLOCK_M);
+    const int tiles_n = ceil_div(N, BLOCK_N);
+    const int wid     = kittens::warpid();
+    const int warp_r  = wid / WARPS_N;
+    const int warp_c  = wid % WARPS_N;
+    const int num_kb  = ceil_div(K, BLOCK_K);
+    int kb0      = 0;
+    int k_blocks = num_kb;
+    if constexpr (E == SPLIT) {
+        const int splits = gridDim.z;
+        const int z      = blockIdx.z;
+        kb0      = num_kb * z / splits;
+        k_blocks = num_kb * (z + 1) / splits - kb0;
+    }
+    // Never taken (the host keeps K > 0 and splits <= num_kb), but without it the accumulator zeroing grows.
+    if (k_blocks <= 0) {
         return;
     }
-#pragma unroll
-    for (int e = 0; e < 8; e++) {
-        if (e < n) {
-            p[e] = static_cast<T>(v[e]);
-        }
+    // A workgroup that ends leaves the cluster barrier's member count (ISA 5.6.6).
+    if (tile_m >= tiles_m || tile_n >= tiles_n) {
+        return;
     }
-}
 
-// Copy-out of the C tile staged in LDS: D = alpha * C (+ beta * D) (+ bias), then GELU (pre-GELU to aux) or
-// times dgelu(aux). EDGE stores only D's rows and columns, element-wise where 8 rows do not fit.
-template <typename StT, Epi E, bool ACC, typename OutT, typename SideT, bool PLAIN_ALPHA, bool EDGE>
-__device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d,
-                                         const SideT *__restrict__ bias, SideT *__restrict__ aux,
-                                         float alpha, float beta, int M, int N, int tile_m,
-                                         int tile_n) {
-    constexpr bool PLAIN = !std::is_same_v<StT, float>;
-    constexpr int SSTR = BLOCK_M * sizeof(StT) + 16;
-    constexpr int CH   = BLOCK_M / 8;
-    constexpr bool ADD_BIAS = E == BIAS || E == GELU_AUX_BIAS;
-    constexpr bool GELU     = E == GELU_AUX || E == GELU_AUX_BIAS;
-    constexpr int UNROLL = GELU || E == DGELU || EDGE ? 1 : 4;
-    static_assert(NUM_THREADS % CH == 0, "a thread's rows are the same in every column");
-    const int m8 = threadIdx.x % CH;
-    const size_t tile = size_t(tile_n) * BLOCK_N * M + size_t(tile_m) * BLOCK_M + m8 * 8;
-    const int rows = EDGE ? std::clamp(M - tile_m * BLOCK_M - m8 * 8, 0, 8) : 8;
-    const int cols = EDGE ? std::min(N - tile_n * BLOCK_N, BLOCK_N) : BLOCK_N;
-    const bool vec = !EDGE || (rows == 8 && M % 8 == 0);
-    v8f b8{};
-    if constexpr (ADD_BIAS) {
-        b8 = load8(bias + tile_m * BLOCK_M + m8 * 8, rows, vec);
+    // The wave's slice of each operand tile: an element index (K-contiguous) or a lane byte offset.
+    const uint32_t warp_off_a = Tl::TRANS_A ? tr_lane_offset<A_stage>(warp_r * WARP_M)
+                                            : uint32_t(warp_r * WARP_M * BLOCK_K);
+    const uint32_t warp_off_b = Tl::TRANS_B ? tr_lane_offset<B_stage>(warp_c * WARP_N)
+                                            : uint32_t(warp_c * WARP_N * BLOCK_K);
+
+    // Multicast sets: WGs sharing tile_m receive A, those sharing tile_n receive B (ISA 10.7).
+    uint32_t a_mask = 0;
+    uint32_t b_mask = 0;
+    if constexpr (MC) {
+        const uint32_t cx   = blockIdx.x % CLUSTER_DIM;
+        const uint32_t cy   = blockIdx.y % CLUSTER_DIM;
+        const uint32_t in_x = min(tiles_m - int(blockIdx.x - cx), CLUSTER_DIM);
+        const uint32_t in_y = min(tiles_n - int(blockIdx.y - cy), CLUSTER_DIM);
+        a_mask = (cluster_col_bits(CLUSTER_DIM, CLUSTER_DIM) << cx) & ((1u << (CLUSTER_DIM * in_y)) - 1u);
+        b_mask = ((1u << in_x) - 1u) << (CLUSTER_DIM * cy);
     }
-#pragma unroll UNROLL
-    for (int col = threadIdx.x / CH; col < cols; col += NUM_THREADS / CH) {
-        const size_t off = tile + size_t(col) * M;
-        const uint32_t src = lds0 + col * SSTR + m8 * 8 * sizeof(StT);
-        if constexpr (PLAIN) {
-            if (vec && (!PLAIN_ALPHA || alpha == 1.f)) {
-                *reinterpret_cast<v4i *>(d + off) = *lds_ptr<v4i>(src);
-            } else if constexpr (PLAIN_ALPHA) {
-                store8(d + off, alpha * __builtin_convertvector(*lds_ptr<vec8<StT>>(src), v8f),
-                       rows, vec);
+
+    // Wave 0 fills A, wave 1 B. The K % BLOCK_K head is block 0; later blocks read through ga_k and gb_k,
+    // moved back by back elements.
+    const int m_rem  = M - tile_m * BLOCK_M;
+    const int n_rem  = N - tile_n * BLOCK_N;
+    const int k_head = K % BLOCK_K;
+    const int back   = k_head ? BLOCK_K - k_head : 0;
+    gl_e<T> ga_k = ga;
+    gl_e<T> gb_k = gb;
+    ga_k.raw_ptr -= size_t(back) * (Tl::TRANS_A ? M : 1);
+    gb_k.raw_ptr -= size_t(back) * (Tl::TRANS_B ? N : 1);
+    // Block 0 is the head (or this slice's first block).
+    const gl_e<T> &ga0 = kb0 == 0 ? ga : ga_k;
+    const gl_e<T> &gb0 = kb0 == 0 ? gb : gb_k;
+    const int kx0 = kb0 == 0 && k_head ? k_head : K;
+    if (wid == 0) {
+        fill<Tl::TRANS_A>(*A_st[0], ga0, tile_m, kb0, kx0, m_rem, M, K, a_mask, 1);
+    }
+    if (wid == 1) {
+        fill<Tl::TRANS_B>(*B_st[0], gb0, tile_n, kb0, kx0, n_rem, N, K, b_mask, 1);
+    }
+    kittens::sync::wait_tdm<0>();
+    kittens::sched::compiler_fence();
+    if constexpr (MC) {
+        kittens::cluster::sync();
+    } else {
+        // The empty branch keeps the cluster kernel's block structure: the two K loops differ only in the barrier.
+        kittens::sync::arrive();
+        if (wid == 0) {
+            asm volatile("");
+        }
+        kittens::sync::wait();
+    }
+    kittens::sched::compiler_fence();
+
+    // Two register slots, named rather than indexed so they stay in registers; K steps alternate.
+    struct operand_slot {
+        A_reg a;
+        B_reg b;
+    };
+    operand_slot slot0;
+    operand_slot slot1;
+    // Column sums of K step ks, after its WMMAs. Kept a lambda: a direct colsum call costs the bf16 BGRADB K loop
+    // 14% more instructions (16-bit repacking of the B fragments).
+    auto bgrad = [&](int ks, const B_reg &b) {
+        colsum<BGRAD>(bsum, b, tile_m == 0 && warp_r == ks);
+    };
+    load_step<Tl::TRANS_A, 0>(slot0.a, *A_st[0], warp_off_a);
+    load_step<Tl::TRANS_B, 0>(slot0.b, *B_st[0], warp_off_b);
+
+    for (int kb = 0; kb < k_blocks; kb++) {
+        const int cur = kb % STAGES;
+        const int nxt = (kb + 1) % STAGES;
+
+        // A count of zero skips the tail transfer without a branch (TDM cannot be EXEC-masked).
+        const int fill_k = kb0 + ((kb + 1 < k_blocks) ? kb + 1 : 0);
+        const uint32_t count = (kb + 1 < k_blocks) ? 1u : 0u;
+        if (wid == 0) {
+            fill<Tl::TRANS_A>(*A_st[nxt], ga_k, tile_m, fill_k, K, m_rem, M, K, a_mask, count);
+        }
+        if (wid == 1) {
+            fill<Tl::TRANS_B>(*B_st[nxt], gb_k, tile_n, fill_k, K, n_rem, N, K, b_mask, count);
+        }
+        kittens::sched::compiler_fence();
+
+        load_step<Tl::TRANS_A, 1>(slot1.a, *A_st[cur], warp_off_a);
+        load_step<Tl::TRANS_B, 1>(slot1.b, *B_st[cur], warp_off_b);
+        kittens::mma_ABt(C, slot0.a, slot0.b, C);
+        pin_interleave();
+        kittens::sched::compiler_fence();
+        bgrad(0, slot0.b);
+
+        load_step<Tl::TRANS_A, 2>(slot0.a, *A_st[cur], warp_off_a);
+        load_step<Tl::TRANS_B, 2>(slot0.b, *B_st[cur], warp_off_b);
+        kittens::mma_ABt(C, slot1.a, slot1.b, C);
+        pin_interleave();
+        kittens::sched::compiler_fence();
+        bgrad(1, slot1.b);
+
+        load_step<Tl::TRANS_A, 3>(slot1.a, *A_st[cur], warp_off_a);
+        load_step<Tl::TRANS_B, 3>(slot1.b, *B_st[cur], warp_off_b);
+        kittens::mma_ABt(C, slot0.a, slot0.b, C);
+        pin_interleave();
+        kittens::sched::compiler_fence();
+        bgrad(2, slot0.b);
+
+        // Last K step: PRE_BAR WMMAs overlap the wait and barrier, the rest the next reads.
+        mma_zigzag<0, PRE_BAR>(C, slot1.a, slot1.b);
+        kittens::sched::compiler_fence();
+
+        kittens::sync::wait_ds<0>();
+        kittens::sync::wait_tdm<0>();
+        kittens::sched::compiler_fence();
+        kittens::sync::arrive();
+        if (wid == 0) {
+            if constexpr (MC) {
+                kittens::cluster::arrive();
             } else {
-                store8(d + off, *lds_ptr<vec8<StT>>(src), rows, false);
+                asm volatile("");
             }
-        } else {
-            v8f v = alpha * *lds_ptr<v8f>(src);
-            if constexpr (ACC) {
-                v += beta * load8(d + off, rows, vec);
-            }
-            if constexpr (ADD_BIAS) {
-                v += b8;
-            }
-            if constexpr (GELU) {
-                store8(aux + off, v, rows, vec);
-#pragma unroll
-                for (int e = 0; e < 8; e++) {
-                    v[e] = kittens::base_ops::gelu::op<float>(v[e]);
-                }
-            }
-            if constexpr (E == DGELU) {
-                const v8f g = load8(aux + off, rows, vec);
-#pragma unroll
-                for (int e = 0; e < 8; e++) {
-                    v[e] *= kittens::base_ops::dgelu::op<float>(g[e]);
-                }
-            }
-            store8(d + off, v, rows, vec);
         }
+        kittens::sched::compiler_fence();
+        kittens::sync::wait();
+        kittens::sched::compiler_fence();
+
+        load_step<Tl::TRANS_A, 0>(slot0.a, *A_st[nxt], warp_off_a);
+        load_step<Tl::TRANS_B, 0>(slot0.b, *B_st[nxt], warp_off_b);
+        mma_zigzag<PRE_BAR, WMMA_STEP>(C, slot1.a, slot1.b);
+
+        pin_interleave<(WMMA_STEP - PRE_BAR) / PIN_REP>();
+        kittens::sched::compiler_fence();
+        if constexpr (MC) {
+            kittens::cluster::wait();
+        }
+        kittens::sched::compiler_fence();
+        bgrad(3, slot1.b);
+    }
+
+    kittens::sync::wait_tdm<0>();
+    kittens::sync::wait_ds<0>();
+
+    // Accumulator lane L holds column L % 16 and rows 8 (L / 16) + 0..7 of each 16x16 tile.
+    using StT = staged_t<T, E, ACC, OutT>;
+    int lane = kittens::laneid();
+    if constexpr (L == NT && E == NONE && !std::is_same_v<StT, float>) {
+        // Else the 16-bit staging reuses the transposed reads' lane terms past the K loop (+1 VGPR).
+        asm volatile("" : "+v"(lane));
+    }
+    const int row0 = warp_r * WARP_M + 8 * (lane / 16);
+    const int col0 = warp_c * WARP_N + lane % 16;
+    const bool edge = (tile_m + 1) * BLOCK_M > M || (tile_n + 1) * BLOCK_N > N || M % 8 != 0;
+    if constexpr (E == SPLIT) {
+        float *ws = reinterpret_cast<float *>(D) + size_t(blockIdx.z) * M * N + size_t(tile_n) * BLOCK_N * M +
+                    size_t(tile_m) * BLOCK_M;
+        if (edge) {
+            store_split<true>(ws, C, row0, col0, m_rem, n_rem, M);
+        } else {
+            store_split<false>(ws, C, row0, col0, m_rem, n_rem, M);
+        }
+        return;
+    }
+
+    const uint32_t lds0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&__shm[0]));
+    if constexpr (BGRAD) {
+        // Partials [warp_r][lane half][column] in LDS; thread n adds column n's 8 in that order.
+        if (tile_m == 0) {
+            kittens::sync::wait_ds<0>();
+            kittens::sync::sync();
+#pragma unroll
+            for (int t = 0; t < B_FRAGS; t++) {
+                const int p = (warp_r * 2 + lane / 16) * BLOCK_N + col0 + t * 16;
+                *lds_ptr<float>(lds0 + p * sizeof(float)) = bsum[t];
+            }
+            kittens::sync::wait_ds<0>();
+            kittens::sync::sync();
+            float sum = 0.f;
+#pragma unroll
+            for (int p = 0; p < WARPS_M * 2; p++) {
+                sum += *lds_ptr<float>(lds0 + (p * BLOCK_N + threadIdx.x) * sizeof(float));
+            }
+            if (int(threadIdx.x) < n_rem) {
+                bias[tile_n * BLOCK_N + threadIdx.x] = static_cast<SideT>(sum);
+            }
+        }
+    }
+
+    constexpr int STRIDE = staged_stride(sizeof(StT));
+    kittens::sync::wait_ds<0>();
+    kittens::sync::sync();
+#pragma unroll
+    for (int i = 0; i < A_FRAGS; i++) {
+#pragma unroll
+        for (int j = 0; j < B_FRAGS; j++) {
+            const auto &d = C.tiles[i][j].data;
+            const v8f v{d[0].x, d[0].y, d[1].x, d[1].y, d[2].x, d[2].y, d[3].x, d[3].y};
+            const uint32_t addr = lds0 + (col0 + 16 * j) * STRIDE + (row0 + 16 * i) * sizeof(StT);
+            *lds_ptr<vec8<StT>>(addr) = __builtin_convertvector(v, vec8<StT>);
+        }
+    }
+    kittens::sync::wait_ds<0>();
+    kittens::sync::sync();
+    if (edge) {
+        copy_out<StT, E, ACC, OutT, SideT, L != TN, true>(lds0, D, bias, aux, alpha, beta, M, N, tile_m, tile_n);
+    } else {
+        copy_out<StT, E, ACC, OutT, SideT, L != TN, false>(lds0, D, bias, aux, alpha, beta, M, N, tile_m, tile_n);
     }
 }
 
-// SPLIT: workgroup z writes its fp32 partial to D + z M N; BGRADB: tile_m = 0 also writes bias[n] = sum_k B(n, k).
-// Both kernels include one body: a shared __device__ function changed the cluster kernel's K-loop schedule.
 template <Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
 __global__ __cluster_dims__(CLUSTER_DIM, CLUSTER_DIM, 1) __launch_bounds__(NUM_THREADS, 1)
-void bf16_gemm_kernel(const gl_e<T> ga, const gl_e<T> gb, OutT *__restrict__ D,
-                      SideT *__restrict__ bias, SideT *__restrict__ aux, float alpha, float beta,
-                      int M, int N, int K) {
-    constexpr bool MC = ARCH_MCAST;
-#include "bf16_gemm_body.inc"
+void bf16_gemm_kernel(const gl_e<T> ga, const gl_e<T> gb, OutT *__restrict__ D, SideT *__restrict__ bias,
+                      SideT *__restrict__ aux, float alpha, float beta, int M, int N, int K) {
+    bf16_gemm_body<ARCH_MCAST, L, T, E, ACC, OutT, SideT>(ga, gb, D, bias, aux, alpha, beta, M, N, K);
 }
 
 template <Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
 __global__ __launch_bounds__(NUM_THREADS, 1)
-void bf16_gemm_kernel_nomc(const gl_e<T> ga, const gl_e<T> gb, OutT *__restrict__ D,
-                           SideT *__restrict__ bias, SideT *__restrict__ aux, float alpha,
-                           float beta, int M, int N, int K) {
-    constexpr bool MC = false;
-#include "bf16_gemm_body.inc"
+void bf16_gemm_kernel_nomc(const gl_e<T> ga, const gl_e<T> gb, OutT *__restrict__ D, SideT *__restrict__ bias,
+                           SideT *__restrict__ aux, float alpha, float beta, int M, int N, int K) {
+    bf16_gemm_body<false, L, T, E, ACC, OutT, SideT>(ga, gb, D, bias, aux, alpha, beta, M, N, K);
 }
 
 template <Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
-void launch_kernel(const Launch &l, void *d, int splits) {
+void launch_kernel(const GemmArgs &args, void *d, int splits, bool mcast) {
     using Tl = Tiles<T, L>;
-    const auto kernel = l.mcast ? bf16_gemm_kernel<L, T, E, ACC, OutT, SideT>
-                                : bf16_gemm_kernel_nomc<L, T, E, ACC, OutT, SideT>;
+    const auto kernel = mcast ? bf16_gemm_kernel<L, T, E, ACC, OutT, SideT>
+                              : bf16_gemm_kernel_nomc<L, T, E, ACC, OutT, SideT>;
     kittens_check(hipFuncSetAttribute(reinterpret_cast<const void *>(kernel),
                                       hipFuncAttributeMaxDynamicSharedMemorySize, Tl::LDS_BYTES),
                   "gfx1250 bf16_gemm_kernel LDS");
-    T *A = static_cast<T *>(const_cast<void *>(l.A));
-    T *B = static_cast<T *>(const_cast<void *>(l.B));
-    const gl_e<T> ga(A, 1, 1, Tl::TRANS_A ? l.K : l.M, Tl::TRANS_A ? l.M : l.K);
-    const gl_e<T> gb(B, 1, 1, Tl::TRANS_B ? l.K : l.N, Tl::TRANS_B ? l.N : l.K);
-    const int side = l.mcast ? CLUSTER_DIM : 1;
-    auto clusters = [&](int n, int tile) {
-        return ((n + tile - 1) / tile + side - 1) / side * side;
-    };
-    const dim3 grid(clusters(l.M, BLOCK_M), clusters(l.N, BLOCK_N), splits);
-    hipLaunchKernelGGL(kernel, grid, dim3(NUM_THREADS), Tl::LDS_BYTES, l.stream, ga, gb,
-                       static_cast<OutT *>(d), static_cast<SideT *>(const_cast<void *>(l.bias)),
-                       static_cast<SideT *>(l.aux), l.alpha, l.beta, l.M, l.N, l.K);
+    T *A = static_cast<T *>(const_cast<void *>(args.A));
+    T *B = static_cast<T *>(const_cast<void *>(args.B));
+    const gl_e<T> ga(A, 1, 1, Tl::TRANS_A ? args.K : args.M, Tl::TRANS_A ? args.M : args.K);
+    const gl_e<T> gb(B, 1, 1, Tl::TRANS_B ? args.K : args.N, Tl::TRANS_B ? args.N : args.K);
+    const int side = mcast ? CLUSTER_DIM : 1;
+    const dim3 grid(ceil_div(ceil_div(args.M, BLOCK_M), side) * side, ceil_div(ceil_div(args.N, BLOCK_N), side) * side,
+                    splits);
+    hipLaunchKernelGGL(kernel, grid, dim3(NUM_THREADS), Tl::LDS_BYTES, args.stream, ga, gb, static_cast<OutT *>(d),
+                       static_cast<SideT *>(const_cast<void *>(args.bias)), static_cast<SideT *>(args.aux_gelu),
+                       args.alpha, args.beta, args.M, args.N, args.K);
     kittens_check(hipGetLastError(), "gfx1250 bf16_gemm_kernel");
 }
 
-// Instantiated epilogue variants of layout L, defined in bf16_<layout>.cpp; In: the input type.
-struct In {};
-template <Layout L>
-struct Instances;
+// The compiled variants; in is the input dtype. Any other combination launches nothing.
+constexpr bool supported(Layout L, Epi E, bool acc, int in, int out, int side) {
+    const bool in_or_f32 = out == in || out == KITTENS_FLOAT32;
+    switch (E) {
+    case NONE:          return side == out && in_or_f32;
+    case BIAS:          return side == in && in_or_f32 && (!acc || (L == TN && out == in));
+    case GELU_AUX:      return L == TN && !acc && out == in && side == in;
+    case GELU_AUX_BIAS: return L == TN && !acc && out == in && side == in;
+    case DGELU:         return L == NN && !acc && out == in && side == in;
+    case BGRADB:        return L == NT && side == out && in_or_f32;
+    default:            return false;
+    }
+}
+
+template <Layout L, typename T, Epi E, bool ACC, typename OutT, typename SideT>
+bool launch_variant(const GemmArgs &args, void *workspace, int splits, bool mcast) {
+    if constexpr (!supported(L, E, ACC, dtype_of<native_t<T>>, dtype_of<OutT>, dtype_of<SideT>)) {
+        return false;
+    } else {
+        if constexpr (E == NONE) {
+            if (splits > 1) {
+                launch_kernel<L, T, SPLIT, false, float, float>(args, workspace, splits, mcast);
+                splitk_reduce(args, workspace, splits);
+                return true;
+            }
+        }
+        launch_kernel<L, T, E, ACC, OutT, SideT>(args, args.C, 1, mcast);
+        return true;
+    }
+}
+
+template <Layout L, typename T, Epi E, bool ACC, typename OutT>
+bool switch_side(const GemmArgs &args, void *workspace, int splits, bool mcast) {
+    switch (side_dtype(args)) {
+    case KITTENS_FLOAT32:  return launch_variant<L, T, E, ACC, OutT, float>(args, workspace, splits, mcast);
+    case KITTENS_FLOAT16:  return launch_variant<L, T, E, ACC, OutT, _Float16>(args, workspace, splits, mcast);
+    case KITTENS_BFLOAT16: return launch_variant<L, T, E, ACC, OutT, __bf16>(args, workspace, splits, mcast);
+    default:               return false;
+    }
+}
+
+template <Layout L, typename T, Epi E, bool ACC>
+bool switch_out(const GemmArgs &args, void *workspace, int splits, bool mcast) {
+    switch (args.out_dtype) {
+    case KITTENS_FLOAT32:  return switch_side<L, T, E, ACC, float>(args, workspace, splits, mcast);
+    case KITTENS_FLOAT16:  return switch_side<L, T, E, ACC, _Float16>(args, workspace, splits, mcast);
+    case KITTENS_BFLOAT16: return switch_side<L, T, E, ACC, __bf16>(args, workspace, splits, mcast);
+    default:               return false;
+    }
+}
+
+template <Layout L, typename T, Epi E>
+bool switch_acc(const GemmArgs &args, void *workspace, int splits, bool mcast) {
+    if (args.beta != 0.f) {
+        return switch_out<L, T, E, true>(args, workspace, splits, mcast);
+    }
+    return switch_out<L, T, E, false>(args, workspace, splits, mcast);
+}
+
+template <Layout L, typename T>
+bool switch_epi(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast) {
+    switch (epi) {
+    case NONE:          return switch_acc<L, T, NONE>(args, workspace, splits, mcast);
+    case BIAS:          return switch_acc<L, T, BIAS>(args, workspace, splits, mcast);
+    case GELU_AUX:      return switch_acc<L, T, GELU_AUX>(args, workspace, splits, mcast);
+    case GELU_AUX_BIAS: return switch_acc<L, T, GELU_AUX_BIAS>(args, workspace, splits, mcast);
+    case DGELU:         return switch_acc<L, T, DGELU>(args, workspace, splits, mcast);
+    case BGRADB:        return switch_acc<L, T, BGRADB>(args, workspace, splits, mcast);
+    default:            return false;
+    }
+}
 
 }  // namespace bf16_gemm
 
 template <Layout L>
-bool launch_bf16(const Launch &l) {
-    using namespace bf16_gemm;
-    auto run = [&](auto t) {
-        using T = typename decltype(t)::type;
-        auto resolve = [](auto x) {
-            using X = typename decltype(x)::type;
-            return std::type_identity<std::conditional_t<std::is_same_v<X, In>, native_t<T>, X>>{};
-        };
-        return any_of(typename Instances<L>::variants{}, [&](auto v) {
-            using V     = decltype(v);
-            using OutT  = typename decltype(resolve(std::type_identity<typename V::OutT>{}))::type;
-            using SideT = typename decltype(resolve(std::type_identity<typename V::SideT>{}))::type;
-            if (l.epi != V::E || l.acc != V::ACC || l.out_dtype != dtype_of<OutT> ||
-                l.side_dtype != dtype_of<SideT>) {
-                return false;
-            }
-            if constexpr (V::E == NONE) {
-                if (l.splits > 1) {
-                    launch_kernel<L, T, SPLIT, false, float, float>(l, l.workspace, l.splits);
-                    splitk_reduce(l);
-                    return true;
-                }
-            }
-            launch_kernel<L, T, V::E, V::ACC, OutT, SideT>(l, l.D, 1);
-            return true;
-        });
-    };
-    return l.a_dtype == KITTENS_FLOAT16 ? run(std::type_identity<kittens::half>{})
-                                        : run(std::type_identity<kittens::bf16>{});
+bool launch_bf16(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast) {
+    if (args.a_dtype == KITTENS_FLOAT16) {
+        return bf16_gemm::switch_epi<L, kittens::half>(args, workspace, splits, epi, mcast);
+    }
+    return bf16_gemm::switch_epi<L, kittens::bf16>(args, workspace, splits, epi, mcast);
 }
 
 }  // namespace te_kittens::cdna5

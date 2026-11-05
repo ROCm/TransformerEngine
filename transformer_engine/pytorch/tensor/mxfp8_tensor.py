@@ -46,11 +46,13 @@ class MXFP8Quantizer(Quantizer):
     if IS_HIP_EXTENSION:
         # ROCm MXFP8 quantize writes compact scales; gfx1250 GEMMs trust the swizzled tag,
         # so it must stay false there.
-        optimize_for_gemm = property(
-            lambda self: self.__dict__["optimize_for_gemm"]
-            and get_device_compute_capability() != (12, 5),
-            lambda self, value: self.__dict__.__setitem__("optimize_for_gemm", value),
-        )
+        @property
+        def optimize_for_gemm(self):
+            return self.__dict__["optimize_for_gemm"] and get_device_compute_capability() != (12, 5)
+
+        @optimize_for_gemm.setter
+        def optimize_for_gemm(self, value):
+            self.__dict__["optimize_for_gemm"] = value
 
     def __init__(
         self,
