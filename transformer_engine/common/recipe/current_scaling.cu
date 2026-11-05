@@ -17,6 +17,11 @@
 #include "../util/logging.h"
 #include "../util/vectorized_pointwise.h"
 #include "recipe_common.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../util/cuda_runtime.h"
+#include "../util/system.h"
+#include "../cast/core/rocm_tdm_common.cuh"
+#endif  //__HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace {
@@ -133,6 +138,11 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N,
   if (N == 0) {
     return;
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if (dispatch::common::compute_amax_tdm(input, amax, N, noop_ptr, stream)) {
+    return;
+  }
+#endif  //__HIP_PLATFORM_AMD__
 
   // Figure out alignment
   auto align = CheckAlignment(N, nvec, input);

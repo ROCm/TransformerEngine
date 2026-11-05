@@ -1,4 +1,5 @@
 /*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,6 +15,9 @@
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../transpose/cast_transpose.h"
+#endif
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
@@ -95,3 +99,25 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
   dispatch::group_quantize_fwd_host_aware_helper<IS_ACT, Empty, nullptr>(
       input, outputs, split_sections, num_tensors, quant_config, stream);
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+bool nvte_group_nvfp4_quantize_tdm(const NVTETensor input, NVTETensor *outputs,
+                                   const size_t *split_sections, const size_t num_tensors,
+                                   const bool with_rht, const int random_sign_mask_t,
+                                   const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_quantize_tdm);
+  using namespace transformer_engine;
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+  std::vector<Tensor *> outputs_cpp;
+  for (size_t i = 0; i < num_tensors; i++) {
+    outputs_cpp.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+  return detail::group_quantize_nvfp4_tdm(*convertNVTETensorCheck(input), outputs_cpp,
+                                          split_sections, with_rht,
+                                          static_cast<uint16_t>(random_sign_mask_t),
+                                          quant_config_cpp, stream);
+}
+#endif  // __HIP_PLATFORM_AMD__

@@ -2635,7 +2635,10 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       NVFP4Quantizer::is_eligible_for_rht_cast_fusion(convertShape(input.shape()));
 
 #ifdef USE_ROCM
-  eligible_for_rht_cast_fusion = false;
+  // gfx1250 fuses the transform into its TDM quantize kernel where that applies.
+  eligible_for_rht_cast_fusion =
+      this->with_rht &&
+      nvte_quantize_with_hadamard_transform_supported(input.data(), out.data(), quant_config);
 #endif
 
 

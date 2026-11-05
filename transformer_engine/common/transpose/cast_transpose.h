@@ -73,6 +73,22 @@ void quantize_transpose_vector_blockwise_fp4(
     const SimpleTensor &noop_tensor, const int nvfp4_e4m3_max,
     const NVTENVFP44Over6Mode nvfp4_4over6_mode, cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
+// NVFP4 quantize of the BF16 input, rowwise as is and columnwise after a random Hadamard transform
+// of its transpose, in one TDM kernel on gfx1250 where the _supported check holds.
+bool quantize_with_hadamard_transform_supported(const Tensor &input, const Tensor &output,
+                                                const QuantizationConfig &config);
+void quantize_with_hadamard_transform(const Tensor &input, Tensor &output,
+                                      const Tensor &hadamard_matrix,
+                                      const QuantizationConfig &config, cudaStream_t stream);
+// NVFP4 quantize of the splits of the BF16 input along its rows, amaxes included, in grouped TDM
+// kernels on gfx1250; false, launching nothing, where those do not apply.
+bool group_quantize_nvfp4_tdm(const Tensor &input, const std::vector<Tensor *> &outputs,
+                              const size_t *split_sections, const bool with_rht,
+                              const uint16_t sign_mask, const QuantizationConfig &config,
+                              cudaStream_t stream);
+#endif
+
 }  // namespace transformer_engine::detail
 
 #endif  // TRANSFORMER_ENGINE_COMMON_TRANSPOSE_CAST_TRANSPOSE_H_

@@ -28,7 +28,10 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
+#include "../../util/cuda_runtime.h"
 #include "../../util/rocm_device_utils.cuh"
+#include "../../util/system.h"
+#include "./rocm_quantize_mxfp8_tdm.cuh"
 #endif
 
 namespace transformer_engine {
@@ -37,6 +40,7 @@ namespace mxfp8 {
 namespace gated_kernel {
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_gated_mxfp8.cuh"
+#include "rocm_gated_mxfp8_tdm.cuh"
 #else
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
@@ -761,6 +765,10 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
 
 #ifdef __HIP_PLATFORM_AMD__
+  if (quantize_gated_tdm<IS_BWD, ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream)) {
+    return;
+  }
+
   constexpr size_t TMA_SHMEM_ALIGNMENT = ALIGNMENT_SIZE;
 
   constexpr size_t BUFF_DIM_Y = BUFFER_DIM_Y;

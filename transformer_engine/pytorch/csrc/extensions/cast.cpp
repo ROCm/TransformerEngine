@@ -2060,10 +2060,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(input_last_dim % 128 == 0,
              "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
 
-#ifndef USE_ROCM
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
+#ifndef USE_ROCM
   // The grouped Hadamard transform kernels are implemented for the SM100 family
   // only. On other architectures, where
   // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
@@ -2096,9 +2096,27 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                        stream);
     }
 #else
-    // ROCm: group hadamard kernels are not available, fall back to per-tensor quantize
-    // which handles both RHT and non-RHT paths via NVFP4Quantizer::quantize_impl.
-    for (size_t i = 0; i < num_tensors; i++) {
+    // gfx1250 quantizes all splits, amaxes included, in grouped TDM kernels where those apply.
+    // Otherwise quantize each split on its own, which handles both RHT and non-RHT paths via
+    // NVFP4Quantizer::quantize_impl.
+    bool grouped = false;
+    if (!quantizer.with_rht || quantizer.with_post_rht_amax) {
+      std::vector<NVTETensor> nvte_tensor_output_list;
+      for (auto &output : output_list) {
+        nvte_tensor_output_list.push_back(output.data());
+      }
+      std::vector<QuantizationConfigWrapper> quant_config_list(1);
+      std::vector<QuantizationConfigWrapper> unused_quant_config_list_colwise;
+      auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
+          1, quantizer.stochastic_rounding, true, false, quant_config_list,
+          unused_quant_config_list_colwise);
+      quant_config_list[0].set_nvfp4_4over6_mode(quantizer.nvfp4_4over6_mode);
+      grouped = nvte_group_nvfp4_quantize_tdm(
+          input.data(), nvte_tensor_output_list.data(), split_sections.data(), num_tensors,
+          quantizer.with_rht, quantizer.rht_matrix_random_sign_mask_t, quant_config_list[0],
+          stream);
+    }
+    for (size_t i = 0; !grouped && i < num_tensors; i++) {
       if (input_list[i].numel() == 0) continue;
       quantizers[i]->quantize(input_list[i], output_list[i]);
     }

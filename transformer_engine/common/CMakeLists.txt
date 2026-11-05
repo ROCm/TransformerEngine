@@ -406,7 +406,8 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
       gemm/ck_grouped_gemm/ck_mx_grouped_gemm.cpp
-      gemm/rocm_gemm.cu)
+      gemm/rocm_gemm.cu
+      util/rocm_amax_slots.cu)
 endif()
 
 if(USE_CUDA)
