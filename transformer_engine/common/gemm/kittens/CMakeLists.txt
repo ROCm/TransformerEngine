@@ -95,8 +95,7 @@ else()
         list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
     endif()
     kittens_add_arch(TAG cdna5 GFX gfx1250 gfx1250-strict
-                     SOURCES cdna5/gemm.cpp cdna5/mxfp8_tn.cpp cdna5/mxfp8_nn.cpp
-                             cdna5/mxfp8_nt.cpp cdna5/bf16_gemm.cuh
+                     SOURCES cdna5/bf16_gemm.cpp cdna5/mxfp8_gemm.cpp
                      FLAGS ${_cdna5_flags})
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})

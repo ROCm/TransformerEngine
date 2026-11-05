@@ -1731,9 +1731,9 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     return true;
 }
 
-class MXFP8GemmCdna4 final : public GemmBackend {
+class MXFP8GemmCdna4 final : public MXFP8GemmBackend {
  public:
-    bool gemm(const GemmArgs &args) override {
+    bool gemm(const MXFP8GemmArgs &args) override {
         return mxfp8_gemm(args.A, args.B, args.C, args.scale_A, args.scale_B,
                           args.M, args.N, args.K, args.transa, args.transb,
                           args.a_dtype, args.b_dtype, args.bias, args.bias_dtype,
@@ -1761,7 +1761,7 @@ class MXFP8GemmCdna4 final : public GemmBackend {
 
 }  // namespace te_kittens::cdna4::mxfp8
 
-GemmBackend *GemmBackend::get_cdna4() {
+MXFP8GemmBackend *MXFP8GemmBackend::get_cdna4() {
     static te_kittens::cdna4::mxfp8::MXFP8GemmCdna4 impl;
     return &impl;
 }

@@ -2251,40 +2251,32 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
                         is_tensor_scaling(inputB->scaling_mode) &&
                         (a_dtype == DType::kBFloat16 || a_dtype == DType::kFloat16) &&
                         inputB->data.dtype == a_dtype;
-  if (!(a_mxfp8 || b_mxfp8 || is_16bit) || !kittens_gemm_supported() || use_hipblaslt()) {
+  const bool supported = is_16bit ? kittens_bf16_supported()
+                                  : (a_mxfp8 || b_mxfp8) && kittens_mxfp8_supported();
+  if (!supported || use_hipblaslt()) {
     return false;
   }
 
   const GemmParam p = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
-  GemmArgs args;
-  args.A = p.A;
-  args.B = p.B;
-  args.C = outputD->data.dptr;
-  args.scale_A = is_16bit ? nullptr : p.A_scale_inv;
-  args.scale_B = is_16bit ? nullptr : p.B_scale_inv;
-  args.M = m;
-  args.N = n;
-  args.K = k;
-  args.transa = transa == CUBLAS_OP_T;
-  args.transb = transb == CUBLAS_OP_T;
-  args.a_dtype = static_cast<int>(p.Atype);
-  args.b_dtype = static_cast<int>(p.Btype);
-  args.mxfp8_compact = a_mxfp8 && b_mxfp8 && !inputA->with_gemm_swizzled_scales &&
-                       !inputB->with_gemm_swizzled_scales;
-  args.bias = inputBias->data.dptr;
-  args.bias_dtype = static_cast<int>(inputBias->data.dtype);
-  args.aux_gelu = outputPreGelu->data.dptr;
-  args.out_dtype = static_cast<int>(outputD->data.dtype);
-  args.aux_dtype = static_cast<int>(outputPreGelu->data.dtype);
-  args.grad = grad;
-  args.alpha = alpha;
-  args.beta = beta;
-  args.splitk   = gfx1250 ? hk_splitk() : 0;
-  args.cu_count = cu_count;
-  args.workspace = workspace;
-  args.workspace_size = workspaceSize;
-  args.stream = stream;
-  return kittens_gemm(args);
+  const int splitk = gfx1250 ? hk_splitk() : 0;
+  if (is_16bit) {
+    return kittens_bf16_gemm(p.A, p.B, outputD->data.dptr, m, n, k, transa == CUBLAS_OP_T,
+                             transb == CUBLAS_OP_T, static_cast<int>(p.Atype),
+                             static_cast<int>(p.Btype), inputBias->data.dptr,
+                             static_cast<int>(inputBias->data.dtype), outputPreGelu->data.dptr,
+                             static_cast<int>(outputD->data.dtype),
+                             static_cast<int>(outputPreGelu->data.dtype), grad, alpha, beta, splitk,
+                             cu_count, workspace, workspaceSize, stream);
+  }
+  const bool mxfp8_compact = a_mxfp8 && b_mxfp8 && !inputA->with_gemm_swizzled_scales &&
+                             !inputB->with_gemm_swizzled_scales;
+  return kittens_mxfp8_gemm(p.A, p.B, outputD->data.dptr, p.A_scale_inv, p.B_scale_inv, m, n, k,
+                            transa == CUBLAS_OP_T, transb == CUBLAS_OP_T,
+                            static_cast<int>(p.Atype), static_cast<int>(p.Btype), mxfp8_compact,
+                            inputBias->data.dptr, static_cast<int>(inputBias->data.dtype),
+                            outputPreGelu->data.dptr, static_cast<int>(outputD->data.dtype),
+                            static_cast<int>(outputPreGelu->data.dtype), grad, alpha, beta, splitk,
+                            cu_count, workspace, workspaceSize, stream);
 }
 #endif
 
@@ -2521,7 +2513,7 @@ static bool kittens_env_set(const char *name) {
 static bool kittens_grouped_mxfp8_enabled() {
     static bool enabled = [] {
         // No gfx1250 grouped kernels: its grouped GEMMs take CK or the per-expert path.
-        if (!kittens_gemm_supported() || cuda::sm_arch() != 95) {
+        if (!kittens_mxfp8_supported() || cuda::sm_arch() != 95) {
             return false;
         }
         bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");

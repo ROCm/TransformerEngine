@@ -146,12 +146,22 @@ BlockwiseGemmBackend *BlockwiseGemmBackend::get_for_arch(int sm_arch) {
     return nullptr;
 }
 
-GemmBackend *GemmBackend::get_for_arch(int sm_arch) {
+MXFP8GemmBackend *MXFP8GemmBackend::get_for_arch(int sm_arch) {
 #ifdef KITTENS_HAVE_CDNA4
     if (sm_arch == 95) {
         return get_cdna4();
     }
 #endif
+#ifdef KITTENS_HAVE_CDNA5
+    if (sm_arch == 125) {
+        return get_cdna5();
+    }
+#endif
+    static_cast<void>(sm_arch);
+    return nullptr;
+}
+
+Bf16GemmBackend *Bf16GemmBackend::get_for_arch(int sm_arch) {
 #ifdef KITTENS_HAVE_CDNA5
     if (sm_arch == 125) {
         return get_cdna5();
