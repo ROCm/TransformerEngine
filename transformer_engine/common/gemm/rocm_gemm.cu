@@ -1182,7 +1182,7 @@ protected:
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" << "aux_type"
     << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
-    << "fp4_alpha" << "ws_min" << "ws_max" << "algo_id" << "aidx";
+    << "fp4_alpha" << "ws_min" << "ws_max" << "algo_id" << "aidx" << "dev_scalar_alpha";
   }
   
   void load_()
@@ -1261,7 +1261,8 @@ protected:
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
       int fp4_alpha = 0;
-      is >> fp4_alpha >> c >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
+      int dev_scalar_alpha = 0;
+      is >> fp4_alpha >> c >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx >> c >> dev_scalar_alpha;
       cfg.fp4_alpha_device_vector = (fp4_alpha != 0);
   
       if (is.bad())
@@ -1321,7 +1322,9 @@ protected:
           continue;
       }
 
-      d.emplace(cfg, Algo(algo_idx, algo_id, ws_min, ws_max));
+      Algo algo(algo_idx, algo_id, ws_min, ws_max);
+      algo.device_scalar_alpha = (dev_scalar_alpha != 0);
+      d.emplace(cfg, algo);
     }
   }
 
@@ -1399,6 +1402,7 @@ protected:
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
       << (cfg.fp4_alpha_device_vector ? 1 : 0)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index
+      << (algo.device_scalar_alpha ? 1 : 0)
       << csv_helper::end() << "\n";
   }
 
@@ -1444,8 +1448,8 @@ static void init_hipblaslt_handles(hipblasLtHandle_t* hipblaslt_handles) {
 }
 
 // Select device scalar alpha for a native NVFP4 GEMM if hipBLASLt has a kernel for this config (not all
-// NVFP4 kernels support it yet). `cached` is the choice recorded with a cached algo; without one, hipBLASLt
-// is probed. Returns false and leaves host pointer mode otherwise.
+// NVFP4 kernels support it yet). `cached` is the mode stored with a known algo and is applied as is; without
+// one, hipBLASLt is probed. Returns false and leaves host pointer mode otherwise.
 static bool use_device_scalar_alpha(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t operationDesc,
                                     hipblasLtMatrixLayout_t Adesc, hipblasLtMatrixLayout_t Bdesc,
                                     hipblasLtMatrixLayout_t Ddesc, size_t workspaceSize,
@@ -1845,29 +1849,29 @@ void hipblaslt_gemm(const Tensor *inputA,
     use_nvfp4 && !use_nvfp4_native);
 
   GemmAlgoCache::Algo cached_algo;
-  const bool algo_cached =
-      algoCache.find(gemm_cfg, workspaceSize, cached_algo) && cached_algo.algo.has_value();
+  algoCache.find(gemm_cfg, workspaceSize, cached_algo);
 
-  // Native NVFP4 host alpha: read c0 back, which synchronizes the stream.
-  auto use_nvfp4_host_alpha = [&]() {
-    NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
-                                   stream));
-    NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-    alpha_ptr = static_cast<const void*>(&nvfp4_c0);
-  };
-
-  if (use_nvfp4_native) {
+  // Native NVFP4: put the alpha mode on the matmul descriptor; std::nullopt probes hipBLASLt.
+  auto set_nvfp4_alpha_mode = [&](std::optional<bool> device_scalar_alpha) {
     cached_algo.device_scalar_alpha = use_device_scalar_alpha(
-        handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg,
-        algo_cached ? std::optional<bool>(cached_algo.device_scalar_alpha) : std::nullopt);
+        handle, operationDesc, Adesc, Bdesc, Ddesc, workspaceSize, gemm_cfg, device_scalar_alpha);
     if (cached_algo.device_scalar_alpha) {
       alpha_ptr = static_cast<const void*>(nvfp4_c0_dev);
     } else {
-      use_nvfp4_host_alpha();
+      NVTE_CHECK_CUDA(hipMemcpyAsync(&nvfp4_c0, nvfp4_c0_dev, sizeof(float), hipMemcpyDeviceToHost,
+                                     stream));
+      NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+      alpha_ptr = static_cast<const void*>(&nvfp4_c0);
     }
+  };
+
+  if (use_nvfp4_native) {
+    // A known algo (cached or loaded via TE_HIPBLASLT_ALGO_LOAD) runs in its stored mode.
+    set_nvfp4_alpha_mode(cached_algo.hasId() ? std::optional<bool>(cached_algo.device_scalar_alpha)
+                                             : std::nullopt);
   }
 
-  if (!algo_cached)
+  if (!cached_algo.algo.has_value())
   {
     bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
@@ -1879,40 +1883,35 @@ void hipblaslt_gemm(const Tensor *inputA,
       
       if (hipblaslt_ext::getAlgosFromIndex(handle, algo_index, algo_arr) == HIPBLAS_STATUS_SUCCESS &&
           algo_arr[0].state == HIPBLAS_STATUS_SUCCESS) {
-        auto algo_usable = [&](const void* alpha_p) {
-          size_t ws_size_min = 0;
-          return HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
-                     handle, operationDesc, alpha_p, Adesc, Bdesc, beta_ptr, Ddesc, Ddesc,
-                     algo_arr[0].algo, ws_size_min) &&
-                 ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize;
-        };
-        bool usable = algo_usable(alpha_ptr);
-#ifdef NVTE_HIPBLASLT_DEVICE_SCALAR_ALPHA
-        if (!usable && use_nvfp4_native && cached_algo.device_scalar_alpha) {
-          // The stored algo may have been tuned with host alpha.
-          int32_t pointer_mode = HIPBLASLT_POINTER_MODE_HOST;
-          NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-              operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
-          usable = algo_usable(&nvfp4_c0);
-          if (usable) {
-            cached_algo.device_scalar_alpha = false;
-            use_nvfp4_host_alpha();
-          } else {
-            pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_SCALAR_BETA_HOST_EXT;
-            NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-                operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
+        size_t ws_size_min = 0;
+        if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
+          handle,
+          operationDesc, 
+          alpha_ptr,
+          Adesc, 
+          Bdesc, 
+          beta_ptr,
+          Ddesc,
+          Ddesc,
+          algo_arr[0].algo,
+          ws_size_min
+        )) {
+
+          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
+            cached_algo.algo = algo_arr[0].algo;
+            cached_algo.ws_size_min = algo_arr[0].workspaceSize;
+            algoCache.store(gemm_cfg, cached_algo);
           }
-        }
-#endif
-        if (usable) {
-          cached_algo.algo = algo_arr[0].algo;
-          cached_algo.ws_size_min = algo_arr[0].workspaceSize;
-          algoCache.store(gemm_cfg, cached_algo);
         }
       }
 
       if (logTuning && !cached_algo.algo.has_value()) {
         std::cout << "[WARNING] Cannot get corresponding solution from cached algoId " << cached_algo.algoId << std::endl;
+      }
+
+      // Stored algo not usable here (e.g. other hipBLASLt): choose the alpha mode for a new algo.
+      if (use_nvfp4_native && !cached_algo.algo.has_value()) {
+        set_nvfp4_alpha_mode(std::nullopt);
       }
     }
 
