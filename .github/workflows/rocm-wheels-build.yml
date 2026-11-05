@@ -269,7 +269,6 @@ jobs:
               --volume "${{ runner.temp }}/ccache:/ccache"
               --env NVTE_USE_CCACHE=1
               --env NVTE_CCACHE_BIN=/opt/ccache/ccache
-              --env NVTE_CMAKE_EXTRA_ARGS=-DCMAKE_HIP_COMPILER_LAUNCHER=/opt/ccache/ccache
               --env NVTE_CMAKE_BUILD_DIR=/TransformerEngine/build/cmake
               --env CCACHE_DIR=/ccache
               --env CCACHE_BASEDIR=/TransformerEngine

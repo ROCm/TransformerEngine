@@ -103,7 +103,6 @@ jobs:
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
     with:
-      rocm_arch: gfx942,gfx950
       use_ccache: true
       save_ccache: ${{ github.event_name != 'pull_request' }}
 
