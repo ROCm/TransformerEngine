@@ -28,8 +28,7 @@ NUM_STAGES = 3  # LDS pages per operand
 TDM_GROUP_WAVES = NUM_WAVES // 2
 TDM_WAVES = 2
 PRO_SCALE_WAVES = 2
-# Scales stream through SCALE_STAGES LDS pages of SCALE_GROUP K tiles
-SCALE_GROUP = 8
+SCALE_GROUP = 6
 SCALE_STAGES = 2
 LDS_B_START = 64 * 1024
 C_HALF_ROWS = BLOCK_M // 2  # C is stored in two halves
@@ -38,9 +37,7 @@ C_WAVE_ROWS = C_HALF_ROWS // NUM_WAVES
 ROW_WORDS = 16
 LDS_ROW_WORDS = 20
 SCHED_TAIL_MMAS = 8
-# Scales are TE's row-major words (one per row and K tile), kept in LDS as [row][SCALE_STAGES *
-# SCALE_GROUP] with an odd row pitch so the per-row reads avoid bank conflicts
-LDS_SCALE_PITCH = 17
+K_LOOP_BODY = SCALE_GROUP
 OUT_KINDS = {torch.float32: 0, torch.bfloat16: 1, torch.float16: 2}
 
 
@@ -56,7 +53,8 @@ def gemm_kernel(
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
-    K_iters: fx.Constexpr[int],
+    K_SHORT: fx.Constexpr[int],
+    K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
 ):
 
@@ -82,18 +80,17 @@ def gemm_kernel(
     wm, wn = wave % 2, wave // 2
 
     k_words = K // 8
+    K_iters = K // BLOCK_K
     # global offsets in 64 bits: rows * k_words and rows * N exceed 2^31 for large shapes
     k_words64, N64 = fx.Int64(k_words), fx.Int64(N)
     A_words = as_words(A, M, k_words)
     B_words = as_words(B, N, k_words)
 
-    # this lane's 16 B chunks khalf and khalf + 2
+    # this lane's 16 B chunk khalf (khalf + 2 is 8 words on)
     a_lds_lo = (wm * 16 + lane_mod16) * LDS_ROW_WORDS + 4 * khalf
-    a_lds_hi = a_lds_lo + 8
     b_lds_lo = (wn * 16 + lane_mod16) * LDS_ROW_WORDS + 4 * khalf
-    b_lds_hi = b_lds_lo + 8
-    as_lds_base = (wm * 16 + lane_mod16) * LDS_SCALE_PITCH
-    bs_lds_base = (wn * 16 + lane_mod16) * LDS_SCALE_PITCH
+    as_lds_base = (wm * 16 + lane_mod16) * SCALE_GROUP
+    bs_lds_base = (wn * 16 + lane_mod16) * SCALE_GROUP
 
     # tile k lives in LDS page k % NUM_STAGES
     smem = fx.SharedAllocator(static=False)
@@ -114,10 +111,9 @@ def gemm_kernel(
     )
     pad = dict(pad_interval=ROW_WORDS, pad_amount=LDS_ROW_WORDS - ROW_WORDS)
 
-    num_groups = (K_iters + SCALE_GROUP - 1) // SCALE_GROUP
-    tail_tiles = K_iters - (num_groups - 1) * SCALE_GROUP
-    lds_As = smem.allocate(fx.Array[fx.Int32, BLOCK_M * LDS_SCALE_PITCH]).peek()
-    lds_Bs = smem.allocate(fx.Array[fx.Int32, BLOCK_N * LDS_SCALE_PITCH]).peek()
+    PAGE_S = BLOCK_M * SCALE_GROUP
+    lds_As = smem.allocate(fx.Array[fx.Int32, SCALE_STAGES * PAGE_S]).peek()
+    lds_Bs = smem.allocate(fx.Array[fx.Int32, SCALE_STAGES * PAGE_S]).peek()
 
     # C is staged from LDS offset 0 after the K loop
     if smem.allocated_bytes < c_stage_bytes:
@@ -158,7 +154,7 @@ def gemm_kernel(
             half_box,
         )
 
-    # prologue atoms: whole tiles and scales
+    # prologue atoms: whole tiles 0 and 1
     tdm_A1w, cA1w = fx.rocdl.cdna5.make_tiled_tdm_atom(
         fx.rocdl.TensorLoad(), A_words, box_A, (BLOCK_M, 16), num_warps=1
     )
@@ -179,39 +175,29 @@ def gemm_kernel(
     sA_blk = fx.add_offset(scale_ptr(A_s), bid_m * BLOCK_M * As_sw)
     sB_blk = fx.add_offset(scale_ptr(B_s), bid_n * BLOCK_N * Bs_sw)
 
-    def scale_atom(view, sw, tiles, width):
-        return fx.rocdl.make_tdm_atom(
-            view,
-            [None, tiles],
-            strides=[fx.Int64(sw), None],
-            num_warps=1,
-            pad_interval=width,
-            pad_amount=LDS_SCALE_PITCH - width,
-        )
-
-    # prologue: scale groups 0 and 1, half the rows per wave
-    sc_wave = wave % PRO_SCALE_WAVES
-    PRO_ROWS = BLOCK_M // PRO_SCALE_WAVES
-    PRO_COLS = SCALE_STAGES * SCALE_GROUP
-    pro_box = fx.make_layout((PRO_ROWS, PRO_COLS), (PRO_COLS, 1))
-    gAs_pro = fx.make_view(fx.add_offset(sA_blk, sc_wave * PRO_ROWS * As_sw), pro_box)
-    gBs_pro = fx.make_view(fx.add_offset(sB_blk, sc_wave * PRO_ROWS * Bs_sw), pro_box)
-    tdm_As_pro = scale_atom(gAs_pro, As_sw, K_iters, PRO_COLS)
-    tdm_Bs_pro = scale_atom(gBs_pro, Bs_sw, K_iters, PRO_COLS)
-    pro_lds_off = sc_wave * PRO_ROWS * LDS_SCALE_PITCH
-    lAs_pro = fx.make_view(fx.add_offset(sAs_base_ptr, pro_lds_off), pro_box)
-    lBs_pro = fx.make_view(fx.add_offset(sBs_base_ptr, pro_lds_off), pro_box)
-
     grp_box = fx.make_layout((BLOCK_M, SCALE_GROUP), (SCALE_GROUP, 1))
+
     gAs_grp = fx.make_view(sA_blk, grp_box)
     gBs_grp = fx.make_view(sB_blk, grp_box)
-    tdm_As_grp = scale_atom(gAs_grp, As_sw, None, SCALE_GROUP)
-    tdm_Bs_grp = scale_atom(gBs_grp, Bs_sw, None, SCALE_GROUP)
-    tail_col = (num_groups - 1) * SCALE_GROUP
-    gAs_tail = fx.make_view(fx.add_offset(sA_blk, tail_col), grp_box)
-    gBs_tail = fx.make_view(fx.add_offset(sB_blk, tail_col), grp_box)
-    tdm_As_tail = scale_atom(gAs_tail, As_sw, tail_tiles, SCALE_GROUP)
-    tdm_Bs_tail = scale_atom(gBs_tail, Bs_sw, tail_tiles, SCALE_GROUP)
+    tdm_As_grp = fx.rocdl.make_tdm_atom(
+        gAs_grp, [None, None], strides=[fx.Int64(As_sw), None], num_warps=1
+    )
+    tdm_Bs_grp = fx.rocdl.make_tdm_atom(
+        gBs_grp, [None, None], strides=[fx.Int64(Bs_sw), None], num_warps=1
+    )
+
+    def copy_scale_group(blk, sw, lds_base, g, full=False, page=None):
+        page = g % SCALE_STAGES if page is None else page
+        lds = fx.make_view(fx.add_offset(lds_base, page * PAGE_S), grp_box)
+        if const_expr(full):
+            atom, view = (tdm_As_grp, gAs_grp) if blk is sA_blk else (tdm_Bs_grp, gBs_grp)
+            fx.copy(atom, view, lds, imm_offset=fx.Int64(g) * (SCALE_GROUP * 4))
+        else:
+            view = fx.make_view(fx.add_offset(blk, g * SCALE_GROUP), grp_box)
+            atom = fx.rocdl.make_tdm_atom(
+                view, [None, K_iters - g * SCALE_GROUP], strides=[fx.Int64(sw), None], num_warps=1
+            )
+            fx.copy(atom, view, lds)
 
     # whole tiles, for K-loop iterations that also load a scale group
     gA_full = fx.make_view(
@@ -226,6 +212,306 @@ def gemm_kernel(
     tdm_B_full = fx.rocdl.make_tdm_atom(
         gB_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
+
+    bC = fx.slice(fx.zipped_divide(C, (BLOCK_M, BLOCK_N)), (None, (bid_m, bid_n)))
+
+    mma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(16, 16, 128, fx.Float4E2M1FN))
+    tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 4, 1), (1, 2, 0)))
+    thr_mma = tiled_mma.thr_slice(tid)
+
+    copy_atom_i32 = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
+    copy_atom_s32 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
+    copy_atom_c = fx.make_copy_atom(
+        fx.UniversalCopy32b() if OUT_KIND == 0 else fx.UniversalCopy16b(), out_fx
+    )
+
+    def new_frags():
+        return (
+            fx.make_rmem_tensor(fx.make_layout((8, 8, 1), (1, 8, 0)), fx.Int32),
+            fx.make_rmem_tensor(fx.make_layout((8, 4, 1), (1, 8, 0)), fx.Int32),
+            fx.make_rmem_tensor(fx.make_layout((1, 8, 1), (0, 1, 0)), fx.Int32),
+            fx.make_rmem_tensor(fx.make_layout((1, 4, 1), (0, 1, 0)), fx.Int32),
+        )
+
+    A_REPS, B_REPS = 8, 4
+    acc_tile = fx.make_layout((8, 1, 1), (1, 0, 0))
+    scale_tile = fx.make_layout((1, 1, 1), (0, 0, 0))
+    frag_acc = [
+        [fx.make_rmem_tensor(acc_tile, fx.Float32) for _ in range(B_REPS)] for _ in range(A_REPS)
+    ]
+
+    def frag_view(t, off, layout):
+        return fx.make_view(fx.add_offset(fx.get_iter(t), off), layout)
+
+    def frag_view_ptr(ptr, off):
+        return fx.make_view(fx.add_offset(ptr, off), fx.make_layout(1, 1))
+
+    # one TDM op per wave: tiles 0 and 1 and the scales
+    def issue_prologue_tdm():
+        if wave < 4:
+            if wave == 0:
+                fx.copy(tdm_A1w, tAgA1w[None, 0], tAsA1w[None, 0])
+            else:
+                if wave == 1:
+                    fx.copy(tdm_B1w, tBgB1w[None, 0], tBsB1w[None, 0])
+                else:
+                    if wave == 2:
+                        fx.copy(tdm_A1w, tAgA1w[None, 1], tAsA1w[None, 1])
+                    else:
+                        fx.copy(tdm_B1w, tBgB1w[None, 1], tBsB1w[None, 1])
+        else:
+            if wave < 6:
+                if wave == 4:
+                    copy_scale_group(sA_blk, As_sw, sAs_base_ptr, 0)
+                else:
+                    if const_expr(K_SHORT == 0 or K_SHORT > SCALE_GROUP):
+                        copy_scale_group(sA_blk, As_sw, sAs_base_ptr, 1)
+            else:
+                if wave == 6:
+                    copy_scale_group(sB_blk, Bs_sw, sBs_base_ptr, 0)
+                else:
+                    if const_expr(K_SHORT == 0 or K_SHORT > SCALE_GROUP):
+                        copy_scale_group(sB_blk, Bs_sw, sBs_base_ptr, 1)
+
+    n_dsrd = 3 * (A_REPS + B_REPS)
+    n_mma = A_REPS * B_REPS
+
+    # interleave tile k+1's LDS reads with gemm(k)'s WMMAs
+    def hot_loop_scheduler():
+        n_spread = n_mma - SCHED_TAIL_MMAS
+        issued = 0
+        for i in range_constexpr(n_spread):
+            want = (i + 1) * n_dsrd // n_spread
+            if want > issued:
+                fx.rocdl.sched_dsrd(want - issued)
+                issued = want
+            fx.rocdl.sched_mfma(1)
+        fx.rocdl.sched_mfma(SCHED_TAIL_MMAS)
+        fx.rocdl.sched_barrier(0)
+
+    def gemm_step(src):
+        frag_A, frag_B, frag_sA, frag_sB = src
+        for i in range_constexpr(A_REPS):
+            for j in range_constexpr(B_REPS):
+                fx.gemm(
+                    mma_atom,
+                    frag_acc[i][j],
+                    [frag_view(frag_A, 8 * i, acc_tile), frag_view(frag_sA, i, scale_tile)],
+                    [frag_view(frag_B, 8 * j, acc_tile), frag_view(frag_sB, j, scale_tile)],
+                    frag_acc[i][j],
+                )
+
+    def rt_ptrs0():
+        return [fx.get_iter(v) for v in (gA_half, gB_half, gA_full, gB_full)] + [sA_blk, sB_blk]
+
+    def rt_advance(ptrs, tiles):
+        tw = tiles * (BLOCK_K // 8)
+        return [fx.add_offset(p, tw) for p in ptrs[:4]] + [
+            fx.add_offset(p, tiles) for p in ptrs[4:]
+        ]
+
+    def rt_views(ptrs):
+        layouts = (half_box, half_box, box_A, box_B, grp_box, grp_box)
+        return tuple(fx.make_view(p, l) for p, l in zip(ptrs, layouts))
+
+    def issue_tdm_rt(kb, vw, ks, scales, exact):
+        vA_half, vB_half, vA_full, vB_full, vAs, vBs = vw
+        js = ks + NUM_STAGES
+        page, group = js % NUM_STAGES, js % 2
+        k_off = fx.Int64(js * (BLOCK_K // 2))
+        if wave // TDM_GROUP_WAVES == group:
+            gw = wave % TDM_GROUP_WAVES
+            if const_expr(scales):
+                gi = ks // SCALE_GROUP + 1
+                gpage = (kb // SCALE_GROUP + gi) % SCALE_STAGES
+                s_off = fx.Int64(gi * SCALE_GROUP * 4)
+                if gw < 2:
+                    if gw == 0:
+                        fx.copy(
+                            tdm_A_full,
+                            vA_full,
+                            fx.make_view(fx.add_offset(sA_base_ptr, page * PAGE_A), box_A),
+                            imm_offset=k_off,
+                        )
+                    else:
+                        if const_expr(exact):
+                            g = kb // SCALE_GROUP + gi
+                            copy_scale_group(sA_blk, As_sw, sAs_base_ptr, g, page=gpage)
+                        else:
+                            lds = fx.make_view(fx.add_offset(sAs_base_ptr, gpage * PAGE_S), grp_box)
+                            fx.copy(tdm_As_grp, vAs, lds, imm_offset=s_off)
+                else:
+                    if gw == 2:
+                        fx.copy(
+                            tdm_B_full,
+                            vB_full,
+                            fx.make_view(fx.add_offset(sB_base_ptr, page * PAGE_B), box_B),
+                            imm_offset=k_off,
+                        )
+                    else:
+                        if const_expr(exact):
+                            g = kb // SCALE_GROUP + gi
+                            copy_scale_group(sB_blk, Bs_sw, sBs_base_ptr, g, page=gpage)
+                        else:
+                            lds = fx.make_view(fx.add_offset(sBs_base_ptr, gpage * PAGE_S), grp_box)
+                            fx.copy(tdm_Bs_grp, vBs, lds, imm_offset=s_off)
+            else:
+                if gw < TDM_WAVES:
+                    fx.copy(tdm_A, vA_half, lds_half(sA_base_ptr, page), imm_offset=k_off)
+                else:
+                    fx.copy(tdm_B, vB_half, lds_half(sB_base_ptr, page), imm_offset=k_off)
+
+    def lds_to_regs_rt(r, dst, bases):
+        a_lo, b_lo, s_a, s_b, s_d = bases
+        page = r % NUM_STAGES
+        frag_A, frag_B, frag_sA, frag_sB = dst
+        for h in range_constexpr(2):
+            fx.copy(
+                copy_atom_i32,
+                fx.make_view(
+                    fx.add_offset(sA_base_ptr, a_lo + (page * PAGE_A + 8 * h)),
+                    fx.make_layout((4, 8), (1, 32 * LDS_ROW_WORDS)),
+                ),
+                frag_view(frag_A, 4 * h, fx.make_layout((4, 8), (1, 8))),
+            )
+            fx.copy(
+                copy_atom_i32,
+                fx.make_view(
+                    fx.add_offset(sB_base_ptr, b_lo + (page * PAGE_B + 8 * h)),
+                    fx.make_layout((4, 4), (1, 64 * LDS_ROW_WORDS)),
+                ),
+                frag_view(frag_B, 4 * h, fx.make_layout((4, 4), (1, 8))),
+            )
+        if const_expr(r // SCALE_GROUP % SCALE_STAGES == 1):
+            s_a, s_b = s_a + s_d, s_b + s_d
+        col = r % SCALE_GROUP
+        for i in range_constexpr(A_REPS):
+            fx.copy(
+                copy_atom_s32,
+                frag_view_ptr(sAs_base_ptr, s_a + (col + i * 32 * SCALE_GROUP)),
+                frag_view(frag_sA, i, fx.make_layout(1, 1)),
+            )
+            fx.rocdl.sched_barrier(0x7FF)
+        for j in range_constexpr(B_REPS):
+            fx.copy(
+                copy_atom_s32,
+                frag_view_ptr(sBs_base_ptr, s_b + (col + j * 64 * SCALE_GROUP)),
+                frag_view(frag_sB, j, fx.make_layout(1, 1)),
+            )
+            fx.rocdl.sched_barrier(0x7FF)
+
+    def wait_tile_rt(ks, pending):
+        if const_expr(pending == 0):
+            fx.rocdl.s_wait_tensorcnt(0)
+        else:
+            if wave // TDM_GROUP_WAVES == (ks + 2) % 2:
+                fx.rocdl.s_wait_tensorcnt(1)
+            else:
+                fx.rocdl.s_wait_tensorcnt(0)
+
+    def k_step_rt(ks, cur, bases, issue=None, scales=False, exact=False, pending=1):
+        fx.rocdl.sched_barrier(0)
+        wait_tile_rt(ks, pending)
+        fx.rocdl.s_wait_dscnt(0)
+        fx.barrier()
+        fx.rocdl.sched_barrier(0)
+        if const_expr(issue is not None):
+            issue_tdm_rt(issue[0], issue[1], ks, scales, exact)
+        nxt = new_frags()
+        lds_to_regs_rt(ks + 1, nxt, bases)
+        gemm_step(cur)
+        hot_loop_scheduler()
+        return nxt
+
+    def carry_values(fr):
+        frag_A, frag_B, frag_sA, frag_sB = fr
+        return (
+            [frag_view(frag_A, 8 * i, acc_tile).load() for i in range_constexpr(A_REPS)]
+            + [frag_view(frag_B, 8 * j, acc_tile).load() for j in range_constexpr(B_REPS)]
+            + [frag_sA.load(), frag_sB.load()]
+            + [acc.load() for acc_row in frag_acc for acc in acc_row]
+        )
+
+    def from_carry(vals):
+        fr = new_frags()
+        frag_A, frag_B, frag_sA, frag_sB = fr
+        for i in range_constexpr(A_REPS):
+            frag_view(frag_A, 8 * i, acc_tile).store(vals[i])
+        for j in range_constexpr(B_REPS):
+            frag_view(frag_B, 8 * j, acc_tile).store(vals[A_REPS + j])
+        frag_sA.store(vals[A_REPS + B_REPS])
+        frag_sB.store(vals[A_REPS + B_REPS + 1])
+        accs = vals[A_REPS + B_REPS + 2 :]
+        for i in range_constexpr(A_REPS):
+            for j in range_constexpr(B_REPS):
+                frag_acc[i][j].store(accs[i * B_REPS + j])
+        return fr
+
+    for acc_row in frag_acc:
+        for acc in acc_row:
+            acc.fill(0)
+
+    issue_prologue_tdm()
+    if wave // TDM_WAVES == 1:
+        fx.rocdl.s_wait_tensorcnt(1)
+    else:
+        fx.rocdl.s_wait_tensorcnt(0)
+    fx.barrier()
+    bases = (a_lds_lo, b_lds_lo, as_lds_base, bs_lds_base, fx.Int32(PAGE_S))
+    cur = new_frags()
+    lds_to_regs_rt(0, cur, bases)
+
+    fx.rocdl.sched_barrier(0)
+    fx.rocdl.s_wait_tensorcnt(0)
+    fx.rocdl.s_wait_dscnt(0)
+    fx.barrier()
+    fx.rocdl.sched_barrier(0)
+    views0 = rt_views(rt_ptrs0())
+    for ks in range_constexpr(-1, 1):
+        if const_expr(K_SHORT == 0 or ks + NUM_STAGES < K_SHORT):
+            issue_tdm_rt(0, views0, ks, False, False)
+    nxt = new_frags()
+    lds_to_regs_rt(1, nxt, bases)
+    gemm_step(cur)
+    hot_loop_scheduler()
+    cur = nxt
+
+    if const_expr(K_SHORT == 0):
+        # kb & 2^30 is zero, but keeps the carried LDS bases from being hoisted
+        n_body = K_iters // K_LOOP_BODY - 2
+        init = carry_values(cur) + list(bases) + rt_ptrs0()
+        for i, state in range(0, n_body, 1, init=init):
+            nc = len(state) - 11
+            cur = from_carry(state[:nc])
+            a_lo, b_lo, s_a, s_b, s_d = (fx.Int32(v) for v in state[nc : nc + 5])
+            bases = (a_lo, b_lo, s_a, s_b, s_d)
+            ptrs = list(state[nc + 5 :])
+            kb = fx.Int32(i) * K_LOOP_BODY
+            issue = (kb, rt_views(ptrs))
+            for u in range_constexpr(K_LOOP_BODY):
+                at_group = (1 + u) % SCALE_GROUP == 0
+                cur = k_step_rt(1 + u, cur, bases, issue, scales=at_group)
+            zero = kb & (1 << 30)
+            bases_next = [a_lo + zero, b_lo + zero, s_a + s_d, s_b + s_d, -s_d]
+            results = yield carry_values(cur) + bases_next + rt_advance(ptrs, K_LOOP_BODY)
+        nc = len(results) - 11
+        cur = from_carry(results[:nc])
+        bases = tuple(fx.Int32(v) for v in results[nc : nc + 5])
+        kb = n_body * K_LOOP_BODY
+        issue = (kb, rt_views(list(results[nc + 5 :])))
+        R = 2 * SCALE_GROUP + K_REM - 4
+    else:
+        issue = (0, views0)
+        R = max(K_SHORT - 4, 0)
+    for u in range_constexpr(R):
+        at_group = (1 + u) % SCALE_GROUP == 0 and u < R - 3
+        cur = k_step_rt(1 + u, cur, bases, issue, scales=at_group, exact=u >= R - 8)
+    ks_last = R + 3 if K_SHORT == 0 else K_SHORT - 1
+    for ks in range_constexpr(max(ks_last - 2, 1), ks_last):
+        cur = k_step_rt(ks, cur, bases, pending=int(ks < ks_last - 1))
+    gemm_step(cur)
+    x = bases[0] - wm * 16 * LDS_ROW_WORDS
+    lane_mod16, khalf = x // LDS_ROW_WORDS, x % LDS_ROW_WORDS // 4
 
     # C store: each wave writes C_WAVE_ROWS rows of each half
     c_wave_box = fx.make_layout((C_WAVE_ROWS, BLOCK_N), (BLOCK_N, 1))
@@ -243,209 +529,13 @@ def gemm_kernel(
     tdm_C = fx.rocdl.make_tdm_atom(gC_wave[0], [None, None], strides=[N64, None], num_warps=1)
     lds_C_wave = fx.make_view(fx.add_offset(lds_C_ptr, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
 
-    bC = fx.slice(fx.zipped_divide(C, (BLOCK_M, BLOCK_N)), (None, (bid_m, bid_n)))
-
-    mma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(16, 16, 128, fx.Float4E2M1FN))
-    tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 4, 1), (1, 2, 0)))
-    thr_mma = tiled_mma.thr_slice(tid)
-
-    copy_atom_i32 = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
-    copy_atom_s32 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
-    copy_atom_c = fx.make_copy_atom(
-        fx.UniversalCopy32b() if OUT_KIND == 0 else fx.UniversalCopy16b(), out_fx
-    )
-
-    # double-buffered register fragments: tile k is read into set k % 2
-    frag_A = [fx.make_rmem_tensor(fx.make_layout((8, 8, 1), (1, 8, 0)), fx.Int32) for _ in range(2)]
-    frag_B = [fx.make_rmem_tensor(fx.make_layout((8, 4, 1), (1, 8, 0)), fx.Int32) for _ in range(2)]
-    frag_sA = [fx.make_rmem_tensor((1, 8, 1), fx.Int32) for _ in range(2)]
-    frag_sB = [fx.make_rmem_tensor((1, 4, 1), fx.Int32) for _ in range(2)]
-    frag_acc = thr_mma.make_fragment_C(bC)
-
-    # tiles issued per wave class, to derive each class's tensorcnt wait for tile t
-    WAVE_CLASSES = ((0, 2), (2, 4), (4, NUM_WAVES))
-    tdm_issued = [[0], [1], [0]]  # prologue ops
-
-    def wait_tile(t):
-        counts = [sum(1 for x in tiles if x > t) for tiles in tdm_issued]
-        if counts[0] == counts[1] == counts[2]:
-            fx.rocdl.s_wait_tensorcnt(counts[0])
-        else:
-            if wave < WAVE_CLASSES[0][1]:
-                fx.rocdl.s_wait_tensorcnt(counts[0])
-            else:
-                if wave < WAVE_CLASSES[1][1]:
-                    fx.rocdl.s_wait_tensorcnt(counts[1])
-                else:
-                    fx.rocdl.s_wait_tensorcnt(counts[2])
-
-    # With scale_group g the group's waves load the A tile, A scale group g, the B tile and
-    # B scale group g, still one TDM op per wave; the scale op shares tile j's wait slot
-    def issue_tdm(j, scale_group=None):
-        page = j % NUM_STAGES
-        group = j % 2
-        k_off = fx.Int64(j * BLOCK_K // 2)
-        if scale_group is None:
-            if wave // TDM_GROUP_WAVES == group:
-                if wave % TDM_GROUP_WAVES < TDM_WAVES:
-                    fx.copy(tdm_A, gA_half, lds_half(sA_base_ptr, page), imm_offset=k_off)
-                else:
-                    fx.copy(tdm_B, gB_half, lds_half(sB_base_ptr, page), imm_offset=k_off)
-        else:
-            g = scale_group
-            spage = g % SCALE_STAGES
-            tail = g == num_groups - 1 and tail_tiles < SCALE_GROUP
-            atom_As, atom_Bs = (tdm_As_tail, tdm_Bs_tail) if tail else (tdm_As_grp, tdm_Bs_grp)
-            g_As, g_Bs = (gAs_tail, gBs_tail) if tail else (gAs_grp, gBs_grp)
-            l_As = fx.make_view(fx.add_offset(sAs_base_ptr, spage * SCALE_GROUP), grp_box)
-            l_Bs = fx.make_view(fx.add_offset(sBs_base_ptr, spage * SCALE_GROUP), grp_box)
-            s_offA = s_offB = fx.Int64(0 if tail else g * SCALE_GROUP * 4)
-            if wave // TDM_GROUP_WAVES == group:
-                gw = wave % TDM_GROUP_WAVES
-                if gw < 2:
-                    if gw == 0:
-                        fx.copy(
-                            tdm_A_full,
-                            gA_full,
-                            fx.make_view(fx.add_offset(sA_base_ptr, page * PAGE_A), box_A),
-                            imm_offset=k_off,
-                        )
-                    else:
-                        fx.copy(atom_As, g_As, l_As, imm_offset=s_offA)
-                else:
-                    if gw == 2:
-                        fx.copy(
-                            tdm_B_full,
-                            gB_full,
-                            fx.make_view(fx.add_offset(sB_base_ptr, page * PAGE_B), box_B),
-                            imm_offset=k_off,
-                        )
-                    else:
-                        fx.copy(atom_Bs, g_Bs, l_Bs, imm_offset=s_offB)
-        for c in ((0, 1) if group == 0 else (2,)):
-            tdm_issued[c].append(j)
-
-    # one TDM op per wave: tiles 0 and 1 and the scales
-    def issue_prologue_tdm():
-        if wave < 4:
-            if wave == 0:
-                fx.copy(tdm_A1w, tAgA1w[None, 0], tAsA1w[None, 0])
-            else:
-                if wave == 1:
-                    fx.copy(tdm_B1w, tBgB1w[None, 0], tBsB1w[None, 0])
-                else:
-                    if wave == 2:
-                        fx.copy(tdm_A1w, tAgA1w[None, 1], tAsA1w[None, 1])
-                    else:
-                        fx.copy(tdm_B1w, tBgB1w[None, 1], tBsB1w[None, 1])
-        else:
-            if wave < 4 + PRO_SCALE_WAVES:
-                fx.copy(tdm_As_pro, gAs_pro, lAs_pro)
-            else:
-                fx.copy(tdm_Bs_pro, gBs_pro, lBs_pro)
-
-    def lds_to_regs(k):
-        page, r = k % NUM_STAGES, k % 2
-        for h, a_off, b_off in ((0, a_lds_lo, b_lds_lo), (1, a_lds_hi, b_lds_hi)):
-            src_A = fx.make_view(
-                fx.add_offset(sA_base_ptr, page * PAGE_A + a_off),
-                fx.make_layout((4, 8), (1, 32 * LDS_ROW_WORDS)),
-            )
-            src_B = fx.make_view(
-                fx.add_offset(sB_base_ptr, page * PAGE_B + b_off),
-                fx.make_layout((4, 4), (1, 64 * LDS_ROW_WORDS)),
-            )
-            fx.copy(
-                copy_atom_i32,
-                src_A,
-                fx.make_view(
-                    fx.add_offset(fx.get_iter(frag_A[r]), 4 * h), fx.make_layout((4, 8), (1, 8))
-                ),
-            )
-            fx.copy(
-                copy_atom_i32,
-                src_B,
-                fx.make_view(
-                    fx.add_offset(fx.get_iter(frag_B[r]), 4 * h), fx.make_layout((4, 4), (1, 8))
-                ),
-            )
-        s_col = (k // SCALE_GROUP) % SCALE_STAGES * SCALE_GROUP + k % SCALE_GROUP
-        fx.copy(
-            copy_atom_s32,
-            fx.make_view(
-                fx.add_offset(sAs_base_ptr, as_lds_base + s_col),
-                fx.make_layout((1, 8), (1, 32 * LDS_SCALE_PITCH)),
-            ),
-            fx.make_view(fx.get_iter(frag_sA[r]), fx.make_layout((1, 8), (1, 1))),
-        )
-        # B rows are 64 apart; sched_barrier keeps them from merging into ds_load_2addr_stride64
-        for j in range_constexpr(4):
-            fx.copy(
-                copy_atom_s32,
-                fx.make_view(
-                    fx.add_offset(sBs_base_ptr, bs_lds_base + s_col + j * 64 * LDS_SCALE_PITCH),
-                    fx.make_layout(1, 1),
-                ),
-                fx.make_view(fx.add_offset(fx.get_iter(frag_sB[r]), j), fx.make_layout(1, 1)),
-            )
-            fx.rocdl.sched_barrier(0x7FF)
-
-    A_REPS, B_REPS = 8, 4
-    n_dsrd = 3 * (A_REPS + B_REPS)
-    n_mma = A_REPS * B_REPS
-
-    # interleave tile k+1's LDS reads with gemm(k)'s WMMAs
-    def hot_loop_scheduler():
-        n_spread = n_mma - SCHED_TAIL_MMAS
-        issued = 0
-        for i in range_constexpr(n_spread):
-            want = (i + 1) * n_dsrd // n_spread
-            if want > issued:
-                fx.rocdl.sched_dsrd(want - issued)
-                issued = want
-            fx.rocdl.sched_mfma(1)
-        fx.rocdl.sched_mfma(SCHED_TAIL_MMAS)
-        fx.rocdl.sched_barrier(0)
-
-    def gemm_step(k):
-        r = k % 2
-        fx.gemm(mma_atom, frag_acc, [frag_A[r], frag_sA[r]], [frag_B[r], frag_sB[r]], frag_acc)
-
-    frag_acc.fill(0)
-
-    issue_prologue_tdm()
-    wait_tile(0)
-    fx.barrier()
-    lds_to_regs(0)
-
-    for k in range_constexpr(K_iters):
-        if k + 1 < K_iters:
-            # keep WMMAs from being scheduled across the barrier
-            fx.rocdl.sched_barrier(0)
-            wait_tile(k + 1)
-            fx.rocdl.s_wait_dscnt(0)
-            fx.barrier()
-            fx.rocdl.sched_barrier(0)
-            if k == 0 and NUM_STAGES - 1 < K_iters:
-                issue_tdm(NUM_STAGES - 1)
-            if k + NUM_STAGES < K_iters:
-                # scale group g >= SCALE_STAGES: issued at k = SCALE_GROUP * (g - 1)
-                g_next = k // SCALE_GROUP + 1
-                if k % SCALE_GROUP == 0 and SCALE_STAGES <= g_next < num_groups:
-                    issue_tdm(k + NUM_STAGES, scale_group=g_next)
-                else:
-                    issue_tdm(k + NUM_STAGES)
-            lds_to_regs(k + 1)
-            gemm_step(k)
-            hot_loop_scheduler()
-        else:
-            gemm_step(k)
-
     if const_expr(OUT_KIND == 0):
         frag_c = frag_acc
     else:
-        frag_c = fx.make_fragment_like(frag_acc, out_fx)
-        frag_c.store(frag_acc.load().to(out_fx))
+        frag_c = [[fx.make_fragment_like(acc, out_fx) for acc in acc_row] for acc_row in frag_acc]
+        for i in range_constexpr(A_REPS):
+            for j in range_constexpr(B_REPS):
+                frag_c[i][j].store(frag_acc[i][j].load().to(out_fx))
 
     # accumulator (v, j, i) is tile row wm*16 + 8*khalf + v + 32*i, column wn*16 + lane_mod16 + 64*j
     fx.rocdl.s_wait_dscnt(0)
@@ -459,10 +549,7 @@ def gemm_kernel(
         for ii in range_constexpr(4):
             for j in range_constexpr(4):
                 for v in range_constexpr(8):
-                    src_c = fx.make_view(
-                        fx.add_offset(fx.get_iter(frag_c), v + 8 * j + 32 * (4 * h + ii)),
-                        fx.make_layout(1, 1),
-                    )
+                    src_c = frag_view(frag_c[4 * h + ii][j], v, fx.make_layout(1, 1))
                     dst_c = fx.make_view(
                         fx.add_offset(lds_C_ptr, lane_c + (32 * ii + v) * BLOCK_N + 64 * j),
                         fx.make_layout(1, 1),
@@ -487,12 +574,13 @@ def launch_gemm(
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
-    K_iters: fx.Constexpr[int],
+    K_SHORT: fx.Constexpr[int],
+    K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_tot = (M // BLOCK_M) * (N // BLOCK_N)
-    gemm_kernel(A, B, A_s, B_s, C, M, N, K, As_sw, Bs_sw, K_iters, OUT_KIND).launch(
+    gemm_kernel(A, B, A_s, B_s, C, M, N, K, As_sw, Bs_sw, K_SHORT, K_REM, OUT_KIND).launch(
         grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream
     )
 
@@ -515,6 +603,15 @@ def _scale_row_words(scale, rows, K):
     if rows * (scale.stride(0) // 4) > 2**31 - 1:
         raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 scale offsets exceed 32 bits ({rows} rows)")
     return scale.stride(0) // 4
+
+
+def k_loop_constexprs(K):
+    """(K_SHORT, K_REM): the K tile count if the kernel needs no K loop, else K tiles mod
+    K_LOOP_BODY, so that kernels are compiled per remainder, not per K."""
+    k_iters = K // BLOCK_K
+    if k_iters < 2 * K_LOOP_BODY:
+        return k_iters, 0
+    return 0, k_iters % K_LOOP_BODY
 
 
 def check_mxfp4_shape(m, n, k):
@@ -577,7 +674,7 @@ def mxfp4_matmul(
         k,
         _scale_row_words(a_scale, m, k),
         _scale_row_words(b_scale, n, k),
-        k // BLOCK_K,
+        *k_loop_constexprs(k),
         OUT_KINDS[D.dtype],
         stream=stream,
     )
