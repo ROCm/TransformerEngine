@@ -8,8 +8,6 @@ MXFP4 columnwise storage is a materialized transpose, so this one kernel serves 
 Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS by TDM.
 """
 
-import functools
-
 import torch
 
 import flydsl.compiler as flyc
@@ -37,8 +35,9 @@ SCALE_STAGES = 2
 LDS_B_START = 64 * 1024
 C_HALF_ROWS = BLOCK_M // 2  # C is stored in two halves
 C_WAVE_ROWS = C_HALF_ROWS // NUM_WAVES
-# Logical 16 B chunk c of row r is stored at chunk c ^ ((r >> 2) & 3) to avoid LDS bank conflicts
-SWZ_CHUNKS = 4
+# A/B LDS rows: 16 words padded to 20 by the TDM, so ds_load_b128 reads avoid bank conflicts
+ROW_WORDS = 16
+LDS_ROW_WORDS = 20
 SCHED_TAIL_MMAS = 8
 # Each lane's scale words are made contiguous so they load as ds_load_b128
 SCALE_LANE_ROWS_A = 32
@@ -100,31 +99,32 @@ def gemm_kernel(
     A_words = as_words(A, M, k_words)
     B_words = as_words(B, N, k_words)
 
-    # physical chunks of this lane's logical chunks khalf and khalf + 2 (same for all its rows)
-    swz = (lane_mod16 // 4) % SWZ_CHUNKS
-    chunk_lo = khalf ^ swz
-    chunk_hi = chunk_lo ^ 2
-    a_lds_lo = (wm * 16 + lane_mod16) * 16 + 4 * chunk_lo
-    a_lds_hi = (wm * 16 + lane_mod16) * 16 + 4 * chunk_hi
-    b_lds_lo = (wn * 16 + lane_mod16) * 16 + 4 * chunk_lo
-    b_lds_hi = (wn * 16 + lane_mod16) * 16 + 4 * chunk_hi
+    # this lane's 16 B chunks khalf and khalf + 2
+    a_lds_lo = (wm * 16 + lane_mod16) * LDS_ROW_WORDS + 4 * khalf
+    a_lds_hi = a_lds_lo + 8
+    b_lds_lo = (wn * 16 + lane_mod16) * LDS_ROW_WORDS + 4 * khalf
+    b_lds_hi = b_lds_lo + 8
     as_lds_base = (wm * 16 + lane_mod16) * (BLOCK_M // SCALE_LANE_ROWS_A)
     bs_lds_base = (wn * 16 + lane_mod16) * (BLOCK_N // SCALE_LANE_ROWS_B)
 
     # tile k lives in LDS page k % NUM_STAGES
     smem = fx.SharedAllocator(static=False)
-    lds_A = smem.allocate(fx.Array[fx.Int32, NUM_STAGES * BLOCK_M * 16]).peek()
+    PAGE_A, PAGE_B = BLOCK_M * LDS_ROW_WORDS, BLOCK_N * LDS_ROW_WORDS
+    lds_A = smem.allocate(fx.Array[fx.Int32, NUM_STAGES * PAGE_A]).peek()
     # B starts at 64 KB so all its pages are reachable with immediate offsets from one base register
-    smem.allocate(fx.Array[fx.Int32, LDS_B_START // 4 - NUM_STAGES * BLOCK_M * 16])
-    lds_B = smem.allocate(fx.Array[fx.Int32, NUM_STAGES * BLOCK_N * 16]).peek()
-    box_A = fx.make_layout((BLOCK_M, 16), (16, 1))
+    smem.allocate(fx.Array[fx.Int32, LDS_B_START // 4 - NUM_STAGES * PAGE_A])
+    lds_B = smem.allocate(fx.Array[fx.Int32, NUM_STAGES * PAGE_B]).peek()
+    box_A = fx.make_layout((BLOCK_M, ROW_WORDS), (LDS_ROW_WORDS, 1))
     sA = fx.make_view(
-        lds_A.ptr, fx.make_layout(((BLOCK_M, 16), NUM_STAGES), ((16, 1), BLOCK_M * 16))
+        lds_A.ptr,
+        fx.make_layout(((BLOCK_M, ROW_WORDS), NUM_STAGES), ((LDS_ROW_WORDS, 1), PAGE_A)),
     )
-    box_B = fx.make_layout((BLOCK_N, 16), (16, 1))
+    box_B = fx.make_layout((BLOCK_N, ROW_WORDS), (LDS_ROW_WORDS, 1))
     sB = fx.make_view(
-        lds_B.ptr, fx.make_layout(((BLOCK_N, 16), NUM_STAGES), ((16, 1), BLOCK_N * 16))
+        lds_B.ptr,
+        fx.make_layout(((BLOCK_N, ROW_WORDS), NUM_STAGES), ((LDS_ROW_WORDS, 1), PAGE_B)),
     )
+    pad = dict(pad_interval=ROW_WORDS, pad_amount=LDS_ROW_WORDS - ROW_WORDS)
 
     num_groups = (K_iters + SCALE_GROUP - 1) // SCALE_GROUP
     tail_tiles = K_iters - (num_groups - 1) * SCALE_GROUP
@@ -154,15 +154,16 @@ def gemm_kernel(
         half_box,
     )
     tdm_A = fx.rocdl.make_tdm_atom(
-        gA_half, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
+        gA_half, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
     tdm_B = fx.rocdl.make_tdm_atom(
-        gB_half, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
+        gB_half, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
 
     def lds_half(base_ptr, page):
         return fx.make_view(
-            fx.add_offset(base_ptr, page * BLOCK_M * 16 + tdm_wave * HALF_ROWS * 16), half_box
+            fx.add_offset(base_ptr, page * PAGE_A + tdm_wave * HALF_ROWS * LDS_ROW_WORDS),
+            half_box,
         )
 
     # prologue atoms: whole tiles and scales
@@ -221,10 +222,10 @@ def gemm_kernel(
     gA_full = fx.make_view(fx.add_offset(fx.get_iter(A_words), bid_m * BLOCK_M * k_words), box_A)
     gB_full = fx.make_view(fx.add_offset(fx.get_iter(B_words), bid_n * BLOCK_N * k_words), box_B)
     tdm_A_full = fx.rocdl.make_tdm_atom(
-        gA_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
+        gA_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
     tdm_B_full = fx.rocdl.make_tdm_atom(
-        gB_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1
+        gB_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
 
     # C store: each wave writes C_WAVE_ROWS rows of each half
@@ -313,7 +314,7 @@ def gemm_kernel(
                         fx.copy(
                             tdm_A_full,
                             gA_full,
-                            fx.make_view(fx.add_offset(sA_base_ptr, page * BLOCK_M * 16), box_A),
+                            fx.make_view(fx.add_offset(sA_base_ptr, page * PAGE_A), box_A),
                             imm_offset=k_off,
                         )
                     else:
@@ -323,7 +324,7 @@ def gemm_kernel(
                         fx.copy(
                             tdm_B_full,
                             gB_full,
-                            fx.make_view(fx.add_offset(sB_base_ptr, page * BLOCK_N * 16), box_B),
+                            fx.make_view(fx.add_offset(sB_base_ptr, page * PAGE_B), box_B),
                             imm_offset=k_off,
                         )
                     else:
@@ -352,15 +353,14 @@ def gemm_kernel(
 
     def lds_to_regs(k):
         page, r = k % NUM_STAGES, k % 2
-        # one copy per swizzled chunk; registers stay in logical chunk order
         for h, a_off, b_off in ((0, a_lds_lo, b_lds_lo), (1, a_lds_hi, b_lds_hi)):
             src_A = fx.make_view(
-                fx.add_offset(sA_base_ptr, page * BLOCK_M * 16 + a_off),
-                fx.make_layout((4, 8), (1, 32 * 16)),
+                fx.add_offset(sA_base_ptr, page * PAGE_A + a_off),
+                fx.make_layout((4, 8), (1, 32 * LDS_ROW_WORDS)),
             )
             src_B = fx.make_view(
-                fx.add_offset(sB_base_ptr, page * BLOCK_N * 16 + b_off),
-                fx.make_layout((4, 4), (1, 64 * 16)),
+                fx.add_offset(sB_base_ptr, page * PAGE_B + b_off),
+                fx.make_layout((4, 4), (1, 64 * LDS_ROW_WORDS)),
             )
             fx.copy(
                 copy_atom_i32,
@@ -554,19 +554,6 @@ def shuffle_scales(
     ).launch(grid=(grid_r, words_per_row, 1), block=(block_rows, 1, 1), stream=stream)
 
 
-@functools.lru_cache(maxsize=None)
-def _swizzle_index(rows: int, K: int, device: torch.device) -> torch.Tensor:
-    swz = (torch.arange(rows, device=device) >> 2) & (SWZ_CHUNKS - 1)
-    src_chunk = torch.arange(SWZ_CHUNKS, device=device)[None, :] ^ swz[:, None]
-    return src_chunk[:, None, :, None].expand(rows, K // BLOCK_K, SWZ_CHUNKS, 4)
-
-
-def swizzle_operand(q, rows, K):
-    """Copy of packed FP4 operand q [rows, K/2] with the LDS chunk swizzle applied."""
-    words = q.view(torch.int32).view(rows, K // BLOCK_K, SWZ_CHUNKS, 4)
-    return words.gather(2, _swizzle_index(rows, K, q.device)).view(torch.uint8).view(rows, K // 2)
-
-
 def _shuffle_scale_words(scale, rows, K, block_rows, lane_rows, stream):
     """Reorder TE E8M0 scales (possibly padded) into the kernel's iteration-major order."""
     if scale.dtype != torch.uint8 or scale.ndim != 2:
@@ -636,15 +623,20 @@ def mxfp4_matmul(
 
     if stream is None:
         stream = torch.cuda.current_stream(a.device)
-    a_u8 = a.view(torch.uint8)
-    b_u8 = b.view(torch.uint8)
     a_scale_k = _shuffle_scale_words(a_scale, m, k, BLOCK_M, SCALE_LANE_ROWS_A, stream)
     b_scale_k = _shuffle_scale_words(b_scale, n, k, BLOCK_N, SCALE_LANE_ROWS_B, stream)
-    with torch.cuda.stream(stream):
-        a_k = swizzle_operand(a_u8, m, k)
-        b_k = swizzle_operand(b_u8, n, k)
     launch_gemm(
-        a_k, b_k, a_scale_k, b_scale_k, D, m, n, k, k // BLOCK_K, OUT_KINDS[D.dtype], stream=stream
+        a.view(torch.uint8),
+        b.view(torch.uint8),
+        a_scale_k,
+        b_scale_k,
+        D,
+        m,
+        n,
+        k,
+        k // BLOCK_K,
+        OUT_KINDS[D.dtype],
+        stream=stream,
     )
     return D
 
