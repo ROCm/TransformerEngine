@@ -19,10 +19,8 @@ __device__ __forceinline__ __attribute__((address_space(3))) T *lds_ptr(uint32_t
     return reinterpret_cast<__attribute__((address_space(3))) T *>(static_cast<uintptr_t>(addr));
 }
 
-// Bytes per column of the C tile staged column-major in LDS.
 constexpr int staged_stride(int elem_bytes) { return BLOCK_M * elem_bytes + 16; }
 
-// Cluster bits (x fastest) of the workgroups in one column of a cx x cy cluster.
 constexpr uint32_t cluster_col_bits(int cx, int cy) {
     uint32_t bits = 0;
     for (int y = 0; y < cy; y++) {
@@ -31,7 +29,6 @@ constexpr uint32_t cluster_col_bits(int cx, int cy) {
     return bits;
 }
 
-// The first n of the 8 elements at p, one vector access when vec (then n is 8).
 template <typename T>
 __device__ __forceinline__ v8f load8(const T *p, int n, bool vec) {
     if (vec) {
@@ -61,8 +58,6 @@ __device__ __forceinline__ void store8(T *p, const V &v, int n, bool vec) {
     }
 }
 
-// Copy-out of the C tile staged in LDS: D = alpha * C (+ beta * D) (+ bias), then GELU (pre-GELU to aux) or
-// times dgelu(aux). EDGE stores only D's rows and columns, element-wise where 8 rows do not fit.
 template <typename StT, Epi E, bool ACC, typename OutT, typename SideT, bool PLAIN_ALPHA, bool EDGE>
 __device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d, const SideT *__restrict__ bias,
                                          SideT *__restrict__ aux, float alpha, float beta, int M, int N, int tile_m,
@@ -73,7 +68,6 @@ __device__ __forceinline__ void copy_out(uint32_t lds0, OutT *__restrict__ d, co
     constexpr int STRIDE     = staged_stride(sizeof(StT));
     constexpr int ROW_CHUNKS = BLOCK_M / 8;
     constexpr int UNROLL     = GELU || E == DGELU || EDGE ? 1 : 4;
-    static_assert(NUM_THREADS % ROW_CHUNKS == 0, "a thread's rows are the same in every column");
     const int m8 = threadIdx.x % ROW_CHUNKS;
     const size_t tile = size_t(tile_n) * BLOCK_N * M + size_t(tile_m) * BLOCK_M + m8 * 8;
     const int rows = EDGE ? std::clamp(M - tile_m * BLOCK_M - m8 * 8, 0, 8) : 8;

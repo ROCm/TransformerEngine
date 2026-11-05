@@ -14,7 +14,6 @@ constexpr int REDUCE_THREADS    = 256;
 constexpr int REDUCE_MAX_BLOCKS = 65536;
 constexpr int WS_ALIGN          = 256;
 
-// D = alpha * (sum of the split partials in split order) (+ beta * D), eight rows per thread.
 template <typename OutT, bool ACC>
 __global__ void __launch_bounds__(REDUCE_THREADS)
 splitk_reduce_kernel(const float *__restrict__ ws, OutT *__restrict__ D, float alpha, float beta,
@@ -33,24 +32,15 @@ splitk_reduce_kernel(const float *__restrict__ ws, OutT *__restrict__ D, float a
     }
 }
 
-template <typename OutT, bool ACC>
+template <typename OutT>
 static void launch_reduce(const GemmArgs &args, const void *workspace, int splits) {
     const size_t mn     = size_t(args.M) * args.N;
     const size_t blocks = std::min<size_t>((mn / 8 + REDUCE_THREADS - 1) / REDUCE_THREADS, REDUCE_MAX_BLOCKS);
-    const auto kernel = splitk_reduce_kernel<OutT, ACC>;
+    const auto kernel = args.beta != 0.f ? splitk_reduce_kernel<OutT, true> : splitk_reduce_kernel<OutT, false>;
     hipLaunchKernelGGL(kernel, dim3(blocks), dim3(REDUCE_THREADS), 0, args.stream,
                        static_cast<const float *>(workspace), static_cast<OutT *>(args.C), args.alpha, args.beta,
                        mn, splits);
     kittens_check(hipGetLastError(), "gfx1250 splitk_reduce_kernel");
-}
-
-template <typename OutT>
-static void launch_reduce(const GemmArgs &args, const void *workspace, int splits) {
-    if (args.beta != 0.f) {
-        launch_reduce<OutT, true>(args, workspace, splits);
-    } else {
-        launch_reduce<OutT, false>(args, workspace, splits);
-    }
 }
 
 void splitk_reduce(const GemmArgs &args, const void *workspace, int splits) {
@@ -67,32 +57,6 @@ static bool aligned16(const void *p) {
     return reinterpret_cast<uintptr_t>(p) % 16 == 0;
 }
 
-static bool splitk_fits(const GemmArgs &args, size_t workspace_size, int k_block, int S) {
-    return S <= args.K / k_block && args.M % 8 == 0 &&
-           size_t(args.M) * args.N * S * sizeof(float) <= workspace_size;
-}
-
-// Split-K factor S (whole k_block slices, M % 8 == 0): NVTE_HK_SPLITK forces S when legal, auto picks S in
-// {1,2,4,8,16} minimising the one-wave cost K/S + a + b*tiles*S/cus.
-static int splitk_pick(const GemmArgs &args, size_t workspace_size, int k_block) {
-    constexpr double a = 512;
-    constexpr double b = 2048;
-    const int64_t tiles = int64_t(ceil_div(args.M, BLOCK_M)) * ceil_div(args.N, BLOCK_N);
-    if (args.splitk != 0) {
-        return args.splitk > 1 && splitk_fits(args, workspace_size, k_block, args.splitk) ? args.splitk : 1;
-    }
-    int best = 1;
-    double best_t = args.K;
-    for (int S = 2; S <= 16 && tiles * S <= args.cu_count; S *= 2) {
-        const double t = double(args.K) / S + a + b * double(tiles * S) / args.cu_count;
-        if (splitk_fits(args, workspace_size, k_block, S) && t < best_t) {
-            best = S;
-            best_t = t;
-        }
-    }
-    return best;
-}
-
 class GemmCdna5 final : public GemmBackend {
  public:
     bool gemm(const GemmArgs &args) override {
@@ -102,7 +66,6 @@ class GemmCdna5 final : public GemmBackend {
         if (!(mxfp8 || bf16) || (args.transa && args.transb)) {
             return false;
         }
-        // MXFP8: whole scale blocks of K, and DWord rows of an M- or N-contiguous operand.
         if (args.M <= 0 || args.N <= 0 || args.K <= 0 ||
             (mxfp8 && (args.M % 4 != 0 || args.N % 4 != 0 || args.K % 32 != 0))) {
             return false;
@@ -112,7 +75,6 @@ class GemmCdna5 final : public GemmBackend {
             return false;
         }
 
-        // Bias and aux share one dtype.
         const bool bias = args.bias != nullptr;
         const bool aux  = args.aux_gelu != nullptr;
         if ((bias && aux && args.bias_dtype != args.aux_dtype) || (args.grad && bias && aux)) {
@@ -124,36 +86,47 @@ class GemmCdna5 final : public GemmBackend {
         } else if (bias || aux) {
             epi = !aux ? BIAS : bias ? GELU_AUX_BIAS : GELU_AUX;
         }
-        // TN stores a 16-bit D without epilogue as accumulated, with no alpha (no training path).
         if (args.transa && epi == NONE && args.beta == 0.f && args.out_dtype != KITTENS_FLOAT32 &&
             args.alpha != 1.f) {
             return false;
         }
 
-        // Split partials start 256 B aligned. A slice holds whole K-blocks, 256 for MXFP8 or 128;
-        // a K % k_block head joins slice 0.
         const uintptr_t ws_raw = reinterpret_cast<uintptr_t>(args.workspace);
         const uintptr_t ws     = (ws_raw + WS_ALIGN - 1) & ~uintptr_t(WS_ALIGN - 1);
         const size_t pad     = ws - ws_raw;
         const size_t ws_size = args.workspace_size > pad ? args.workspace_size - pad : 0;
         const int k_block = mxfp8 ? MXFP8_BLOCK_K : BF16_BLOCK_K;
-        const int splits  = epi == NONE ? splitk_pick(args, ws_size, k_block) : 1;
+        const int64_t tiles = int64_t(ceil_div(args.M, BLOCK_M)) * ceil_div(args.N, BLOCK_N);
+        const size_t split_bytes = size_t(args.M) * args.N * sizeof(float);
+        int splits = 1;
+        if (epi == NONE && args.M % 8 == 0) {
+            if (args.splitk > 1 && args.splitk <= args.K / k_block && split_bytes * args.splitk <= ws_size) {
+                splits = args.splitk;
+            }
+            double best_t = args.K;
+            for (int s = 2; args.splitk == 0 && s <= 16 && tiles * s <= args.cu_count; s *= 2) {
+                const double t = double(args.K) / s + 512 + 2048 * double(tiles * s) / args.cu_count;
+                if (s <= args.K / k_block && split_bytes * s <= ws_size && t < best_t) {
+                    splits = s;
+                    best_t = t;
+                }
+            }
+        }
 
         void *workspace = reinterpret_cast<void *>(ws);
         const bool mcast = use_mcast();
-        if (args.transa) {
-            return mxfp8 ? launch_mxfp8<TN>(args, workspace, splits, epi, mcast)
-                         : launch_bf16<TN>(args, workspace, splits, epi, mcast);
+        if (args.transa && !args.transb) {
+            return mxfp8 ? launch_mxfp8<true, false>(args, workspace, splits, epi, mcast)
+                         : launch_bf16<true, false>(args, workspace, splits, epi, mcast);
         }
-        if (args.transb) {
-            return mxfp8 ? launch_mxfp8<NT>(args, workspace, splits, epi, mcast)
-                         : launch_bf16<NT>(args, workspace, splits, epi, mcast);
+        if (!args.transa && args.transb) {
+            return mxfp8 ? launch_mxfp8<false, true>(args, workspace, splits, epi, mcast)
+                         : launch_bf16<false, true>(args, workspace, splits, epi, mcast);
         }
-        return mxfp8 ? launch_mxfp8<NN>(args, workspace, splits, epi, mcast)
-                     : launch_bf16<NN>(args, workspace, splits, epi, mcast);
+        return mxfp8 ? launch_mxfp8<false, false>(args, workspace, splits, epi, mcast)
+                     : launch_bf16<false, false>(args, workspace, splits, epi, mcast);
     }
 
-    // No gfx1250 grouped kernels: grouped GEMMs take CK or the per-expert path.
     bool grouped_gemm(const MXFP8GroupedGemmArgs &) override { return false; }
     bool grouped_wgrad(const MXFP8WgradArgs &) override { return false; }
 };

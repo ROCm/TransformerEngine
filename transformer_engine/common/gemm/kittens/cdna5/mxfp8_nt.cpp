@@ -8,6 +8,6 @@
 
 namespace te_kittens::cdna5 {
 
-template bool launch_mxfp8<NT>(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast);
+template bool launch_mxfp8<false, true>(const GemmArgs &args, void *workspace, int splits, Epi epi, bool mcast);
 
 }  // namespace te_kittens::cdna5

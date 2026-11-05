@@ -656,7 +656,7 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
     }
     return std::nullopt;
   } else {
-    return "HipKittens requires gfx942, gfx950 or gfx1250";
+    return "HipKittens requires gfx942+";
   }
 #else
   return "HipKittens requires ROCm";
