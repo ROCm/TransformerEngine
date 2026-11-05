@@ -296,23 +296,23 @@ __device__ __forceinline__ uint8_t cvt_f32_to_fp4_rne(float v, float scale_rcp) 
     uint8_t sign = (scaled < 0.0f) ? 0x8 : 0x0;
     float mag = fabsf(scaled);
 
-    // E2M1 magnitude encoding (RNE boundaries are midpoints):
-    //   [0, 0.25)     -> 0  (0.0)
-    //   [0.25, 0.75)  -> 1  (0.5)
-    //   [0.75, 1.25)  -> 2  (1.0)
-    //   [1.25, 1.75)  -> 3  (1.5)
-    //   [1.75, 2.5)   -> 4  (2.0)
-    //   [2.5, 3.5)    -> 5  (3.0)
-    //   [3.5, 5.0)    -> 6  (4.0)
-    //   [5.0, inf)    -> 7  (6.0)
+    // E2M1 magnitude encoding (RNE: a midpoint goes to the even code):
+    //   [0, 0.25]     -> 0  (0.0)
+    //   (0.25, 0.75)  -> 1  (0.5)
+    //   [0.75, 1.25]  -> 2  (1.0)
+    //   (1.25, 1.75)  -> 3  (1.5)
+    //   [1.75, 2.5]   -> 4  (2.0)
+    //   (2.5, 3.5)    -> 5  (3.0)
+    //   [3.5, 5.0]    -> 6  (4.0)
+    //   (5.0, inf)    -> 7  (6.0)
     uint8_t code;
-    if      (mag < 0.25f)  code = 0;
-    else if (mag < 0.75f)  code = 1;
-    else if (mag < 1.25f)  code = 2;
-    else if (mag < 1.75f)  code = 3;
-    else if (mag < 2.5f)   code = 4;
-    else if (mag < 3.5f)   code = 5;
-    else if (mag < 5.0f)   code = 6;
+    if      (mag <= 0.25f) code = 0;
+    else if (mag <  0.75f) code = 1;
+    else if (mag <= 1.25f) code = 2;
+    else if (mag <  1.75f) code = 3;
+    else if (mag <= 2.5f)  code = 4;
+    else if (mag <  3.5f)  code = 5;
+    else if (mag <= 5.0f)  code = 6;
     else                   code = 7;
 
     return sign | code;
