@@ -590,15 +590,13 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: FlyDSL on gfx1250 if NVTE_GEMM_BACKEND=FLYDSL, else route to AITER a4w4 ASM
-    # kernels, unless the hipBLASLt backend is opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
+    # MXFP4 GEMM: FlyDSL on gfx1250 (no fallback), else route to AITER a4w4 ASM kernels,
+    # unless the hipBLASLt backend is opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        if (
-            IS_HIP_EXTENSION
-            and get_device_compute_capability() == (12, 5)
-            and get_gemm_backend() == "flydsl"
-        ):
-            result = _try_flydsl_gemm(
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5):
+            from ..flydsl_kernels.gemm import te_generic_gemm_flydsl
+
+            out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
                 A,
                 transa,
                 B,
@@ -622,11 +620,9 @@ def general_gemm(
                 alpha=alpha,
                 beta=beta,
             )
-            if result is not None:
-                out, bias_grad, gelu_input, extra_output = result
-                if debug_quantizer is not None:
-                    out = debug_quantizer.process_gemm_output(out)
-                return out, bias_grad, gelu_input, extra_output
+            if debug_quantizer is not None:
+                out = debug_quantizer.process_gemm_output(out)
+            return out, bias_grad, gelu_input, extra_output
         if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
             result = mxfp4_gemm(
                 A,

@@ -18,9 +18,14 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 
 recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=True)
+requires_gfx950 = pytest.mark.skipif(
+    not recipe_available or get_device_compute_capability() != (9, 5),
+    reason="AITER and hipBLASLt MXFP4 GEMMs require gfx950",
+)
 
 try:
     import aiter  # noqa: F401
@@ -122,6 +127,7 @@ _SHAPES = [
 
 # AITER a4w4 backend: shuffled FP4 data + swizzled scales, TN only. Requires the aiter package.
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@requires_gfx950
 @pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
 @pytest.mark.parametrize("M, K, N", _SHAPES)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
@@ -146,6 +152,7 @@ def test_mxfp4_gemm_aiter_versus_reference(
 
 # hipBLASLt F4F4 backend: plain FP4 data, plain or pre-swizzled UE8M0 scales
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@requires_gfx950
 @pytest.mark.parametrize("M, K, N", _SHAPES)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT", "TT"])

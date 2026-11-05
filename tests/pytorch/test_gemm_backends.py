@@ -1167,8 +1167,7 @@ def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
 def test_flydsl_mxfp4_unsupported_shape_raises():
     """MXFP4 configs FlyDSL cannot run raise FlyDSLUnsupportedError.
 
-    That is the type ``general_gemm`` catches to fall back. The native MXFP4
-    GEMM does not run on gfx1250, so the fallback itself is not exercised.
+    ``general_gemm`` raises it, as gfx1250 has no other MXFP4 GEMM.
     """
     from transformer_engine.pytorch.flydsl_kernels.gemm import (
         FlyDSLUnsupportedError,

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.quantization import check_mxfp4_support
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _MXFP4_OK, _MXFP4_REASON = check_mxfp4_support()
 
@@ -25,6 +26,9 @@ from transformer_engine.pytorch.triton_kernels.grouped_gemm_mxfp4_impl import (
 
 pytestmark = [
     pytest.mark.skipif(not _MXFP4_OK, reason=f"MXFP4 unsupported: {_MXFP4_REASON}"),
+    pytest.mark.skipif(
+        _MXFP4_OK and get_device_compute_capability() != (9, 5), reason="requires gfx950"
+    ),
 ]
 
 DTYPE = torch.bfloat16
