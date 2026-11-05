@@ -26,6 +26,15 @@ on:
         required: false
         default: false
         type: boolean
+      skip_build:
+        description: 'DEBUG: Skip the build job and reuse wheels from build_run_id instead'
+        required: false
+        default: false
+        type: boolean
+      build_run_id:
+        description: 'DEBUG: Run ID whose te-rocm-wheels artifact to reuse (required if skip_build)'
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       test_level:
@@ -40,6 +49,14 @@ on:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
         type: boolean
         default: false
+      skip_build:
+        description: 'DEBUG: Skip the build job and reuse wheels from build_run_id instead'
+        type: boolean
+        default: false
+      build_run_id:
+        description: 'DEBUG: Run ID whose te-rocm-wheels artifact to reuse (required if skip_build)'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -77,6 +94,11 @@ jobs:
              exit 1
           fi
 
+          if [[ "${{ inputs.skip_build }}" == "true" && -z "${{ inputs.build_run_id }}" ]]; then
+             echo "::error::skip_build is true but build_run_id was not provided."
+             exit 1
+          fi
+
           BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
           VERSION_KEY="$BRANCH_NAME"
@@ -100,12 +122,14 @@ jobs:
 
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    if: ${{ !inputs.skip_build }}
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
+    if: ${{ !cancelled() && needs.select_image.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.4' }}
     env:
@@ -141,6 +165,8 @@ jobs:
             with:
               name: te-rocm-wheels
               path: dist/
+              run-id: ${{ inputs.skip_build && inputs.build_run_id || github.run_id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
 
           - name: Pull Docker Image
             run: |
@@ -262,6 +288,7 @@ jobs:
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
+    if: ${{ !cancelled() && needs.select_image.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.8' }}
     env:
@@ -291,6 +318,8 @@ jobs:
             with:
               name: te-rocm-wheels
               path: dist/
+              run-id: ${{ inputs.skip_build && inputs.build_run_id || github.run_id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
 
           - name: Pull Docker Image
             run: |
