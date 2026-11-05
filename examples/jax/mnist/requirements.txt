@@ -1,3 +1,5 @@
+# ROCm: Python 3.14 needs datasets>=4.8; encoder/common.py adapts the examples to its API.
+# datasets<4.0.0
 datasets>=4.8.0
 flax>=0.7.1
 optax
