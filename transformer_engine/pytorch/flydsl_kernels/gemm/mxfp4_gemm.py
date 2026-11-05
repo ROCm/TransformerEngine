@@ -82,6 +82,8 @@ def gemm_kernel(
     wm, wn = wave % 2, wave // 2
 
     k_words = K // 8
+    # global offsets in 64 bits: rows * k_words and rows * N exceed 2^31 for large shapes
+    k_words64, N64 = fx.Int64(k_words), fx.Int64(N)
     A_words = as_words(A, M, k_words)
     B_words = as_words(B, N, k_words)
 
@@ -132,11 +134,15 @@ def gemm_kernel(
     HALF_ROWS = BLOCK_M // TDM_WAVES
     half_box = fx.make_layout((HALF_ROWS, 16), (16, 1))
     gA_half = fx.make_view(
-        fx.add_offset(fx.get_iter(A_words), (bid_m * BLOCK_M + tdm_wave * HALF_ROWS) * k_words),
+        fx.add_offset(
+            fx.get_iter(A_words), fx.Int64(bid_m * BLOCK_M + tdm_wave * HALF_ROWS) * k_words64
+        ),
         half_box,
     )
     gB_half = fx.make_view(
-        fx.add_offset(fx.get_iter(B_words), (bid_n * BLOCK_N + tdm_wave * HALF_ROWS) * k_words),
+        fx.add_offset(
+            fx.get_iter(B_words), fx.Int64(bid_n * BLOCK_N + tdm_wave * HALF_ROWS) * k_words64
+        ),
         half_box,
     )
     tdm_A = fx.rocdl.make_tdm_atom(
@@ -169,6 +175,7 @@ def gemm_kernel(
         src = fx.get_iter(t)
         return fx.recast_iter(fx.PointerType.get(fx.Int32.ir_type, src.memspace, 4), src)
 
+    # scale offsets stay 32-bit (rows * K / 128 words; the host checks they fit)
     sA_blk = fx.add_offset(scale_ptr(A_s), bid_m * BLOCK_M * As_sw)
     sB_blk = fx.add_offset(scale_ptr(B_s), bid_n * BLOCK_N * Bs_sw)
 
@@ -207,8 +214,12 @@ def gemm_kernel(
     tdm_Bs_tail = scale_atom(gBs_tail, Bs_sw, tail_tiles, SCALE_GROUP)
 
     # whole tiles, for K-loop iterations that also load a scale group
-    gA_full = fx.make_view(fx.add_offset(fx.get_iter(A_words), bid_m * BLOCK_M * k_words), box_A)
-    gB_full = fx.make_view(fx.add_offset(fx.get_iter(B_words), bid_n * BLOCK_N * k_words), box_B)
+    gA_full = fx.make_view(
+        fx.add_offset(fx.get_iter(A_words), fx.Int64(bid_m * BLOCK_M) * k_words64), box_A
+    )
+    gB_full = fx.make_view(
+        fx.add_offset(fx.get_iter(B_words), fx.Int64(bid_n * BLOCK_N) * k_words64), box_B
+    )
     tdm_A_full = fx.rocdl.make_tdm_atom(
         gA_full, [None, None], strides=[fx.Int64(k_words), None], num_warps=1, **pad
     )
@@ -221,14 +232,15 @@ def gemm_kernel(
     c_wave_row = bid_m * BLOCK_M + wave * C_WAVE_ROWS
     gC_wave = [
         fx.make_view(
-            fx.add_offset(fx.get_iter(C), (c_wave_row + h * C_HALF_ROWS) * N + bid_n * BLOCK_N),
+            fx.add_offset(
+                fx.get_iter(C),
+                fx.Int64(c_wave_row + h * C_HALF_ROWS) * N64 + fx.Int64(bid_n * BLOCK_N),
+            ),
             c_wave_box,
         )
         for h in range(2)
     ]
-    tdm_C = fx.rocdl.make_tdm_atom(
-        gC_wave[0], [None, None], strides=[fx.Int64(N), None], num_warps=1
-    )
+    tdm_C = fx.rocdl.make_tdm_atom(gC_wave[0], [None, None], strides=[N64, None], num_warps=1)
     lds_C_wave = fx.make_view(fx.add_offset(lds_C_ptr, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
 
     bC = fx.slice(fx.zipped_divide(C, (BLOCK_M, BLOCK_N)), (None, (bid_m, bid_n)))
@@ -500,6 +512,8 @@ def _scale_row_words(scale, rows, K):
         raise FlyDSLUnsupportedError(
             f"FlyDSL MXFP4 needs word-aligned row-major scales, got strides {scale.stride()}"
         )
+    if rows * (scale.stride(0) // 4) > 2**31 - 1:
+        raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 scale offsets exceed 32 bits ({rows} rows)")
     return scale.stride(0) // 4
 
 
