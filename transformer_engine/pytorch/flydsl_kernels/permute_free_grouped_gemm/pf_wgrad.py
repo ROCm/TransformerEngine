@@ -40,12 +40,14 @@ Fixed configuration (no runtime toggles):
 from __future__ import annotations
 
 import functools
+import inspect
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import rocdl as _rocdl_ops
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import AddressSpace, PointerType, T
@@ -72,12 +74,25 @@ def _align_up(x, align):
     return (x + align - 1) // align * align
 
 
+# Older FlyDSL builds the raw buffer ops' ``aux`` cache policy as a trailing i32 operand; newer
+# releases (>= 0.3.4) take it as an optional keyword attribute that defaults to 0.
+_AUX_IS_OPERAND = (
+    inspect.signature(_rocdl_ops.raw_ptr_buffer_store).parameters["aux"].kind
+    is not inspect.Parameter.KEYWORD_ONLY
+)
+
+
+def _zero_soffset_aux():
+    """Zero ``soffset`` (and ``aux``, where it is an operand) for a raw buffer op."""
+    z = fx.Int32(0).ir_value()
+    return (z, z) if _AUX_IS_OPERAND else (z,)
+
+
 def raw_buffer_load(rsrc, offset, dtype):
-    """Element-offset ``rocdl.raw_ptr_buffer_load`` (flydsl 0.3 aux is an i32 operand)."""
+    """Element-offset ``rocdl.raw_ptr_buffer_load``."""
     ty = dtype.ir_type
     byte_off = fx.Int32(offset) * (ty.width // 8)
-    z = fx.Int32(0).ir_value()
-    return dtype(rocdl.raw_ptr_buffer_load(ty, rsrc, byte_off.ir_value(), z, z))
+    return dtype(_rocdl_ops.raw_ptr_buffer_load(ty, rsrc, byte_off.ir_value(), *_zero_soffset_aux()))
 
 
 def buffer_load_i32(rsrc, offset):
@@ -86,8 +101,7 @@ def buffer_load_i32(rsrc, offset):
 
 def raw_buffer_store(data, rsrc, offset):
     byte_off = fx.Int32(offset) * (type(data).width // 8)
-    z = fx.Int32(0).ir_value()
-    rocdl.raw_ptr_buffer_store(data.ir_value(), rsrc, byte_off.ir_value(), z, z)
+    _rocdl_ops.raw_ptr_buffer_store(data.ir_value(), rsrc, byte_off.ir_value(), *_zero_soffset_aux())
 
 
 
