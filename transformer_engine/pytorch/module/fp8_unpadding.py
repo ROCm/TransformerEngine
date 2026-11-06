@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -80,8 +82,10 @@ class Fp8Unpadding(torch.nn.Module):
     align_size : int, optional
                  Alignment size used to pad each grouped input. If not provided,
                  it is determined from the active recipe on the first forward
-                 pass: 32 for MXFP8, 128 for NVFP4, 16 for other built-in
-                 recipes, and ``CustomRecipe.quantization_alignment`` for custom recipes.
+                 pass: 32 for MXFP8 (on gfx950: 128, or 256 with the HipKittens
+                 grouped GEMM), 128 for NVFP4, 256 for MXFP4, 128 for FP8 block
+                 scaling on ROCm, 16 for other built-in recipes, and
+                 ``CustomRecipe.quantization_alignment`` for custom recipes.
     """
 
     def __init__(

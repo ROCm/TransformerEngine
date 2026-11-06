@@ -346,6 +346,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  hipStream_t stream, int compute_stream_offset = -1);
+// Blockwise FP8 GEMM operand rules. The implementation is in rocm_gemm.cu
+void check_blockwise_fp8_gemm(const Tensor *inputA, const Tensor *inputB, bool transa, bool transb,
+                              size_t k);
 #else // Use cublasLt
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -1045,6 +1048,18 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
                               cudaStream_t stream) {
   using namespace transformer_engine;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // Check the blockwise FP8 rules of every GEMM before any is queued on the compute streams.
+  for (int i = 0; i < num_gemms; i++) {
+    const Tensor *inputA = convertNVTETensorCheck(A[i]);
+    const Tensor *inputB = convertNVTETensorCheck(B[i]);
+    if (is_fp8_block_scaling(inputA->scaling_mode) || is_fp8_block_scaling(inputB->scaling_mode)) {
+      check_blockwise_fp8_gemm(inputA, inputB, transa, transb,
+                               transa ? inputA->flat_last_dim() : inputA->flat_first_dim());
+    }
+  }
+#endif
+
   int num_streams = nvte_get_num_compute_streams();
 
   int num_stream_used = std::min(num_streams, num_gemms);
@@ -1260,7 +1275,11 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   // Otherwise, fall back to cuBLAS.
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
-      true)                               {
+      // The CK/HipKittens grouped GEMMs do not support FP8 block scaling; run it per GEMM.
+      !transformer_engine::is_fp8_block_scaling(
+          transformer_engine::convertNVTETensorCheck(A[0])->scaling_mode) &&
+      !transformer_engine::is_fp8_block_scaling(
+          transformer_engine::convertNVTETensorCheck(B[0])->scaling_mode)) {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
 
     bool handled_by_ck = false;

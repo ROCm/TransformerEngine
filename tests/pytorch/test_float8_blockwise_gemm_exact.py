@@ -89,6 +89,8 @@ def cublas_gemm_fp8_blockwise_case(
         )
         if not supported:
             pytest.skip(reason)
+        if K % 128 != 0:
+            pytest.skip("ROCm blockwise FP8 GEMM requires K % 128 == 0")
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -271,7 +273,8 @@ def cublas_gemm_test_constraint_enforced(
             is_x_1d_scaled, is_w_1d_scaled,
             x_columnwise=x_columnwise, w_columnwise=w_columnwise,
         )
-        if not supported:
+        # rocm_gemm.cu checks K % 128 before the scaling modes and the layout.
+        if not supported and K % 128 == 0:
             expected_err_msg = reason
     # Setup device and random seed
     device = "cuda"
@@ -975,7 +978,9 @@ def test_illegal_2D_by_2D_enforced(
         (256, 120, 256, False, False),
         # N must be a multiple of 8
         (256, 128, 252, False, False),
-    ],
+    ]
+    # ROCm only: K must be a multiple of 128
+    + ([(256, 192, 256, True, True)] if IS_HIP_EXTENSION else []),
 )
 @pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
@@ -1006,7 +1011,7 @@ def test_unaligned_shapes(
     is_w_1d_scaled,
 ) -> None:
     if IS_HIP_EXTENSION:
-        legal = (K % 16 == 0) and (N % 16 == 0)  # M is unconstrained for rocm
+        legal = (K % 128 == 0) and (N % 16 == 0)  # M is unconstrained for rocm
         if not legal:
             cublas_gemm_test_constraint_enforced(
                 x_dtype,
@@ -1019,7 +1024,12 @@ def test_unaligned_shapes(
                 use_split_accumulator,
                 is_x_1d_scaled,
                 is_w_1d_scaled,
-                expected_err_msg="must be multiple of 16",
+                # rocm_gemm.cu checks K before N (the GEMM M)
+                expected_err_msg=(
+                    "must be multiple of 128 for blockwise FP8 scaling"
+                    if K % 128 != 0
+                    else "must be multiple of 16"
+                ),
             )
         else:
             cublas_gemm_fp8_blockwise_case(
