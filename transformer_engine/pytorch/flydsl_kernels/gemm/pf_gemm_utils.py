@@ -13,13 +13,8 @@
 
 """FlyDSL helpers for permute-free MoE grouped GEMM (Mega 8-wave / 32x32x16).
 
-Shared building blocks for ``pf_fwd.py`` and ``pf_dgrad.py``. Dense 4-wave BF16
-utilities live in ``fp16_gemm_utils.py``. The Mega 8-wave pipelined MMA loop
-lives here as ``dense_mma_pipeline_bf16`` (independent of the 4-wave
-``half_prec_gemm`` core), with the NT/NN gather tiles
-(``gemm_bf16_nt_gather_tile``, ``gemm_bf16_nn_gather_tile``). Each gather tile carries a
-compile-time ``gather`` flag selecting the A-gather variant (FC1 fwd / FC2 dgrad) or the
-contiguous route-read/dense variant (FC2 fwd / FC1 dgrad).
+Shared by ``pf_fwd.py`` and ``pf_dgrad.py``: the 8-wave MMA pipeline plus NT/NN tiles whose
+compile-time ``gather`` flag selects gathered (FC1 fwd / FC2 dgrad) or contiguous A rows.
 """
 
 import flydsl.expr as fx
@@ -213,13 +208,9 @@ class StoreCBf16:
 
 
 class RouteI32Loader:
-    """Copy-atom scalar i32 loader for a 1-D route/index tensor.
+    """Scalar i32 loader for a 1-D index tensor; out-of-range slots read hardware zero.
 
-    Replaces the removed ``buffer_load(rsrc, off, vec_width=1, dtype=i32)``: a
-    ``max_size`` buffer tensor so an out-of-range slot reads OOB (hardware 0),
-    and a linear ``logical_divide`` so the slice coordinate is the element index.
-    Build once per tensor; the copy atom is shared and a fresh register is
-    allocated per load (a shared register would alias across live loads).
+    Each load gets a fresh register: a shared one would alias across live loads.
     """
 
     def __init__(self, tensor):
@@ -239,13 +230,9 @@ def buffer_load_i32(loader, off):
 
 
 def _global_swizzle_bf16(lane_id, wave_id, K, n_rounds, src_row):
-    """Per-lane global A element offsets for the flat-buffer bf16 (gather) pipeline.
+    """Per-lane global A offsets, with tile row ``row`` fetched from global row ``src_row(row)``.
 
-    ``src_row`` is a callable mapping the contiguous *tile* row to its global source row;
-    the public variants below differ only in that mapping. The bank swizzle (``c``) stays
-    keyed on the tile row so the LDS destination layout -- and therefore the S2R
-    transpose-read -- is unchanged; only the global fetch address is redirected. Any index
-    loads happen once (K-invariant) and amortize over the whole K-loop.
+    The bank swizzle stays keyed on the tile row, so the LDS layout is the same for every mapping.
     """
     offsets = []
     n_waves = fx.block_dim.x // 64
@@ -263,15 +250,7 @@ def compute_global_swizzle_bf16(lane_id, wave_id, K, n_rounds):
 
 
 def compute_global_gather_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_res, sorted_row_base):
-    """Per-lane global A offsets for a *gathering* grouped GEMM.
-
-    Identical to :func:`compute_global_swizzle_bf16` except the tile row is redirected through a
-    gather index: the source row for tile row ``row`` is ``SORTED_IDS[sorted_row_base + row]``
-    instead of the contiguous pool row. The bank swizzle (``c``) is still keyed on the *tile* row
-    so the LDS destination layout (and therefore the S2R transpose-read) is unchanged -- only the
-    global fetch address is redirected. The index loads happen once (K-invariant), so they are
-    amortized over the whole K-loop.
-    """
+    """Gathered A offsets: tile row ``row`` reads ``SORTED[sorted_row_base + row]``."""
     return _global_swizzle_bf16(
         lane_id,
         wave_id,
@@ -282,14 +261,7 @@ def compute_global_gather_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_res
 
 
 def compute_global_identity_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_row_base):
-    """Per-lane global A offsets reading the *route row directly* (identity gather).
-
-    Same flat-buffer pipeline as :func:`compute_global_gather_swizzle_bf16` but the source row is
-    ``sorted_row_base + row`` computed arithmetically instead of loaded from a gather table. This
-    is the FC2 route-read (``index_a_by_route_pos``) path: it needs no ``sorted_slot_ids`` tensor,
-    so it stays inside a HIP graph capture (no per-call identity allocation) while reusing the
-    proven whole-buffer / base-0 gather tile (avoiding the per-tile A-rebase multi-block hazard).
-    """
+    """Identity A offsets (row ``sorted_row_base + row``), so FC2 needs no index tensor."""
     return _global_swizzle_bf16(
         lane_id, wave_id, K, n_rounds, lambda row: sorted_row_base + row
     )
@@ -543,14 +515,7 @@ def gemm_bf16_nt_gather_tile(
     b_group_base,
     gather=True,
 ):
-    """One NT tile of the grouped GEMM with the A rows *gathered* via ``sorted_slot_ids``.
-
-    Identical to Primus-Turbo / Mega ``gemm_bf16_nt_tile`` except:
-      * the two LDS A half-tiles use *gather* swizzles (rows redirected through
-        ``sorted_slot_ids[sorted_row_base + tile_row]``), so the A base offset is 0 and only the
-        K-step rides the load ``soffset``;
-      * ``C`` is already rebased to this tile's row block by the caller, so the store block_m is 0.
-    """
+    """Mega ``gemm_bf16_nt_tile`` with gathered (or identity) A rows; ``C`` is pre-rebased."""
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
     assert K % BLOCK_K == 0, f"bf16 NT gather needs K % {BLOCK_K} == 0 (got K={K})"
     N_TILES_A = BLOCK_M // 128
@@ -566,7 +531,7 @@ def gemm_bf16_nt_gather_tile(
     wave_m = wave_id // 4
     wave_n = wave_id % 4
 
-    # A rows carried by the gather offsets -> global base is 0 (K rides soffset only).
+    # The gather offsets carry the A row, so the A base is 0.
     A0_gl_offset = fx.Int32(0)
     A1_gl_offset = fx.Int32(0)
     B0_gl_offset = (block_n * BLOCK_N) * K
@@ -575,17 +540,13 @@ def gemm_bf16_nt_gather_tile(
         B0_gl_offset = B0_gl_offset + b_group_base
         B1_gl_offset = B1_gl_offset + b_group_base
 
-    # ``A`` MUST be a flat 1D buffer view (built by the caller): a linear gather offset
-    # (src_row*K + col) indexes row-major elements. A raw 2D tensor's logical_divide/slice
-    # indexes the outer (row) dim, so a flat offset runs off the end -> garbage.
+    # ``A`` must be a flat 1D view: on a 2D tensor the flat offset would index rows.
     gA = make_byte_buffer_tensor(A)
     gB = make_byte_buffer_tensor(B_T)
     a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
     b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
-    # Two gather swizzles: the lo half covers tile rows [0, LDS_BLOCK_M), the hi half
-    # [LDS_BLOCK_M, BLOCK_M); each redirects its tile row through sorted_slot_ids. The two
-    # halves gather independent rows, so they need distinct loaders (a_g2s / a_g2s_hi).
+    # The lo/hi LDS half-tiles map independent rows, so each needs its own loader.
     if gather:
         gl_off_a_lo = compute_global_gather_swizzle_bf16(
             lane_id, wave_id, K, N_LDS_ROUNDS, sorted_res, sorted_row_base
@@ -594,7 +555,6 @@ def gemm_bf16_nt_gather_tile(
             lane_id, wave_id, K, N_LDS_ROUNDS, sorted_res, sorted_row_base + fx.Int32(LDS_BLOCK_M)
         )
     else:
-        # FC2 route-read: identity (row = route position), no sorted_slot_ids load.
         gl_off_a_lo = compute_global_identity_swizzle_bf16(
             lane_id, wave_id, K, N_LDS_ROUNDS, sorted_row_base
         )
@@ -656,20 +616,10 @@ def gemm_bf16_nn_gather_tile(
     b_group_base,
     gather=True,
 ):
-    """One NN dgrad tile, contracting over ``Kc`` (= N) on the transpose-read B path.
+    """One NN dgrad tile contracting over ``Kc`` (= N); ``C`` is pre-rebased.
 
-    Single self-contained tile for both NN dgrad flavours (mirrors :func:`gemm_bf16_nt_gather_tile`),
-    selected by the compile-time ``gather`` flag:
-
-    * ``gather=True`` (FC2 dgrad): ``A`` is the flat token-space grad buffer; each tile row is
-      redirected through ``sorted_slot_ids[sorted_row_base + row]`` (A base 0, two loaders for the
-      independently-gathered lo/hi halves).
-    * ``gather=False`` (FC1 dgrad): ``A`` is the route-ordered grad tile, **pre-rebased to this
-      tile's row block by the caller in i64** (so the base pointer -- not an i32 offset -- carries
-      ``block_m``, avoiding the int32 multi-block overflow). Rows are read contiguously with a
-      single loader (``a_g2s_hi=None`` aliases to ``a_g2s`` in the pipeline).
-
-    ``C`` is rebased to this tile's row block by the caller in both cases, so the store block_m is 0.
+    ``gather=True``: ``A`` is the flat token-space grad, rows gathered via ``SORTED``.
+    ``gather=False``: ``A`` is the route-ordered grad tile, pre-rebased in i64 by the caller.
     """
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
     assert Kc % BLOCK_K == 0, f"NN gather needs N % {BLOCK_K} == 0 (got N={Kc})"
@@ -699,9 +649,7 @@ def gemm_bf16_nn_gather_tile(
     b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
     if gather:
-        # Two gather swizzles: the lo half covers tile rows [0, LDS_BLOCK_M), the hi half
-        # [LDS_BLOCK_M, BLOCK_M); each redirects its tile row through ``sorted_slot_ids``. The
-        # two halves gather independent rows, so they need distinct loaders (a_g2s / a_g2s_hi).
+        # The lo/hi LDS half-tiles gather independent rows, so each needs its own loader.
         gl_off_a_lo = compute_global_gather_swizzle_bf16(
             lane_id, wave_id, Kc, N_LDS_ROUNDS, sorted_res, sorted_row_base
         )
@@ -717,7 +665,7 @@ def gemm_bf16_nn_gather_tile(
         a_g2s = G2SLoader(a_div, gl_off_a_lo, N_LDS_STEPS_A, fx.BFloat16.ir_type, wave_id)
         a_g2s_hi = G2SLoader(a_div, gl_off_a_hi, N_LDS_STEPS_A, fx.BFloat16.ir_type, wave_id)
     else:
-        # Contiguous halves share one loader; ``a_g2s_hi=None`` aliases to ``a_g2s`` in the pipeline.
+        # Contiguous halves share one loader.
         a_g2s = G2SLoader(a_div, gl_off_a, N_LDS_STEPS_A, fx.BFloat16.ir_type, wave_id)
         a_g2s_hi = None
     b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, fx.BFloat16.ir_type, wave_id)

@@ -1,15 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""FlyDSL permute-free MoE route-list forward gather-GEMM op wrapper.
-
-Mirrors the route-list forward gather-GEMM contract: the fwd/dgrad launch consumes
-``sorted_slot_ids`` and ``expert_ids`` from the routing align (plus ``block_m`` for tile
-geometry). ``block_start`` is not passed here; it is built alongside the align for wgrad only.
-Writes the block-padded ``[R_block, WIDTH_N]`` slot output in place.
-
-Forward gather-GEMM is FlyDSL-only (MegaMOE-ported plain GEMM).
-"""
+"""FlyDSL permute-free MoE fwd/dgrad gather-GEMM op wrapper."""
 
 from __future__ import annotations
 
@@ -19,12 +11,10 @@ __all__ = [
     "flydsl_moe_fwd",
 ]
 
-# MegaMOE hand-tuned bf16 grouped-GEMM tile geometry (offline-swept in primus-turbo's
-# bench_mega_moe: BLOCK_N=256, GROUP_M=4 fwd / GROUP_M=8 FC1 NN dgrad, num_xcd=1).
-# ``block_m`` comes from the route-list align (128 or 256); N-tile and grouping are fixed here.
+# Tile geometry swept offline in primus-turbo's bench_mega_moe; ``block_m`` comes from the align.
 _PF_BLOCK_N = 256
 _PF_GROUP_M = 4
-_PF_DGRAD_FC1_GROUP_M = 8  # bench_mega_moe grouped_gemm_combine L1-dgrad (NN) sweep
+_PF_DGRAD_FC1_GROUP_M = 8
 _PF_NUM_XCD = 1
 
 
@@ -32,12 +22,7 @@ def _run_gather_gemm(
     A, B, C, sorted_slot_ids, expert_ids, *, block_m,
     transpose_b, index_a_by_route_pos,
 ):
-    """Dispatch fwd/dgrad to the permute-free FlyDSL gather-GEMM kernels.
-
-    Covers FC1 gather (``index_a_by_route_pos=False``), FC2 route-read
-    (``index_a_by_route_pos=True``), and dgrad (``transpose_b``). Uses MegaMOE's fixed tile
-    geometry (32x32x16 MFMA, ``BLOCK_N=256``, ``GROUP_M=4``, ``num_xcd=1``).
-    """
+    """Dispatch to the permute-free fwd (or, with ``transpose_b``, dgrad) gather-GEMM kernel."""
     block_m = int(block_m)
     R_block = int(sorted_slot_ids.shape[0])
     if R_block % block_m != 0:
@@ -55,9 +40,6 @@ def _run_gather_gemm(
         )
 
     if transpose_b:
-        # dgrad: NN GEMM contracting the incoming grad against the forward weight [E, N, K]
-        # route-read from block-padded route-ordered grad; FC2 dgrad gathers token-ordered
-        # grad [num_recv, N] into block-padded route-ordered dX [R_block, K].
         from ..flydsl_kernels.permute_free_grouped_gemm.pf_dgrad import grouped_gemm_dgrad_bf16
 
         dgrad_group_m = _PF_DGRAD_FC1_GROUP_M if index_a_by_route_pos else _PF_GROUP_M
@@ -90,12 +72,9 @@ def flydsl_moe_fwd(
 ) -> None:
     """Route-list gather-GEMM, writing block-padded route-ordered ``C[R_block, WIDTH_N]`` in place.
 
-    ``A`` is token-ordered ``[num_recv, K]`` gathered via ``sorted_slot_ids`` when
-    ``index_a_by_route_pos=False`` (FC1), or block-padded route-ordered read by route slot when
-    ``index_a_by_route_pos=True`` (FC2). ``B`` is ``[num_experts, N_OUT, K]`` (contiguous inner
-    ``K``). Set ``dgrad=True`` for the data-gradient path (same ``B`` layout). Gated activation
-    and route-prob apply are **not** fused here; use the standalone helpers in
-    :mod:`pf_helper_kernels`.
+    ``A`` is token-ordered and gathered via ``sorted_slot_ids`` (FC1), or block-padded
+    route-ordered when ``index_a_by_route_pos=True`` (FC2). ``B`` is ``[E, N_OUT, K]``.
+    ``dgrad=True`` runs the data-gradient GEMM with the same ``B``.
     """
     assert A.dtype == B.dtype == C.dtype == torch.bfloat16
     assert A.stride(1) == 1, "A must be contiguous along the contraction (K)"

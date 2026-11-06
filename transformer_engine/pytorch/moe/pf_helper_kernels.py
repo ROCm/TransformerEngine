@@ -4,10 +4,7 @@
 
 """Route-list MoE Triton helpers (bf16): align/scan, gated-act, gather-combine.
 
-Grouped GEMM for FC1/FC2 forward, backward (dgrad), and wgrad is FlyDSL-only
-(``pf_fwd_wrapper``, ``pf_wgrad_wrapper``). This module retains Triton kernels for
-routing metadata construction, gated-activation recompute/bwd, and the token-order
-gather-combine pass that follows the block-padded route-ordered GEMM outputs.
+The grouped GEMMs themselves are FlyDSL (``pf_fwd_wrapper``, ``pf_wgrad_wrapper``).
 """
 
 from __future__ import annotations
@@ -39,9 +36,7 @@ def _gelu_tanh(x):
     return 0.5 * x * (1.0 + _tanh(inner))
 
 
-# Activation selector for the fused epilogue. Keep the set small and explicit; add a helper
-# above and an entry here to extend. Passed to the kernel as a compile-time int so each
-# activation specializes to its own instance (no runtime branch in the hot path).
+# Passed as a constexpr so each activation compiles to its own kernel.
 _ACT_IDS = {"silu": 0, "gelu": 1}
 
 
@@ -78,11 +73,7 @@ def _apply_activation_grad(x, ACTIVATION: tl.constexpr):
         return _gelu_tanh_grad(x)
 
 
-# --- Fused activation + derivative (for the gated-activation backward) ---
-# The backward needs *both* act(x) and act'(x) on the same input. Computing them via
-# the separate helpers above evaluates the transcendental twice (sigmoid for silu,
-# tanh for gelu). These return the pair from a single transcendental -- the backward
-# kernel is VALU-bound on exp2, so sharing it is the dominant win.
+# --- Fused activation + derivative: one exp2 for both (the backward is exp2-bound) ---
 @triton.jit
 def _silu_and_grad(x):
     # s = sigmoid(x); silu = x*s; d/dx silu = s + x*s*(1-s).
@@ -108,20 +99,11 @@ def _apply_activation_and_grad(x, ACTIVATION: tl.constexpr):
 
 
 def _gated_act_bwd_autotune_configs() -> list:
-    """Tile/warp configs for the gated-act-bwd autotuner.
-
-    Each program owns a ``BLOCK_M`` x ``BLOCK_H`` route/feature tile. The kernel is
-    latency-bound (the per-route work is tiny and the memory unit is never stalled), so
-    the sweep brackets the route-tile height ``BLOCK_M`` (more routes/block = more loads
-    in flight to hide latency) against the feature width ``BLOCK_H`` and the warp count,
-    trading memory-level parallelism against VGPR/occupancy.
-    """
+    """``BLOCK_M`` x ``BLOCK_H`` tile / warp configs for the latency-bound gated-act kernels."""
     return [
         triton.Config({"BLOCK_M": bm, "BLOCK_H": bh}, num_warps=w)
         for bm, bh, w in (
-            # ``num_warps`` such that BLOCK_H/(warps*64) >= 8 gives 128-bit (dwordx4)
-            # global loads/stores; the (1,1024,2) / (2,1024,2) points below hit that,
-            # while the wider-warp points keep dwordx2 -- the tuner picks per shape.
+            # BLOCK_H / (warps * 64) >= 8 gives dwordx4 accesses; wider-warp points give dwordx2.
             (1, 1024, 4),
             (1, 1024, 2),
             (2, 1024, 2),
@@ -172,32 +154,12 @@ def _gated_act_prob_bwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    """Backward of the fused gated-activation (+ optional route-prob) FC1 epilogue.
+    """Backward of the gated-activation (+ optional route-prob) FC1 epilogue.
 
-    Each program owns a ``BLOCK_M`` x ``BLOCK_H`` tile of routes x gate features. Given
-    ``grad_out`` (F), the saved pre-activation ``[gate | up]`` (2F) and the per-route prob
-    ``p``, it emits the 2F grad wrt the raw GEMM output (``dpre = [d_gate | d_up]``) and,
-    when probs are fused, reduces ``dp = sum_f grad_out * act(gate) * up`` per route and
-    scatters it to ``grad_dispatched_probs[token, expert]``.
-
-    ``act(gate)`` and ``act'(gate)`` are produced together from a single transcendental
-    (the kernel is VALU-heavy on ``exp2``). Each ``(token, expert)`` cell is written by
-    exactly one route, so the prob-grad scatter is a plain store (no atomics). Padded /
-    over-allocated routes carry the ``token == num_recv_tokens`` sentinel and are masked
-    out of the prob load/store; their ``dpre`` rows are inert (ignored downstream).
-
-    When ``EMIT_ACT`` is set the kernel *also* stores the ``F``-wide forward activation
-    ``fc2_input = act(gate)*up[*prob]`` to ``act_out_ptr`` -- the same buffer the FC2 wgrad
-    would otherwise recompute in a second full pass over the ``2F`` preact. Since ``act(gate)``,
-    ``up`` and ``prob`` are already live in registers here, this is one extra multiply + store
-    and removes the redundant ``2F`` HBM read (see :func:`fused_gated_act_prob_fwd`).
-
-    The block-padded route buffers are statically over-allocated to the worst-case
-    ``routes_max = T * topk`` (sync-free shape bound), but the real routes occupy only the
-    dense route-ordered head ``[0, num_routes)`` -- under expert parallelism this can be ~topk*E_local/E
-    times smaller. ``nbound_ptr`` carries the actual (block-padded) route extent as a device
-    scalar so tail programs beyond it exit before touching HBM, instead of grinding through
-    the padding at full memory bandwidth.
+    Emits ``dpre = [d_gate | d_up]`` and, with probs, ``dp = sum_f grad_out * act(gate) * up``
+    as a plain store (each ``(token, expert)`` cell has exactly one route). ``EMIT_ACT`` also
+    stores the forward ``act(gate) * up [* prob]`` for the FC2 wgrad. Programs past
+    ``nbound_ptr`` (the real padded route extent) exit early.
     """
     pid = tl.program_id(axis=0)
     num_routes_bound = tl.load(nbound_ptr)
@@ -251,8 +213,6 @@ def _gated_act_prob_bwd_kernel(
             mask=m,
         )
         if EMIT_ACT:
-            # Re-emit the F-wide forward activation from values already in registers, so the
-            # FC2 wgrad can consume it directly instead of re-streaming the 2F preact.
             fi = act_g * u
             if HAS_PROBS:
                 fi = fi * prob[:, None]
@@ -296,29 +256,22 @@ def fused_gated_act_prob_bwd(
         ``[num_recv_tokens, E]`` gating probs, or ``None`` if the forward did not fuse the
         route-prob multiply. When given, its gradient is returned.
     num_routes_bound:
-        Optional ``[1]`` int32 device scalar giving a (block-padded) upper bound on the number
-        of *real* route slots. The route buffers are statically sized to the worst case
-        ``routes_max = T * topk``, but under expert parallelism only a small dense head is
-        populated; passing the actual extent (e.g. ``num_tokens_post_padded`` from the routing
-        metadata) lets tail programs exit early instead of streaming the padding through HBM.
-        When ``None`` the full static ``routes_max`` is used (no early exit).
+        Optional ``[1]`` int32 device bound on real route slots (e.g. ``num_tokens_post_padded``)
+        so tail programs exit early. ``None`` processes all ``routes_max``.
     emit_act:
-        When ``True`` the kernel additionally re-materialises the ``F``-wide forward activation
-        ``fc2_input = act(gate)*up[*prob]`` (``[T * min(topk, E), F]`` bf16) from the values it
-        already computes, so the FC2 wgrad can consume it directly instead of re-reading the ``2F``
-        preact in a separate recompute pass. Returned as the third element (``None`` otherwise).
+        Also return the forward ``fc2_input = act(gate) * up [* prob]`` (bf16), saving the FC2
+        wgrad a separate recompute pass.
 
     Returns
     -------
     (dpre, grad_probs, fc2_input)
-        ``dpre`` is ``[T * min(topk, E), 2F]`` (bf16), grad wrt the raw GEMM output; ``grad_probs`` is
-        ``[num_recv_tokens, E]`` (matching ``dispatched_probs.dtype``) or ``None``; ``fc2_input`` is
-        ``[T * min(topk, E), F]`` (bf16) when ``emit_act`` else ``None``.
+        ``dpre`` ``[R_block, 2F]`` bf16; ``grad_probs`` ``[num_recv_tokens, E]`` in
+        ``dispatched_probs.dtype`` or ``None``; ``fc2_input`` ``[R_block, F]`` bf16 or ``None``.
     """
     R_block, F = grad_out.shape
     if preact.shape[0] != R_block or preact.shape[1] != 2 * F:
         raise ValueError(
-            f"preact must be [T * min(topk, E), 2F]={ (R_block, 2 * F) }, got {tuple(preact.shape)}."
+            f"preact must be [R_block, 2F]={(R_block, 2 * F)}, got {tuple(preact.shape)}."
         )
     routes_max = int(token.shape[0])
     has_probs = dispatched_probs is not None
@@ -401,16 +354,7 @@ def _gated_act_prob_fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    """Compute the fused gated-activation FC1 output ``act(gate) * up * prob`` from preact.
-
-    This is the *forward* counterpart of :func:`_gated_act_prob_bwd_kernel`: given the saved
-    ``2F`` pre-activation ``[gate | up]`` and the per-route prob it re-materialises the
-    ``F``-wide activation that the forward fused into the FC1 epilogue, so the backward can
-    checkpoint only the ``2F`` preact (never the ``F``-wide act) and rebuild it just-in-time
-    for the FC2 wgrad. Padded / over-allocated routes carry the ``token == num_recv_tokens``
-    sentinel and get ``prob == 0`` (their act rows are ignored downstream). ``nbound_ptr``
-    bounds tail programs to the real block-padded route extent (sync-free, EP-friendly early exit).
-    """
+    """Compute ``act(gate) * up [* prob]`` from the ``[gate | up]`` preact."""
     pid = tl.program_id(axis=0)
     num_routes_bound = tl.load(nbound_ptr)
     if pid * BLOCK_M >= num_routes_bound:
@@ -456,14 +400,9 @@ def fused_gated_act_prob_fwd(
     dispatched_probs: Optional[torch.Tensor] = None,
     num_routes_bound: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Recompute the fused gated-activation FC1 output from the saved pre-activation.
+    """Compute ``act(gate) * up [* prob]`` (``[routes_max, F]`` bf16) from the ``2F`` preact.
 
-    Re-materialises ``act = act(gate) * up * prob`` (``[routes_max, F]``, bf16) from the
-    ``[routes_max, 2F]`` preact ``[gate | up]`` -- the inverse of checkpointing the ``F``-wide
-    activation. Feeding this transient buffer to the *unchanged* FC2 wgrad keeps that kernel at
-    full (stored-act) speed while only the ``2F`` preact is persisted across the fwd/bwd
-    boundary. See :func:`fused_gated_act_prob_bwd` for the argument contract (token / expert /
-    ``num_routes_bound`` are the same per-route routing arrays).
+    Arguments match :func:`fused_gated_act_prob_bwd`.
     """
     routes_max, two_f = preact.shape
     if two_f % 2 != 0:
@@ -528,9 +467,7 @@ def _gather_combine_kernel(
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     n_mask = offs_n < N
     acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
-    # Sum the token's route rows (expert-ascending -> deterministic). Columns >= cnt are
-    # unused padding and skipped, so no padded/garbage slot is ever gathered (this masked
-    # padded->token reduction is the sole output-side masking point in the block-padded path).
+    # Expert-ascending sum (deterministic); columns >= cnt are padding and never read.
     for j in range(0, MAXK):
         if j < cnt:
             r = tl.load(token_routes_ptr + t * MAXK + j).to(tl.int64)
@@ -548,29 +485,26 @@ def route_gather_combine(
     out_dtype: torch.dtype = torch.bfloat16,
     block_n: Optional[int] = None,
 ) -> torch.Tensor:
-    """Combine per-route rows into per-token rows via a contention-free gather.
+    """Sum each token's route rows into a token-ordered output (no atomics, no host sync).
 
     Parameters
     ----------
     src:
-        Compact per-route buffer ``[T * min(topk, E), N]`` (route order; only ``[0, num_routes)`` valid).
+        Block-padded route-ordered ``[R_block, N]`` buffer.
     token_routes / token_route_count:
-        Token->routes inverse map from the align place kernel (``[T, MAXK]`` route positions
-        and the per-token route count).
+        ``[T, MAXK]`` slot positions per token and the per-token route count.
     num_recv_tokens:
         Number of output token rows ``T``.
     block_n:
-        N-tile width (``BLOCK_N``). ``None`` (default) picks ``min(next_pow2(N), 4096)``: wide
-        tiles issue larger contiguous per-route loads and cut redundant index loads.
+        N-tile width; ``None`` picks ``min(next_pow2(N), 4096)``.
 
     Returns
     -------
     torch.Tensor
-        ``[num_recv_tokens, N]`` in ``out_dtype`` -- each row is the fp32 sum of its token's
-        route rows, cast once. No atomics, no host sync.
+        ``[num_recv_tokens, N]`` in ``out_dtype`` (summed in fp32).
     """
     if src.dim() != 2:
-        raise ValueError(f"src must be [T * min(topk, E), N], got {tuple(src.shape)}.")
+        raise ValueError(f"src must be [R_block, N], got {tuple(src.shape)}.")
     if not src.is_contiguous():
         src = src.contiguous()
     n = src.shape[1]
@@ -675,10 +609,7 @@ def _route_list_place_kernel(
     BUILD_INVERSE: tl.constexpr,
     MAXK: tl.constexpr,
 ):
-    # One row of the map per program; place the (few) routed cells deterministically into their
-    # block-padded slot ``bs*BLOCK_SIZE_M + within[e, t]``. The token->routes inverse map (used by
-    # the contention-free gather-combine) is emitted here too when ``BUILD_INVERSE`` -- folding
-    # what was a second per-token kernel launch into this one (expert-ascending, no atomics).
+    # One token per program; with ``BUILD_INVERSE`` also emits its slots (expert-ascending).
     t = tl.program_id(axis=0)
     if t >= T:
         return
@@ -689,20 +620,12 @@ def _route_list_place_kernel(
             w = tl.load(within_ptr + e * T + t)
             bs = tl.load(block_start_ptr + e)
             slot = bs * BLOCK_SIZE_M + w
-            # Both bounds hold by construction when the caller's ``topk`` / ``num_routes``
-            # hints are honest. Mask anyway: an under-sized hint then drops the excess routes
-            # instead of writing past these buffers.
+            # Masked so an undersized ``topk``/``num_routes`` hint drops routes, not memory.
             tl.store(sorted_slot_ids_ptr + slot, t, mask=slot < R_block)
             if BUILD_INVERSE:
-                # Block-padded canonical layout: every intermediate route tensor (the GEMM
-                # output, the FC2 route-read input, the activation) is indexed by the padded
-                # slot ``bs*BLOCK_SIZE_M + w``. The token->routes inverse map therefore stores the
-                # padded slot so the final padded->token gather-combine reads the correct rows.
                 tl.store(token_routes_ptr + t * MAXK + j, slot, mask=j < MAXK)
                 j += 1
     if BUILD_INVERSE:
-        # Clamped for the same reason as the masked stores above: keep the gather-combine
-        # inside ``token_routes`` even if the hinted width was too small.
         tl.store(token_count_ptr + t, tl.minimum(j, MAXK))
 
 
@@ -711,11 +634,9 @@ def route_list_scan(
     *,
     num_experts: int,
 ):
-    """Block-size-independent scan: per-expert token counts + within-expert ranks.
+    """Per-expert counts and within-expert ranks ``(counts [E], within [E, T])``.
 
-    Returned ``(counts [E], within [E, T])`` can be reused across multiple block sizes
-    (e.g. the fwd/dgrad ``BLOCK_SIZE_M`` and the wgrad ``CONTRACT_M``), so the scan is
-    only paid once per routing map. Pass them to :func:`route_list_align` via ``scan=``.
+    Block-size independent, so one scan can feed every :func:`route_list_align` via ``scan=``.
     """
     device = routing_map.device
     T = int(routing_map.size(0))
@@ -749,25 +670,12 @@ def route_list_align(
     Parameters
     ----------
     scan:
-        Optional ``(counts, within)`` from :func:`route_list_scan` for this ``routing_map``.
-        When supplied the block-independent scan kernel is skipped (shared across block
-        sizes); otherwise it is computed here.
-    topk:
-        Host-known upper bound on the number of experts any token routes to (the router
-        top-k). When provided, the static over-allocation bound is tightened from the dense
-        ``T * num_experts`` to ``T * min(topk, num_experts)`` -- still
-        sync-free, but shrinking the padded buffers by ``num_experts / topk``.
-    num_routes:
-        Host-known **exact** route count (``routing_map.sum()``). When provided it replaces
-        the static bound entirely, leaving only the unavoidable per-expert block padding.
-        This makes ``R_block`` data-dependent (no static shapes, no CUDA graphs), so it is off
-        the default path; see :class:`MoERoutingMetadata`. A value below the true count
-        silently drops the routes past the bound.
+        Optional precomputed :func:`route_list_scan` result for this ``routing_map``.
+    topk, num_routes:
+        Optional route-buffer bounds; see :class:`MoERoutingMetadata`.
     build_inverse_map:
-        When True, the place kernel also emits the token->routes inverse map (used by the
-        contention-free gather-combine in FC2 fwd / FC1 dgrad) in the same launch, so no
-        separate inverse-map kernel is needed. Block-independent, so build it on the fwd align
-        only.
+        Also emit ``token_routes`` / ``token_route_count``. Block-size independent, so build it
+        on one align only.
 
     Returns
     -------
@@ -783,31 +691,22 @@ def route_list_align(
     T = int(routing_map.size(0))
     E = int(num_experts)
 
-    # Static (sync-free) upper bounds from shapes only. Each token routes to at most
-    # ``min(topk, E)`` experts, so that tightens the dense ``T * E`` bound. An exact
-    # ``num_routes`` from the host replaces the bound outright, leaving only the per-expert
-    # block padding the layout needs (the ``+ E`` term covers one partial block per expert).
+    # Sync-free bound from shapes; ``+ E`` covers one partial block per expert.
     max_per_token = E if topk is None else min(int(topk), E)
     routes_max = T * max_per_token if num_routes is None else int(num_routes)
     blocks_max = (routes_max + block_size - 1) // block_size + E
     R_block = blocks_max * block_size
 
-    # Per-expert count + exclusive within-expert rank (one program per expert). Reused
-    # across block sizes when the caller passes a precomputed scan.
     if scan is None:
         counts, within = route_list_scan(routing_map, num_experts=E)
     else:
         counts, within = scan
 
-    # Per-expert placement metadata + per-block expert ids (single launch).
-    blocks_per_expert = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: ceil(count[e]/block_m)
-    block_start = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: first M-block index of expert e
-    expert_ids = torch.empty((blocks_max,), dtype=torch.int32, device=device)  # [blocks_max]: owner of M-block b (-1 past end)
-    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)  # [1] device scalar: actual R_block (padded route count)
+    blocks_per_expert = torch.empty((E,), dtype=torch.int32, device=device)
+    block_start = torch.empty((E,), dtype=torch.int32, device=device)
+    expert_ids = torch.empty((blocks_max,), dtype=torch.int32, device=device)
+    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)
     block_b = 256
-    # From per-expert route counts, derive the expert-sorted block layout: how many M-blocks
-    # each expert needs, where each expert's slots start (block_start), which expert owns each
-    # M-block (expert_ids), and the real padded route extent (num_tokens_post_padded).
     _expert_meta_kernel[(triton.cdiv(blocks_max, block_b),)](
         counts,
         blocks_per_expert,
@@ -821,9 +720,7 @@ def route_list_align(
         BLOCK_B=block_b,
     )
 
-    # Optional token->routes inverse map, emitted by the same place kernel. Width is the
-    # tightened per-token bound; zero-init so any unused tail column is a safe (in-range)
-    # index (the gather masks columns >= count anyway).
+    # Zero-init so unused columns hold an in-range index.
     if build_inverse_map:
         maxk = max(max_per_token, 1)
         token_routes = torch.zeros((T, maxk), dtype=torch.int32, device=device)
@@ -833,9 +730,7 @@ def route_list_align(
         token_routes = torch.empty((1,), dtype=torch.int32, device=device)  # unused stub
         token_route_count = token_routes
 
-    # One program per token: for each routed (t, e), write sorted_slot_ids[slot] = t where
-    # slot = block_start[e] * block_m + within[e, t]. Unwritten slots stay at sentinel T.
-    # Optionally emits token_routes / token_route_count (token -> padded slot indices).
+    # Unwritten slots keep the sentinel T.
     sorted_slot_ids = torch.full((R_block,), T, dtype=torch.int32, device=device)
     _route_list_place_kernel[(T,)](
         routing_map,

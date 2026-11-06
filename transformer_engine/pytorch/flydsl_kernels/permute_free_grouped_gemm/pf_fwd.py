@@ -3,24 +3,16 @@
 
 """Permute-free MoE forward gather grouped-GEMM: MegaMOE's fast bf16 GEMM + route-list gather.
 
-This is a port of the MegaMOE grouped bf16 GEMM (32x32x16 MFMA, 8-wave / 512-thread
-workgroup, deep distance-2 3-buffer DMA ring, XCD swizzle with ``GROUP_M`` front-loading)
-into Transformer Engine FlyDSL, with a *single* change: the A operand is fetched
-through a per-row gather index instead of a contiguous pool.
+MegaMOE's grouped bf16 GEMM pipeline, unchanged except that A rows are fetched through
+``sorted_slot_ids`` instead of from a pre-permuted buffer.
 
-The gather is folded into MegaMOE's pipeline rather than implemented as a separate
-pre-permute: we keep Mega's DMA/LDS/MFMA path verbatim and only redirect the A fetch
-through ``sorted_slot_ids``, preserving Mega's throughput while keeping the permute-free
-memory model (no pre-permutation, gather-on-demand).
-
-Contract (mirrors MegaMOE ``grouped_gemm_bf16_only`` + permute-free routing metadata):
+Contract:
   * ``A``            [num_recv, K] bf16   received-token activations, UNPERMUTED (gather source)
   * ``B``            [E, N, K]    bf16    per-expert weights (contiguous inner K)
-  * ``C``            [R_block, N]  bf16    block-padded route-ordered output (expert-major, in place)
+  * ``C``            [R_block, N]  bf16    block-padded route-ordered output (in place)
   * ``sorted_slot_ids`` [R_block]  i32     received-token row per padded slot (sentinel = num_recv)
-  * ``expert_ids``   [num_m_blocks] i32   expert id per ``BLOCK_M`` output block (padding tail:
-                                          ``-1``; those blocks early-exit in-kernel)
-  * ``num_tile_blocks`` [1]      i32      real (non-padding) ``BLOCK_M`` block count (device)
+  * ``expert_ids``   [num_m_blocks] i32   expert id per ``BLOCK_M`` output block (-1 = padding)
+  * ``num_tile_blocks`` int               real (non-padding) ``BLOCK_M`` block count (host)
 
 Gated activation and route-prob apply live in standalone Triton helpers, not here.
 """
@@ -62,14 +54,8 @@ def compile_grouped_gemm_gather_bf16(
 ):
     """Compile (cached) the gathering grouped BF16 GEMM launcher for one ``(K, tile)`` combo.
 
-    Grid is over-launched to the padded output pool; each block early-exits past the real tile
-    range (``num_tile_blocks``) or when ``expert_ids[block_m] < 0`` (PF padding tail). Mirrors
-    MegaMOE's ``compile_grouped_gemm_bf16`` (the fprop / TE ``TN`` GEMM) exactly apart from the
-    gather A fetch, the extra ``SORTED`` argument, and the padding-block guard. Returns the flyc
-    launch callable.
-
-    The FC2 route-read (``index_a_by_route_pos``) case reuses this same gathering kernel with an
-    identity ``SORTED`` (``SORTED[s] = s``), so no separate no-gather tile is needed.
+    The grid is over-launched to the padded pool; blocks past ``num_tile_blocks`` or with
+    ``expert_ids[block_m] < 0`` exit early.
     """
     SharedStorage = _make_shared_storage(BLOCK_M, BLOCK_N)
 
@@ -88,20 +74,15 @@ def compile_grouped_gemm_gather_bf16(
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         group_res = RouteI32Loader(TILE_TO_GROUP)
         sorted_res = RouteI32Loader(SORTED)
-        # Real (non-padding) BLOCK_M tile count as a scalar (host-known, capture-safe -- avoids a
-        # per-call device tensor that a HIP graph capture forbids). Host-known int scalar.
+        # Host scalar, not a device tensor, so the launch stays graph-capture safe.
         real_tiles = NUM_TILE_BLOCKS
-        # XCD-swizzle over the REAL tile range only (front-loaded); swizzling the full padded
-        # pool scatters real tiles -> ~2x slower.
+        # Swizzle over real tiles only; swizzling the padded pool scatters them (~2x slower).
         real_grid = real_tiles * n_blocks
 
         pool_ptr_ty = PointerType.get(
             elem_ty=fx.BFloat16.ir_type, address_space=AddressSpace.Global, alignment=16
         )
-        # Flat 1D view of the whole received-token buffer, bounded to A_ELEMS elements. The
-        # gather offsets index this row-major buffer directly; the buffer resource clamps the
-        # padding sentinel (src_row == num_recv) to an OOB read of 0. (int32 element count:
-        # holds up to 2^31 elems; larger A needs a per-lane i64 rebase like Mega's fp8 path.)
+        # Flat A view bounded to A_ELEMS (int32) so the sentinel row (num_recv) reads OOB zero.
         a_base = fx.Int64(fx.ptrtoint(fx.get_iter(A)))
         A_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, a_base), fx.make_layout(A_ELEMS, 1))
 
@@ -117,11 +98,10 @@ def compile_grouped_gemm_gather_bf16(
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
             g_idx = group_res.load(block_m)
-            # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline.
+            # Padding blocks have expert_ids == -1.
             if g_idx >= fx.Int32(0):
                 gbase = g_idx * fx.Int32(K) * c_n
-                # Worst-case pool (cap*N > 2^31): rebase C per tile in int64, int32 in-resource
-                # offset. Mirrors the fused nt path.
+                # Rebase C per tile in i64 so pools beyond 2^31 elements stay addressable.
                 c_byte_off = fx.Int64(block_m * fx.Int32(BLOCK_M)) * fx.Int64(c_n) * fx.Int64(2)
                 c_base = fx.Int64(fx.ptrtoint(fx.get_iter(C)))
                 C_tile = fx.make_view(
@@ -186,14 +166,10 @@ def grouped_gemm_gather_bf16(
     agpr_alloc=0,
     gather=True,
 ):
-    """Host entry: grouped bf16 forward GEMM (TE ``TN`` fprop -- ``input @ weight^T``). With
-    ``gather=True`` (FC1) ``C[pos] = A[SORTED[pos]] @ B[expert]^T``; with ``gather=False`` (FC2
-    route-read) ``A`` is **block-padded route-ordered** ``[R_block, K]`` read at the route slot
-    (``sorted_slot_ids`` unused, may be a dummy).
+    """Host entry: grouped bf16 fprop ``C[pos] = A[row(pos)] @ B[expert]^T``.
 
-    ``output`` is written in place over its full padded ``[R_block, N]`` extent (padding rows carry
-    dead values, ignored by downstream stages keyed on the same routing metadata). ``c_m`` is the
-    padded slot count (``output.shape[0]``); the grid self-bounds to ``num_tile_blocks``.
+    ``gather=True`` (FC1) reads ``A[SORTED[pos]]``; ``gather=False`` (FC2) reads block-padded
+    route-ordered ``A`` at ``pos``. ``output`` is fully overwritten; padding rows hold garbage.
     """
     assert A.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
     assert output.dtype == torch.bfloat16
@@ -202,20 +178,14 @@ def grouped_gemm_gather_bf16(
     assert K == A.shape[1], f"weight K={K} != A K={A.shape[1]}"
     assert output.shape[1] == N, f"output N={output.shape[1]} != weight N={N}"
 
-    # The kernel computes the per-expert weight offset (``expert_id * N * K``) in 32-bit, and
-    # FlyDSL passes each operand's flattened size to the kernel in 32-bit, so ``weight`` and ``A``
-    # must fit 2^31 -- keep the hard guard (``A`` is also bounded by ``A_ELEMS`` below).
-    # ``output`` is safe: the kernel addresses it in 64-bit, one tile at a time
-    # (``c_base + c_byte_off``), so it stays correct above 2 GiB.
+    # Weight offsets and A's flat view are int32; ``output`` is rebased per tile in i64.
     require_launch_size(
         "permute-free fwd",
         ("A", A),
         ("weight", weight),
     )
 
-    # The tile core contracts over K in BLOCK_K=64 steps and needs >= 2 K-tiles. This is
-    # enforced by a bare ``assert`` inside the traced kernel (stripped under ``python -O``,
-    # yielding garbage), so validate host-side here where it always runs.
+    # The in-kernel K assert is stripped under ``python -O``, so check here.
     if K % 64 != 0 or K < 128:
         raise ValueError(
             f"permute-free fwd requires K % 64 == 0 and K >= 128 (BLOCK_K=64, >= 2 K-tiles), got K={K}."
@@ -233,8 +203,7 @@ def grouped_gemm_gather_bf16(
     if gather:
         sorted_arg = sorted_slot_ids.to(torch.int32)
     else:
-        # FC2 route-read: the kernel synthesizes the identity index on-device, so SORTED is
-        # unread. Reuse a live tensor as the (unused) arg to avoid a capture-illegal allocation.
+        # SORTED is unread; pass a live tensor rather than allocating (capture-illegal).
         sorted_arg = expert_ids_i32
     launch = compile_grouped_gemm_gather_bf16(
         K=K,

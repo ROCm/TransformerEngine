@@ -1,18 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""FlyDSL permute-free MoE weight-gradient (wgrad) op wrapper.
-
-Mirrors the route-list wgrad contract so the same routing metadata
-(``sorted_slot_ids`` holding the received-token row per slot, plus ``block_start`` /
-``blocks_per_expert`` and the per-expert block-padded grad base ``grad_base``) can be reused
-verbatim.
-
-Fixed kernel configuration (matches ``pf_wgrad.py``): FC1 route-list wgrad with block-padded
-``grad`` + token-gathered ``x``, bf16 into ``dw`` (overwrite or accumulate), DMA + XOR
-chunk swizzle fill, 3-stage LDS pipeline. Only the workgroup tile geometry is selectable
-/ autotuned.
-"""
+"""FlyDSL permute-free MoE weight-gradient (wgrad) op wrapper; only the tile is autotuned."""
 
 from __future__ import annotations
 
@@ -47,18 +36,9 @@ def flydsl_moe_wgrad(
 ) -> None:
     """Compute FC1 grouped wgrad ``grad[slot]^T @ x[token(slot)]`` into ``dw``, per expert.
 
-    See the permute-free wgrad API for the argument contract: ``x`` is
-    ``[num_recv_tokens, K]`` (gathered by received-token row), ``grad`` is the block-padded
-    ``[R_block, N]`` per-slot gradient, ``sorted_slot_ids`` maps each block-padded slot to its
-    received-token row (sentinel ``num_recv_tokens`` for padding), and ``grad_base[e]`` is the
-    block-padded first-slot row of expert ``e`` (``block_start[e] * block_size_m``).
-
-    ``swap_gather`` selects the FC2 wgrad variant: ``grad`` is the token-space ``[num_recv, N]``
-    operand (gathered) and ``x`` is the block-padded ``[R_block, K]`` operand (contiguous walk),
-    emitting the native ``dw[E, N, K]`` orientation with no transpose.
-
-    ``block_n``/``block_k`` and ``warps_n``/``warps_k`` select the workgroup tile; the
-    defaults (``128x128`` over ``2x2`` warps) are a strong general config on CDNA4.
+    ``x`` is token-ordered ``[num_recv_tokens, K]`` (gathered), ``grad`` is block-padded
+    ``[R_block, N]``, and ``grad_base[e] = block_start[e] * block_size_m``. ``swap_gather``
+    (FC2) swaps which operand is gathered, still writing ``dw[E, N, K]``.
     """
     num_experts, N, K = dw.shape
 
@@ -66,11 +46,7 @@ def flydsl_moe_wgrad(
     assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
-    # The kernel computes ``dw`` store offsets in int32, so a ``dw`` at/above 2 GiB wraps and
-    # corrupts memory -- keep the hard guard.
-    # ``x`` / ``grad`` are safe: the kernel rebases the contiguous operand's SRD base per expert in
-    # i64 (so its i32 offset only spans this expert's slots) and SRD-bounds the gathered operand, so
-    # both address correctly past 2 GiB. Guarding them would false-positive on the static path.
+    # ``dw`` offsets are int32; ``x``/``grad`` are rebased per expert in i64, so need no guard.
     require_launch_size(
         "permute-free wgrad",
         ("dw", dw),
@@ -142,13 +118,7 @@ def _wgrad_run(
     swap_gather=False,
     out_dtype="bf16",
 ):
-    """Dispatch target for the FlyDSL autotuner: compile (lru-cached) + launch one tile.
-
-    ``swap_gather`` / ``accumulate`` / ``out_dtype`` are forwarded to the compile so the sweep
-    benchmarks the *actual* kernel variant being launched (the FC1 non-swap and FC2 swap kernels
-    gather a different operand and write ``dw`` in a different orientation, so their optimal tile
-    can differ even at the same ``(N, K)``).
-    """
+    """Autotuner dispatch target: compile (lru-cached) and launch one tile config."""
     exe = compile_moe_wgrad_v2(
         block_n=int(block_n),
         block_k=int(block_k),
@@ -189,9 +159,7 @@ def _get_autotuner(warmup=10, rep=30):
         _wgrad_autotuner = Autotuner(
             _wgrad_run,
             configs,
-            # ``swap_gather`` / ``accumulate`` / ``out_dtype`` gate distinct kernel variants
-            # (different gather operand, store orientation, and epilogue), each with its own
-            # best tile -- key on them so FC1 (non-swap) and FC2 (swap) don't share a tile.
+            # Each kernel variant has its own best tile, so key on the variant flags too.
             key=["x", "N", "num_experts", "swap_gather", "accumulate", "out_dtype"],
             warmup=warmup,
             rep=rep,
@@ -207,12 +175,7 @@ def _select_wgrad_config(
     swap_gather=False,
     out_dtype="bf16",
 ):
-    """Return the autotuned ``(block_n, block_k, warps_n, warps_k)`` for this problem.
-
-    The sweep is run for the *specific* ``swap_gather`` / ``accumulate`` / ``out_dtype`` variant
-    being launched (they are part of the cache key), so the tile is benchmarked against the real
-    kernel rather than a stand-in.
-    """
+    """Return the autotuned ``(block_n, block_k, warps_n, warps_k)`` for this variant."""
     tuner = _get_autotuner()
     scratch_dtype = torch.float32 if out_dtype == "fp32" else torch.bfloat16
     scratch = torch.empty(num_experts, N, K, device=x.device, dtype=scratch_dtype)
@@ -243,11 +206,8 @@ def flydsl_moe_wgrad_autotuned(
 ) -> None:
     """Shape-autotuned variant of :func:`flydsl_moe_wgrad`.
 
-    First call for a given ``(x.shape, N, num_experts, swap_gather, accumulate, out_dtype)``
-    benchmarks every tile in ``_AUTOTUNE_TILES`` and caches the fastest (in-memory + on disk
-    under ``~/.flydsl/autotune/``). ``swap_gather`` (FC1 non-swap vs FC2 swap) is part of the
-    key and is compiled into the benchmarked kernel, so each variant gets its own measured-best
-    tile instead of inheriting the other's.
+    The first call per shape/variant benchmarks ``_AUTOTUNE_TILES`` and caches the fastest
+    (in memory and under ``~/.flydsl/autotune/``).
     """
     num_experts, N, K = dw.shape
 
