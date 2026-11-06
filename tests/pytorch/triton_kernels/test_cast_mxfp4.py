@@ -56,7 +56,7 @@ def mxfp4_quantize_cpu(
 
     Implements:
     - E8M0 scale: floor(log2(amax_rounded)) - 2 + 127
-    - FP4 encoding: Threshold-based nearest-neighbor to E2M1 values
+    - FP4 encoding: round-to-nearest-even to E2M1 values
     - Packing: (odd_nibble << 4) | even_nibble
 
     Args:
@@ -108,7 +108,7 @@ def mxfp4_quantize_cpu(
 
     scaled_blocks = data_blocks * scale_vals
 
-    # === FP4 Encoding (matches Triton kernel's threshold-based lookup) ===
+    # === FP4 Encoding (round to nearest, ties to even; matches the Triton kernel) ===
     # E2M1 representable values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
     # Thresholds at midpoints: {0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0}
 
@@ -116,13 +116,13 @@ def mxfp4_quantize_cpu(
     abs_vals = np.abs(scaled_blocks)
 
     indices = np.zeros_like(abs_vals, dtype=np.uint8)
-    indices = np.where(abs_vals >= 0.25, 1, indices)  # → 0.5
+    indices = np.where(abs_vals > 0.25, 1, indices)  # → 0.5
     indices = np.where(abs_vals >= 0.75, 2, indices)  # → 1.0
-    indices = np.where(abs_vals >= 1.25, 3, indices)  # → 1.5
+    indices = np.where(abs_vals > 1.25, 3, indices)  # → 1.5
     indices = np.where(abs_vals >= 1.75, 4, indices)  # → 2.0
-    indices = np.where(abs_vals >= 2.5, 5, indices)  # → 3.0
+    indices = np.where(abs_vals > 2.5, 5, indices)  # → 3.0
     indices = np.where(abs_vals >= 3.5, 6, indices)  # → 4.0
-    indices = np.where(abs_vals >= 5.0, 7, indices)  # → 6.0
+    indices = np.where(abs_vals > 5.0, 7, indices)  # → 6.0
 
     # Combine sign and magnitude: [sign(1bit)][magnitude(3bits)]
     fp4_encoded = (signs << 3) | indices
