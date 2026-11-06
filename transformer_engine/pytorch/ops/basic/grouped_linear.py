@@ -17,7 +17,7 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
 from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
@@ -135,6 +135,7 @@ def is_op_fuser_grouped_tensor_path_supported(
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and recipe.fp8_format == RecipeFormat.E4M3
         )
     return False
 
@@ -672,10 +673,6 @@ class GroupedLinear(BasicOperation):
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()
 
-        # Initialize params if needed
-        if any(param.device.type == "meta" for param in self.parameters()):
-            self.reset_parameters()
-
         # Check that all weight params are consistent
         if not self.single_grouped_weight:
             dtype = self.weight0.dtype
@@ -1092,6 +1089,7 @@ class GroupedLinear(BasicOperation):
             )
         else:
             out, tensors_to_save = self._fuser_forward_split_quantize(
+                ctx=ctx,
                 input_=input_,
                 split_sizes=split_sizes,
                 scales=scales,
@@ -1204,6 +1202,7 @@ class GroupedLinear(BasicOperation):
     def _fuser_forward_split_quantize(
         self,
         *,
+        ctx: OperationContext,
         input_: torch.Tensor,
         split_sizes: torch.Tensor,
         scales: Optional[torch.Tensor],
@@ -1224,6 +1223,7 @@ class GroupedLinear(BasicOperation):
             )
         num_groups = self.num_groups
         has_bias = self.has_bias
+        ctx.host_split_sizes = None
 
         # Need CPU split sizes for split_quantize / general_grouped_gemm.
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
@@ -1318,6 +1318,9 @@ class GroupedLinear(BasicOperation):
             saved.append(scales)
         saved.extend(xs)
         saved.extend(ws)
+        # The list form is needed again by backward. Cache it on this invocation's
+        # context so the device tensor is read back once per step instead of twice.
+        ctx.host_split_sizes = split_sizes_int
         return out, tuple(saved)
 
     def _fuser_forward_grouped_tensor(
@@ -1557,8 +1560,10 @@ class GroupedLinear(BasicOperation):
         xs, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
         ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
-        # Split grad output tensor and convert dtypes if needed
-        split_sizes_int = [int(s) for s in split_sizes.tolist()]
+        # Split grad output tensor and convert dtypes if needed. The forward pass of
+        # this same invocation always sets ``host_split_sizes`` on its own context, so
+        # the device tensor is not read back a second time.
+        split_sizes_int = ctx.host_split_sizes
         dy = maybe_dequantize(grad_output, ctx.dtype)
         dys = None
         grad_biases = [None] * num_groups
