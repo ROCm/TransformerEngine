@@ -80,7 +80,7 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "gemm-backends" 1 test_gemm_backends.py
     NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "triton" 1 triton_kernels/test_gemm_kernel.py
     run 1 test_gqa.py
-    run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run 1 test_grouped_linear.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
