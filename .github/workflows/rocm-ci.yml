@@ -24,7 +24,7 @@ on:
       test_config_from_source:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
         required: false
-        default: false
+        default: true
         type: boolean
   workflow_dispatch:
     inputs:
@@ -39,7 +39,7 @@ on:
       test_config_from_source:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -59,7 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
+          ref: ${{ inputs.test_config_from_source && github.ref || github.event.repository.default_branch || 'dev' }}
           sparse-checkout: ci/ci_config.json
           sparse-checkout-cone-mode: false
 
