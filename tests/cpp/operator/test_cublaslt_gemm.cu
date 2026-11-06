@@ -615,7 +615,7 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
 }
 
 
-std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop) {
+std::optional<std::string> checkMxFP8Support(const TestParams& params, const cudaDeviceProp& prop, DType dtype) {
   if (params.scaling_mode != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
@@ -641,13 +641,23 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
     return std::nullopt;
   }
 #ifdef __HIP_PLATFORM_AMD__
-  if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
-    return "HipKittens requires gfx942 or gfx950";
+  if (prop.major == 12 && prop.minor == 5) {
+    if (isFp8Type(dtype)) {
+      return "HipKittens on gfx1250 requires a non-FP8 output";
+    }
+    const bool tn = params.transa && !params.transb;
+    if (!tn && params.use_gelu) {
+      return "HipKittens on gfx1250 has GELU epilogues for TN only";
+    }
+    return std::nullopt;
+  } else if (prop.major == 9 && (prop.minor == 4 || prop.minor == 5)) {
+    if (params.m % 256 || params.n % 256 || params.k < 256) {
+      return "HipKittens requires M and N 256-aligned, K >= 256";
+    }
+    return std::nullopt;
+  } else {
+    return "HipKittens requires gfx942+";
   }
-  if (params.m % 256 || params.n % 256 || params.k < 256) {
-    return "HipKittens requires M and N 256-aligned, K >= 256";
-  }
-  return std::nullopt;
 #else
   return "HipKittens requires ROCm";
 #endif
@@ -674,13 +684,17 @@ void performTest(const TestParams& params) {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
-    if (auto reason = checkMxFP8Support(params, prop))
+    if (auto reason = checkMxFP8Support(params, prop, dtype))
     {
       GTEST_SKIP() << *reason;
     }
   }
 
 #ifdef __HIP_PLATFORM_AMD__
+  if (!use_mxfp8 && !params.force_hipblaslt &&
+      !(prop.major == 12 && prop.minor == 5 && (atype == DType::kBFloat16 || atype == DType::kFloat16))) {
+    GTEST_SKIP();
+  }
 
   #if HIP_VERSION < 70200000
     if (prop.major == 9 && prop.minor == 5 &&
@@ -829,7 +843,7 @@ void performTest(const TestParams& params) {
     params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
-  if (use_mxfp8 && prop.major == 12 && prop.minor == 5) {
+  if (use_mxfp8 && params.force_hipblaslt && prop.major == 12 && prop.minor == 5) {
     swizzle_mxfp8_scales(A, !a_colwise);
     swizzle_mxfp8_scales(B, !b_colwise);
   }
@@ -891,7 +905,7 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  if (auto reason = checkMxFP8Support(params, prop))
+  if (auto reason = checkMxFP8Support(params, prop, dtype))
   {
     GTEST_SKIP() << *reason;
   }
@@ -934,7 +948,7 @@ void performDqTest(const TestParams &params) {
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   const bool a_colwise = !params.transa;
   const bool b_colwise = params.transb;
-  if (prop.major == 12 && prop.minor == 5) {
+  if (params.force_hipblaslt && prop.major == 12 && prop.minor == 5) {
     swizzle_mxfp8_scales(A_fp8, !a_colwise);
     swizzle_mxfp8_scales(B_fp8, !b_colwise);
   }
@@ -1124,11 +1138,7 @@ void performMxfp4Test(const TestParams &params) {
 
 #define MAKE_TEST_PARAMS(P_)                                                    \
   bool force_hipblaslt_ = std::get<5>(GetParam());                              \
-  if (force_hipblaslt_) {                                                       \
-    setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "1", 1);                            \
-  } else {                                                                      \
-    setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0", 1);                            \
-  }                                  \
+  setenv("NVTE_ROCM_USE_HIPBLASLT", force_hipblaslt_ ? "1" : "0", 1);           \
   TestParams P_ = {.m = std::get<0>(std::get<0>(GetParam())),                   \
                    .k = std::get<1>(std::get<0>(GetParam())),                   \
                    .n = std::get<2>(std::get<0>(GetParam())),                   \
@@ -1209,7 +1219,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
                                             ::testing::Values(false),         //use mxfp8
-                                            ::testing::Values(true)),        //force hipblaslt
+                                            ::testing::Values(false, true)),  //force hipblaslt
                          GEMMTestName);
 
 INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
