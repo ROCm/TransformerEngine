@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -125,7 +127,11 @@ __global__ void reduce_aux_loss_partials(const float* partial_sums, int num_part
     sum += partial_sums[i];
   }
   for (int offset = kThreadsPerWarp / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    sum += __shfl_down(sum, offset, kThreadsPerWarp);
+#else
     sum += __shfl_down_sync(0xffffffff, sum, offset);
+#endif
   }
   if (lane_id == 0) {
     Coeff_buf[1] = sum;

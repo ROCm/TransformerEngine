@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,8 +21,16 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, PartitionSpec as P
 from transformer_engine.jax.quantize import QuantizerFactory, QuantizeLayout, ScalingMode
 from transformer_engine.jax.quantize.dequantizer import Dequantizer
+from transformer_engine.jax.util import is_hip_extension
 
 moe = importlib.import_module("transformer_engine.jax.moe")
+
+# ROCm keeps MXFP8 scales compact (unpadded and unswizzled) and TE MoE requires EP, which ROCm
+# does not support, so the quantized FSDP gather of GEMM-swizzled weight scales does not apply.
+requires_swizzled_mxfp8_scales = pytest.mark.skipif(
+    is_hip_extension(),
+    reason="MoE quantized FSDP gather is not supported on ROCm (needs GEMM-swizzled MXFP8 scales)",
+)
 
 
 def fsdp_mesh():
@@ -29,6 +39,7 @@ def fsdp_mesh():
     return Mesh(np.asarray(jax.devices()[:2]), ("fsdp",))
 
 
+@requires_swizzled_mxfp8_scales
 def test_standard_gated_shards_match_unsharded_swiglu():
     mesh = fsdp_mesh()
     # Each rank receives 128 contiguous columns: rank 0 gets only gates (1),
@@ -161,6 +172,7 @@ def reference_quantize_weight(data, *args, **kwargs):
     return moe.ScaledTensor2x(*copies)
 
 
+@requires_swizzled_mxfp8_scales
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("width", [64, 192])
 def test_small_gated_shards_preserve_quantized_pairs(monkeypatch, native, width):
@@ -198,6 +210,7 @@ def test_small_gated_shards_preserve_quantized_pairs(monkeypatch, native, width)
         np.testing.assert_array_equal(decoded, execution_weight)
 
 
+@requires_swizzled_mxfp8_scales
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("shard_dimension", ["expert", "k", "gated"])
