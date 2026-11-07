@@ -103,28 +103,33 @@ void launch_pack_scales_sharded(const uint8_t *scales, uint32_t *ln, int cblk_of
         cblk_off, tiles_local);
 }
 
+constexpr int LANE_LOAD_BYTES = 16;
+constexpr int WAVE_LOAD_BYTES = LANE_LOAD_BYTES * kittens::WARP_THREADS;
+constexpr int TR_GROUP_LANES  = 16;
+constexpr int TR_LANE_BYTES   = 8;
 
-struct TileDma {
+// Buffer-to-LDS tile load state. srd[h][1] starts WAVE_LOAD_BYTES early because the instruction offset
+// advances the global and the LDS address alike.
+struct TileLoad {
     kittens::i32x4 srd[2][2];
-    uint32_t m0[2][2];
-    uint32_t voff[2];
+    uint32_t lds[2][2];
+    uint32_t sw[2];
     uint32_t k_step;
 };
 
 template <int NUM_WARPS, typename ST>
-__device__ __forceinline__ TileDma make_tile_dma(const void *base, uint32_t half_step, uint32_t k_step,
-                                                 uint32_t range, uint32_t row_stride, ST (&tiles)[2][2]) {
-    constexpr int bpw = ST::underlying_subtile_bytes_per_thread * kittens::WARP_THREADS;
-    static_assert(sizeof(ST) == 2 * NUM_WARPS * bpw);
+__device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t half_bytes, uint32_t k_step,
+                                                      uint32_t range, uint32_t row_stride, ST (&tiles)[2][2]) {
+    static_assert(sizeof(ST) == 2 * NUM_WARPS * WAVE_LOAD_BYTES);
     static_assert(ST::underlying_subtiles_per_row == 1);
-    static_assert(bpw == 1024);
-    const int wid = kittens::warpid() % NUM_WARPS;
-    const uint8_t *p = reinterpret_cast<const uint8_t *>(base);
-    TileDma d;
+    static_assert(ST::underlying_subtile_bytes_per_thread == LANE_LOAD_BYTES);
+    const int warp = kittens::warpid() % NUM_WARPS;
+    const uint8_t *src = reinterpret_cast<const uint8_t *>(base);
+    TileLoad d;
 #pragma unroll
     for (int h = 0; h < 2; h++) {
-        d.srd[h][0] = kittens::make_srsrc(p + h * half_step, range);
-        d.srd[h][1] = kittens::make_srsrc(p + h * half_step - bpw, range + bpw);
+        d.srd[h][0] = kittens::make_srsrc(src + h * half_bytes, range);
+        d.srd[h][1] = kittens::make_srsrc(src + h * half_bytes - WAVE_LOAD_BYTES, range + WAVE_LOAD_BYTES);
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             d.srd[h][0][i] = __builtin_amdgcn_readfirstlane(d.srd[h][0][i]);
@@ -132,103 +137,114 @@ __device__ __forceinline__ TileDma make_tile_dma(const void *base, uint32_t half
         }
     }
 #pragma unroll
-    for (int t = 0; t < 2; t++) {
+    for (int stage = 0; stage < 2; stage++) {
 #pragma unroll
         for (int h = 0; h < 2; h++) {
-            d.m0[t][h] = kittens::to_sgpr_u32(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&tiles[t][h].data[0]))
-                                              + wid * 2 * bpw);
+            const uint32_t tile_lds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&tiles[stage][h].data[0]));
+            d.lds[stage][h] = kittens::to_sgpr_u32(tile_lds + warp * 2 * WAVE_LOAD_BYTES);
         }
     }
 #pragma unroll
     for (int i = 0; i < 2; i++) {
-        const int lbo = kittens::laneid() * ST::underlying_subtile_bytes_per_thread
-                      + ((wid % (NUM_WARPS / 2)) * 2 + i) * bpw + (wid / (NUM_WARPS / 2)) * NUM_WARPS * bpw;
-        const int sub = lbo / ST::underlying_subtile_bytes;
-        const int sbo = lbo % ST::underlying_subtile_bytes;
-        const uint32_t swz = ST::swizzle({sbo / ST::underlying_subtile_row_bytes,
-                                          sbo % ST::underlying_subtile_row_bytes});
-        d.voff[i] = (swz / ST::underlying_subtile_row_bytes + sub * ST::underlying_subtile_rows) * row_stride
-                  + swz % ST::underlying_subtile_row_bytes;
+        const int lane_off    = kittens::laneid() * LANE_LOAD_BYTES;
+        const int byte        = lane_off + ((warp % (NUM_WARPS / 2)) * 2 + i) * WAVE_LOAD_BYTES +
+                                (warp / (NUM_WARPS / 2)) * NUM_WARPS * WAVE_LOAD_BYTES;
+        const int subtile     = byte / ST::underlying_subtile_bytes;
+        const int subtile_off = byte % ST::underlying_subtile_bytes;
+        const uint32_t swizzled = ST::swizzle({subtile_off / ST::underlying_subtile_row_bytes,
+                                               subtile_off % ST::underlying_subtile_row_bytes});
+        d.sw[i] = (swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows) * row_stride +
+                  swizzled % ST::underlying_subtile_row_bytes;
     }
     d.k_step = k_step;
     return d;
 }
 
-__device__ __forceinline__ void tile_dma_issue(const TileDma &d, int h, int kb) {
+// m0 must already hold this warp's LDS destination.
+__device__ __forceinline__ void tile_load(const TileLoad &d, int h, int k) {
     asm volatile("buffer_load_dwordx4 %0, %2, %4 offen lds\n\t"
-                 "buffer_load_dwordx4 %1, %3, %4 offen offset:1024 lds"
-                 :: "v"(d.voff[0]), "v"(d.voff[1]), "s"(d.srd[h][0]), "s"(d.srd[h][1]), "s"(kb * d.k_step)
+                 "buffer_load_dwordx4 %1, %3, %4 offen offset:%5 lds"
+                 :: "v"(d.sw[0]), "v"(d.sw[1]), "s"(d.srd[h][0]), "s"(d.srd[h][1]), "s"(k * d.k_step),
+                    "i"(WAVE_LOAD_BYTES)
                  : "memory");
 }
 
-__device__ __forceinline__ void tile_dma_load(const TileDma &d, int t, int h, int kb) {
-    asm volatile("s_mov_b32 m0, %5\n\ts_nop 0\n\t"
+// The LDS DMA reads m0, which needs one wait state after the s_mov.
+__device__ __forceinline__ void tile_load_m0(const TileLoad &d, int stage, int h, int k) {
+    asm volatile("s_mov_b32 m0, %6\n\ts_nop 0\n\t"
                  "buffer_load_dwordx4 %0, %2, %4 offen lds\n\t"
-                 "buffer_load_dwordx4 %1, %3, %4 offen offset:1024 lds"
-                 :: "v"(d.voff[0]), "v"(d.voff[1]), "s"(d.srd[h][0]), "s"(d.srd[h][1]), "s"(kb * d.k_step),
-                    "s"(t ? d.m0[1][h] : d.m0[0][h])
+                 "buffer_load_dwordx4 %1, %3, %4 offen offset:%5 lds"
+                 :: "v"(d.sw[0]), "v"(d.sw[1]), "s"(d.srd[h][0]), "s"(d.srd[h][1]), "s"(k * d.k_step),
+                    "i"(WAVE_LOAD_BYTES), "s"(stage ? d.lds[1][h] : d.lds[0][h])
                  : "memory", "m0");
 }
 
-struct ScaleDma {
-    kittens::i32x4 srd_a, srd_b;
-    uint32_t m0[2];
-    uint32_t a_step, b_step;
+// Scale load state: smem[stage] holds the A tile then the B lo/hi pair. sb_srd starts one tile early
+// because the instruction offset advances the global and the LDS address alike.
+struct ScaleLoad {
+    kittens::i32x4 sa_srd, sb_srd;
+    uint32_t lds[2];
+    uint32_t sa_step, sb_step;
 };
 
 template <typename GL, typename ST>
-__device__ __forceinline__ ScaleDma make_scale_dma(const GL &sa, const GL &sb, int sa_tile, int sb_tile,
-                                                   int sa_tiles_per_k, int sb_tiles_per_k, ST (&smem)[2][3]) {
-    constexpr uint32_t TB = sizeof(ST);
-    static_assert(TB == 1024);
-    const uint8_t *pa = reinterpret_cast<const uint8_t *>(sa.raw_ptr) + (size_t)sa_tile * TB;
-    const uint8_t *pb = reinterpret_cast<const uint8_t *>(sb.raw_ptr) + (size_t)sb_tile * TB - TB;
-    ScaleDma d;
-    d.srd_a = kittens::make_srsrc(pa, (uint32_t)((size_t)(sa.batch() - sa_tile) * TB));
-    d.srd_b = kittens::make_srsrc(pb, (uint32_t)((size_t)(sb.batch() - sb_tile + 1) * TB));
+__device__ __forceinline__ ScaleLoad prefill_scale_load(const GL &sa, const GL &sb, int sa_tile, int sb_tile,
+                                                        int sa_tiles_per_k, int sb_tiles_per_k, ST (&smem)[2][3]) {
+    constexpr uint32_t TILE_BYTES = sizeof(ST);
+    static_assert(TILE_BYTES == WAVE_LOAD_BYTES);
+    const uint8_t *sa_ptr = reinterpret_cast<const uint8_t *>(sa.raw_ptr) + (size_t)sa_tile * TILE_BYTES;
+    const uint8_t *sb_ptr = reinterpret_cast<const uint8_t *>(sb.raw_ptr) + (size_t)sb_tile * TILE_BYTES - TILE_BYTES;
+    ScaleLoad d;
+    d.sa_srd = kittens::make_srsrc(sa_ptr, (uint32_t)((size_t)(sa.batch() - sa_tile) * TILE_BYTES));
+    d.sb_srd = kittens::make_srsrc(sb_ptr, (uint32_t)((size_t)(sb.batch() - sb_tile + 1) * TILE_BYTES));
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        d.srd_a[i] = __builtin_amdgcn_readfirstlane(d.srd_a[i]);
-        d.srd_b[i] = __builtin_amdgcn_readfirstlane(d.srd_b[i]);
+        d.sa_srd[i] = __builtin_amdgcn_readfirstlane(d.sa_srd[i]);
+        d.sb_srd[i] = __builtin_amdgcn_readfirstlane(d.sb_srd[i]);
     }
 #pragma unroll
-    for (int s = 0; s < 2; s++) {
-        d.m0[s] = kittens::to_sgpr_u32(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&smem[s][0].data[0])));
+    for (int stage = 0; stage < 2; stage++) {
+        const uint32_t stage_lds = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&smem[stage][0].data[0]));
+        d.lds[stage] = kittens::to_sgpr_u32(stage_lds);
     }
-    d.a_step = sa_tiles_per_k * TB;
-    d.b_step = sb_tiles_per_k * TB;
+    d.sa_step = sa_tiles_per_k * TILE_BYTES;
+    d.sb_step = sb_tiles_per_k * TILE_BYTES;
     return d;
 }
 
-__device__ __forceinline__ void scale_dma_issue(const ScaleDma &d, int k) {
+// m0 must already hold the LDS destination; warp 0 loads all three scale tiles.
+__device__ __forceinline__ void scale_load(const ScaleLoad &d, int k) {
     if (kittens::warpid() == 0) {
         asm volatile("buffer_load_dwordx4 %0, %1, %2 offen lds\n\t"
-                     "buffer_load_dwordx4 %0, %3, %4 offen offset:1024 lds\n\t"
-                     "buffer_load_dwordx4 %0, %3, %4 offen offset:2048 lds"
-                     :: "v"(kittens::laneid() * 16), "s"(d.srd_a), "s"(k * d.a_step), "s"(d.srd_b), "s"(k * d.b_step)
+                     "buffer_load_dwordx4 %0, %3, %4 offen offset:%5 lds\n\t"
+                     "buffer_load_dwordx4 %0, %3, %4 offen offset:%6 lds"
+                     :: "v"(kittens::laneid() * LANE_LOAD_BYTES), "s"(d.sa_srd), "s"(k * d.sa_step), "s"(d.sb_srd),
+                        "s"(k * d.sb_step), "i"(WAVE_LOAD_BYTES), "i"(2 * WAVE_LOAD_BYTES)
                      : "memory");
     }
 }
 
-__device__ __forceinline__ void scale_dma_load(const ScaleDma &d, int s, int k) {
+__device__ __forceinline__ void scale_load_m0(const ScaleLoad &d, int stage, int k) {
     if (kittens::warpid() == 0) {
-        asm volatile("s_mov_b32 m0, %5\n\ts_nop 0\n\t"
+        asm volatile("s_mov_b32 m0, %7\n\ts_nop 0\n\t"
                      "buffer_load_dwordx4 %0, %1, %2 offen lds\n\t"
-                     "buffer_load_dwordx4 %0, %3, %4 offen offset:1024 lds\n\t"
-                     "buffer_load_dwordx4 %0, %3, %4 offen offset:2048 lds"
-                     :: "v"(kittens::laneid() * 16), "s"(d.srd_a), "s"(k * d.a_step), "s"(d.srd_b), "s"(k * d.b_step),
-                        "s"(s ? d.m0[1] : d.m0[0])
+                     "buffer_load_dwordx4 %0, %3, %4 offen offset:%5 lds\n\t"
+                     "buffer_load_dwordx4 %0, %3, %4 offen offset:%6 lds"
+                     :: "v"(kittens::laneid() * LANE_LOAD_BYTES), "s"(d.sa_srd), "s"(k * d.sa_step), "s"(d.sb_srd),
+                        "s"(k * d.sb_step), "i"(WAVE_LOAD_BYTES), "i"(2 * WAVE_LOAD_BYTES),
+                        "s"(stage ? d.lds[1] : d.lds[0])
                      : "memory", "m0");
     }
 }
 
 template <typename RT, typename ST>
-__device__ __forceinline__ uint32_t row_frag_addr(const ST &st, int row_tile, int k) {
+__device__ __forceinline__ uint32_t row_frag_addr(const ST &st, int row_tile, int k_half) {
     const int lane = kittens::laneid();
     const int row  = lane % RT::base_tile_rows;
-    const int col  = RT::base_tile_stride * (lane / RT::base_tile_rows) + k * RT::base_tile_elements_per_stride_group;
-    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&st.data[0]))
-         + row_tile * (RT::rows / ST::underlying_subtile_rows) * ST::underlying_subtile_bytes + ST::swizzle({row, col});
+    const int col  = RT::base_tile_stride * (lane / RT::base_tile_rows);
+    const int k    = k_half * RT::base_tile_elements_per_stride_group;
+    const uint32_t tile_off = row_tile * (RT::rows / ST::underlying_subtile_rows) * ST::underlying_subtile_bytes;
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&st.data[0])) + tile_off + ST::swizzle({row, col + k});
 }
 
 template <typename ST, int BUF, typename RT>
@@ -248,24 +264,31 @@ __device__ __forceinline__ void load_rows(RT &dst, uint32_t addr0, uint32_t addr
 
 template <typename RT, typename ST>
 __device__ __forceinline__ void col_frag_addrs(uint32_t (&addr)[RT::height], const ST &st, int col_offset) {
-    const int laneid   = kittens::laneid();
-    const int block_id = laneid / 16;
-    const int l_within = laneid % 16;
-    const int tr_k_grp = l_within / 2;
-    const int m_half   = l_within & 1;
+    const int lane     = kittens::laneid();
+    const int block_id = lane / TR_GROUP_LANES;
+    const int k_row    = (lane % TR_GROUP_LANES) / 2;
+    const int m_half   = lane & 1;
 #pragma unroll
     for (int i = 0; i < RT::height; i++) {
-        const int m_col = col_offset + i * RT::base_tile_rows + m_half * 8;
-        addr[i] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&st.data[0]))
-                + block_id * ST::underlying_subtile_bytes + ST::swizzle({tr_k_grp, m_col});
+        const int m_col = col_offset + i * RT::base_tile_rows + m_half * TR_LANE_BYTES;
+        const uint32_t sub_off = block_id * ST::underlying_subtile_bytes + ST::swizzle({k_row, m_col});
+        addr[i] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&st.data[0])) + sub_off;
     }
 }
 
 template <typename ST, int BUF, typename RT>
 __device__ __forceinline__ void load_cols(RT &dst, const uint32_t (&addr)[RT::height]) {
+    static_assert(std::is_same_v<typename ST::shape, kittens::ducks::st_shape::st_16x128>);
+    static_assert(sizeof(typename ST::dtype) == 1);
+    static_assert(ST::underlying_subtile_bytes == 2048);
+    static_assert(sizeof(ST) % ST::underlying_subtile_bytes == 0);
     constexpr int OFF = BUF * sizeof(ST);
     constexpr int SUB = ST::underlying_subtile_bytes;
-    constexpr uint32_t K_HI_XOR = 1088u;
+    // Upper 8 K rows: +1024 B sets offset bit 10, which st_16x128::swizzle maps to bit 6 ((1024 >> 8) << 4).
+    // Applied to the absolute address, so the tile arrays are declared alignas(SUB).
+    constexpr uint32_t K_HALF_BYTES = ST::underlying_subtile_rows / 2 * ST::underlying_subtile_row_bytes;
+    constexpr uint32_t K_HI_XOR     = K_HALF_BYTES | ((K_HALF_BYTES >> 8) << 4);
+    static_assert(K_HI_XOR == 1088);
 #pragma unroll
     for (int i = 0; i < RT::height; i++) {
         asm volatile("ds_read_b64_tr_b8 %0, %2 offset:%3\n"
@@ -283,10 +306,11 @@ __device__ __forceinline__ void load_cols(RT &dst, const uint32_t (&addr)[RT::he
     }
 }
 
+// The LDS DMA reads m0, which needs one wait state after the s_mov.
 template <typename ST, typename GL, int COPIES>
-__device__ __forceinline__ void g2l_srd(ST &dst, const GL &src, const kittens::coord<ST> &idx,
-                                        const uint32_t (&sw)[COPIES], kittens::i32x4 srd, const void *base,
-                                        uint32_t lds_base) {
+__device__ __forceinline__ void load_srd(ST &dst, const GL &src, const kittens::coord<ST> &idx,
+                                         const uint32_t (&sw)[COPIES], kittens::i32x4 srd, const void *base,
+                                         uint32_t lds_base) {
     const kittens::coord<> uc = idx.template unit_coord<2, 3>();
     const uint8_t *gptr = reinterpret_cast<const uint8_t *>(&src[uc]);
     const uint32_t soff = kittens::to_sgpr_u32(static_cast<uint32_t>(gptr - reinterpret_cast<const uint8_t *>(base)));

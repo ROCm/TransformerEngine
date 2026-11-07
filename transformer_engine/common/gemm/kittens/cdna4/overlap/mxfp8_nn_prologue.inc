@@ -17,10 +17,10 @@
     using RT_C     = rt_fl<REG_M, REG_N, col_l, rt_16x16_s>;
 
     __shared__ ST_A As[2][2];
-    __shared__ ST_B Bs[2][2];
+    __shared__ alignas(ST_B::underlying_subtile_bytes) ST_B Bs[2][2];
 
     // B needs 8 scale groups = 2 tiles
-    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
+    __shared__ ST_Scale scale_smem[2][3];
 
     const int warp_m = kittens::warpid() / WARPS_COL;
     const int warp_n = kittens::warpid() % WARPS_COL;
@@ -64,4 +64,4 @@
     col_frag_addrs<RT_B>(b_frag, Bs[0][0], warp_n * REG_N);
 
     const int n_iters = k_iters - 2;
-    const int s0      = n_iters & 1;
+    const bool s0 = n_iters & 1;

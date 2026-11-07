@@ -40,4 +40,4 @@
     const uint32_t b_frag1 = row_frag_addr<RT_B>(Bs[0][0], warp_n, 1);
 
     const int n_iters = k_iters - 2;
-    const int s0      = n_iters & 1;
+    const bool s0 = n_iters & 1;

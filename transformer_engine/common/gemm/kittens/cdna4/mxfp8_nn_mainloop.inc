@@ -10,27 +10,27 @@
         if (s0) {
             constexpr int TIC = 1;
             constexpr int TOC = TIC ^ 1;
-            G::load(scale_A_smem[TOC], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_lo[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
-            G::load(scale_B_hi[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
+            G::load(scale_smem[TOC][0], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
+            G::load(scale_smem[TOC][1], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_smem[TOC][2], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
 
             load_cols<ST_B, 2 * TIC>(b0, b_frag);
             load_rows<ST_A, 2 * TIC>(a, a_frag0, a_frag1);
-            g2l_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
+            load_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
             asm volatile("s_waitcnt lgkmcnt(0)"); // drain LDS: the B tr-reads must land before mma_A
             __builtin_amdgcn_s_barrier();
 
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[TIC], warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[TIC], warp_n);
+            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
+            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
             __builtin_amdgcn_s_setprio(2);
             kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[TIC], warp_n);
+            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
             load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-            g2l_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
+            load_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
             asm volatile("s_waitcnt lgkmcnt(0)"); // drain LDS: need b1 in registers for mma_B
             __builtin_amdgcn_s_barrier();
 
@@ -39,9 +39,9 @@
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[TIC], 2 + warp_m);
+            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
             load_rows<ST_A, 2 * TIC + 1>(a, a_frag0, a_frag1);
-            g2l_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
+            load_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
             asm volatile("s_waitcnt lgkmcnt(0)"); // drain LDS: need as1 in registers for mma_C
             __builtin_amdgcn_s_barrier();
 
@@ -51,7 +51,7 @@
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            g2l_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
+            load_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
             asm volatile("s_waitcnt vmcnt(6)"); // wait for toc data loads; next-iter prefetches in flight
             __builtin_amdgcn_s_barrier();
 
@@ -65,27 +65,27 @@
             {
                 constexpr int TIC = 0;
                 constexpr int TOC = TIC ^ 1;
-                G::load(scale_A_smem[TOC], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-                G::load(scale_B_lo[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
-                G::load(scale_B_hi[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
+                G::load(scale_smem[TOC][0], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
+                G::load(scale_smem[TOC][1], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+                G::load(scale_smem[TOC][2], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
 
                 load_cols<ST_B, 2 * TIC>(b0, b_frag);
                 load_rows<ST_A, 2 * TIC>(a, a_frag0, a_frag1);
-                g2l_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
+                load_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
-                kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[TIC], warp_m);
-                kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[TIC], warp_n);
+                kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
+                kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
                 __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[TIC], warp_n);
+                kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
                 load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-                g2l_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
+                load_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
@@ -94,9 +94,9 @@
                 __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
-                kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[TIC], 2 + warp_m);
+                kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
                 load_rows<ST_A, 2 * TIC + 1>(a, a_frag0, a_frag1);
-                g2l_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
+                load_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
@@ -106,7 +106,7 @@
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                g2l_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
+                load_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
                 asm volatile("s_waitcnt vmcnt(6)");
                 __builtin_amdgcn_s_barrier();
 
@@ -119,27 +119,27 @@
             {
                 constexpr int TIC = 1;
                 constexpr int TOC = TIC ^ 1;
-                G::load(scale_A_smem[TOC], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-                G::load(scale_B_lo[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
-                G::load(scale_B_hi[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
+                G::load(scale_smem[TOC][0], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
+                G::load(scale_smem[TOC][1], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+                G::load(scale_smem[TOC][2], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
 
                 load_cols<ST_B, 2 * TIC>(b0, b_frag);
                 load_rows<ST_A, 2 * TIC>(a, a_frag0, a_frag1);
-                g2l_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
+                load_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
-                kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[TIC], warp_m);
-                kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[TIC], warp_n);
+                kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
+                kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
                 __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[TIC], warp_n);
+                kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
                 load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-                g2l_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
+                load_srd(As[TIC][0], A_local, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[TIC][0]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
@@ -148,9 +148,9 @@
                 __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
-                kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[TIC], 2 + warp_m);
+                kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
                 load_rows<ST_A, 2 * TIC + 1>(a, a_frag0, a_frag1);
-                g2l_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
+                load_srd(Bs[TIC][0], B_local, {0, 0, k + 2, b_half0}, sw_B, b_srd, b_base, b_lds[TIC][0]);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
@@ -160,7 +160,7 @@
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                g2l_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
+                load_srd(Bs[TIC][1], B_local, {0, 0, k + 2, b_half1}, sw_B, b_srd, b_base, b_lds[TIC][1]);
                 asm volatile("s_waitcnt vmcnt(6)");
                 __builtin_amdgcn_s_barrier();
 
@@ -185,20 +185,20 @@
             constexpr int TIC = 0;
             constexpr int TOC = TIC ^ 1;
             int k = k_iters - 2;
-            G::load(scale_A_smem[TOC], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_lo[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
-            G::load(scale_B_hi[TOC],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
+            G::load(scale_smem[TOC][0], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
+            G::load(scale_smem[TOC][1], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_smem[TOC][2], scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
             asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM: last prefetch iteration
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_barrier();
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[TIC], warp_m);
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[TIC], 2 + warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[TIC], warp_n);
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[TIC], warp_n);
+            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
+            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
+            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
+            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
 
             load_cols<ST_B, 2 * TIC>(b0, b_frag);
             load_rows<ST_A, 2 * TIC>(a, a_frag0, a_frag1);
-            g2l_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
+            load_srd(As[TOC][1], A_local, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[TOC][1]);
             __builtin_amdgcn_s_barrier();
 
             asm volatile("s_waitcnt lgkmcnt(0)"); // need as0/b0 in registers for mma_A
@@ -247,10 +247,10 @@
             asm volatile("s_waitcnt vmcnt(0)");
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_barrier();
-            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[TIC], warp_m);
-            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[TIC], 2 + warp_m);
-            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[TIC], warp_n);
-            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[TIC], warp_n);
+            kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
+            kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
+            kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
+            kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
 
             load_rows<ST_A, 2 * TIC>(a, a_frag0, a_frag1);
             __builtin_amdgcn_s_barrier();
