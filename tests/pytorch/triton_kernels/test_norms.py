@@ -338,21 +338,16 @@ class TestNorms:
 
         )
 
-        if norm == "layer":
-            triton_bwd_outs = triton_bwd_func(*args["triton"])
-            dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
-        elif norm == "rms":
-            triton_bwd_outs = triton_bwd_func(*args["triton"])
-            dx_triton, dgamma_triton = triton_bwd_outs
-            dbeta_triton = None
-
+        triton_bwd_outs = triton_bwd_func(*args["triton"])
         hip_bwd_outs = hip_bwd_func(*args["hip"])
 
         if norm == "layer":
+            dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
             dx_hip, dgamma_hip, dbeta_hip = hip_bwd_outs
         elif norm == "rms":
+            dx_triton, dgamma_triton = triton_bwd_outs
             dx_hip, dgamma_hip = hip_bwd_outs
-            dbeta_hip = None
+            dbeta_triton = dbeta_hip = None
 
         # Assert on dx, dgamma and dbeta:
         self._compare_bwd_tensors(
