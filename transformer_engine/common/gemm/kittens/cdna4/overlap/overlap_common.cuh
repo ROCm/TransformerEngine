@@ -6,6 +6,7 @@
 
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
+#include "../xcd_sched_common.cuh"
 #include <cstddef>
 #include <vector>
 
@@ -13,7 +14,6 @@
 // with `using namespace hk_overlap;`.
 namespace hk_overlap {
 
-constexpr int SCHED_ROUNDS = 2;
 constexpr int NUM_WARPS    = 8;
 constexpr int WARPS_ROW    = 2;
 constexpr int WARPS_COL    = 4;
@@ -50,12 +50,9 @@ struct PeerPtrsT {
 #define GATH_WG 8
 #endif
 
-constexpr int NUM_XCDS_AFF = 8;
-
-struct XcdBuckets {
-    int off[NUM_XCDS_AFF];
-    int cnt[NUM_XCDS_AFF];
-};
+using te_kittens::cdna4::NUM_XCDS_AFF;
+using te_kittens::cdna4::SCHED_ROUNDS;
+using te_kittens::cdna4::XcdBuckets;
 
 #ifndef AG_PUBLISH
 #define AG_PUBLISH(p) __hip_atomic_fetch_add((p), 1u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT)

@@ -7,7 +7,7 @@
 #include "../kittens_common.h"
 #include "../kittens_kernel_common.cuh"
 #include "mxfp8_gemm_helper.cuh"
-#include "overlap/overlap_common.cuh"
+#include "xcd_sched_common.cuh"
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -291,27 +291,7 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
             reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
     }
 
-    G::load(Bs[tic][0], B_local, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A);
-    G::load(Bs[tic][1], B_local, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A);
-
-    if (warp_m == 1) __builtin_amdgcn_s_barrier();
-    asm volatile("s_waitcnt vmcnt(4)"); // wait for tic[0] halves; tic[1] halves still in flight
-    __builtin_amdgcn_s_barrier();
-
-    G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A);
-    G::load(Bs[toc][0], B_local, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-    asm volatile("s_waitcnt vmcnt(6)"); // wait for tic[1] halves; 3 toc loads + scales in flight
-    __builtin_amdgcn_s_barrier();
-
-    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
-    asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM before first MMA
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
+#include "mxfp8_tn_preload.inc"
 
 #include "mxfp8_tn_mainloop.inc"
 
@@ -413,28 +393,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
-
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
-    asm volatile("s_waitcnt vmcnt(0)");
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    if (warp_m == 1) __builtin_amdgcn_s_barrier();
+#include "mxfp8_nn_preload.inc"
 
 #include "mxfp8_nn_mainloop.inc"
 
@@ -942,10 +901,6 @@ static void warn_fallback(const char *tag, const char *reason) {
     }
 }
 
-using hk_overlap::NUM_XCDS_AFF;
-using hk_overlap::SCHED_ROUNDS;
-using hk_overlap::XcdBuckets;
-
 constexpr int SCHED_CHUNK      = 64;
 constexpr int SCHED_CTR_GLOBAL = NUM_XCDS_AFF;
 constexpr int SCHED_CTR_BYTES  = 256;
@@ -991,60 +946,23 @@ __global__ void pack_scales_tab_kernel(const PackTab tab, uint32_t *__restrict__
 
     int tile_id = blockIdx.x;
     int e       = blockIdx.y;
-    const uint8_t *scales;
-    int k_iter, cblk;
     if constexpr (MODE == ScalePack::CONCAT) {
         e = hk_upper_bound(tab.off, num_experts, tile_id / k_iters);
         int tpc = tab.off[e + 1] - tab.off[e];
         tile_id -= k_iters * tab.off[e];
-        scales = tab.src[e];
-        ln += (size_t)k_iters * tab.off[e] * NG * 64;
-        dim    = tpc * 256;
-        k_iter = tile_id / tpc;
-        cblk   = tile_id % tpc;
+        pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + (size_t)k_iters * tab.off[e] * NG * 64, tpc * 256,
+                                           scale_K, tile_id / tpc, tile_id % tpc, tile_id);
     } else if constexpr (MODE == ScalePack::VARYING) {
         int e_k_iters = tab.k_iters[e];
         if (tile_id >= e_k_iters * tiles_per_col) {
             return;
         }
-        scales = tab.src[e];
-        ln += tab.off[e];
-        scale_K = e_k_iters * 4;
-        k_iter  = tile_id / tiles_per_col;
-        cblk    = tile_id % tiles_per_col;
+        pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + tab.off[e], dim, e_k_iters * 4,
+                                           tile_id / tiles_per_col, tile_id % tiles_per_col, tile_id);
     } else {
-        scales = tab.src[e];
-        ln += (size_t)e * expert_stride;
-        k_iter = tile_id / tiles_per_col;
-        cblk   = tile_id % tiles_per_col;
+        pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + (size_t)e * expert_stride, dim, scale_K,
+                                           tile_id / tiles_per_col, tile_id % tiles_per_col, tile_id);
     }
-
-    constexpr int TILE_WORDS = 256;
-    constexpr int PAD_WORDS  = (NG - 1) * STEP + 64;
-    __shared__ uint32_t tile[PAD_WORDS];
-
-    int kb_base = k_iter * 4;
-    int row0    = cblk * TILE_WORDS;
-
-    for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
-        uint32_t p = 0;
-        if (i < TILE_WORDS) {
-            int row = row0 + i;
-            if constexpr (COLWISE) {
-                int base = kb_base * dim + row;
-                p  =  (uint32_t)scales[base]              | ((uint32_t)scales[base +     dim] << 8)
-                   | ((uint32_t)scales[base + 2 * dim] << 16) | ((uint32_t)scales[base + 3 * dim] << 24);
-            } else {
-                __builtin_memcpy(&p, &scales[(size_t)row * scale_K + kb_base], 4);
-            }
-        }
-        tile[i] = p;
-    }
-    __syncthreads();
-
-    int tid = threadIdx.x, lane = tid % 64, grp = tid / 64;
-    kittens::fp8e8m0_4 out = kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
-    ln[((size_t)tile_id * NG + grp) * 64 + lane] = out;
 }
 
 template <int CBSZ, int BLGP, typename OutGL>
@@ -1069,8 +987,8 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
     __shared__ int s_wgid;
     __shared__ XcdBuckets buckets;
 
-    int warp_m = kittens::warpid() / WARPS_COL;
-    int warp_n = kittens::warpid() % WARPS_COL;
+    int warp_m = __builtin_amdgcn_readfirstlane(kittens::warpid() / WARPS_COL);
+    int warp_n = __builtin_amdgcn_readfirstlane(kittens::warpid() % WARPS_COL);
 
     using T = kittens::fp8e4m3;
 
@@ -1082,61 +1000,7 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
     G::prefill_swizzled_offsets(As_s[0][0], A, sw_A);
     G::prefill_swizzled_offsets(Bs_s[0][0], B, sw_B);
 
-    const bool static_sched = num_tiles <= SCHED_ROUNDS * (int)gridDim.x;
-    const int limit = (num_tiles / (NUM_XCDS_AFF * SCHED_CHUNK)) * (NUM_XCDS_AFF * SCHED_CHUNK);
-    if (threadIdx.x == 0) {
-        const int tail = num_tiles - limit;
-        int off = 0;
-        for (int b = 0; b < NUM_XCDS_AFF; b++) {
-            buckets.off[b] = off;
-            buckets.cnt[b] = limit / NUM_XCDS_AFF + (tail > b ? (tail - b + NUM_XCDS_AFF - 1) / NUM_XCDS_AFF : 0);
-            off += buckets.cnt[b];
-        }
-    }
-    int iter = 0;
-    int wgid = 0;
-    int zero;
-    asm volatile("s_mov_b32 %0, 0" : "=s"(zero));
-    if (zero != 0) {
-        asm volatile("" : "+s"(wgid));
-        goto tile;
-    }
-    asm volatile("" : "+s"(iter));
-#pragma unroll 1
-    for (;; iter++) {
-        if (threadIdx.x == 0) {
-            if (static_sched) {
-                const int i = (int)blockIdx.x + iter * (int)gridDim.x;
-                s_wgid = i < num_tiles ? kittens::chiplet_transform_chunked(i, num_tiles, NUM_XCDS_AFF, SCHED_CHUNK)
-                                       : num_tiles;
-            } else {
-                int *bucket_ctr = ctr;
-                const int my_pe = (int)blockIdx.x % NUM_XCDS_AFF;
-                int s_tile_idx;
-#include "overlap/xcd_steal.inc"
-                s_wgid = num_tiles;
-                if (s_tile_idx < num_tiles) {
-                    int bb = NUM_XCDS_AFF - 1;
-                    while (bb > 0 && (buckets.cnt[bb] == 0 || buckets.off[bb] > s_tile_idx)) {
-                        bb--;
-                    }
-                    const int idx   = s_tile_idx - buckets.off[bb];
-                    const int nfull = limit / NUM_XCDS_AFF;
-                    if (idx < nfull) {
-                        s_wgid = (idx / SCHED_CHUNK) * (NUM_XCDS_AFF * SCHED_CHUNK) + bb * SCHED_CHUNK
-                               + idx % SCHED_CHUNK;
-                    } else {
-                        s_wgid = limit + bb + NUM_XCDS_AFF * (idx - nfull);
-                    }
-                }
-            }
-        }
-        __syncthreads();
-        wgid = __builtin_amdgcn_readfirstlane(s_wgid);
-        if (wgid >= num_tiles) {
-            break;
-        }
-    tile:
+#include "xcd_sched.inc"
         uint32_t lds_zero;
         asm volatile("s_mov_b32 %0, 0" : "=s"(lds_zero));
         auto &As = *(decltype(As_s) *)(__attribute__((address_space(3))) decltype(As_s) *)(uintptr_t)
@@ -1199,29 +1063,7 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         const int b_row_stride = B_local.template stride<2>() * sizeof(T);
         kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
 
-        G::load(Bs[tic][0], B_local, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A);
-        G::load(Bs[tic][1], B_local, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A);
-
-        if (warp_m == 1) {
-            __builtin_amdgcn_s_barrier();
-        }
-        asm volatile("s_waitcnt vmcnt(4)");
-        __builtin_amdgcn_s_barrier();
-
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A);
-        G::load(Bs[toc][0], B_local, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-        asm volatile("s_waitcnt vmcnt(6)");
-        __builtin_amdgcn_s_barrier();
-
-        G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
-        asm volatile("s_waitcnt vmcnt(0)");
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
+#include "mxfp8_tn_preload.inc"
 
 #include "mxfp8_tn_mainloop.inc"
 
@@ -1272,61 +1114,7 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
     int b_col_off = warp_n * REG_N;
 
-    const bool static_sched = num_tiles <= SCHED_ROUNDS * (int)gridDim.x;
-    const int limit = (num_tiles / (NUM_XCDS_AFF * SCHED_CHUNK)) * (NUM_XCDS_AFF * SCHED_CHUNK);
-    if (threadIdx.x == 0) {
-        const int tail = num_tiles - limit;
-        int off = 0;
-        for (int b = 0; b < NUM_XCDS_AFF; b++) {
-            buckets.off[b] = off;
-            buckets.cnt[b] = limit / NUM_XCDS_AFF + (tail > b ? (tail - b + NUM_XCDS_AFF - 1) / NUM_XCDS_AFF : 0);
-            off += buckets.cnt[b];
-        }
-    }
-    int iter = 0;
-    int wgid = 0;
-    int zero;
-    asm volatile("s_mov_b32 %0, 0" : "=s"(zero));
-    if (zero != 0) {
-        asm volatile("" : "+s"(wgid));
-        goto tile;
-    }
-    asm volatile("" : "+s"(iter));
-#pragma unroll 1
-    for (;; iter++) {
-        if (threadIdx.x == 0) {
-            if (static_sched) {
-                const int i = (int)blockIdx.x + iter * (int)gridDim.x;
-                s_wgid = i < num_tiles ? kittens::chiplet_transform_chunked(i, num_tiles, NUM_XCDS_AFF, SCHED_CHUNK)
-                                       : num_tiles;
-            } else {
-                int *bucket_ctr = ctr;
-                const int my_pe = (int)blockIdx.x % NUM_XCDS_AFF;
-                int s_tile_idx;
-#include "overlap/xcd_steal.inc"
-                s_wgid = num_tiles;
-                if (s_tile_idx < num_tiles) {
-                    int bb = NUM_XCDS_AFF - 1;
-                    while (bb > 0 && (buckets.cnt[bb] == 0 || buckets.off[bb] > s_tile_idx)) {
-                        bb--;
-                    }
-                    const int idx   = s_tile_idx - buckets.off[bb];
-                    const int nfull = limit / NUM_XCDS_AFF;
-                    if (idx < nfull) {
-                        s_wgid = (idx / SCHED_CHUNK) * (NUM_XCDS_AFF * SCHED_CHUNK) + bb * SCHED_CHUNK
-                               + idx % SCHED_CHUNK;
-                    } else {
-                        s_wgid = limit + bb + NUM_XCDS_AFF * (idx - nfull);
-                    }
-                }
-            }
-        }
-        __syncthreads();
-        wgid = __builtin_amdgcn_readfirstlane(s_wgid);
-        if (wgid >= num_tiles) {
-            break;
-        }
-    tile:
+#include "xcd_sched.inc"
         uint32_t lds_zero;
         asm volatile("s_mov_b32 %0, 0" : "=s"(lds_zero));
         auto &As = *(decltype(As_s) *)(__attribute__((address_space(3))) decltype(As_s) *)(uintptr_t)
@@ -1395,30 +1183,7 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         int tic = 0, toc = 1;
         int tic_scales = 0, toc_scales = 1;
 
-        G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-        G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-        G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-
-        G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
-        asm volatile("s_waitcnt vmcnt(0)");
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-
-        if (warp_m == 1) {
-            __builtin_amdgcn_s_barrier();
-        }
+#include "mxfp8_nn_preload.inc"
 
 #include "mxfp8_nn_mainloop.inc"
 
@@ -1606,12 +1371,8 @@ void mxfp8_wgrad_nt_kernel(
     __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
     __shared__ int s_wgid;
 
-    int warp_m = kittens::warpid() / WARPS_COL;
-    int warp_n = kittens::warpid() % WARPS_COL;
-    if constexpr (ACCUMULATE) {
-        warp_m = __builtin_amdgcn_readfirstlane(warp_m);
-        warp_n = __builtin_amdgcn_readfirstlane(warp_n);
-    }
+    int warp_m = __builtin_amdgcn_readfirstlane(kittens::warpid() / WARPS_COL);
+    int warp_n = __builtin_amdgcn_readfirstlane(kittens::warpid() % WARPS_COL);
 
     using T = kittens::fp8e4m3;
 

@@ -9,27 +9,9 @@
 
 namespace te_kittens::cdna4::mxfp8 {
 
-// Packs raw scales into the lane-native layout the GEMM kernels read.
-// A: STEP=64,NG=4; B: STEP=32,NG=8 (hi/lo tile pair).
-template<bool COLWISE, int STEP, int NG, bool SHARDED = false>
-__global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln, int dim,
-    int scale_K, int k_iters, int tiles_per_col, [[maybe_unused]] int cblk_off = 0,
-    [[maybe_unused]] int tiles_local = 0) {
-
-    int tile_id = blockIdx.x;
-    int k_iter, cblk;
-    size_t out_tile;
-    if constexpr (SHARDED) {
-        if (tile_id >= k_iters * tiles_local) return;
-        k_iter   = tile_id / tiles_local;
-        cblk     = tile_id % tiles_local;
-        out_tile = (size_t)k_iter * tiles_per_col + cblk_off + cblk;
-    } else {
-        if (tile_id >= k_iters * tiles_per_col) return;
-        k_iter   = tile_id / tiles_per_col;
-        cblk     = tile_id % tiles_per_col;
-        out_tile = (size_t)tile_id;
-    }
+template<bool COLWISE, int STEP, int NG>
+__device__ __forceinline__ void pack_scale_tile(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln,
+    int dim, int scale_K, int k_iter, int cblk, size_t out_tile) {
 
     constexpr int TILE_WORDS = 256;
     constexpr int PAD_WORDS  = (NG - 1) * STEP + 64; // covers OOB pack_scales read
@@ -57,6 +39,30 @@ __global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t 
     int tid = threadIdx.x, lane = tid % 64, grp = tid / 64;
     kittens::fp8e8m0_4 out = kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
     ln[(out_tile * NG + grp) * 64 + lane] = out;
+}
+
+// Packs raw scales into the lane-native layout the GEMM kernels read.
+// A: STEP=64,NG=4; B: STEP=32,NG=8 (hi/lo tile pair).
+template<bool COLWISE, int STEP, int NG, bool SHARDED = false>
+__global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln, int dim,
+    int scale_K, int k_iters, int tiles_per_col, [[maybe_unused]] int cblk_off = 0,
+    [[maybe_unused]] int tiles_local = 0) {
+
+    int tile_id = blockIdx.x;
+    int k_iter, cblk;
+    size_t out_tile;
+    if constexpr (SHARDED) {
+        if (tile_id >= k_iters * tiles_local) return;
+        k_iter   = tile_id / tiles_local;
+        cblk     = tile_id % tiles_local;
+        out_tile = (size_t)k_iter * tiles_per_col + cblk_off + cblk;
+    } else {
+        if (tile_id >= k_iters * tiles_per_col) return;
+        k_iter   = tile_id / tiles_per_col;
+        cblk     = tile_id % tiles_per_col;
+        out_tile = (size_t)tile_id;
+    }
+    pack_scale_tile<COLWISE, STEP, NG>(scales, ln, dim, scale_K, k_iter, cblk, out_tile);
 }
 
 template<bool COLWISE, int STEP, int NG>

@@ -53,7 +53,7 @@ void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-#include "xcd_steal.inc"
+#include "../xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -294,7 +294,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-#include "xcd_steal.inc"
+#include "../xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
