@@ -180,7 +180,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        py::arg("bin_bounds"), py::arg("histogram_mode"),
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
@@ -195,13 +195,16 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
         py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
         py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+  m.def("get_moe_aux_loss_workspace_config", &get_moe_aux_loss_workspace_config);
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
   m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
@@ -241,6 +244,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("nvfp4_gemm_swizzled_scales_alignment",
+        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
+        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
+        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
+        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),

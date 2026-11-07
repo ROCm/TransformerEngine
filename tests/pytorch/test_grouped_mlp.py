@@ -21,6 +21,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
@@ -472,10 +473,8 @@ class _InjectGrad(torch.autograd.Function):
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
-    def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
+    def test_meta_single_grouped_weight_with_delayed_wgrad(self) -> None:
         """A deferred op shell must not access its grouped parent before it is attached."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-
         op = te.ops.GroupedLinear(
             2,
             16,
@@ -499,9 +498,8 @@ class TestGroupedLinearOp:
 
         assert grouped_weight.skip_backward_post_hook
 
-    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+    def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
         op = te.ops.GroupedLinear(
             2,
             128,
@@ -548,13 +546,6 @@ class TestGroupedLinearOp:
         single_grouped_bias: bool,
     ) -> None:
         """Grouped GEMM"""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -655,6 +646,7 @@ class TestGroupedLinearOp:
                 delay_wgrad_compute=delay_wgrad_compute,
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
+                split_alignment=split_alignment,
             )
         with torch.no_grad():
             if single_grouped_weight:
@@ -950,13 +942,6 @@ class TestGroupedLinearOp:
         """
 
         # Skip invalid configurations
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
         if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
@@ -1150,9 +1135,9 @@ class TestGroupedMLPFusedOp:
         fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
 
-        fc1 = te.ops.GroupedLinear(1, 64, 128, bias=False, device="cuda")
+        fc1 = te.ops.GroupedLinear(1, 64, 128, bias=False, device="cuda", split_alignment=256)
         activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
-        fc2 = te.ops.GroupedLinear(1, 64, 64, bias=False, device="cuda")
+        fc2 = te.ops.GroupedLinear(1, 64, 64, bias=False, device="cuda", split_alignment=256)
         ops = [fc1, activation, fc2]
 
         def fuse(recipe):
@@ -1170,6 +1155,11 @@ class TestGroupedMLPFusedOp:
 
         e4m3 = MXFP8BlockScaling(fp8_format=Format.E4M3)
         assert_fused(e4m3)
+
+        fc1.split_alignment = 128
+        with pytest.warns(UserWarning, match="split_alignment.*divisible by 256"):
+            assert fuse(e4m3) == ops
+        fc1.split_alignment = 256
 
         # NVFP4 quantizes gradients to FP4, so the FP8 format must not gate it. Forcing the
         # lookup to E5M2 is what an NVFP4 recipe would hit if the check were not MXFP8-only.
@@ -1193,9 +1183,11 @@ class TestGroupedMLPFusedOp:
             "scaled_tanh_srelu",
         ),
     )
+    @pytest.mark.parametrize("enable_fusion", (True, False), ids=("fusion_on", "fusion_off"))
     def test_grouped_mlp(
         self,
         *,
+        enable_fusion: bool,
         group_size: int = 4,
         bias: bool,
         hidden_size: int,
@@ -1244,13 +1236,6 @@ class TestGroupedMLPFusedOp:
             pytest.skip(_ROCM_NO_SINGLE_GROUPED_PARAM)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1450,6 +1435,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_bias=single_grouped_bias,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
 
                 fc2_op = te.ops.GroupedLinear(
@@ -1464,6 +1450,7 @@ class TestGroupedMLPFusedOp:
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
                     scale_bias=bias,
+                    split_alignment=split_alignment,
                 )
                 return te.ops.Sequential(fc1_op, _make_scaled_act(), fc2_op), fc1_op, fc2_op
 
@@ -1511,14 +1498,29 @@ class TestGroupedMLPFusedOp:
                 )
         del fc1_ws_test, fc1_bs_test, fc2_ws_test, fc2_bs_test
 
-        # Fuse ops and perform forward and backward pass
-        with te.autocast(enabled=with_quantization, recipe=recipe):
-            fc2_extra = (split_sizes, probs_test) if bias else (split_sizes,)
-            y_test = module(x_test, split_sizes, probs_test, *fc2_extra)
-        y_test.backward(dy_test)
-        if delay_wgrad_compute:
-            fc1.backward_dw()
-            fc2.backward_dw()
+        # Keep the same basic ops and quantizer wiring in both execution paths.
+        with pytest.MonkeyPatch.context() as fusion_patch:
+            if not enable_fusion:
+                grouped_mlp_callbacks = {
+                    grouped_mlp_module.fuse_glu_ops,
+                    grouped_mlp_module.fuse_unary_activation_ops,
+                }
+                fusion_patch.setattr(
+                    OperationFuser,
+                    "forward_backward_fusion_functions",
+                    [
+                        callback
+                        for callback in OperationFuser.forward_backward_fusion_functions
+                        if callback not in grouped_mlp_callbacks
+                    ],
+                )
+            with te.autocast(enabled=with_quantization, recipe=recipe):
+                fc2_extra = (split_sizes, probs_test) if bias else (split_sizes,)
+                y_test = module(x_test, split_sizes, probs_test, *fc2_extra)
+            y_test.backward(dy_test)
+            if delay_wgrad_compute:
+                fc1.backward_dw()
+                fc2.backward_dw()
 
         # Check for expected fusions
         if activation == "scaled_swiglu":
@@ -1571,7 +1573,12 @@ class TestGroupedMLPFusedOp:
                 )
             )
         )
-        if expected_grouped_mlp_fusion:
+        if not enable_fusion:
+            expected_ops = [(fc1, [0]), (module[1], [1]), (fc2, [2])]
+            fuser = module._module_groups[0]
+            for ops in (fuser._forward_ops, fuser._backward_ops):
+                assert ops == expected_ops
+        elif expected_grouped_mlp_fusion:
             if activation_is_glu:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
@@ -1690,6 +1697,7 @@ class TestGroupedMLPFusedOp:
         _clear_grouped_glu_kernel_caches()
         try:
             self.test_grouped_mlp(
+                enable_fusion=True,
                 group_size=4,
                 bias=True,
                 hidden_size=128,
@@ -1734,10 +1742,9 @@ class TestGroupedMLPFusedOp:
         assert fused_cls.is_supported()
         # FC2 bias-gradient accumulation uses an atomic Triton reduction.
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
-        if single_grouped_weight:
-            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
         self.test_grouped_mlp(
+            enable_fusion=True,
             group_size=4,
             bias=True,
             hidden_size=128,
@@ -1802,6 +1809,7 @@ class TestGroupedMLPFusedOp:
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
 
         self.test_grouped_mlp(
+            enable_fusion=True,
             group_size=4,
             bias=True,
             hidden_size=128,
@@ -1892,10 +1900,22 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
-                group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(
                 fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
@@ -1986,7 +2006,13 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, 2 * hidden_size, bias=bias, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -1996,6 +2022,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(
                 fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
@@ -2059,15 +2086,18 @@ class TestGroupedMLPFusedOp:
             "scaled_tanh_srelu",
         ),
     )
+    @pytest.mark.parametrize("enable_fusion", (True, False), ids=("fusion_on", "fusion_off"))
     def test_grouped_mlp_fp16(
         self,
         *,
+        enable_fusion: bool,
         bias: bool,
         quantization: Optional[str],
         activation: str,
     ) -> None:
         """Grouped MLP with high-precision tensors in FP16"""
         self.test_grouped_mlp(
+            enable_fusion=enable_fusion,
             bias=bias,
             hidden_size=128,
             dtype=torch.float16,
@@ -2081,9 +2111,11 @@ class TestGroupedMLPFusedOp:
     )
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("runtime_offsets_supported", (False, True))
+    @pytest.mark.parametrize("enable_fusion", (True, False), ids=("fusion_on", "fusion_off"))
     def test_grouped_mlp_single_group(
         self,
         monkeypatch,
+        enable_fusion: bool,
         *,
         quantization: str,
         bias: bool,
@@ -2091,7 +2123,8 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear."""
         if (
-            runtime_offsets_supported
+            enable_fusion
+            and runtime_offsets_supported
             and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets(
                 te.ops.ScaledSwiGLU
             )
@@ -2103,6 +2136,7 @@ class TestGroupedMLPFusedOp:
             lambda _activation_type: runtime_offsets_supported,
         )
         self.test_grouped_mlp(
+            enable_fusion=enable_fusion,
             group_size=1,
             bias=bias,
             hidden_size=128,
@@ -2200,10 +2234,22 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                1, hidden_size, fc1_out_features, bias=False, device=device, dtype=dtype
+                1,
+                hidden_size,
+                fc1_out_features,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=256,
             )
             fc2 = te.ops.GroupedLinear(
-                1, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                1,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=256,
             )
             module = te.ops.Sequential(fc1, te.ops.ScaledSwiGLU(glu_interleave_size=32), fc2)
         with torch.no_grad():
@@ -2252,7 +2298,7 @@ class TestGroupedMLPFusedOp:
 
         split_sizes = torch.full(
             (group_size,),
-            128,
+            256,
             dtype=torch.int64,
             device=device,
         )
@@ -2267,6 +2313,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 single_grouped_weight=True,
+                split_alignment=256,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2275,6 +2322,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 single_grouped_weight=True,
+                split_alignment=256,
             )
             module = te.ops.Sequential(
                 fc1,
@@ -2299,9 +2347,11 @@ class TestGroupedMLPFusedOp:
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
+    @pytest.mark.parametrize("enable_fusion", (True, False), ids=("fusion_on", "fusion_off"))
     def test_grouped_mlp_mcore_integrations(
         self,
         *,
+        enable_fusion: bool,
         quantization: Optional[str],
         single_grouped_weight: bool,
         accumulate_into_main_grad: bool,
@@ -2312,6 +2362,7 @@ class TestGroupedMLPFusedOp:
         if not accumulate_into_main_grad and not delay_wgrad_compute:
             pytest.skip("Configuration is already tests in test_grouped_mlp")
         self.test_grouped_mlp(
+            enable_fusion=enable_fusion,
             bias=False,
             hidden_size=128,
             quantization=quantization,
@@ -2338,8 +2389,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if activation == "scaled_clamped_qgeglu":
@@ -2404,6 +2453,7 @@ class TestGroupedMLPFusedOp:
                     device=device,
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
+                    split_alignment=split_alignment,
                 )
                 fc2 = te.ops.GroupedLinear(
                     group_size,
@@ -2414,6 +2464,7 @@ class TestGroupedMLPFusedOp:
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
                     scale_bias=bias,
+                    split_alignment=split_alignment,
                 )
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
 
@@ -2553,6 +2604,7 @@ class TestGroupedMLPFusedOp:
         device: torch.device | str,
         bias: bool = False,
         delay_wgrad_compute: bool = False,
+        split_alignment: int = 256,
     ) -> dict:
         """Fused grouped MLP forward and backward with deterministic weights and inputs.
 
@@ -2573,6 +2625,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 delay_wgrad_compute=delay_wgrad_compute,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2583,6 +2636,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 delay_wgrad_compute=delay_wgrad_compute,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(fc1, scaled_act, fc2)
 
@@ -2764,11 +2818,23 @@ class TestGroupedMLPFusedOp:
         def build() -> te.ops.Sequential:
             with te.quantized_model_init(enabled=True, recipe=recipe):
                 fc1 = te.ops.GroupedLinear(
-                    group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    2 * hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    split_alignment=split_alignment,
                 )
                 scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 fc2 = te.ops.GroupedLinear(
-                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    split_alignment=split_alignment,
                 )
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
             with torch.no_grad():
@@ -2844,8 +2910,6 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -2882,6 +2946,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_weight=single_grouped_weight,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
                 fc2 = te.ops.GroupedLinear(
                     group_size,
@@ -2893,6 +2958,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_weight=single_grouped_weight,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
                 scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
@@ -2977,8 +3043,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
@@ -3009,6 +3073,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -3019,6 +3084,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             scaled_act = (
                 te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
@@ -3039,6 +3105,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             reference_fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -3049,6 +3116,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             reference_scaled_act = (
                 te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
@@ -3305,6 +3373,7 @@ class TestGroupedMLPDeterminism:
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
         try:
             TestGroupedMLPFusedOp().test_grouped_mlp(
+                enable_fusion=True,
                 bias=False,
                 hidden_size=128,
                 quantization="mxfp8",
@@ -3338,6 +3407,7 @@ class TestGroupedMLPDeterminism:
         torch.use_deterministic_algorithms(True, warn_only=True)
         with pytest.raises(RuntimeError, match="dprob"):
             TestGroupedMLPFusedOp().test_grouped_mlp(
+                enable_fusion=True,
                 bias=True,
                 hidden_size=128,
                 quantization="mxfp8",
@@ -3406,6 +3476,7 @@ class TestGroupedMLPDeterminism:
                     single_grouped_weight=is_glu,
                     device=device,
                     dtype=dtype,
+                    split_alignment=256,
                 ),
                 _make_scaled_activation(activation, glu_interleave_size=32 if is_glu else None),
                 te.ops.GroupedLinear(
@@ -3416,6 +3487,7 @@ class TestGroupedMLPDeterminism:
                     single_grouped_weight=is_glu,
                     device=device,
                     dtype=dtype,
+                    split_alignment=256,
                 ),
             )
 

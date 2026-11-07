@@ -52,8 +52,6 @@ check_mxfp8_supported() {
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
-    # Enable GroupedLinear single-param feature
-    export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         mkdir -p ${TEST_DIR}/checkpoint
