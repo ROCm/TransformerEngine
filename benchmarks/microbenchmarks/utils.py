@@ -183,6 +183,17 @@ def build_recipes(names=None):
 # Timing helpers
 # ---------------------------------------------------------------------------
 
+# --interleave R (set via configure_interleave from conftest): every benchmark runs in R rounds
+# spread over the session, each with 1/R of the timing budget; merge_rounds pools the rounds.
+_ROUNDS = 1
+
+
+def configure_interleave(rounds):
+    """Set the number of interleave rounds (from --interleave)."""
+    global _ROUNDS
+    _ROUNDS = rounds
+
+
 def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     """Time *fn* and return ``(median_ms, measurement)``.
 
@@ -192,6 +203,7 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
 
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
+    Under ``--interleave R`` each round runs for 1/R of *min_run_time*.
     """
     # Untimed first (pre-warmup) call: the timers size their blocks from their first timed calls,
     # and a slow one-off first call (e.g. lazy kernel load, JIT compilation, algorithm selection,
@@ -201,9 +213,9 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     torch.cuda.synchronize()
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
     if method == "blocked":
-        m = timer.blocked_autorange(min_run_time=min_run_time)
+        m = timer.blocked_autorange(min_run_time=min_run_time / _ROUNDS)
     else:
-        m = timer.adaptive_autorange(min_run_time=min_run_time)
+        m = timer.adaptive_autorange(min_run_time=min_run_time / _ROUNDS)
     return m.median * 1e3, m
 
 
@@ -225,8 +237,8 @@ def _prepared_calls(fn, prepare, n):
     return [functools.partial(fn, prepare()) for _ in range(n)]
 
 
-def _kernel_time_profiler_ms(fn, warmup=100, iters=100, prepare=None, block=None):
-    """Median GPU kernel (device) time per call, in ms, via torch.profiler.
+def _kernel_times_profiler_ms(fn, warmup=100, iters=100, prepare=None, block=None):
+    """GPU kernel (device) time of each call, in ms, via torch.profiler.
 
     Profiles ``iters`` back-to-back calls and splits the in-order kernel list into
     per-call groups (matched against one call's kernel sequence), summing the device
@@ -284,18 +296,18 @@ def _kernel_time_profiler_ms(fn, warmup=100, iters=100, prepare=None, block=None
                       f"({n_kernels} kernel records from {iters} calls); "
                       "kernel time left empty.")
         return None
-    return statistics.median(per_call_us) / 1e3
+    return [t / 1e3 for t in per_call_us]
 
 
-def _kernel_time_event_ms(fn, warmup=100, iters=100, prepare=None, block=None):
-    """Median elapsed GPU device time per call, in ms, via CUDA events.
+def _kernel_times_event_ms(fn, warmup=100, iters=100, prepare=None, block=None):
+    """Elapsed GPU device time of each call, in ms, via CUDA events.
 
     Records an event on the current stream between consecutive calls of a
     saturated loop, so concurrent multi-stream kernels are measured by their
     overlapped span rather than a per-kernel sum. Handles the multi-stream
     grouped-GEMM path (where a per-kernel sum double-counts overlapping kernels);
     converges to the wall time for device-bound ops. *prepare* / *block* are as in
-    :func:`_kernel_time_profiler_ms`.
+    :func:`_kernel_times_profiler_ms`.
     """
     for _ in range(warmup):
         _prepared_calls(fn, prepare, 1)[0]()
@@ -311,7 +323,7 @@ def _kernel_time_event_ms(fn, warmup=100, iters=100, prepare=None, block=None):
             event.record()
         torch.cuda.synchronize()
         spans += [a.elapsed_time(b) for a, b in zip(events, events[1:])]
-    return statistics.median(spans)
+    return spans
 
 
 # Kernel-time method: "profiler" (default) or "event". A benchmark opts into the
@@ -327,11 +339,15 @@ def _resolve_kernel_method(method):
     return method or "profiler"
 
 
-def _kernel_time_ms(fn, warmup=100, iters=100, method=None, prepare=None, block=None):
-    """Median GPU device time per call (ms) using the resolved kernel-time method."""
+def _kernel_times_ms(fn, warmup=100, iters=100, method=None, prepare=None, block=None):
+    """GPU device time of each call (ms, or None) using the resolved kernel-time method.
+
+    Under ``--interleave R`` each round profiles 1/R of *iters* calls.
+    """
+    iters = math.ceil(iters / _ROUNDS)
     if _resolve_kernel_method(method) == "event":
-        return _kernel_time_event_ms(fn, warmup, iters, prepare, block)
-    return _kernel_time_profiler_ms(fn, warmup, iters, prepare, block)
+        return _kernel_times_event_ms(fn, warmup, iters, prepare, block)
+    return _kernel_times_profiler_ms(fn, warmup, iters, prepare, block)
 
 
 # Tensile kernel names spell out every tuning parameter (~900 chars): keep them up to the
@@ -357,7 +373,7 @@ def _triton_config_name(name, config):
 def gemm_kernel_names(fn, prepare=None):
     """``;``-joined GEMM kernels that one call of *fn* launches, in launch order: hipBLASLt
     kernels (Tensile ``Cijk_*``, rocRoller ``RR_GEMM_*``) and Triton autotuned kernels with the
-    config they run. *prepare* is as in :func:`_kernel_time_profiler_ms`.
+    config they run. *prepare* is as in :func:`_kernel_times_profiler_ms`.
     """
     from torch.autograd import DeviceType
     from torch.profiler import profile, ProfilerActivity
@@ -411,14 +427,17 @@ def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECO
 
     ``wall_ms`` / ``measurement`` are the host wall-clock timing from
     :func:`time_func`. ``kernel_ms`` is the median GPU kernel (device) time per
-    call from :func:`_kernel_time_ms` when kernel profiling is enabled
+    call from :func:`_kernel_times_ms` when kernel profiling is enabled
     (``--kernel-profile``); otherwise it is ``None`` and no profiler pass runs.
     It is also ``None`` when the profiler pass can't attribute kernels to calls.
+    ``measurement.kernel_times`` holds the per-call kernel times (or ``None``).
     *kernel_method* selects the measurement ("profiler" default, or "event" for
     concurrent multi-stream ops such as grouped GEMM).
     """
     wall_ms, measurement = time_func(fn, method=method, min_run_time=min_run_time)
-    kernel_ms = _kernel_time_ms(fn, method=kernel_method) if _KERNEL_PROFILE else None
+    measurement.kernel_times = (_kernel_times_ms(fn, method=kernel_method)
+                                if _KERNEL_PROFILE else None)
+    kernel_ms = statistics.median(measurement.kernel_times) if measurement.kernel_times else None
     return wall_ms, measurement, kernel_ms
 
 
@@ -446,9 +465,11 @@ def time_backward_dual(fwd_func, bwd_func, min_run_time=DEFAULT_MIN_RUN_TIME_SEC
     back, so the host runs ahead of the GPU as in the forward timing and no forward time
     is subtracted. The first block is warmup; GC is off while timing, as in
     :func:`time_func`. ``measurement.times`` holds each block's time per call;
-    ``kernel_ms`` is as in :func:`time_func_dual`.
+    ``kernel_ms`` and ``measurement.kernel_times`` are as in :func:`time_func_dual`.
+    Under ``--interleave R`` each round times 1/R of the blocks and of *min_run_time*.
     """
     calls = _bwd_block_calls(fwd_func)
+    min_blocks = math.ceil(_BWD_MIN_BLOCKS / _ROUNDS)
     times = []
     for block in itertools.count():
         fwd_outs = [fwd_func() for _ in range(calls)]
@@ -468,11 +489,13 @@ def time_backward_dual(fwd_func, bwd_func, min_run_time=DEFAULT_MIN_RUN_TIME_SEC
         if block == 0:
             continue
         times.append(elapsed / calls)
-        if len(times) >= _BWD_MIN_BLOCKS and sum(times) * calls >= min_run_time:
+        if len(times) >= min_blocks and sum(times) * calls >= min_run_time / _ROUNDS:
             break
-    kernel_ms = (_kernel_time_ms(bwd_func, method=kernel_method, prepare=fwd_func, block=calls)
-                 if _KERNEL_PROFILE else None)
-    return statistics.median(times) * 1e3, SimpleNamespace(times=times), kernel_ms
+    kernel_times = (_kernel_times_ms(bwd_func, method=kernel_method, prepare=fwd_func, block=calls)
+                    if _KERNEL_PROFILE else None)
+    kernel_ms = statistics.median(kernel_times) if kernel_times else None
+    measurement = SimpleNamespace(times=times, kernel_times=kernel_times)
+    return statistics.median(times) * 1e3, measurement, kernel_ms
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1004,33 @@ def record_bench(store, family, case_params, metric_records, node_name=""):
     fam.case_metrics.append((_stringify_params(case_params), metric_records, node_name))
 
 
+def merge_rounds(rounds):
+    """Pool the metric records of one case's ``--interleave`` rounds (a list of record lists).
+
+    Wall and kernel time are the medians of all rounds' samples. Throughputs are rescaled to
+    the pooled times.
+    """
+    merged = []
+    for parts in zip(*rounds):
+        first = parts[0]
+        times = [t for m in parts for t in m["measurement"].times]
+        kernel_times = [t for m in parts
+                        for t in getattr(m["measurement"], "kernel_times", None) or []]
+        ms = statistics.median(times) * 1e3
+        rec = dict(first, ms=ms, throughput=first["throughput"] * first["ms"] / ms,
+                   measurement=SimpleNamespace(times=times, kernel_times=kernel_times or None))
+        if kernel_times:
+            ref = next(m for m in parts if m.get("kernel_ms") is not None)
+            k_ms = statistics.median(kernel_times)
+            k_thr = ref.get("kernel_throughput")
+            rec["kernel_ms"] = k_ms
+            rec["kernel_throughput"] = k_thr * ref["kernel_ms"] / k_ms if k_thr else None
+        if "kernel_names" in first:
+            rec["kernel_names"] = " | ".join(dict.fromkeys(m["kernel_names"] for m in parts))
+        merged.append(rec)
+    return merged
+
+
 def print_case(case_params, metric_records):
     """Print a case header and its metric lines (reused stdout format)."""
     label = "  ".join(f"{k}={v}" for k, v in case_params.items())
@@ -1141,6 +1191,7 @@ def _write_run_info(path, meta):
         "kernel": os.uname().release,
         "cpus": meta.get("cpus") or "unpinned",
         "hw_queues": os.environ.get("GPU_MAX_HW_QUEUES", "HIP default"),
+        "interleave": meta.get("interleave", 1),
     }
     path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
 

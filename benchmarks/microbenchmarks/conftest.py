@@ -14,6 +14,7 @@ forwards to pytest), e.g.::
 
 import ctypes
 import os
+import random
 import sys
 
 # Snapshot GPU neighbors BEFORE importing torch: on ROCm the first CUDA call (which
@@ -29,11 +30,13 @@ from pathlib import Path
 import pytest
 
 from utils import (
+    configure_interleave,
     configure_kernel_profile,
     configure_rotating,
     dashboard_run_plan,
     format_aggregate_table,
     format_results_table,
+    merge_rounds,
     pin_cpus,
     print_case,
     record_bench,
@@ -80,6 +83,12 @@ def pytest_addoption(parser):
              "(on by default; the governor change needs root).",
     )
     group.addoption(
+        "--interleave", type=int, default=1, metavar="R",
+        help="Measure every benchmark in R rounds spread over the session (round 1 of all "
+             "benchmarks, then round 2, ...; shuffled within a round), each with 1/R of the "
+             "timing budget, and pool the rounds (default: 1).",
+    )
+    group.addoption(
         "--dashboard-run", action="store_true", default=False,
         help="Collect all families into one run dir (born-tagged CSVs + samples/ + "
              "run_info.txt) under --dashboard-out, for the TE dashboard.",
@@ -99,9 +108,16 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "benchmark: TE GPU microbenchmark")
+    if config.getoption("--interleave") < 1:
+        raise pytest.UsageError("--interleave expects a number of rounds >= 1")
+    configure_interleave(config.getoption("--interleave"))
     configure_rotating(config.getoption("--rotating"), config.getoption("--no-rotating"))
     configure_kernel_profile(config.getoption("--kernel-profile"))
     config._microbench_store = {}
+    # --interleave: {(family, nodeid without round): (case, name, [records per round])}, and
+    # each case's position in the unshuffled collection, which the merged results keep.
+    config._microbench_rounds = {}
+    config._microbench_order = {}
     if not config.getoption("--no-gpu-interference-check"):
         status, foreign = gpu_neighbors.detect_gpu_interference(_GPU_SNAPSHOT)
         if foreign:
@@ -131,6 +147,7 @@ def pytest_configure(config):
 
     if plan is not None:
         config._dashboard_plan = plan
+        plan.meta["interleave"] = config.getoption("--interleave")
         if config._cpu_pin is not None:
             plan.meta["cpus"] = config._cpu_pin.description
 
@@ -139,6 +156,8 @@ def pytest_report_header(config):
     pin = getattr(config, "_cpu_pin", None)
     lines = [f"cpus: {pin.description if pin else 'unpinned'}",
              f"GPU_MAX_HW_QUEUES: {os.environ.get('GPU_MAX_HW_QUEUES', 'HIP default')}"]
+    if config.getoption("--interleave") > 1:
+        lines.append(f"interleave: {config.getoption('--interleave')} rounds")
     plan = getattr(config, "_dashboard_plan", None)
     if plan is None:
         return lines
@@ -168,6 +187,56 @@ def pytest_collect_file(parent, file_path):
     return None
 
 
+def _round_of(item):
+    """The ``--interleave`` round of a test item, or None."""
+    callspec = getattr(item, "callspec", None)
+    return callspec.params.get("_microbench_round") if callspec else None
+
+
+def _strip_round(name, rnd):
+    """Drop the interleave round from a node id/name: ``t[case-r2]`` -> ``t[case]``."""
+    if name.endswith(f"-r{rnd}]"):
+        return name[: -len(f"-r{rnd}]")] + "]"
+    return name.removesuffix(f"[r{rnd}]")
+
+
+@pytest.fixture
+def _microbench_round(request):
+    return request.param
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_generate_tests(metafunc):
+    # trylast: after the benchmark modules' own parametrization, so the round ends the id.
+    rounds = metafunc.config.getoption("--interleave")
+    if rounds > 1 and "microbench" in metafunc.fixturenames:
+        metafunc.fixturenames.append("_microbench_round")
+        metafunc.parametrize("_microbench_round", range(1, rounds + 1), indirect=True,
+                             ids=lambda r: f"r{r}")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """With --interleave, run round 1 of all selected benchmarks, then round 2, ..."""
+    rounds = config.getoption("--interleave")
+    if rounds < 2:
+        return
+    by_round = [[] for _ in range(rounds)]
+    others = []
+    for item in items:
+        rnd = _round_of(item)
+        if rnd is None:
+            others.append(item)
+            continue
+        config._microbench_order.setdefault(_strip_round(item.nodeid, rnd),
+                                            len(config._microbench_order))
+        by_round[rnd - 1].append(item)
+    # Fixed seeds: a rerun visits the benchmarks in the same order.
+    for r, round_items in enumerate(by_round):
+        random.Random(r).shuffle(round_items)
+    items[:] = others + [item for round_items in by_round for item in round_items]
+
+
 class _MicroBench:
     """Handed to each test as the ``microbench`` fixture."""
 
@@ -180,10 +249,15 @@ class _MicroBench:
         records = bench_callable()
         print_case(case, records)
         family = Path(self._request.module.__file__).stem
-        record_bench(
-            self._config._microbench_store, family, case, records,
-            self._request.node.name,
-        )
+        node = self._request.node
+        rnd = _round_of(node)
+        if rnd is None:
+            record_bench(self._config._microbench_store, family, case, records, node.name)
+        else:
+            key = (family, _strip_round(node.nodeid, rnd))
+            entry = self._config._microbench_rounds.setdefault(
+                key, (case, _strip_round(node.name, rnd), []))
+            entry[2].append(records)
         return records
 
 
@@ -220,6 +294,11 @@ def pytest_sessionfinish(session, exitstatus):
     if getattr(config, "_cpu_pin", None) is not None:
         config._cpu_pin.restore()
     store = getattr(config, "_microbench_store", None)
+    rounds = getattr(config, "_microbench_rounds", {})
+    order = getattr(config, "_microbench_order", {})
+    for (family, _nodeid), (case, name, records) in sorted(
+            rounds.items(), key=lambda kv: order.get(kv[0][1], len(order))):
+        record_bench(store, family, case, merge_rounds(records), name)
     if not store:
         return
     if config.getoption("--dashboard-run"):

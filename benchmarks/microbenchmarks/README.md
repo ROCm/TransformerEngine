@@ -81,12 +81,18 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
   root; restored at the end, also if the process is killed or crashes, by a small watchdog
   process). The header and `run_info.txt` show the cores used; see
   [CPU pinning](BENCHMARKING_NOTES.md#cpu-pinning) for why.
+- `--interleave R`: measure every benchmark in R rounds spread over the session: round 1 of
+  all selected benchmarks, then round 2, and so on (shuffled within a round, with a fixed
+  seed). Each round gets 1/R of the timing budget, and the results pool the rounds: wall
+  and kernel time are the medians of all rounds' samples. A transient slowdown then hits a
+  few samples of many benchmarks instead of one benchmark's whole measurement. Setup and
+  warmup repeat every round, so runs take longer.
 - `--dashboard-run`: write all families of the session into one run directory for the TE
   dashboard instead of the `--csv` outputs:
   `<dashboard-out>/<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/` with
   `benchmark_<family>.csv` (each row tagged with the run timestamp and commit),
-  `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues) and, with
-  `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
+  `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues, interleave rounds)
+  and, with `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
   `results`); `--gpu-model NAME` overrides the detected GPU model (the run is refused if
   no model can be detected and none is given). A full dashboard run:
 
