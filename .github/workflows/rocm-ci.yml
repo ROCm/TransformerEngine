@@ -386,7 +386,7 @@ jobs:
     name: mGPU Tests (${{ matrix.arch_label }})
     needs: [scope, select_image, build]
     if: needs.scope.outputs.mgpu_suites != ''
-    timeout-minutes: 210
+    timeout-minutes: 240
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
       DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
