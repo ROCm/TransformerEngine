@@ -65,6 +65,7 @@ RULES = [
     (".github/workflows/rocm-ci-dispatch.yml", EVERYTHING, "the CI workflow"),
     (".github/workflows/rocm-wheels-build.yml", EVERYTHING, "the CI build"),
     (".github/scripts/run_examples.sh", frozenset({"examples"}), "examples suite script"),
+    (".github/scripts/run_example.py", frozenset({"examples"}), "examples suite helper"),
     # A PR is gated by its own copy of these rules, so one that edits them runs
     # every suite rather than trusting the rules it is changing.
     (".github/scripts/change_scope.py", EVERYTHING, "the gating rules"),
