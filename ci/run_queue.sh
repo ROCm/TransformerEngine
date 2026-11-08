@@ -477,6 +477,7 @@ setup_banner=""
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
     cmd="${SUITE_CMDS[$i]}"
+    rest="${SUITE_ARGS[$i]}"
     # Opaque suites do their own setup when they run
     [[ "${SUITE_MODES[$i]}" == "list" ]] || continue
     # Skip a suite with nothing queued (a re-run where all of it passed)
@@ -487,7 +488,7 @@ for i in "${!SUITE_LABELS[@]}"; do
     fi
     printf '  %s: installing prerequisites (%s) ... ' "$label" "$cmd"
     setup_start=$(date +%s)
-    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 TE_CI_SKIP_CK_JIT=1 "$cmd" \
+    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 TE_CI_SKIP_CK_JIT=1 "$cmd" ${rest:-} \
             > "$SETUP_DIR/${label}.log" 2>&1; then
         echo "FAILED"
         log_error "setup failed for ${label}; see $SETUP_DIR/${label}.log"
@@ -662,6 +663,13 @@ declare -a FAILED_KEYS=()    # label+tag per failed item, for the next attempt
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
     suite_log="$SUITE_LOG_DIR/${SUITE_LOGFILES[$i]}"
+    # A marker in the suite's JUnit dir tells junit_report.py the suite was not
+    # re-run, so its empty results dir is not reported as a crash
+    suite_junit_dir=""
+    if [[ -n "${JUNITXML_PREFIX:-}${JUNITXML_SUFFIX:-}" ]]; then
+        suite_junit_dir="${JUNITXML_PREFIX:-}${label}/"
+        rm -f "${suite_junit_dir}not_rerun"
+    fi
     if ! awk -F'\t' -v l="$label" '$2==l {found=1} END {exit !found}' "$QUEUE_FILE"; then
         # Nothing of this suite was queued: on a re-run, all of it passed last
         # time, so record a pass (the workflow reads a missing verdict as a
@@ -669,6 +677,10 @@ for i in "${!SUITE_LABELS[@]}"; do
         [[ -n "$RERUN_MODE" ]] || continue
         echo "not re-run this attempt: no item of this suite failed the last one" > "$suite_log"
         echo 0 > "${suite_log}.rc"
+        if [[ -n "$suite_junit_dir" ]]; then
+            mkdir -p "$suite_junit_dir"
+            cp "$suite_log" "${suite_junit_dir}not_rerun"
+        fi
         continue
     fi
     : > "$suite_log"

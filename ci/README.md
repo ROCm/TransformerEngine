@@ -30,7 +30,7 @@ Everything it reads and writes is under `ci-data/` in the repo root (`TE_CI_DATA
 * `weights/` - learned item durations, used to start the longest items first (sGPU only)
 * `rerun/` - the items, and where possible the single tests, that failed; the next run queues only those
 
-CI keeps `weights/` and `rerun/` across runs with `actions/cache`, so "Re-run failed jobs" re-runs only what failed.
+CI keeps `weights/` and `rerun/` across runs with `actions/cache`, so "Re-run failed jobs" re-runs only what failed; "Re-run all jobs" runs everything again.
 
 ### Running locally
 

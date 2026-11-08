@@ -172,7 +172,7 @@ def emit(lines):
 def main():
     if len(sys.argv) < 2:
         print(
-            "usage: junit_report.py <results-dir> [--title TITLE] [--attempt N]",
+            "usage: junit_report.py <results-dir> [--title TITLE]",
             file=sys.stderr,
         )
         return 0
@@ -180,14 +180,6 @@ def main():
     title = "Test Results"
     if "--title" in sys.argv:
         title = sys.argv[sys.argv.index("--title") + 1]
-    # Run attempt (default 1), used only to word an empty results dir: on attempt
-    # 1 the suite crashed before writing XML, on a re-run it had nothing to re-run.
-    attempt = 1
-    if "--attempt" in sys.argv:
-        try:
-            attempt = max(1, int(sys.argv[sys.argv.index("--attempt") + 1]))
-        except (IndexError, ValueError):
-            attempt = 1
 
     xml_files = sorted(glob.glob(os.path.join(results_dir, "*.xml")))
     # Sidecars left behind by te_ci_result_sink when a run hard-exited before
@@ -196,9 +188,9 @@ def main():
 
     if not xml_files and not partial_files:
         lines = [f"## {title}\n"]
-        if attempt > 1:
-            # Every test passed on an earlier attempt, so none was re-run. Keep the
-            # heading so the suite does not look lost from this attempt's summary.
+        if os.path.exists(os.path.join(results_dir, "not_rerun")):
+            # ci/run_queue.sh skipped this suite on a re-run: all of it passed on an
+            # earlier attempt. Keep the heading so it does not look lost.
             lines.append(
                 "> :white_check_mark: **Nothing to re-run.** Every test in this "
                 "suite passed on an earlier attempt of this run.\n"

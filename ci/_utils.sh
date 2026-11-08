@@ -162,16 +162,20 @@ check_setup_needed() {
     test -z "$TE_CI_SKIP_SETUP" -a -z "$TE_CI_LIST_ITEMS"
 }
 
+#Each probe starts Python and imports TE, so it runs once per script and the
+#answer is reused: a queued item would otherwise repeat it in every config
 check_supported() {
     skip_check_supported && return 0
     case "$1" in
         "mxfp8")
             #MXFP8-only test filters collect no tests on unsupported archs
-            _probe_result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+            test -n "${_supports_mxfp8+set}" || _supports_mxfp8=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+            _probe_result=$_supports_mxfp8
             _probe_message="MXFP8 is not supported on this device, skipping MXFP8-only tests"
         ;;
         "flash_attn")
-            _probe_result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+            test -n "${_supports_flash_attn+set}" || _supports_flash_attn=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+            _probe_result=$_supports_flash_attn
             _probe_message="Flash attention is not installed"
         ;;
         *)

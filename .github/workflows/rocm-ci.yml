@@ -112,6 +112,10 @@ jobs:
       run_build: ${{ steps.scope.outputs.run_build }}
       sgpu_suites: ${{ steps.scope.outputs.sgpu_suites }}
       mgpu_suites: ${{ steps.scope.outputs.mgpu_suites }}
+      # "Re-run failed jobs" copies this job and its outputs from the earlier
+      # attempt; "Re-run all jobs" runs it again. The GPU jobs tell the two apart
+      # by comparing this with the current attempt.
+      ran_in_attempt: ${{ github.run_attempt }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -251,9 +255,11 @@ jobs:
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-
 
-      # What failed on an earlier attempt of this run. The key is tied to run_id,
-      # so a first attempt finds nothing and runs the whole queue.
+      # What failed on an earlier attempt of this run, restored only on "Re-run
+      # failed jobs" (the scope job was copied, not re-run). A first attempt and
+      # "Re-run all jobs" run the whole queue.
       - name: Restore the previous attempt's failed items
+        if: needs.scope.outputs.ran_in_attempt != github.run_attempt
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
@@ -317,11 +323,11 @@ jobs:
 
           # One report per suite; each appends its own section to the job summary.
           # An attempt reports only what it ran (GitHub keeps a summary per
-          # attempt). An empty suite dir is a crash on a first attempt and nothing
-          # to re-run on a later one; unselected suites are named in the schedule.
+          # attempt). A suite a re-run skipped says so; any other empty suite dir is
+          # reported as a crash. Unselected suites are named in the schedule.
           report() {
             [[ " $SUITES " == *" $1 "* ]] || return 0
-            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2" --attempt "$ATTEMPT"
+            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2"
           }
           report torch "sGPU PyTorch (${{ matrix.arch_label }})"
           report jax "sGPU JAX (${{ matrix.arch_label }})"
@@ -439,8 +445,9 @@ jobs:
           EOF
           )"
 
-      # What failed on an earlier attempt of *this* run; see the sGPU job.
+      # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
+        if: needs.scope.outputs.ran_in_attempt != github.run_attempt
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
@@ -487,7 +494,7 @@ jobs:
           # Unselected suites have no report; the schedule report names them
           report() {
             [[ " $SUITES " == *" $1 "* ]] || return 0
-            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2" --attempt "$ATTEMPT"
+            python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/$1" --title "$2"
           }
           report torch-mgpu "mGPU PyTorch (${{ matrix.arch_label }})"
           report jax-mgpu "mGPU JAX (${{ matrix.arch_label }})"
