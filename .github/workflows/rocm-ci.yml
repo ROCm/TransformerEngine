@@ -310,6 +310,9 @@ jobs:
           ATTEMPT: ${{ github.run_attempt }}
           SUITES: ${{ needs.scope.outputs.sgpu_suites }}
         run: |
+          # "Re-run failed jobs" copies passed jobs, summaries included, into the
+          # new attempt, so say which attempt wrote this one
+          echo "Results from attempt ${ATTEMPT} of this run." >> "$GITHUB_STEP_SUMMARY"
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
 
           # One report per suite; each appends its own section to the job summary.
@@ -477,6 +480,9 @@ jobs:
           ATTEMPT: ${{ github.run_attempt }}
           SUITES: ${{ needs.scope.outputs.mgpu_suites }}
         run: |
+          # "Re-run failed jobs" copies passed jobs, summaries included, into the
+          # new attempt, so say which attempt wrote this one
+          echo "Results from attempt ${ATTEMPT} of this run." >> "$GITHUB_STEP_SUMMARY"
           command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
           # Unselected suites have no report; the schedule report names them
           report() {
