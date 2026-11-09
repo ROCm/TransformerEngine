@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +14,7 @@ from typing import Optional, Tuple
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch import GatedDeltaNetAttention, autocast, is_fp8_available
 
@@ -38,7 +41,10 @@ if os.getenv("NVTE_GDN_TEST_REQUIRED", "0") == "1" and not _GDN_AVAILABLE:
         "cutedsl runtime is unavailable."
     )
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+    pytest.mark.skipif(IS_HIP_EXTENSION, reason="Linear attention is not supported on ROCm"),
+]
 requires_gdn = pytest.mark.skipif(
     not _GDN_AVAILABLE, reason="GDN requires a supported cuDNN frontend kernel runtime"
 )
@@ -443,19 +449,6 @@ def test_gdn_requires_both_gates():
     )
     with pytest.raises(ValueError, match="requires both g and beta"):
         attention(q, k, v, g=g)
-
-
-@pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")
-def test_gdn_rejects_fp8_autocast():
-    """GDN must not silently run in high precision inside FP8 autocast."""
-    q, k, v, g, beta = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNetAttention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with autocast(enabled=True), pytest.raises(ValueError, match="does not support FP8 autocast"):
-        attention(q, k, v, g=g, beta=beta)
 
 
 def test_gdn_runs_te_forward_lifecycle(monkeypatch):

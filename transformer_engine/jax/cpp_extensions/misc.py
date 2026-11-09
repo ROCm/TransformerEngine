@@ -18,6 +18,7 @@ from jax.interpreters.mlir import dtype_to_ir_type
 
 import transformer_engine_jax
 
+from ...common import decode_cudnn_version
 from ..sharding import get_padded_spec as te_get_padded_spec
 from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from ..quantize import ScaledTensorFactory, QuantizeLayout
@@ -149,11 +150,7 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     # ROCm fused attn does not use cudnn, return high numbers to avoid tests filtering out
     if is_hip_extension():
         return (99, 0, 0)
-    encoded_version = transformer_engine_jax.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
+    return decode_cudnn_version(transformer_engine_jax.get_cudnn_version())
 
 
 def get_xla_flag(flag: str, default=None, cast=str):
