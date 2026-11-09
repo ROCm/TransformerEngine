@@ -79,7 +79,7 @@ build_rocjitsu() {
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to build rocjitsu"
-        tail -n 50 "$ROCJITSU_HOME/build.log"
+        cat "$ROCJITSU_HOME/build.log"
         return $rc
     fi
     # Not needed to run, and its root-only git files break the CI cache
@@ -97,7 +97,7 @@ build_cpp_tests() {
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to build cpp test suite"
-        tail -n 50 "$_log"
+        cat "$_log"
     fi
     return $rc
 }
