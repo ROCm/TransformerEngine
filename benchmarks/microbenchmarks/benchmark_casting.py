@@ -14,6 +14,8 @@ Benchmarks quantization (BF16 -> low precision) and dequantization
 (low precision -> BF16) for the formats used by TE training recipes:
 
   * FP8 per-tensor scaling: E4M3 (activations/weights) and E5M2 (gradients)
+  * FP8 block scaling:      E4M3, 1x128 blocks (activations/gradients) and 128x128
+                            blocks (weights), FP32 scales
   * MXFP8 block scaling:    E4M3 and E5M2 (32-elem blocks, E8M0 scales)
   * NVFP4 block scaling:    E2M1 (16-elem blocks, E4M3 scales), no RHT
   * MXFP4 block scaling:    E2M1 (32-elem blocks, E8M0 scales)
@@ -41,8 +43,10 @@ import torch
 import transformer_engine
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.quantization import (
+    check_fp8_block_scaling_support,
     check_fp8_support,
     check_mxfp4_support,
     check_mxfp8_support,
@@ -76,13 +80,33 @@ def _fp8_quantizer(fp8_dtype):
 #   (name, quantizer factory, quantized bytes/elem, support check, dequant supported).
 # "quantized bytes/elem" = packed data + block-scale bytes per element:
 #   FP8   : 1.0 data, per-tensor scale ~ 0          -> 1.0
+#   FP8 1x128 / 128x128 blocks: 1.0 data + FP32 scale per block -> 1 + 4/128, 1 + 4/128^2
 #   MXFP8 : 1.0 data + E8M0 1 byte / 32-elem block  -> 1 + 1/32
 #   NVFP4 : 0.5 data + E4M3 1 byte / 16-elem block  -> 0.5 + 1/16
 #   MXFP4 : 0.5 data + E8M0 1 byte / 32-elem block  -> 0.5 + 1/32
 # MXFP4 has no packed-FP4 dequantize kernel yet, so it runs the quantize direction only.
+# Blockwise FP8 is only quantized in training (the GEMM consumes the block scales).
 _CAST_FORMATS = (
     ("fp8-e4m3", _fp8_quantizer(TE_FP8_E4M3), 1.0, check_fp8_support, True),
     ("fp8-e5m2", _fp8_quantizer(TE_FP8_E5M2), 1.0, check_fp8_support, True),
+    (
+        "fp8-block1d",
+        lambda: Float8BlockQuantizer(
+            TE_FP8_E4M3, rowwise=True, columnwise=False, block_scaling_dim=1
+        ),
+        1.0 + 4.0 / 128,
+        check_fp8_block_scaling_support,
+        False,
+    ),
+    (
+        "fp8-block2d",
+        lambda: Float8BlockQuantizer(
+            TE_FP8_E4M3, rowwise=True, columnwise=False, block_scaling_dim=2
+        ),
+        1.0 + 4.0 / 128**2,
+        check_fp8_block_scaling_support,
+        False,
+    ),
     (
         "mxfp8-e4m3",
         lambda: MXFP8Quantizer(TE_FP8_E4M3, rowwise=True, columnwise=False),
@@ -142,10 +166,10 @@ _FORMATS = None
 
 
 def _triton_applies(fmt, direction):
-    # Cast-transpose Triton covers FP8/MXFP8/MXFP4 quantize (not NVFP4); the
+    # Cast-transpose Triton covers FP8/MXFP8/MXFP4 quantize (not NVFP4 or blockwise FP8); the
     # dequantize Triton path exists only for MXFP8 (mxfp8_tensor_storage).
     if direction == "quantize":
-        return fmt != "nvfp4"
+        return not fmt.startswith(("nvfp4", "fp8-block"))
     return fmt.startswith("mxfp8")
 
 

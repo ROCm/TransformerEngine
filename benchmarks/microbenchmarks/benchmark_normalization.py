@@ -10,8 +10,9 @@ Normalization micro-benchmark using the fusible-ops LayerNorm / RMSNorm.
 Run with ``python benchmark_normalization.py`` (a pytest module under the hood;
 see conftest.py).
 
-Sweeps BF16 plus the quantized-output precisions (FP8, MXFP8, MXFP4, NVFP4)
-that TE training recipes produce. In FP8/FP4 training the norm is fused with the following
+Sweeps BF16 plus the quantized-output precisions (FP8, blockwise FP8, MXFP8,
+MXFP4, NVFP4) that TE training recipes produce. In FP8/FP4 training the norm is
+fused with the following
 Linear (LayerNormLinear / LayerNormMLP) and writes its output already
 quantized. That is reproduced here with ``ops.Sequential(Norm, Quantize)``: the
 op fuser threads the Quantize op's input quantizer into the norm, so the norm
@@ -20,9 +21,9 @@ identity outside ``autocast``, so the bf16 baseline uses the same harness.
 
 The backward (input and weight gradients) runs for bf16 only: the norm saves
 its bf16 input and the Quantize op passes the gradient through, so the backward
-reads and writes bf16 whatever the forward output precision. On ROCm,
-MXFP8/MXFP4/NVFP4 norms run unfused (bf16 norm + separate cast kernel), so
-those forward rows measure norm + cast as LayerNormLinear sees it. Precisions
+reads and writes bf16 whatever the forward output precision. On ROCm, blockwise
+FP8 and MXFP8/MXFP4/NVFP4 norms run unfused (bf16 norm + separate cast kernel),
+so those forward rows measure norm + cast as LayerNormLinear sees it. Precisions
 unsupported on the current device are skipped.
 
 These are memory-bound; we report GB/s (forward: input read + output write;
@@ -70,12 +71,14 @@ RECIPES = build_recipes()
 # Input is always bf16 (2 bytes/elem).
 #   bf16  : 2.0                    (single bf16 output; Quantize is identity)
 #   fp8   : 2.0                    (rowwise + columnwise E4M3/E5M2 data; scale ~ 0)
+#   fp8_block: 2.0 + 2*4/128 = 2 + 1/16  (rowwise + columnwise data, FP32 scale per 1x128)
 #   mxfp8 : 2.0 + 2/32 = 2 + 1/16  (rowwise + columnwise data + both E8M0 scales)
 #   mxfp4 : 1.0 + 2/32 = 1 + 1/16  (packed E2M1 data x2 + E8M0 scale per 32)
 #   nvfp4 : 1.0 + 2/16 = 1 + 1/8   (packed E2M1 data x2 + E4M3 scale per 16)
 _FWD_WRITE_BYTES = {
     "bf16": 2.0,
     "fp8": 2.0,
+    "fp8_block": 2.0 + 1.0 / 16,
     "mxfp8": 2.0 + 1.0 / 16,
     "mxfp4": 1.0 + 1.0 / 16,
     "nvfp4": 1.0 + 1.0 / 8,

@@ -8,8 +8,8 @@
 
 Run with ``python benchmark_gemm.py`` (a pytest module under the hood; see
 conftest.py). Sweeps the shared model GEMM shapes over BF16 (the high-precision
-baseline) plus every supported low-precision recipe (FP8, MXFP8, MXFP4, NVFP4)
-via te.autocast, crossed with a selectable kernel Backend. Precisions whose
+baseline) plus every supported low-precision recipe (FP8, blockwise FP8, MXFP8,
+MXFP4, NVFP4) via te.autocast, crossed with a selectable kernel Backend. Precisions whose
 hardware/runtime support is unavailable on the current device are skipped
 automatically.
 
@@ -54,7 +54,8 @@ RECIPES = build_recipes()
 # dispatch: bf16 defaults to hipBLASLt; Triton is NVTE_GEMM_BACKEND=TRITON (PR #676,
 # unified selector) or the legacy NVTE_USE_GEMM_TRITON=1 toggle (PR #667), resolved
 # per build by _triton_gemm_env. mxfp8 defaults to HipKittens, forced to hipBLASLt via
-# NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. FlyDSL
+# NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. Blockwise FP8
+# (fp8_block) GEMMs only run on HipKittens (rocm_gemm.cu). FlyDSL
 # (gfx950-only, BF16/FP8/MXFP8) is NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
 # mxfp4 runs AITER a4w4 unless NVTE_ROCM_USE_HIPBLASLT_MXFP4=1 (cpp_extensions/gemm.py);
 # that hipBLASLt path fails in the te.Linear backward, so it isn't benchmarked.
@@ -78,6 +79,7 @@ GEMM_BACKENDS = {
 _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "triton", "flydsl"],
     "fp8": ["hipblaslt", "flydsl"],
+    "fp8_block": ["hipkittens"],
     "mxfp8": ["hipblaslt", "hipkittens", "flydsl"],
     "mxfp4": ["aiter"],
 }
@@ -266,14 +268,21 @@ def test_gemm(microbench, case, monkeypatch):
                        else (case["K"], case["N"], case["M"]))
         if any(dim % kmul for dim in contraction):
             pytest.skip(f"MXFP8 GEMM needs the contraction dim divisible by {kmul}")
+    if case["Precision"] == "fp8_block":
+        # HipKittens' blockwise kernel needs GEMM dims divisible by 16; gfx942 needs K % 128
+        # (TE pads only the grouped GEMM), so be conservative there.
+        kmul = 128 if _device_cc() == (9, 4) else 16
+        if any(dim % kmul for dim in (case["M"], case["N"], case["K"])):
+            pytest.skip(f"Blockwise FP8 GEMM needs M/N/K divisible by {kmul}")
     if case["Backend"] == "triton" and not _triton_gemm_supported():
         pytest.skip("Triton GEMM backend not available in this TE build")
     if case["Backend"] == "triton" and _device_cc() == (12, 5):
         pytest.skip("Triton GEMM hangs or crashes on many shapes on gfx1250")
     if case["Backend"] == "hipkittens" and not te_honors_env(_HIPBLASLT_MXFP8):
         pytest.skip("HipKittens GEMM backend not available in this TE build")
-    if case["Backend"] == "hipkittens" and (case["N"] % 256 or case["K"] % 256):
-        pytest.skip("HipKittens GEMM needs 256-aligned N/K")
+    if (case["Backend"] == "hipkittens" and case["Precision"] == "mxfp8"
+            and (case["N"] % 256 or case["K"] % 256)):
+        pytest.skip("HipKittens MXFP8 GEMM needs 256-aligned N/K")
     if case["Backend"] == "flydsl" and not _flydsl_gemm_supported():
         pytest.skip("FlyDSL GEMM backend not available (needs gfx950 + flydsl package)")
     if case["Backend"] == "aiter" and importlib.util.find_spec("aiter") is None:

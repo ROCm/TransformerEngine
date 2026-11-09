@@ -122,16 +122,20 @@ def _precision_specs():
 
     A ``None`` factory is the bf16 baseline (no autocast). The fp8 entry uses
     HYBRID delayed scaling and is shared by the dense and grouped GEMM
-    benchmarks so their fp8 numbers stay comparable.
+    benchmarks so their fp8 numbers stay comparable. fp8_block is the
+    DeepSeek-style Float8BlockScaling recipe (1x128 activation/gradient blocks,
+    128x128 weight blocks).
     """
     from transformer_engine.common.recipe import (
         DelayedScaling,
+        Float8BlockScaling,
         Format,
         MXFP4BlockScaling,
         MXFP8BlockScaling,
         NVFP4BlockScaling,
     )
     from transformer_engine.pytorch.quantization import (
+        check_fp8_block_scaling_support,
         check_fp8_support,
         check_mxfp4_support,
         check_mxfp8_support,
@@ -149,6 +153,7 @@ def _precision_specs():
             ),
             check_fp8_support,
         ),
+        ("fp8_block", Float8BlockScaling, check_fp8_block_scaling_support),
         ("mxfp8", MXFP8BlockScaling, check_mxfp8_support),
         ("mxfp4", MXFP4BlockScaling, check_mxfp4_support),
         ("nvfp4", NVFP4BlockScaling, check_nvfp4_support),

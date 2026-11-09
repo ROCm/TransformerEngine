@@ -7,8 +7,8 @@
 """Grouped GEMM micro-benchmark using te.GroupedLinear across precisions and backends.
 
 Run with ``python benchmark_grouped_gemm.py`` (a pytest module under the hood;
-see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16, FP8, MXFP8, and
-NVFP4, crossed with the selectable kernel backend for each precision (hipBLASLt /
+see conftest.py). Sweeps MoE grouped-GEMM shapes over BF16, FP8, blockwise FP8, MXFP8,
+and NVFP4, crossed with the selectable kernel backend for each precision (hipBLASLt /
 CK_Tile / Triton / HipKittens) and forward/backward direction.
 
     python benchmark_grouped_gemm.py --csv
@@ -44,31 +44,37 @@ from utils import (
 BENCHMARK_LABEL = "Grouped GEMM"
 
 # FIXME: Add mxfp4 when https://github.com/ROCm/TransformerEngine/pull/745 is merged
-RECIPES = build_recipes(names=("bf16", "fp8", "mxfp8", "nvfp4"))
+RECIPES = build_recipes(names=("bf16", "fp8", "fp8_block", "mxfp8", "nvfp4"))
 
 # Env recipes to force a grouped-GEMM kernel backend (None unsets the var). Per the
 # C++ dispatch (cublaslt_gemm.cu / rocm_gemm.cu): all-unset -> one GEMM per expert on
 # the compute streams; CUTLASS+CK -> CK; CUTLASS+HK -> HipKittens; NVTE_USE_GROUPED_GEMM_TRITON
 # routes bf16 to the Triton grouped GEMM. Per-expert MXFP8 GEMMs default to dense HipKittens
 # on gfx950 ("hipkittens_per_expert", TE's default MXFP8 path), so "hipblaslt" forces hipBLASLt
-# via NVTE_ROCM_USE_HIPBLASLT_MXFP8.
+# via NVTE_ROCM_USE_HIPBLASLT_MXFP8. Per-expert blockwise FP8 GEMMs always run on HipKittens;
+# NVTE_USE_BLOCKWISE_GMM_TRITON routes them to the Triton blockwise grouped GEMM (grouped_linear.py).
 _CUTLASS = "NVTE_USE_CUTLASS_GROUPED_GEMM"
 _CK = "NVTE_USE_CK_GROUPED_GEMM"
 _HK = "NVTE_USE_HIPKITTENS_GROUPED_GEMM"
 _TRITON = "NVTE_USE_GROUPED_GEMM_TRITON"
+_TRITON_BLOCKWISE = "NVTE_USE_BLOCKWISE_GMM_TRITON"
 _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 
+_UNSET = {_CUTLASS: None, _CK: None, _HK: None, _TRITON: None, _TRITON_BLOCKWISE: None,
+          _HIPBLASLT_MXFP8: None}
 GROUPED_BACKENDS = {
-    "hipblaslt":  {_CUTLASS: None, _CK: None, _HK: None, _TRITON: None, _HIPBLASLT_MXFP8: "1"},
-    "hipkittens_per_expert": {_CUTLASS: None, _CK: None, _HK: None, _TRITON: None, _HIPBLASLT_MXFP8: None},
-    "ck_tile":    {_CUTLASS: "1", _CK: "1", _HK: None, _TRITON: None, _HIPBLASLT_MXFP8: None},
-    "hipkittens_grouped": {_CUTLASS: "1", _CK: None, _HK: "1", _TRITON: None, _HIPBLASLT_MXFP8: None},
-    "triton":     {_CUTLASS: None, _CK: None, _HK: None, _TRITON: "1", _HIPBLASLT_MXFP8: None},
+    "hipblaslt":  {**_UNSET, _HIPBLASLT_MXFP8: "1"},
+    "hipkittens_per_expert": _UNSET,
+    "ck_tile":    {**_UNSET, _CUTLASS: "1", _CK: "1"},
+    "hipkittens_grouped": {**_UNSET, _CUTLASS: "1", _HK: "1"},
+    # Each toggle applies to its own precision only (bf16 / blockwise FP8).
+    "triton":     {**_UNSET, _TRITON: "1", _TRITON_BLOCKWISE: "1"},
 }
 
 _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "ck_tile", "triton"],
     "fp8": ["hipblaslt", "ck_tile"],
+    "fp8_block": ["hipkittens_per_expert", "triton"],
     "mxfp8": ["hipblaslt", "hipkittens_per_expert", "hipkittens_grouped", "ck_tile"],
     "nvfp4": ["hipblaslt"],
 }
@@ -352,11 +358,12 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
         pytest.skip("known hipBLASLt grouped-GEMM hang on gfx950")
     if backend in ("ck_tile", "hipkittens_grouped") and case["B"] <= 1:
         pytest.skip(f"{backend} grouped GEMM needs num_groups > 1")
+    hk_mxfp8 = backend.startswith("hipkittens") and case["recipe"] != "fp8_block"
     # Dense HipKittens per expert silently falls back to hipBLASLt for unaligned GEMMs.
-    if backend.startswith("hipkittens") and (case["N"] % 256 or case["K"] % 256):
+    if hk_mxfp8 and (case["N"] % 256 or case["K"] % 256):
         pytest.skip("HipKittens GEMM needs 256-aligned expert dims")
     # HK-vs-CK grouped MXFP8 is latched per process (rocm_gemm.cu); arch gates keep them apart.
-    if backend.startswith("hipkittens") and get_device_compute_capability() != (9, 5):
+    if hk_mxfp8 and get_device_compute_capability() != (9, 5):
         pytest.skip("HipKittens GEMM is gfx950-only")
     if backend == "triton" and get_device_compute_capability() == (12, 5):
         pytest.skip("Triton grouped GEMM hangs or crashes on many configs on gfx1250")
@@ -367,8 +374,9 @@ def test_grouped_gemm(request, microbench, case, monkeypatch):
     # Skip a forced backend when the build doesn't honor the toggles it enables,
     # so old builds show no data instead of silently measuring hipBLASLt. Builds that
     # don't read NVTE_ROCM_USE_HIPBLASLT_MXFP8 already run hipBLASLt per expert.
+    ignored = {_HIPBLASLT_MXFP8, _TRITON if case["recipe"] == "fp8_block" else _TRITON_BLOCKWISE}
     required = [k for k, v in GROUPED_BACKENDS[backend].items()
-                if v is not None and k != _HIPBLASLT_MXFP8]
+                if v is not None and k not in ignored]
     if required and not all(te_honors_env(k) for k in required):
         pytest.skip(f"{backend} grouped GEMM backend not available in this TE build")
     # The dense-GEMM selector also drives autocast's recipe check (TRITON rejects fp8 HYBRID).
