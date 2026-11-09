@@ -59,7 +59,7 @@ run_test_config() {
     run_default_fa 1 test_functions.py
     run_default_fa 1 test_gemm_partitioning.py
     run 1 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # skip smallseq in normal flow
-    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run_lbl "smallseq" 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # Using FAv2 for forward and backward pass
     # bf16 atomic dq accumulation (dq_shuffle post-kernel). Default is fp32 (atomic32/dq_convert), so the
@@ -103,10 +103,7 @@ run_test_config_mgpu() {
     # hipBLASLt instead. Run those cases with Triton GEMM disabled only.
     _layernorm_mlp_jax_gemm_k="Float8CurrentScaling and with_jax_gemm_True"
     run_default_fa 2 test_distributed_layernorm_mlp.py -k "not (${_layernorm_mlp_jax_gemm_k})"
-    _saved_xla_flags="$XLA_FLAGS"
-    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
-    run_default_fa 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
-    export XLA_FLAGS="$_saved_xla_flags"
+    XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false" run_default_fa_lbl "no_triton_gemm" 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
     run_default_fa 3 test_distributed_permutation.py
     run_default_fa 3 test_distributed_softmax.py
 
@@ -123,11 +120,15 @@ fi
 
 #Master script mode: prepares testing prerequisites
 start_message
-install_prerequisites
-pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
-#check_test_jobs_requested
-#test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
-ck_jit_prebuild build || exit $?
+
+if check_setup_needed; then
+    install_prerequisites
+    pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
+    #check_test_jobs_requested
+    #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue
