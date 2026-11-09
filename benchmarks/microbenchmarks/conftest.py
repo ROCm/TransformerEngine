@@ -104,6 +104,11 @@ def pytest_addoption(parser):
         help="Override the detected GPU model/arch name (e.g. MI400X) used in the "
              "--dashboard-run dir + run_info; required when it can't be detected.",
     )
+    group.addoption(
+        "--te-repo", default=None, metavar="DIR",
+        help="TransformerEngine git checkout whose commit tags the --dashboard-run results "
+             "(default: the checkout of an editable TE install, else this directory's).",
+    )
 
 
 def pytest_configure(config):
@@ -137,11 +142,15 @@ def pytest_configure(config):
     plan = None
     if config.getoption("--dashboard-run"):
         plan = dashboard_run_plan(
-            config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"))
+            config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"),
+            te_repo=config.getoption("--te-repo"))
         if not plan.meta["model"]:
             raise pytest.UsageError(
                 "--dashboard-run: could not determine the GPU model from the device name; "
                 "pass --gpu-model NAME (e.g. MI355X).")
+        if config.getoption("--te-repo") and not plan.meta["sha"]:
+            raise pytest.UsageError(
+                f"--te-repo {config.getoption('--te-repo')}: not a git checkout")
 
     config._cpu_pin = None if config.getoption("--no-cpu-pin") else pin_cpus()
 

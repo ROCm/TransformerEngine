@@ -1120,28 +1120,43 @@ def _gpu_pci():
         return ""
 
 
-def _dashboard_run_meta(model=None):
+def _git(repo, *args):
+    """Output of ``git -C repo args`` (stripped), or '' on failure."""
+    # safe.directory=* bypasses git's dubious-ownership guard when the repo
+    # is bind-mounted into a container under a different uid.
+    try:
+        return subprocess.check_output(
+            ["git", "-c", "safe.directory=*", "-C", str(repo), *args],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def _te_source_repo():
+    """Root of the git checkout the imported TE runs from (editable install), else None."""
+    try:
+        pkg = _te_install_root()
+    except Exception:
+        return None
+    top = _git(pkg, "rev-parse", "--show-toplevel")
+    # A non-editable install can still sit inside some other repo (e.g. a venv in a checkout).
+    return pkg.parent if top and Path(top).resolve() == pkg.parent else None
+
+
+def _dashboard_run_meta(model=None, te_repo=None):
     """Run metadata: run timestamp, git sha/date, GPU model, visible GPU id, host.
 
     *model* overrides the auto-detected GPU model when given (e.g. --gpu-model).
+    The sha/date are those of the TE checkout *te_repo* (--te-repo); by default the
+    checkout of an editable TE install, else this benchmark directory's checkout.
+    ``bench_sha`` is the commit of this benchmark directory.
     """
     import datetime
-    import subprocess
 
     here = Path(__file__).resolve().parent
-
-    def git(*args):
-        # safe.directory=* bypasses git's dubious-ownership guard when the repo
-        # is bind-mounted into a container under a different uid.
-        try:
-            return subprocess.check_output(
-                ["git", "-c", "safe.directory=*", "-C", str(here), *args],
-                text=True, stderr=subprocess.DEVNULL,
-            ).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return ""
-
-    sha = git("rev-parse", "HEAD")
+    repo = te_repo or _te_source_repo() or here
+    sha = _git(repo, "rev-parse", "HEAD")
     gpu = (os.environ.get("HIP_VISIBLE_DEVICES", "") or "0").split(",")[0].strip() or "0"
     now = datetime.datetime.now().astimezone()
     return {
@@ -1149,7 +1164,8 @@ def _dashboard_run_meta(model=None):
         "stamp": now.strftime("%Y-%m-%dT%H-%M-%S"),
         "sha": sha,
         "short": sha[:12] or "unknown",
-        "cdate": git("show", "-s", "--format=%cI", "HEAD"),
+        "cdate": _git(repo, "show", "-s", "--format=%cI", "HEAD"),
+        "bench_sha": _git(here, "rev-parse", "HEAD"),
         "model": model or _detect_gpu_model(),
         "gpu": gpu,
         "gpu_bdf": _gpu_pci(),
@@ -1182,6 +1198,7 @@ def _write_run_info(path, meta):
         "gpu_bdf": meta.get("gpu_bdf") or "?",
         "arch": meta["model"],
         "te_commit": meta["sha"],
+        "harness": meta.get("bench_sha") or "?",
         "te": ver("transformer_engine"),
         "pytorch": ver("torch"),
         "triton": ver("triton"),
@@ -1204,9 +1221,9 @@ def _dashboard_run_dir(out_base, meta):
     return Path(out_base) / node / f"{meta['stamp']}_{meta['short']}"
 
 
-def dashboard_run_plan(out_base="results", model=None):
+def dashboard_run_plan(out_base="results", model=None, te_repo=None):
     """Resolve (meta, run_dir) for a dashboard run without writing anything."""
-    meta = _dashboard_run_meta(model=model)
+    meta = _dashboard_run_meta(model=model, te_repo=te_repo)
     return SimpleNamespace(meta=meta, run_dir=_dashboard_run_dir(out_base, meta))
 
 

@@ -94,7 +94,10 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
   `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues, interleave rounds)
   and, with `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
   `results`); `--gpu-model NAME` overrides the detected GPU model (the run is refused if
-  no model can be detected and none is given). A full dashboard run:
+  no model can be detected and none is given). The rows are tagged with the commit of the
+  benchmarked TE: `--te-repo DIR` names its git checkout (default: the checkout of an
+  editable TE install, else the one this directory is in); `run_info.txt` also records
+  the commit of this benchmark directory (`harness`). A full dashboard run:
 
   ```bash
   pytest . --dashboard-run --kernel-profile --csv-samples
