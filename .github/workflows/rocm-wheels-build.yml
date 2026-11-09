@@ -44,10 +44,9 @@ on:
         required: false
         default: ''
       rocm_arch:
-        description: 'Comma separated list of GPU architectures to build for.'
+        description: 'Comma separated list of GPU architectures to build for. Empty: gfx942,gfx950,gfx1250.'
         type: string
         required: false
-        default: 'gfx942,gfx950,gfx1250'
       use_ccache:
         description: 'Use ccache for the TransformerEngine build.'
         type: boolean
@@ -80,7 +79,7 @@ on:
         default: ''
       rocm_arch:
         type: string
-        default: 'gfx942,gfx950,gfx1250'
+        required: false
       use_ccache:
         type: boolean
         default: false
@@ -257,6 +256,7 @@ jobs:
         if: ${{ inputs.use_ccache }}
         run: |
           "${{ runner.temp }}/ccache-bin/ccache" --dir "${{ runner.temp }}/ccache" --zero-stats
+          echo "CCACHE_BUILD_START=$(date +%s)" >> "$GITHUB_ENV"
 
       # Mount the checked-out workspace to /TransformerEngine in the container.
       # The container writes all wheels and logs under /wheelhouse.
@@ -274,7 +274,7 @@ jobs:
               --env CCACHE_BASEDIR=/TransformerEngine
               --env CCACHE_COMPILERCHECK=content
               --env CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime
-              --env CCACHE_MAXSIZE=8G
+              --env CCACHE_MAXSIZE=1G
               --env CCACHE_UMASK=002
             )
           fi
@@ -288,6 +288,16 @@ jobs:
             --volume "${{ github.workspace }}:/TransformerEngine" \
             --volume "${{ runner.temp }}/wheelhouse:/wheelhouse" \
             "${{ steps.set-tag.outputs.image_tag }}"
+
+      - name: Evict ccache entries not used by this build
+        if: ${{ success() && inputs.use_ccache && inputs.save_ccache }}
+        run: |
+          docker run --rm \
+            --volume "${{ runner.temp }}/ccache-bin:/opt/ccache:ro" \
+            --volume "${{ runner.temp }}/ccache:/ccache" \
+            --entrypoint /opt/ccache/ccache \
+            "${{ steps.set-tag.outputs.image_tag }}" \
+            --dir /ccache --evict-older-than "$(( $(date +%s) - CCACHE_BUILD_START ))s"
 
       - name: Show ccache statistics
         if: ${{ always() && inputs.use_ccache }}
