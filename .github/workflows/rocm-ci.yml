@@ -582,7 +582,7 @@ jobs:
 
       # ci/rocjitsu.sh reuses a build of the same rocm-systems commit
       - name: Cache rocjitsu build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: build/rocjitsu
           key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
@@ -631,7 +631,7 @@ jobs:
           )"
 
       - name: Restore learned test weights
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -640,7 +640,7 @@ jobs:
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -668,7 +668,7 @@ jobs:
 
       - name: Save learned test weights
         if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -689,7 +689,7 @@ jobs:
 
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
