@@ -1,0 +1,557 @@
+run_id,pr,sgpu,mgpu,everything
+30677471759,689,,torch-mgpu,False
+30683604311,688,examples torch jax core,torch-mgpu jax-mgpu,True
+30759007400,688,examples torch jax core,torch-mgpu jax-mgpu,True
+30781370199,625,examples torch jax core,torch-mgpu jax-mgpu,True
+30827117465,678,examples torch jax core,torch-mgpu jax-mgpu,True
+30852419376,671,jax,jax-mgpu,False
+30853666711,667,examples torch,torch-mgpu,False
+30853906294,676,examples torch jax core,torch-mgpu jax-mgpu,True
+30873093343,667,examples torch,torch-mgpu,False
+30873821612,667,examples torch,torch-mgpu,False
+30876012250,667,examples torch,torch-mgpu,False
+30876284848,667,examples torch,torch-mgpu,False
+30877068870,667,examples torch,torch-mgpu,False
+30928978014,675,examples torch jax core,torch-mgpu jax-mgpu,True
+30956986026,691,core,,False
+31042565799,618,examples torch jax core,torch-mgpu jax-mgpu,True
+31051341261,691,core,,False
+31129593329,695,examples torch,torch-mgpu,False
+31200082263,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31202367284,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31234576420,698,examples torch jax core,torch-mgpu jax-mgpu,True
+31238512478,698,examples torch jax core,torch-mgpu jax-mgpu,True
+31343555975,698,examples torch jax core,torch-mgpu jax-mgpu,True
+31352172343,692,examples torch jax core,torch-mgpu jax-mgpu,True
+31354963922,694,examples torch,torch-mgpu,False
+31363697412,697,examples torch jax core,torch-mgpu jax-mgpu,True
+31404366952,691,core,,False
+31407409922,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31410029002,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31410357493,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31411360253,697,examples torch jax core,torch-mgpu jax-mgpu,True
+31412887008,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31425900082,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31427885851,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31432081906,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31434509856,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31434656741,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31435927537,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31437326655,692,examples torch jax core,torch-mgpu jax-mgpu,True
+31446050065,694,examples torch,torch-mgpu,False
+31447076108,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31448467411,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31449077132,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31449209001,694,examples torch,torch-mgpu,False
+31449622268,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31450106674,694,examples torch,torch-mgpu,False
+31450357188,694,examples torch,torch-mgpu,False
+31451432857,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31452508421,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31498004361,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31498393843,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31498826378,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31500120454,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31501532395,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31509803664,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31510249313,700,examples torch jax core,torch-mgpu jax-mgpu,True
+31510309212,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31512099686,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31513518172,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31513628037,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31514601871,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31521251268,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31545271855,701,examples torch jax core,torch-mgpu jax-mgpu,True
+31552277300,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31555555730,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31557197123,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31558768646,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31560113039,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31599211326,692,examples torch jax core,torch-mgpu jax-mgpu,True
+31601593405,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31602077308,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31602324937,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31604140432,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31604653650,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31605645638,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31606241379,692,examples torch jax core,torch-mgpu jax-mgpu,True
+31606911720,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31607014220,695,examples torch,torch-mgpu,False
+31607049190,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31607509519,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31607725224,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31608183267,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31608361657,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31608614785,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31608969630,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31609571021,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31610247566,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31610626838,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31611041163,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31611284117,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31611997053,675,examples torch jax core,torch-mgpu jax-mgpu,True
+31613270737,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31614897316,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31615221988,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31616124128,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31616267103,701,examples torch jax core,torch-mgpu jax-mgpu,True
+31617213453,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31621259225,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31623376304,697,examples torch jax core,torch-mgpu jax-mgpu,True
+31624598028,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31625716408,703,torch,torch-mgpu,False
+31630128274,649,examples jax,jax-mgpu,False
+31633820974,697,examples torch jax core,torch-mgpu jax-mgpu,True
+31633874705,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31636744577,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31637100542,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31637600945,701,examples torch jax core,torch-mgpu jax-mgpu,True
+31639773693,694,examples torch,torch-mgpu,False
+31663816019,667,examples torch,torch-mgpu,False
+31715306982,676,examples torch jax core,torch-mgpu jax-mgpu,True
+31724547408,699,examples torch jax core,torch-mgpu jax-mgpu,True
+31771144498,698,examples torch jax core,torch-mgpu jax-mgpu,True
+31782380240,701,examples torch jax core,torch-mgpu jax-mgpu,True
+31827143821,689,,torch-mgpu,False
+31832717683,702,examples torch jax core,torch-mgpu jax-mgpu,True
+31841641172,696,examples torch jax core,torch-mgpu jax-mgpu,True
+32020147533,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32040826638,649,examples jax,jax-mgpu,False
+32051850964,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32068389277,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32075337961,649,examples jax,jax-mgpu,False
+32080563071,694,examples torch,torch-mgpu,False
+32164920752,694,examples torch,torch-mgpu,False
+32167302019,694,examples torch,torch-mgpu,False
+32177432290,706,examples torch,torch-mgpu,False
+32178788952,706,examples torch,torch-mgpu,False
+32186899443,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32238734959,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32244131421,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32256090194,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32258204305,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32266939750,707,examples torch jax core,torch-mgpu jax-mgpu,True
+32270422289,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32287436956,696,examples torch jax core,torch-mgpu jax-mgpu,True
+32292118763,696,examples torch jax core,torch-mgpu jax-mgpu,True
+32307394866,709,examples torch jax core,torch-mgpu jax-mgpu,True
+32334618015,696,examples torch jax core,torch-mgpu jax-mgpu,True
+32389833423,649,examples jax,jax-mgpu,False
+32414563908,707,examples torch jax core,torch-mgpu jax-mgpu,True
+32420982755,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32442532344,710,examples torch jax,torch-mgpu jax-mgpu,False
+32485744594,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32492137129,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32499290200,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32501279323,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32506912250,649,examples jax,jax-mgpu,False
+32506979607,704,examples torch jax core,torch-mgpu jax-mgpu,True
+32512838774,701,examples torch jax core,torch-mgpu jax-mgpu,True
+32513682244,618,examples torch jax core,torch-mgpu jax-mgpu,True
+32514179784,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32515865878,711,examples torch jax core,torch-mgpu jax-mgpu,True
+32530262702,707,examples torch jax core,torch-mgpu jax-mgpu,True
+32609481892,709,examples torch jax core,torch-mgpu jax-mgpu,True
+32720961170,678,examples torch jax core,torch-mgpu jax-mgpu,True
+32751204540,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32767668861,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32779332996,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32783413678,711,examples torch jax core,torch-mgpu jax-mgpu,True
+32784053664,709,examples torch jax core,torch-mgpu jax-mgpu,True
+32869486997,713,examples torch jax core,torch-mgpu jax-mgpu,True
+32874412496,711,examples torch jax core,torch-mgpu jax-mgpu,True
+32875158885,711,examples torch jax core,torch-mgpu jax-mgpu,True
+32906062530,702,examples torch jax core,torch-mgpu jax-mgpu,True
+32906311034,716,examples torch,torch-mgpu,False
+32911652815,716,examples torch,torch-mgpu,False
+32912238176,716,examples torch,torch-mgpu,False
+32912869914,716,examples torch,torch-mgpu,False
+32919015005,704,examples torch jax core,torch-mgpu jax-mgpu,True
+32932670869,716,examples torch,torch-mgpu,False
+32968662299,676,examples torch jax core,torch-mgpu jax-mgpu,True
+32973989526,676,examples torch jax core,torch-mgpu jax-mgpu,True
+33022709839,702,examples torch jax core,torch-mgpu jax-mgpu,True
+33025071513,716,examples torch,torch-mgpu,False
+33067995737,678,examples torch jax core,torch-mgpu jax-mgpu,True
+33089752428,702,examples torch jax core,torch-mgpu jax-mgpu,True
+33098913726,713,examples torch jax core,torch-mgpu jax-mgpu,True
+33101164648,719,examples torch jax core,torch-mgpu jax-mgpu,True
+33120240717,720,examples torch jax core,torch-mgpu jax-mgpu,True
+33124822502,720,examples torch jax core,torch-mgpu jax-mgpu,True
+33124882031,702,examples torch jax core,torch-mgpu jax-mgpu,True
+33125376220,716,examples torch,torch-mgpu,False
+33129184237,709,examples torch jax core,torch-mgpu jax-mgpu,True
+33134162663,697,examples torch jax core,torch-mgpu jax-mgpu,True
+33185581218,719,examples torch jax core,torch-mgpu jax-mgpu,True
+33195485784,709,examples torch jax core,torch-mgpu jax-mgpu,True
+33210727540,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33284343672,713,examples torch jax core,torch-mgpu jax-mgpu,True
+33402401831,709,examples torch jax core,torch-mgpu jax-mgpu,True
+33415282599,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33418656302,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33424152091,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33427951752,723,examples torch,torch-mgpu,False
+33533725931,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33534535520,727,examples torch jax core,torch-mgpu jax-mgpu,True
+33562826360,716,examples torch,torch-mgpu,False
+33575541786,727,examples torch jax core,torch-mgpu jax-mgpu,True
+33659432921,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33666220794,728,examples torch,torch-mgpu,False
+33668841030,728,examples torch,torch-mgpu,False
+33676786287,709,examples torch jax core,torch-mgpu jax-mgpu,True
+33681451529,716,examples torch,torch-mgpu,False
+33690082774,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33767676480,722,examples torch jax core,torch-mgpu jax-mgpu,True
+33768025099,722,examples torch jax core,torch-mgpu jax-mgpu,True
+33773019389,721,examples torch jax core,torch-mgpu jax-mgpu,True
+33797248260,716,examples torch,torch-mgpu,False
+33806971334,732,examples torch jax core,torch-mgpu jax-mgpu,True
+33816374911,733,examples torch jax core,torch-mgpu jax-mgpu,True
+33987976678,733,examples torch jax core,torch-mgpu jax-mgpu,True
+33991387933,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34246742712,697,examples torch jax core,torch-mgpu jax-mgpu,True
+34251808544,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34265439964,732,examples torch jax core,torch-mgpu jax-mgpu,True
+34269275916,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34270541130,625,examples torch jax core,torch-mgpu jax-mgpu,True
+34270794274,625,examples torch jax core,torch-mgpu jax-mgpu,True
+34270927200,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34274984712,697,examples torch jax core,torch-mgpu jax-mgpu,True
+34276064324,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34277381132,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34279155817,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34282254732,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34361070875,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34361521191,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34367863458,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34386436893,732,examples torch jax core,torch-mgpu jax-mgpu,True
+34413446885,697,examples torch jax core,torch-mgpu jax-mgpu,True
+34426812046,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34427116101,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34493943352,722,examples torch jax core,torch-mgpu jax-mgpu,True
+34498443417,722,examples torch jax core,torch-mgpu jax-mgpu,True
+34498822236,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34503578117,732,examples torch jax core,torch-mgpu jax-mgpu,True
+34504651273,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34520117578,736,examples torch jax core,torch-mgpu jax-mgpu,True
+34521846983,736,examples torch jax core,torch-mgpu jax-mgpu,True
+34522804063,736,examples torch jax core,torch-mgpu jax-mgpu,True
+34527723011,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34533235642,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34537156287,723,examples torch,torch-mgpu,False
+34537332084,723,examples torch,torch-mgpu,False
+34539321105,723,examples torch,torch-mgpu,False
+34616487022,733,examples torch jax core,torch-mgpu jax-mgpu,True
+34618633866,723,examples torch,torch-mgpu,False
+34632824257,676,examples torch jax core,torch-mgpu jax-mgpu,True
+34641703400,723,examples torch,torch-mgpu,False
+34645041044,694,examples torch,torch-mgpu,False
+34646963551,723,examples torch,torch-mgpu,False
+34647356575,723,examples torch,torch-mgpu,False
+34651104542,694,examples torch,torch-mgpu,False
+34655400142,725,examples torch jax core,torch-mgpu jax-mgpu,True
+34838663010,678,examples torch jax core,torch-mgpu jax-mgpu,True
+34857964965,725,examples torch jax core,torch-mgpu jax-mgpu,True
+34858896930,725,examples torch jax core,torch-mgpu jax-mgpu,True
+34866726554,694,examples torch,torch-mgpu,False
+34887426440,694,examples torch,torch-mgpu,False
+34891647278,678,examples torch jax core,torch-mgpu jax-mgpu,True
+34895813486,678,examples torch jax core,torch-mgpu jax-mgpu,True
+34897255701,725,examples torch jax core,torch-mgpu jax-mgpu,True
+34986553958,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35000840563,694,examples torch,torch-mgpu,False
+35001602024,663,examples torch jax core,torch-mgpu jax-mgpu,True
+35005395729,663,examples torch jax core,torch-mgpu jax-mgpu,True
+35006798470,736,examples torch jax core,torch-mgpu jax-mgpu,True
+35009182713,606,examples jax,jax-mgpu,False
+35015893675,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35031212433,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35031917067,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35031943077,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35032462380,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35117436745,733,examples torch jax core,torch-mgpu jax-mgpu,True
+35117607194,733,examples torch jax core,torch-mgpu jax-mgpu,True
+35120675925,732,examples torch jax core,torch-mgpu jax-mgpu,True
+35134578480,625,examples torch jax core,torch-mgpu jax-mgpu,True
+35154894740,606,examples jax,jax-mgpu,False
+35155708770,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35157238690,606,examples jax,jax-mgpu,False
+35218055693,678,examples torch jax core,torch-mgpu jax-mgpu,True
+35238760426,606,examples jax,jax-mgpu,False
+35244954249,723,examples torch,torch-mgpu,False
+35250500206,723,examples torch,torch-mgpu,False
+35250823810,606,examples jax,jax-mgpu,False
+35264427286,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35265326609,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35345108520,678,examples torch jax core,torch-mgpu jax-mgpu,True
+35353904929,722,examples torch jax core,torch-mgpu jax-mgpu,True
+35362630098,723,examples torch,torch-mgpu,False
+35385725015,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35386203100,663,examples torch jax core,torch-mgpu jax-mgpu,True
+35387286005,723,examples torch,torch-mgpu,False
+35388056724,722,examples torch jax core,torch-mgpu jax-mgpu,True
+35391064169,723,examples torch,torch-mgpu,False
+35391559082,723,examples torch,torch-mgpu,False
+35395801712,663,examples torch jax core,torch-mgpu jax-mgpu,True
+35403831019,721,examples torch jax core,torch-mgpu jax-mgpu,True
+35411861485,737,examples torch jax core,torch-mgpu jax-mgpu,True
+35411869288,738,examples torch jax core,torch-mgpu jax-mgpu,True
+35423010373,737,examples torch jax core,torch-mgpu jax-mgpu,True
+35559033531,710,examples torch jax,torch-mgpu jax-mgpu,False
+35627369503,696,examples torch jax core,torch-mgpu jax-mgpu,True
+35629736628,734,examples torch jax core,torch-mgpu jax-mgpu,True
+35631004053,740,core,,False
+35679439336,736,examples torch jax core,torch-mgpu jax-mgpu,True
+35785151799,722,examples torch jax core,torch-mgpu jax-mgpu,True
+35881968941,723,examples torch,torch-mgpu,False
+35888285405,721,examples torch jax core,torch-mgpu jax-mgpu,True
+35890150737,721,examples torch jax core,torch-mgpu jax-mgpu,True
+35932945347,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36010108305,742,examples jax,jax-mgpu,False
+36037482577,663,examples torch jax core,torch-mgpu jax-mgpu,True
+36048065039,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36048719991,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36125516225,742,examples jax,jax-mgpu,False
+36126219247,742,examples jax,jax-mgpu,False
+36126244168,742,examples jax,jax-mgpu,False
+36191327519,722,examples torch jax core,torch-mgpu jax-mgpu,True
+36292074143,744,examples torch jax core,torch-mgpu jax-mgpu,True
+36369992621,695,examples torch,torch-mgpu,False
+36397249193,736,examples torch jax core,torch-mgpu jax-mgpu,True
+36439917969,734,examples torch jax core,torch-mgpu jax-mgpu,True
+36456646290,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36465338765,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36465769405,694,examples torch,torch-mgpu,False
+36466042420,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36466091820,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36466376954,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36468062010,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36473635350,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36484521512,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36516847930,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36519335703,696,examples torch jax core,torch-mgpu jax-mgpu,True
+36589727122,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36598123714,736,examples torch jax core,torch-mgpu jax-mgpu,True
+36601517971,736,examples torch jax core,torch-mgpu jax-mgpu,True
+36602474826,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36615155871,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36619405481,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36620509116,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36623216379,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36624412020,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36627384038,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36629642267,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36634800749,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36638462828,745,examples torch jax core,torch-mgpu jax-mgpu,True
+36737144615,746,examples torch,torch-mgpu,False
+36737494993,746,examples torch,torch-mgpu,False
+36741253175,746,examples torch,torch-mgpu,False
+36765097908,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36765100137,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36777313521,696,examples torch jax core,torch-mgpu jax-mgpu,True
+36783069388,721,examples torch jax core,torch-mgpu jax-mgpu,True
+36787104421,747,examples torch jax core,torch-mgpu jax-mgpu,True
+36787920677,747,examples torch jax core,torch-mgpu jax-mgpu,True
+36789233003,747,examples torch jax core,torch-mgpu jax-mgpu,True
+36789977593,747,examples torch jax core,torch-mgpu jax-mgpu,True
+36881022056,748,examples torch jax core,torch-mgpu jax-mgpu,True
+36920915377,696,examples torch jax core,torch-mgpu jax-mgpu,True
+36925795396,750,examples torch jax core,torch-mgpu jax-mgpu,True
+36965318672,751,examples torch jax core,torch-mgpu jax-mgpu,True
+37015458236,751,examples torch jax core,torch-mgpu jax-mgpu,True
+37027326992,749,examples torch jax core,torch-mgpu jax-mgpu,True
+37042374115,753,examples torch jax core,torch-mgpu jax-mgpu,True
+37052315539,736,examples torch jax core,torch-mgpu jax-mgpu,True
+37346389893,736,examples torch jax core,torch-mgpu jax-mgpu,True
+37489419383,736,examples torch jax core,torch-mgpu jax-mgpu,True
+37528086396,754,examples torch jax core,torch-mgpu jax-mgpu,True
+37535250404,736,examples torch jax core,torch-mgpu jax-mgpu,True
+37682609445,756,examples torch jax core,torch-mgpu jax-mgpu,True
+37963044619,745,examples torch jax core,torch-mgpu jax-mgpu,True
+37975844919,758,examples torch jax core,torch-mgpu jax-mgpu,True
+38271184170,744,examples torch jax core,torch-mgpu jax-mgpu,True
+38282261718,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38298287583,758,examples torch jax core,torch-mgpu jax-mgpu,True
+38309341465,758,examples torch jax core,torch-mgpu jax-mgpu,True
+38337784966,744,examples torch jax core,torch-mgpu jax-mgpu,True
+38417830995,734,examples torch jax core,torch-mgpu jax-mgpu,True
+38417835786,734,examples torch jax core,torch-mgpu jax-mgpu,True
+38418081403,734,examples torch jax core,torch-mgpu jax-mgpu,True
+38418838584,759,examples torch jax core,torch-mgpu jax-mgpu,True
+38431105717,756,examples torch jax core,torch-mgpu jax-mgpu,True
+38463635510,758,examples torch jax core,torch-mgpu jax-mgpu,True
+38477578279,745,examples torch jax core,torch-mgpu jax-mgpu,True
+38583793905,746,examples torch,torch-mgpu,False
+38608035236,746,examples torch,torch-mgpu,False
+38631951147,746,examples torch,torch-mgpu,False
+38642707152,746,examples torch,torch-mgpu,False
+38756354268,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38756355651,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38761866951,746,examples torch,torch-mgpu,False
+38781769253,756,examples torch jax core,torch-mgpu jax-mgpu,True
+38784072516,756,examples torch jax core,torch-mgpu jax-mgpu,True
+38789701265,741,examples torch jax core,torch-mgpu jax-mgpu,True
+38791363694,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38792673441,663,examples torch jax core,torch-mgpu jax-mgpu,True
+38794036890,756,examples torch jax core,torch-mgpu jax-mgpu,True
+38803571296,760,examples torch jax core,torch-mgpu jax-mgpu,True
+38804163709,746,examples torch,torch-mgpu,False
+38807772182,758,examples torch jax core,torch-mgpu jax-mgpu,True
+38827271407,762,examples torch jax core,torch-mgpu jax-mgpu,True
+38834848672,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38917473291,663,examples torch jax core,torch-mgpu jax-mgpu,True
+38949465881,736,examples torch jax core,torch-mgpu jax-mgpu,True
+38975463239,766,examples torch jax core,torch-mgpu jax-mgpu,True
+39000758899,767,examples torch jax core,torch-mgpu jax-mgpu,True
+39177789256,741,examples torch jax core,torch-mgpu jax-mgpu,True
+39268237773,746,examples torch,torch-mgpu,False
+39299810015,766,examples torch jax core,torch-mgpu jax-mgpu,True
+39308060200,734,examples torch jax core,torch-mgpu jax-mgpu,True
+39308478155,745,examples torch jax core,torch-mgpu jax-mgpu,True
+39321115718,745,examples torch jax core,torch-mgpu jax-mgpu,True
+39341123955,768,examples torch jax core,torch-mgpu jax-mgpu,True
+39342800436,745,examples torch jax core,torch-mgpu jax-mgpu,True
+39347023303,768,examples torch jax core,torch-mgpu jax-mgpu,True
+39365384407,741,examples torch jax core,torch-mgpu jax-mgpu,True
+39370626444,769,examples torch jax core,torch-mgpu jax-mgpu,True
+39437104605,741,examples torch jax core,torch-mgpu jax-mgpu,True
+39449142789,770,examples torch jax core,torch-mgpu jax-mgpu,True
+39459314285,745,examples torch jax core,torch-mgpu jax-mgpu,True
+39464680414,771,examples torch jax core,torch-mgpu jax-mgpu,True
+39475325003,734,examples torch jax core,torch-mgpu jax-mgpu,True
+39477133369,766,examples torch jax core,torch-mgpu jax-mgpu,True
+39485133896,766,examples torch jax core,torch-mgpu jax-mgpu,True
+39488766663,746,examples torch,torch-mgpu,False
+39494953003,766,examples torch jax core,torch-mgpu jax-mgpu,True
+39496782386,745,examples torch jax core,torch-mgpu jax-mgpu,True
+39505069813,754,examples torch jax core,torch-mgpu jax-mgpu,True
+39509124012,734,examples torch jax core,torch-mgpu jax-mgpu,True
+39517535192,746,examples torch,torch-mgpu,False
+39533856306,746,examples torch,torch-mgpu,False
+39545540699,741,examples torch jax core,torch-mgpu jax-mgpu,True
+39604213812,746,examples torch,torch-mgpu,False
+39623837642,746,examples torch,torch-mgpu,False
+39625757027,746,examples torch,torch-mgpu,False
+39626298158,773,examples torch jax core,torch-mgpu jax-mgpu,True
+39629658761,754,examples torch jax core,torch-mgpu jax-mgpu,True
+39650173907,746,examples torch,torch-mgpu,False
+39651123877,774,examples torch jax core,torch-mgpu jax-mgpu,True
+39653334052,746,examples torch,torch-mgpu,False
+39659195401,771,examples torch jax core,torch-mgpu jax-mgpu,True
+39682854757,776,examples,,False
+39685040563,776,examples,,False
+39685403475,776,examples,,False
+39691119964,746,examples torch,torch-mgpu,False
+39696590010,746,examples torch,torch-mgpu,False
+39696985150,746,examples torch,torch-mgpu,False
+39697858462,771,examples torch jax core,torch-mgpu jax-mgpu,True
+39722011660,774,examples torch jax core,torch-mgpu jax-mgpu,True
+39830140088,696,examples torch jax core,torch-mgpu jax-mgpu,True
+39831717977,773,examples torch jax core,torch-mgpu jax-mgpu,True
+39838998296,771,examples torch jax core,torch-mgpu jax-mgpu,True
+39840327162,774,examples torch jax core,torch-mgpu jax-mgpu,True
+39841861489,774,examples torch jax core,torch-mgpu jax-mgpu,True
+39841886487,663,examples torch jax core,torch-mgpu jax-mgpu,True
+39843641556,760,examples torch jax core,torch-mgpu jax-mgpu,True
+39852075808,776,examples,,False
+39870866099,778,examples torch jax core,torch-mgpu jax-mgpu,True
+39900199958,774,examples torch jax core,torch-mgpu jax-mgpu,True
+39972562163,741,examples torch jax core,torch-mgpu jax-mgpu,True
+39992837620,760,examples torch jax core,torch-mgpu jax-mgpu,True
+39993188272,760,examples torch jax core,torch-mgpu jax-mgpu,True
+40022337583,776,examples,,False
+40023278671,776,examples,,False
+40067031784,780,examples torch jax core,torch-mgpu jax-mgpu,True
+40068953643,780,examples torch jax core,torch-mgpu jax-mgpu,True
+40375851886,760,examples torch jax core,torch-mgpu jax-mgpu,True
+40533404591,745,examples torch jax core,torch-mgpu jax-mgpu,True
+40536896818,745,examples torch jax core,torch-mgpu jax-mgpu,True
+40551804390,781,examples torch jax core,torch-mgpu jax-mgpu,True
+40560468327,741,examples torch jax core,torch-mgpu jax-mgpu,True
+40573925841,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40578784737,746,examples torch,torch-mgpu,False
+40590467597,766,examples torch jax core,torch-mgpu jax-mgpu,True
+40593591588,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40594639708,766,examples torch jax core,torch-mgpu jax-mgpu,True
+40607233383,746,examples torch,torch-mgpu,False
+40717792421,771,examples torch jax core,torch-mgpu jax-mgpu,True
+40725055760,745,examples torch jax core,torch-mgpu jax-mgpu,True
+40736522616,771,examples torch jax core,torch-mgpu jax-mgpu,True
+40748241166,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40755265981,771,examples torch jax core,torch-mgpu jax-mgpu,True
+40757228934,782,examples torch jax core,torch-mgpu jax-mgpu,True
+40762589433,760,examples torch jax core,torch-mgpu jax-mgpu,True
+40787226963,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40788774431,771,examples torch jax core,torch-mgpu jax-mgpu,True
+40906904275,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40912590820,694,examples torch,torch-mgpu,False
+40928834649,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40943554959,694,examples torch,torch-mgpu,False
+40958084133,783,examples torch jax core,torch-mgpu jax-mgpu,True
+40961669319,784,examples torch jax core,torch-mgpu jax-mgpu,True
+40962847990,783,examples torch jax core,torch-mgpu jax-mgpu,True
+40967220275,783,examples torch jax core,torch-mgpu jax-mgpu,True
+40970549189,781,examples torch jax core,torch-mgpu jax-mgpu,True
+40973787981,778,examples torch jax core,torch-mgpu jax-mgpu,True
+40974475093,783,examples torch jax core,torch-mgpu jax-mgpu,True
+40997047240,784,examples torch jax core,torch-mgpu jax-mgpu,True
+41079729714,786,examples torch,torch-mgpu,False
+41115313970,785,examples torch jax core,torch-mgpu jax-mgpu,True
+41117511168,787,examples torch jax core,torch-mgpu jax-mgpu,True
+41117984271,787,examples torch jax core,torch-mgpu jax-mgpu,True
+41124551093,760,examples torch jax core,torch-mgpu jax-mgpu,True
+41133735886,789,examples torch jax core,torch-mgpu jax-mgpu,True
+41165306491,771,examples torch jax core,torch-mgpu jax-mgpu,True
+41483932687,785,examples torch jax core,torch-mgpu jax-mgpu,True
+41505378744,786,examples torch,torch-mgpu,False
+41507032761,791,examples torch jax core,torch-mgpu jax-mgpu,True
+41507286180,786,examples torch,torch-mgpu,False
+41511511703,791,examples torch jax core,torch-mgpu jax-mgpu,True
+41519146567,792,examples torch,torch-mgpu,False
+41520019853,784,examples torch jax core,torch-mgpu jax-mgpu,True
+41526409895,785,examples torch jax core,torch-mgpu jax-mgpu,True
+41531945854,791,examples torch jax core,torch-mgpu jax-mgpu,True
+41535680784,663,examples torch jax core,torch-mgpu jax-mgpu,True
+41536923923,792,examples torch,torch-mgpu,False
+41558899289,788,examples torch jax core,torch-mgpu jax-mgpu,True
+41683294381,760,examples torch jax core,torch-mgpu jax-mgpu,True
+41714896469,789,examples torch jax core,torch-mgpu jax-mgpu,True
+41714971350,745,examples torch jax core,torch-mgpu jax-mgpu,True
+41715443243,786,examples torch,torch-mgpu,False
+41722085122,789,examples torch jax core,torch-mgpu jax-mgpu,True
+41733302470,789,examples torch jax core,torch-mgpu jax-mgpu,True
+41830218343,786,examples torch,torch-mgpu,False
+41856653745,784,examples torch jax core,torch-mgpu jax-mgpu,True
+41862445631,771,examples torch jax core,torch-mgpu jax-mgpu,True
+41868505250,663,examples torch jax core,torch-mgpu jax-mgpu,True
+41873338376,784,examples torch jax core,torch-mgpu jax-mgpu,True
+41886265089,766,examples torch jax core,torch-mgpu jax-mgpu,True
+41886306323,766,examples torch jax core,torch-mgpu jax-mgpu,True
+41888685666,745,examples torch jax core,torch-mgpu jax-mgpu,True
+41889668590,663,examples torch jax core,torch-mgpu jax-mgpu,True
+41906314021,771,examples torch jax core,torch-mgpu jax-mgpu,True
+41928705962,694,examples torch,torch-mgpu,False
+41929044312,766,examples torch jax core,torch-mgpu jax-mgpu,True
+41936980030,771,examples torch jax core,torch-mgpu jax-mgpu,True
+41954142083,786,examples torch,torch-mgpu,False
+41956711637,786,examples torch,torch-mgpu,False
+41958420553,786,examples torch,torch-mgpu,False
+41960870799,786,examples torch,torch-mgpu,False
+41969699333,786,examples torch,torch-mgpu,False
+42068503225,776,examples,,False
+42068527418,776,examples,,False
+42077423919,776,examples,,False
+42093012945,771,examples torch jax core,torch-mgpu jax-mgpu,True
+42100934309,793,examples torch jax core,torch-mgpu jax-mgpu,True
+42122192759,766,examples torch jax core,torch-mgpu jax-mgpu,True
+42123657483,766,examples torch jax core,torch-mgpu jax-mgpu,True
+42142990050,795,examples torch jax core,torch-mgpu jax-mgpu,True
+42172633740,795,examples torch jax core,torch-mgpu jax-mgpu,True
+42254432457,772,examples torch jax core,torch-mgpu jax-mgpu,True
+42257586553,694,examples torch,torch-mgpu,False
+42266623958,694,examples torch,torch-mgpu,False
+42314625821,796,examples torch jax core,torch-mgpu jax-mgpu,True
+42315803668,792,examples torch,torch-mgpu,False
+42321254338,772,examples torch jax core,torch-mgpu jax-mgpu,True
+42329575354,797,examples torch jax core,torch-mgpu jax-mgpu,True
+42647564043,793,examples torch jax core,torch-mgpu jax-mgpu,True

@@ -1,0 +1,115 @@
+{
+  "same_work": {
+    "items": 111,
+    "static_min": 274.3,
+    "queue_min": 111.46666666666667,
+    "work_min": 408.6166666666667
+  },
+  "timeline_l3": {
+    "mi30x": {
+      "static_n": 175,
+      "static_median_min": 164.6,
+      "static_timeouts": 18,
+      "queue_warm_n": 10,
+      "queue_warm_median_min": 74.14166666666667,
+      "dev_min": 66.28333333333333
+    },
+    "mi35x": {
+      "static_n": 182,
+      "static_median_min": 167.80833333333334,
+      "static_timeouts": 21,
+      "queue_warm_n": 12,
+      "queue_warm_median_min": 105.38333333333334,
+      "dev_min": 113.0
+    }
+  },
+  "cold_vs_warm": {
+    "42571551993": {
+      "util": 0.9164548444976076,
+      "over_lower_bound": 0.09116123506138596,
+      "makespan_min": 111.46666666666667,
+      "items_within_25pct_of_weight": null
+    },
+    "42544023501": {
+      "util": 0.9992767598842816,
+      "over_lower_bound": 0.0007237635705670264,
+      "makespan_min": 69.13333333333334,
+      "items_within_25pct_of_weight": 0.16216216216216217
+    }
+  },
+  "utilisation": {
+    "static_util_median": {
+      "l1": 0.5327940361642823,
+      "l3": 0.47754159455838363
+    },
+    "static_n": {
+      "l1": 153,
+      "l3": 160
+    },
+    "torch_longest": 260,
+    "jax_longest": 62,
+    "queue_cold_util": [
+      0.8622256515775034,
+      0.9649331031506259
+    ],
+    "queue_warm_util": [
+      0.9972496866731653,
+      0.999891649812193
+    ],
+    "queue_warm_over_lower_bound_max": 0.0027578984115901317,
+    "speedup_warm_l3": {
+      "n": 22,
+      "median": 2.430436977269113,
+      "min": 1.9373888998617421,
+      "max": 2.8554149085794656
+    },
+    "static_util_same_work_median": 0.4114333256155422
+  },
+  "job_time": {
+    "Full run, before": {
+      "n": 337,
+      "job_min": 182.48333333333332,
+      "test_min": 167.51666666666668,
+      "pull_min": 6.683333333333334
+    },
+    "Full run, after (learned weights)": {
+      "n": 22,
+      "job_min": 104.80833333333334,
+      "test_min": 86.74166666666666,
+      "pull_min": 7.158333333333333
+    },
+    "Re-run failed jobs, before": {
+      "n": 32,
+      "job_min": 141.975,
+      "test_min": 134.025,
+      "pull_min": 6.808333333333334
+    },
+    "Re-run failed jobs, after": {
+      "n": 6,
+      "job_min": 16.266666666666666,
+      "test_min": 2.7333333333333334,
+      "pull_min": 10.516666666666667
+    }
+  },
+  "scope": {
+    "runs": 546,
+    "prs": 90,
+    "runs_subset": 128,
+    "prs_subset": 20,
+    "sgpu_gpu_hours": [
+      115.10916980444446,
+      1106.4163346105568
+    ],
+    "mgpu_gpu_hours": [
+      269.14444444444445,
+      4885.246666666667
+    ]
+  },
+  "dev_end_to_end": {
+    "before_n": 74,
+    "before_median_h": 4.91625,
+    "after": [
+      2.9466666666666668
+    ]
+  }
+}
