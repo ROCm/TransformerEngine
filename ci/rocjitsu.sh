@@ -8,6 +8,9 @@
 # them one after another. TEST_LEVEL >= 3 adds the race detector and A0 emulation with the
 # hsa-hotswap B0->A0 translation.
 
+# CI installs only TE's PyTorch extension, although the image also has JAX
+export NVTE_FRAMEWORK=pytorch
+
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
