@@ -82,7 +82,7 @@ TEST_LEVEL=1 ci/run_queue.sh --queue emu
 TEST_LEVEL=1 TEST_FILTER=cpp_nvfp4.b0.0 ci/rocjitsu.sh
 ```
 
-In CI, the `emu_tests` job of [`rocm-ci.yml`](../.github/workflows/rocm-ci.yml) runs the emu queue on the runner named by the repository variable `TE_CPU_TEST_RUNNER` (default `build-only-te`); the repository variable `TE_CI_EMU_SLOTS` overrides its slot count. The job is advisory: its failures do not fail the run.
+In CI, the `emu_tests` job of [`rocm-ci.yml`](../.github/workflows/rocm-ci.yml) runs the emu queue on the runner named by the repository variable `TE_CPU_TEST_RUNNER` (default `build-only-te`) with 8 slots, so the runtime and the learned item durations do not depend on the size of the runner; the repository variable `TE_CI_EMU_SLOTS` overrides the slot count. The job is advisory: its failures do not fail the run.
 
 ## CI Docker images
 

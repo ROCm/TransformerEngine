@@ -83,6 +83,8 @@ build_rocjitsu() {
         tail -n 50 "$ROCJITSU_HOME/build.log"
         return $rc
     fi
+    # Not needed to run, and its root-only git files break the CI cache
+    rm -rf "$_src"
     echo "$ROCJITSU_REF" > "$ROCJITSU_HOME/ref"
 }
 
