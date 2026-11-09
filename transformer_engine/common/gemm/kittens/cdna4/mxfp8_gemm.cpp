@@ -1096,13 +1096,19 @@ static bool grouped_mxfp8_gemm(
     const void *const *scale_A_array, const void *const *scale_B_array,
     int M, const int *N_array, int K, int num_experts,
     bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
-    void *workspace, size_t workspace_size, hipStream_t stream) {
+    void *workspace, size_t workspace_size, hipStream_t stream,
+    size_t *workspace_size_out) {
 
-    if (transa && transb) { warn_fallback("HK-grouped", "TT layout not supported"); return false; }
-    if (!transa && transb) { warn_fallback("HK-grouped", "NT layout: use grouped_mxfp8_wgrad"); return false; }
-    if (M % BLOCK_ROW != 0) { warn_fallback("HK-grouped", "M not 256-aligned"); return false; }
-    if (K % BLOCK_K != 0 || K < 256) { warn_fallback("HK-grouped", "K not 128-aligned or < 256"); return false; }
-    if (num_experts <= 0) { warn_fallback("HK-grouped", "num_experts <= 0"); return false; }
+    // A size query declines silently; only real launches report why they fall back.
+    auto decline = [&](const char *reason) {
+        if (workspace_size_out == nullptr) warn_fallback("HK-grouped", reason);
+        return false;
+    };
+    if (transa && transb) return decline("TT layout not supported");
+    if (!transa && transb) return decline("NT layout: use grouped_mxfp8_wgrad");
+    if (M % BLOCK_ROW != 0) return decline("M not 256-aligned");
+    if (K % BLOCK_K != 0 || K < 256) return decline("K not 128-aligned or < 256");
+    if (num_experts <= 0) return decline("num_experts <= 0");
 
     // NN's operand slots are flipped (see mxfp8_nn_mainloop.inc), so everything the host builds
     // per-slot follows that swap. The expert partitioning does not move: experts still divide the
@@ -1118,7 +1124,7 @@ static bool grouped_mxfp8_gemm(
     int total_n_tiles = 0;
     int max_N = 0;
     for (int g = 0; g < num_experts; g++) {
-        if (N_array[g] % BLOCK_COL != 0) { warn_fallback("HK-grouped", "N_array not 256-aligned"); return false; }
+        if (N_array[g] % BLOCK_COL != 0) return decline("N_array not 256-aligned");
         h_tile_offsets[g] = total_n_tiles;
         total_N += N_array[g];
         total_n_tiles += N_array[g] / BLOCK_COL;
@@ -1145,6 +1151,10 @@ static bool grouped_mxfp8_gemm(
     size_t sb_off_bytes   = kittens_align_up((size_t)(num_experts + 1) * sizeof(int), 256);
     size_t total_ws = sa_pk_bytes + sb_pk_bytes + a_ptrs_bytes + b_ptrs_bytes
                     + c_ptrs_bytes + sa_ptrs_bytes + offsets_bytes + sb_off_bytes;
+    if (workspace_size_out != nullptr) {
+        *workspace_size_out = total_ws;
+        return true;
+    }
     if (workspace_size < total_ws) {
         warn_fallback("HK-grouped", "workspace too small"); return false;
     }
@@ -1577,11 +1587,17 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     const void *const *scale_A_array, const void *const *scale_B_array,
     int N, int K, const int *M_array, int num_experts,
     int a_dtype, int b_dtype, int out_dtype, bool accumulate,
-    void *workspace, size_t workspace_size, hipStream_t stream) {
+    void *workspace, size_t workspace_size, hipStream_t stream,
+    size_t *workspace_size_out) {
 
-    if (N % BLOCK_ROW != 0) { warn_fallback("HK-wgrad", "N not 256-aligned"); return false; }
-    if (K % BLOCK_COL != 0) { warn_fallback("HK-wgrad", "K not 256-aligned"); return false; }
-    if (num_experts <= 0)    { warn_fallback("HK-wgrad", "num_experts <= 0"); return false; }
+    // A size query declines silently; only real launches report why they fall back.
+    auto decline = [&](const char *reason) {
+        if (workspace_size_out == nullptr) warn_fallback("HK-wgrad", reason);
+        return false;
+    };
+    if (N % BLOCK_ROW != 0) return decline("N not 256-aligned");
+    if (K % BLOCK_COL != 0) return decline("K not 256-aligned");
+    if (num_experts <= 0)    return decline("num_experts <= 0");
 
     int tiles_M = N / BLOCK_ROW;
     int tiles_N = K / BLOCK_COL;
@@ -1601,8 +1617,7 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
         int M_g = M_array[g];
         if (M_g == 0) continue;
         if (M_g % BLOCK_K != 0 || M_g < 256) {
-            warn_fallback("HK-wgrad", "M_i not 128-aligned or < 256");
-            return false;
+            return decline("M_i not 128-aligned or < 256");
         }
         int k_iters_g = M_g / BLOCK_K;
         WgradExpertInfo ei;
@@ -1657,6 +1672,10 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     size_t sb_off_bytes  = kittens_align_up((size_t)num_active * sizeof(int), 256);
     size_t total_ws = sa_pk_bytes + sb_pk_bytes + info_bytes
                     + sa_ptrs_bytes + sb_ptrs_bytes + ki_arr_bytes + sa_off_bytes + sb_off_bytes;
+    if (workspace_size_out != nullptr) {
+        *workspace_size_out = total_ws;
+        return true;
+    }
     if (workspace_size < total_ws) {
         warn_fallback("HK-wgrad", "workspace too small");
         return false;
@@ -1747,7 +1766,8 @@ class MXFP8GemmCdna4 final : public MXFP8GemmBackend {
                                   args.M, args.N_array, args.K, args.num_experts,
                                   args.transa, args.transb,
                                   args.a_dtype, args.b_dtype, args.out_dtype,
-                                  args.workspace, args.workspace_size, args.stream);
+                                  args.workspace, args.workspace_size, args.stream,
+                                  args.workspace_size_out);
     }
 
     bool grouped_wgrad(const MXFP8WgradArgs &args) override {
@@ -1755,7 +1775,8 @@ class MXFP8GemmCdna4 final : public MXFP8GemmBackend {
                                    args.scale_A_array, args.scale_B_array,
                                    args.N, args.K, args.M_array, args.num_experts,
                                    args.a_dtype, args.b_dtype, args.out_dtype, args.accumulate,
-                                   args.workspace, args.workspace_size, args.stream);
+                                   args.workspace, args.workspace_size, args.stream,
+                                   args.workspace_size_out);
     }
 };
 
