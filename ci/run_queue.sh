@@ -262,6 +262,18 @@ if [[ -z "$ARCH" ]]; then
 fi
 echo "== Arch: ${ARCH} =="
 
+# Probe each optional capability once for the whole run and export the answer
+probe_supported() {
+    ( set +u; DIR="$REPO_ROOT/ci"; export HIP_VISIBLE_DEVICES="${GPU_IDS[0]}"
+      . "$DIR/_utils.sh" > /dev/null 2>&1
+      check_supported "$1" 2> /dev/null; echo "$_probe_result" )
+}
+: "${TE_CI_SUPPORTS_MXFP8=$(probe_supported mxfp8)}"
+: "${TE_CI_SUPPORTS_FLASH_ATTN=$(probe_supported flash_attn)}"
+export TE_CI_SUPPORTS_MXFP8 TE_CI_SUPPORTS_FLASH_ATTN
+echo "== Supports: mxfp8=${TE_CI_SUPPORTS_MXFP8:-no answer}" \
+     "flash_attn=${TE_CI_SUPPORTS_FLASH_ATTN:-no answer} =="
+
 # Learned item durations, keyed by arch, TEST_LEVEL and GPU count. Only the sGPU
 # queue keeps them: mGPU items run one at a time on the whole box, so their order
 # does not change the wall time.
