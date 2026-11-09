@@ -112,6 +112,7 @@ jobs:
       run_build: ${{ steps.scope.outputs.run_build }}
       sgpu_suites: ${{ steps.scope.outputs.sgpu_suites }}
       mgpu_suites: ${{ steps.scope.outputs.mgpu_suites }}
+      emu_suites: ${{ steps.scope.outputs.emu_suites }}
       # "Re-run failed jobs" copies this job and its outputs from the earlier
       # attempt; "Re-run all jobs" runs it again. The GPU jobs tell the two apart
       # by comparing this with the current attempt.
@@ -547,3 +548,189 @@ jobs:
       - name: Cleanup container
         if: always()
         run: docker rm -f te-runner || true
+
+  # gfx1250 emulated on the CPU by rocjitsu (ci/rocjitsu.sh), so this needs no GPU: it runs
+  # on the runner named by the repository variable TE_CPU_TEST_RUNNER, as one queue
+  # (ci/run_queue.sh --queue emu) with an item per CPU slot.
+  emu_tests:
+    name: Emulated gfx1250 Tests
+    needs: [scope, select_image, build]
+    if: needs.scope.outputs.emu_suites != ''
+    # Advisory until the emulator and the test selection have proven stable
+    continue-on-error: true
+    timeout-minutes: 240
+    runs-on: ${{ vars.TE_CPU_TEST_RUNNER || 'build-only-te' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      # CPU runners can be shared, so the container name is unique to this run
+      CONTAINER: te-emu-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --recursive --depth 1 \
+            3rdparty/googletest \
+            3rdparty/hipify_torch \
+            3rdparty/composable_kernel
+
+      - name: Get rocjitsu revision
+        id: rocjitsu
+        run: |
+          echo "ref=$(sed -n 's/^: \${ROCJITSU_REF:=\([0-9a-f]*\)}$/\1/p' ci/rocjitsu.sh)" >> "$GITHUB_OUTPUT"
+
+      # ci/rocjitsu.sh reuses a build of the same rocm-systems commit
+      - name: Cache rocjitsu build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/rocjitsu
+            !build/rocjitsu/src
+            !build/rocjitsu/build/**/*.o
+            !build/rocjitsu/build/**/*.a
+          key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
+
+      # Download artifacts and pull the Docker image concurrently
+      - parallel:
+          - name: Download build artifacts
+            uses: actions/download-artifact@v8
+            with:
+              name: te-rocm-wheels
+              path: dist/
+
+          - name: Pull Docker Image
+            run: |
+              docker pull ${{ env.DOCKER_IMAGE }}
+
+      - name: Run Container
+        run: |
+          # --init reaps the helper processes of emulator runs that were killed
+          docker run -dt \
+            --rm \
+            --init \
+            --name "$CONTAINER" \
+            --network=host \
+            --shm-size=16G \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ${{ env.DOCKER_IMAGE }}
+
+      - name: Install packages
+        run: |
+          docker exec "$CONTAINER" bash -c "$(cat <<'EOF'
+          set -ex
+          # core (cpp) tests build via cmake inside the repo; allow git ops in-tree.
+          git config --global --add safe.directory '*'
+
+          TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
+          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG"
+
+          pip install --no-deps "$TE_CORE_PKG"
+          pip install ninja pybind11[global]
+          pip install --upgrade hypothesis setuptools
+          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
+          EOF
+          )"
+
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TE_CI_DATA_DIR }}/weights
+          key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-emu-weights-l${{ env.TEST_LEVEL }}-
+
+      # What failed on an earlier attempt of this run; see the sGPU job.
+      - name: Restore the previous attempt's failed items
+        if: needs.scope.outputs.ran_in_attempt != github.run_attempt
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
+          key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
+
+      - name: Run emulated tests as one queue
+        id: run-tests
+        # Below the job's timeout-minutes so an overrun kills only this step;
+        # the `if: always()` report + upload steps still run (artifacts survive).
+        timeout-minutes: 210
+        run: |
+          rm -rf "$TE_CI_DATA_DIR/test-results"
+          mkdir -p "$TE_CI_DATA_DIR/weights" "$TE_CI_DATA_DIR/rerun"
+
+          docker exec \
+            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TE_CI_DATA_DIR \
+            -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
+            -e JUNITXML_SUFFIX=.xml \
+            -e GITHUB_ACTIONS \
+            -e TE_CI_EMU_SLOTS="${{ vars.TE_CI_EMU_SLOTS }}" \
+            -e TE_CI_SUITES="${{ needs.scope.outputs.emu_suites }}" \
+            "$CONTAINER" bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue emu \
+              --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
+
+      - name: Save learned test weights
+        if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TE_CI_DATA_DIR }}/weights
+          key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Generate test report
+        if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          echo "Results from attempt ${ATTEMPT} of this run." >> "$GITHUB_STEP_SUMMARY"
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+          python3 ci/junit_report.py "$TE_CI_DATA_DIR/test-results/gfx1250-emu" --title "Emulated gfx1250 (rocjitsu)"
+          if [ -f "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" ]; then
+            cat "$TE_CI_DATA_DIR/test-results/logs/report/schedule.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
+
+      - name: Save this attempt's failed items
+        if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TE_CI_DATA_DIR }}/rerun
+          key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Check suite failure status
+        if: always()
+        run: |
+          EXIT_STATUS=0
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "$TE_CI_DATA_DIR/test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in "$TE_CI_DATA_DIR"/test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < ci/ci_emu_queue.conf
+          exit $EXIT_STATUS
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-emu
+          path: ${{ env.TE_CI_DATA_DIR }}/**
+          if-no-files-found: ignore
+          retention-days: 5
+          overwrite: true
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f "$CONTAINER" || true

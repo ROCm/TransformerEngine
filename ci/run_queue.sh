@@ -5,15 +5,18 @@
 #
 # Run test suites as one global work queue across the GPUs of this box.
 #
-# Usage: run_queue.sh [-q|--queue sgpu|mgpu] [-s|--suites "<label>..."] [-l|--log-dir <dir>]
+# Usage: run_queue.sh [-q|--queue sgpu|mgpu|emu] [-s|--suites "<label>..."] [-l|--log-dir <dir>]
 #                     [<config>...]
 #
-# Two queues share this script, selected by --queue (default sgpu):
+# Three queues share this script, selected by --queue (default sgpu):
 #
 #   sgpu  the suites' single-GPU tests (TEST_SGPU=1); every item takes one GPU.
 #         Default config ci/ci_sgpu_queue.conf.
 #   mgpu  the suites' multi-GPU tests (TEST_MGPU=1); every item takes the whole
 #         box. Default config ci/ci_mgpu_queue.conf.
+#   emu   single-GPU tests on GPUs emulated on the CPU, so the box needs no GPU;
+#         every item takes one CPU slot of ROCJITSU_CPU_BUDGET (4) physical cores.
+#         TE_CI_EMU_SLOTS sets the slot count. Default config ci/ci_emu_queue.conf.
 #
 # Config format (one suite per line; # comments and blank lines are ignored):
 #   <label>  <logfile>  <mode>  <command> [args...]
@@ -30,6 +33,7 @@
 #   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 ci/run_queue.sh
 #   TEST_LEVEL=3 ci/run_queue.sh --queue mgpu
 #   TEST_LEVEL=1 ci/run_queue.sh --suites "torch examples"
+#   TEST_LEVEL=1 ci/run_queue.sh --queue emu
 set -u
 SCRIPT_START_TS=$(date +%s)
 
@@ -93,7 +97,7 @@ QUEUE="sgpu"
 # Set, even to nothing, means "only these"; unset means every suite
 SELECTED_SUITES="${TE_CI_SUITES-}"
 FILTER_SUITES="${TE_CI_SUITES+1}"
-USAGE="Usage: $0 [-q|--queue sgpu|mgpu] [-s|--suites \"<label>...\"] [-l|--log-dir <dir>] [<config>...]"
+USAGE="Usage: $0 [-q|--queue sgpu|mgpu|emu] [-s|--suites \"<label>...\"] [-l|--log-dir <dir>] [<config>...]"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -s|--suites)
@@ -121,6 +125,9 @@ done
 case "$QUEUE" in
     sgpu) export TEST_SGPU=1 TEST_MGPU="" ;;
     mgpu) export TEST_SGPU="" TEST_MGPU=1 ;;
+    # Emulated GPUs are not probed, and the CK JIT cache would need a real one
+    emu)  export TEST_SGPU=1 TEST_MGPU="" TE_CI_SKIP_CK_JIT=1 \
+              TE_CI_SUPPORTS_MXFP8="" TE_CI_SUPPORTS_FLASH_ATTN="" ;;
     *)
         echo "Unknown queue: ${QUEUE}" >&2
         echo "$USAGE" >&2
@@ -228,9 +235,17 @@ fi
 # ---------------------------------------------------------------------------
 
 # Fill GPU_IDS with every GPU this run can see: HIP_VISIBLE_DEVICES if set
-# else what rocminfo counts. Returns 1 if there is none.
+# else what rocminfo counts. Returns 1 if there is none. The emu queue counts
+# CPU slots instead, each running one emulated GPU.
 detect_gpu_pool() {
     local n k
+    if [[ "$QUEUE" == "emu" ]]; then
+        n=${TE_CI_EMU_SLOTS:-$(( $(nproc) / $(lscpu | awk '/^Thread\(s\) per core:/ {print $NF}') / ${ROCJITSU_CPU_BUDGET:-4} ))}
+        (( n > 0 )) || n=1
+        for ((k = 0; k < n; k++)); do GPU_IDS+=( "$k" ); done
+        GPU_SOURCE="CPU slots for emulated GPUs"
+        return 0
+    fi
     if [[ -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
         IFS=',' read -r -a GPU_IDS <<< "$HIP_VISIBLE_DEVICES"
         GPU_SOURCE="HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES"
@@ -255,7 +270,12 @@ fi
 NUM_GPUS=${#GPU_IDS[@]}
 echo "== GPUs: ${NUM_GPUS} visible -- ids ${GPU_IDS[*]} (via ${GPU_SOURCE}) =="
 
-ARCH=$(detect_arch)
+# rocminfo cannot see emulated GPUs; the emu suites pick what they emulate
+if [[ "$QUEUE" == "emu" ]]; then
+    ARCH=emulated
+else
+    ARCH=$(detect_arch)
+fi
 if [[ -z "$ARCH" ]]; then
     log_error "could not read the GPU arch from rocminfo; it keys the weight table"
     exit 1
@@ -275,10 +295,10 @@ echo "== Supports: mxfp8=${TE_CI_SUPPORTS_MXFP8:-no answer}" \
      "flash_attn=${TE_CI_SUPPORTS_FLASH_ATTN:-no answer} =="
 
 # Learned item durations, keyed by arch, TEST_LEVEL and GPU count. Only the sGPU
-# queue keeps them: mGPU items run one at a time on the whole box, so their order
-# does not change the wall time.
+# and emu queues keep them: mGPU items run one at a time on the whole box, so their
+# order does not change the wall time.
 WEIGHTS_FILE=""
-if [[ "$QUEUE" == "sgpu" ]]; then
+if [[ "$QUEUE" != "mgpu" ]]; then
     WEIGHTS_FILE="${TE_CI_DATA_DIR}/weights/test_weights.${QUEUE}.${ARCH}.l${TEST_LEVEL:-99}.g${NUM_GPUS}.txt"
     mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 fi
@@ -297,7 +317,7 @@ RERUN_TESTS_DIR="${RERUN_DIR}/tests"
 # GPUs per item: one in the sGPU queue, the whole box in the mGPU queue (the
 # tests adapt to the GPU count they see, skipping cases when given fewer).
 case "$QUEUE" in
-    sgpu) DEFAULT_ITEM_GPUS=1 ;;
+    sgpu|emu) DEFAULT_ITEM_GPUS=1 ;;
     mgpu) DEFAULT_ITEM_GPUS=$NUM_GPUS ;;
 esac
 
@@ -474,16 +494,18 @@ source "$REPO_ROOT/ci/_utils.sh"
 # cache snapshot between them goes through a file.
 export TE_CI_CK_JIT_SNAPSHOT="$SETUP_DIR/ck_jit_cache.snapshot"
 
-echo "== One-time setup: CK JIT prebuild (once per run, shared by every suite) =="
-ck_jit_start=$(date +%s)
-if ! ( export HIP_VISIBLE_DEVICES="${GPU_IDS[0]}"; ck_jit_prebuild build ) \
-        > "$SETUP_DIR/ck_jit_prebuild.log" 2>&1; then
-    log_error "CK JIT prebuild failed; see $SETUP_DIR/ck_jit_prebuild.log"
-    tail -30 "$SETUP_DIR/ck_jit_prebuild.log" >&2
-    exit 1
+if [[ -z "${TE_CI_SKIP_CK_JIT:-}" ]]; then
+    echo "== One-time setup: CK JIT prebuild (once per run, shared by every suite) =="
+    ck_jit_start=$(date +%s)
+    if ! ( export HIP_VISIBLE_DEVICES="${GPU_IDS[0]}"; ck_jit_prebuild build ) \
+            > "$SETUP_DIR/ck_jit_prebuild.log" 2>&1; then
+        log_error "CK JIT prebuild failed; see $SETUP_DIR/ck_jit_prebuild.log"
+        tail -30 "$SETUP_DIR/ck_jit_prebuild.log" >&2
+        exit 1
+    fi
+    sed -n 's/^/  /p' "$SETUP_DIR/ck_jit_prebuild.log"
+    echo "  done in $(( $(date +%s) - ck_jit_start ))s"
 fi
-sed -n 's/^/  /p' "$SETUP_DIR/ck_jit_prebuild.log"
-echo "  done in $(( $(date +%s) - ck_jit_start ))s"
 
 setup_banner=""
 for i in "${!SUITE_LABELS[@]}"; do
@@ -657,13 +679,15 @@ WALL=$(( $(date +%s) - START_TS ))
 # --- CK JIT cache drift ----------------------------------------------------
 # Blobs the queue JIT-compiled that ci/ck_jit_prebuild.txt does not list. Checked
 # once after the queue, since every item shares the cache.
-ck_jit_drift="$(ck_jit_prebuild list 2>&1)" \
-    || log_warn "CK JIT cache check failed; continuing"
-echo "== CK JIT cache =="
-if [[ -n "$ck_jit_drift" ]]; then
-    sed -n 's/^/  /p' <<< "$ck_jit_drift"
-else
-    echo "  no drift: ci/ck_jit_prebuild.txt covered every blob the queue used"
+if [[ -z "${TE_CI_SKIP_CK_JIT:-}" ]]; then
+    ck_jit_drift="$(ck_jit_prebuild list 2>&1)" \
+        || log_warn "CK JIT cache check failed; continuing"
+    echo "== CK JIT cache =="
+    if [[ -n "$ck_jit_drift" ]]; then
+        sed -n 's/^/  /p' <<< "$ck_jit_drift"
+    else
+        echo "  no drift: ci/ck_jit_prebuild.txt covered every blob the queue used"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -760,6 +784,7 @@ fi
 case "$QUEUE" in
     sgpu) REPORT_TITLE="sGPU queue schedule" ;;
     mgpu) REPORT_TITLE="mGPU queue schedule" ;;
+    emu) REPORT_TITLE="Emulated GPU queue schedule" ;;
 esac
 if ! scheduler_py schedule_report.py "$LOG_DIR" \
         --title "$REPORT_TITLE" \
