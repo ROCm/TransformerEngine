@@ -145,10 +145,11 @@ struct CustomMultiTensorCache {
   }
 };
 
-// Cache for L2 norm computation (single tensor list, int sizes, includes output/ret buffers).
+// Cache for L2 norm computation (single tensor list, includes output/ret buffers).
+// Sizes are int64: a single tensor may hold 2^31 or more elements.
 struct CustomL2NormCache {
   std::vector<int64_t> addresses_host;
-  std::vector<int> sizes_host;
+  std::vector<int64_t> sizes_host;
   at::Tensor addresses_dev;
   at::Tensor sizes_dev;
   at::Tensor block_to_tensor_dev;
@@ -164,7 +165,7 @@ struct CustomL2NormCache {
     if (chunk_size != cs || static_cast<int>(sizes_host.size()) != ntensors)
       return false;
     for (int t = 0; t < ntensors; t++) {
-      if (sizes_host[t] != static_cast<int>(tensor_lists[0][t].numel()))
+      if (sizes_host[t] != static_cast<int64_t>(tensor_lists[0][t].numel()))
         return false;
     }
     return true;
@@ -200,8 +201,9 @@ struct CustomL2NormCache {
     int running_offset = 0;
     for (int t = 0; t < ntensors; t++) {
       const auto &tensor = tensor_lists[0][t];
-      const int tensor_numel = static_cast<int>(tensor.numel());
-      const int chunks_this_tensor = (tensor_numel + cs - 1) / cs;
+      const int64_t tensor_numel = tensor.numel();
+      const int chunks_this_tensor = static_cast<int>(
+          (tensor_numel + cs - 1) / cs);
       addresses_host.push_back(reinterpret_cast<int64_t>(tensor.data_ptr()));
       sizes_host.push_back(tensor_numel);
       chunk_offsets_host.push_back(running_offset);
@@ -210,12 +212,17 @@ struct CustomL2NormCache {
       }
       running_offset += chunks_this_tensor;
     }
+    // The kernel launches one block per chunk of `tc`; each block reads its
+    // block_to_tensor entry, so the map must cover exactly `tc` chunks.
+    NVTE_CHECK(static_cast<int64_t>(block_to_tensor_host.size()) == tc,
+               "L2 norm chunk map has ", block_to_tensor_host.size(),
+               " entries, expected ", tc);
 
     auto int_options = tensor_lists[0][0].options().dtype(at::kInt);
     auto long_options = tensor_lists[0][0].options().dtype(at::kLong);
     auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
     addresses_dev = at::empty({ntensors}, long_options);
-    sizes_dev = at::empty({ntensors}, int_options);
+    sizes_dev = at::empty({ntensors}, long_options);
     block_to_tensor_dev = at::empty({tc}, int_options);
     chunk_offsets_dev = at::empty({ntensors}, int_options);
     output_dev = at::empty({tc}, float_options);
@@ -225,7 +232,7 @@ struct CustomL2NormCache {
                                     ntensors * sizeof(int64_t),
                                     cudaMemcpyHostToDevice, stream));
     NVTE_CHECK_CUDA(cudaMemcpyAsync(sizes_dev.data_ptr(), sizes_host.data(),
-                                    ntensors * sizeof(int),
+                                    ntensors * sizeof(int64_t),
                                     cudaMemcpyHostToDevice, stream));
     NVTE_CHECK_CUDA(cudaMemcpyAsync(block_to_tensor_dev.data_ptr(),
                                     block_to_tensor_host.data(),

@@ -269,7 +269,7 @@ struct UnscaleL2NormFunctor {
 template <typename x_t, bool UNSCALE>
 __global__ void custom_multi_tensor_l2norm_kernel(
     int chunk_size, volatile int * __restrict__ noop_gmem,
-    const int64_t * __restrict__ addresses, const int * __restrict__ sizes,
+    const int64_t * __restrict__ addresses, const int64_t * __restrict__ sizes,
     const int * __restrict__ block_to_tensor, const int * __restrict__ chunk_offsets,
     int total_chunks, const float * __restrict__ inv_scale,
     float * __restrict__ output) {
@@ -279,16 +279,18 @@ __global__ void custom_multi_tensor_l2norm_kernel(
 
   const float inv_scale_val = UNSCALE ? *inv_scale : 0.f;
 
-  int n = 0;
+  // Elements left in the tensor from this chunk's start; int64 because a tensor
+  // may hold 2^31 or more elements.
+  int64_t n = 0;
   x_t *x = nullptr;
   if (global_chunk < total_chunks) {
     const int tensor_loc = block_to_tensor[global_chunk];
     const int chunk_idx = global_chunk - chunk_offsets[tensor_loc];
-    n = sizes[tensor_loc];
+    const int64_t elem_offset = static_cast<int64_t>(chunk_idx) * chunk_size;
 
     x = reinterpret_cast<x_t *>(static_cast<uintptr_t>(addresses[tensor_loc]));
-    x += static_cast<size_t>(chunk_idx) * chunk_size;
-    n -= chunk_idx * chunk_size;
+    x += elem_offset;
+    n = sizes[tensor_loc] - elem_offset;
   }
 
   float vals[CILP];
@@ -360,7 +362,7 @@ __global__ void custom_multi_tensor_l2norm_reduce(
 
 void multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag_tensor,
                                      DType input_dtype, const int64_t *addresses,
-                                     const int *sizes, const int *block_to_tensor,
+                                     const int64_t *sizes, const int *block_to_tensor,
                                      const int *chunk_offsets, int total_chunks,
                                      NVTETensor output_tensor,
                                      NVTETensor ret_tensor, cudaStream_t stream) {
@@ -389,7 +391,7 @@ void multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag_tensor
 
 void multi_tensor_unscale_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag_tensor,
                                              DType input_dtype, const int64_t *addresses,
-                                             const int *sizes, const int *block_to_tensor,
+                                             const int64_t *sizes, const int *block_to_tensor,
                                              const int *chunk_offsets, int total_chunks,
                                              NVTETensor output_tensor, NVTETensor ret_tensor,
                                              NVTETensor inv_scale_tensor, cudaStream_t stream) {
@@ -620,7 +622,7 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 #ifdef __HIP_PLATFORM_AMD__
 void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
                       const NVTEDType input_dtype, const int64_t * const addresses,
-                      const int * const sizes, const int * const block_to_tensor,
+                      const int64_t * const sizes, const int * const block_to_tensor,
                       const int * const chunk_offsets, int total_chunks,
                       NVTETensor output,
                       NVTETensor ret, cudaStream_t stream) {
@@ -634,7 +636,7 @@ void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
 
 void nvte_multi_tensor_unscale_l2norm_cuda_custom(
   int chunk_size, NVTETensor noop_flag, const NVTEDType input_dtype,
-  const int64_t * const addresses, const int * const sizes, const int * const block_to_tensor,
+  const int64_t * const addresses, const int64_t * const sizes, const int * const block_to_tensor,
   const int * const chunk_offsets, int total_chunks,
   NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_unscale_l2norm_cuda_custom);
