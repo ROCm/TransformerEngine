@@ -401,6 +401,11 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
+        # Data-free repr for fake/meta data, as in Float8Tensor: dequantizing it under tracing
+        # would specialize its symbolic shape.
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None and (data.__class__ is not torch.Tensor or data.is_meta):
+            return safe_quantized_repr(self, "MXFP8Tensor")
         try:
             return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
         except Exception as exc:  # pylint: disable=broad-except

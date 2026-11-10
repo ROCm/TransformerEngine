@@ -2984,17 +2984,6 @@ def test_te_ops_linear_bias_compile(
 def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
     if IS_HIP_EXTENSION and mode == "row-scaled":
         pytest.skip("Row-scaled NVFP4 columnwise output is not supported on ROCm.")
-    if IS_HIP_EXTENSION:
-        # ROCm (IFU release v2.21): pytest 9 in the ROCm CI image attaches its log-capture
-        # handlers to non-propagating loggers, including torch's structured-trace logger, so AOT
-        # autograd renders its trace payloads on every compile. Rendering the fake NVFP4 output
-        # calls NVFP4Tensor.__repr__, which dequantizes it and specializes the dynamic batch
-        # dimension. Compiled results match eager once those handlers are removed; a follow-up
-        # can make NVFP4Tensor.__repr__ skip dequantizing fake tensors.
-        pytest.xfail(
-            "ROCm: AOT autograd's structured-trace repr of the fake NVFP4 output specializes the "
-            "dynamic batch dimension under pytest log capture."
-        )
     quantizer = NVFP4Quantizer(
         columnwise=True,
         with_rht=mode == "rht",
