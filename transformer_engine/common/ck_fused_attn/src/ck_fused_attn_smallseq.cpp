@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#include "ck_fused_attn/ck_fused_attn_device.hpp"
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -14,15 +15,7 @@
 #include "attn_fwd_mfma_dispatch.h"
 
 #define CK_SMALL_SEQ_TYPE_SWITCH_16BIT(DTYPE, TYPE_NAME, ...) \
-  do {                                                        \
-    if((DTYPE) == DType::kBFloat16) {                         \
-      using TYPE_NAME = hip_bfloat16;                         \
-      __VA_ARGS__                                             \
-    } else if((DTYPE) == DType::kFloat16) {                   \
-      using TYPE_NAME = __half;                               \
-      __VA_ARGS__                                             \
-    }                                                         \
-  } while(0)
+  CK_FUSED_ATTN_DTYPE_SWITCH_16BIT(DTYPE, TYPE_NAME, __half, hip_bfloat16, __VA_ARGS__)
 
 namespace ck_fused_attn {
 

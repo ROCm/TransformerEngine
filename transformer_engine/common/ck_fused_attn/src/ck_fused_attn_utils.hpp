@@ -13,6 +13,7 @@
 #include<hip/hip_runtime.h>
 #include "ck_tile/host.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#include "ck_fused_attn/ck_fused_attn_device.hpp"
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -21,21 +22,8 @@ enum class bias_enum;
 
 namespace ck_fused_attn{
 
-#define CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, type, ...)   \
-switch (dtype) {                                            \
-  case DType::kFloat16: {                                   \
-    using type = ck_tile::half_t;                           \
-    __VA_ARGS__;                                            \
-    break;                                                  \
-  }                                                         \
-  case DType::kBFloat16: {                                  \
-    using type = ck_tile::bf16_t;                           \
-    __VA_ARGS__;                                            \
-    break;                                                  \
-  }                                                         \
-  default:                                                  \
-    throw std::runtime_error("Invalid type for 16 bit..");  \
-}
+#define CK_FUSED_ATTN_TYPE_SWITCH_16BIT(dtype, type, ...) \
+  CK_FUSED_ATTN_DTYPE_SWITCH_16BIT(dtype, type, ck_tile::half_t, ck_tile::bf16_t, __VA_ARGS__)
 
 // Device-side dtype conversion helpers for the reduction kernels.
 // ck_tile::bf16_t lacks implicit float conversions and needs explicit

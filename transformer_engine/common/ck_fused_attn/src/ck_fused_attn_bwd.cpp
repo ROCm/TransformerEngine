@@ -18,24 +18,6 @@
 
 namespace ck_fused_attn{
 
-// TODO: unify with binary search in TE/common/fused_attn(rocm)/util
-// no device std::upper_bound
-// in an increasing array with given size len, search for the index that:
-// array[index] <= target < array[index+1]
-// guaranteed that target >=0 and target <= cu_seqlen[end-1]
-__forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, uint64_t len) {
-  int left = 1, right = len - 1;
-  while (left < right) {
-    int mid = (left + right) / 2;
-    if (array[mid] <= target) {
-      left = mid + 1;
-    } else {
-      right = mid;
-    }
-  }
-  return left - 1;
-}
-
 // Reduce expanded (per-Q-head) dk/dv buffers back to hg KV-heads, accumulating in fp32.
 // Defined only for fp16/bf16 (see launch helper's dtype switch).
 //   GroupMode  : true  -> THD/varlen addressing via cu_seqlen with padding early-exit;

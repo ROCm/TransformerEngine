@@ -10,6 +10,7 @@
 #include <string>
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
+#include <ck_fused_attn/ck_fused_attn_device.hpp>
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -298,23 +299,6 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
   }
 }
 
-// no device std::upper_bound
-// in an increasing array with given size len, search for the index that:
-// array[index] <= target < array[index+1]
-// guaranteed that target >=0 and target <= cu_seqlen[end-1]
-__forceinline__ __device__ int binary_search(int32_t target, const int32_t *array, int len) {
-  int left = 1, right = len - 1;
-  while (left < right) {
-    int mid = (left + right) / 2;
-    if (array[mid] <= target) {
-      left = mid + 1;
-    } else {
-      right = mid;
-    }
-  }
-  return left - 1;
-}
-
 #if !defined(__HIP_DEVICE_COMPILE__) || defined(__GFX12__)
 constexpr int THREADS_PER_WAVEFRONT = 32;
 #else
@@ -344,7 +328,7 @@ __global__ void pad_remap_kernel(
   //BSHD SBHD --> THD (BSHD)
   uint64_t stride_total_seqlen = std::min(stride_b, stride_s);
   for(int token_id = wavefront_idx; token_id<num_total_tokens; token_id += num_wavefronts){
-    int b_idx = binary_search(token_id, cu_seqlen_ptr, b+1);
+    int b_idx = ck_fused_attn::binary_search(token_id, cu_seqlen_ptr, b+1);
     int s_idx = token_id - cu_seqlen_ptr[b_idx];
     DataType* unpadded_cur = nullptr;
     DataType* padded_cur = nullptr;
@@ -437,7 +421,7 @@ __global__ void pad_remap_lse_kernel(
       b_idx = token_id / s_q;
       s_idx = token_id % s_q;
     }else{
-      b_idx = binary_search(token_id, cu_seqlen_q_ptr, b+1);
+      b_idx = ck_fused_attn::binary_search(token_id, cu_seqlen_q_ptr, b+1);
       s_idx = token_id - cu_seqlen_q_ptr[b_idx];
     }
 
