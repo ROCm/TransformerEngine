@@ -176,6 +176,53 @@ __device__ inline void apply_epilogue(
     }
 }
 
+// Copy of kittens::load_global_to_register_buffer<2, false, NUM_THREADS> (hipkittens
+// cdna3/ops/warp/memory/tile/global_to_shared.cuh), optionally without the cache-swizzle bit (word1 bit 30) that
+// kittens::make_srsrc sets in the buffer descriptor. On gfx942, cache-swizzled loads of tiles whose rows straddle
+// 128-byte cache lines return wrong data: intermittently for K % BLOCK_K != 0 in kernels built with ROCm 10.1, and for
+// a base that is not 128-byte aligned also with ROCm 10.0 (seen on the B prefetch; A is cleared as a precaution).
+template <bool CACHE_SWIZZLE, int NUM_THREADS, typename ST, typename GL, typename COORD = kittens::coord<ST>>
+__device__ inline void load_tile_to_register_buffer(float4 *reg_buffer, const int buffer_size, const GL &src,
+                                                    const COORD &idx, const ST &dst_template) {
+    if constexpr (CACHE_SWIZZLE) {
+        kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(reg_buffer, buffer_size, src, idx,
+                                                                       dst_template);
+    } else {
+        using T = typename ST::dtype;
+        constexpr int elem_per_memcpy = sizeof(float4) / sizeof(T);
+        constexpr int memcpy_per_row = ST::cols / elem_per_memcpy;
+        constexpr int total_chunks = (ST::rows * ST::cols) / elem_per_memcpy;
+        constexpr int total_calls = (total_chunks + NUM_THREADS - 1) / NUM_THREADS;
+        constexpr int small_calls = 16;
+        const int big_calls = (total_calls + small_calls - 1) / small_calls;
+
+        const int row_stride = src.template stride<2>();
+        kittens::coord<> unit_coord = idx.template unit_coord<2, 3>();
+        T *base_ptr = (T *)&src[unit_coord];
+        const int laneid = threadIdx.x % NUM_THREADS;
+
+        kittens::i32x4 srsrc = kittens::make_srsrc(base_ptr, row_stride * ST::rows * sizeof(T), row_stride * sizeof(T));
+        srsrc[1] &= ~0x40000000;  // Clear cache swizzle
+
+        int buf_idx = 0;
+        for (int i = 0; i < big_calls && buf_idx < buffer_size; ++i) {
+            const int offset = i * small_calls;
+            #pragma unroll
+            for (int j = 0; j < small_calls; ++j) {
+                const int chunk_idx = (offset + j) * NUM_THREADS + laneid;
+                if (chunk_idx < total_chunks && buf_idx < buffer_size) {
+                    const int row = chunk_idx / memcpy_per_row;
+                    const int col = (chunk_idx % memcpy_per_row) * elem_per_memcpy;
+                    const int byte_offset = (row * row_stride + col) * sizeof(T);
+                    __uint128_t raw = kittens::llvm_amdgcn_raw_buffer_load_b128(srsrc, byte_offset, 0, 0);
+                    reg_buffer[buf_idx] = *reinterpret_cast<float4 *>(&raw);
+                    buf_idx++;
+                }
+            }
+        }
+    }
+}
+
 template <int NUM_THREADS, typename ST, typename GL>
 __device__ inline void load_tile_masked(ST &dst, const GL &src, int row_blk,
                                         int k_blk, int row_dim, int K) {
