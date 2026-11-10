@@ -15,8 +15,8 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
                                         DType b_dtype,
                                         DType d_dtype,
                                         const GroupedGemmRunContext& ctx) {
-  // Check M and K alignment across all groups.
-  // All tile configs share the same M_Tile (256) and K_Tile (64).
+  // Check M and K alignment across all groups against the largest M_Tile (256) and
+  // K_Tile (64) of all tile configs.
   constexpr ck_tile::index_t M_Tile = TileCfg_256x256x64::M_Tile;
   constexpr ck_tile::index_t K_Tile = TileCfg_256x256x64::K_Tile;
 
