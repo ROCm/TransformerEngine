@@ -122,9 +122,10 @@ def _precision_specs():
 
     A ``None`` factory is the bf16 baseline (no autocast). The fp8 entry uses
     HYBRID delayed scaling and is shared by the dense and grouped GEMM
-    benchmarks so their fp8 numbers stay comparable. fp8_block is the
-    DeepSeek-style Float8BlockScaling recipe (1x128 activation/gradient blocks,
-    128x128 weight blocks).
+    benchmarks so their fp8 numbers stay comparable. fp8_block_e8m0 and
+    fp8_block_fp32 are the DeepSeek-style Float8BlockScaling recipe (1x128
+    activation/gradient blocks, 128x128 weight blocks) with power-of-2 (TE's
+    default) or plain FP32 block scales; gfx950 has a separate GEMM kernel for each.
     """
     from transformer_engine.common.recipe import (
         DelayedScaling,
@@ -142,6 +143,21 @@ def _precision_specs():
         check_nvfp4_support,
     )
 
+    def block_scaling(fp32_scales):
+        def make():
+            return Float8BlockScaling(use_f32_scales=fp32_scales)
+
+        def check():
+            supported, reason = check_fp8_block_scaling_support()
+            if not supported:
+                return supported, reason
+            # Older TE builds fix the scale format at import (NVTE_FP8_BLOCK_SCALING_FP32_SCALES).
+            if make().fp8_quant_fwd_inp.power_2_scale != (not fp32_scales):
+                return False, "this TE build can't choose the block scale format per recipe"
+            return supported, reason
+
+        return make, check
+
     return (
         ("bf16", None, None),
         (
@@ -153,7 +169,8 @@ def _precision_specs():
             ),
             check_fp8_support,
         ),
-        ("fp8_block", Float8BlockScaling, check_fp8_block_scaling_support),
+        ("fp8_block_e8m0", *block_scaling(fp32_scales=False)),
+        ("fp8_block_fp32", *block_scaling(fp32_scales=True)),
         ("mxfp8", MXFP8BlockScaling, check_mxfp8_support),
         ("mxfp4", MXFP4BlockScaling, check_mxfp4_support),
         ("nvfp4", NVFP4BlockScaling, check_nvfp4_support),
@@ -182,6 +199,13 @@ def build_recipes(names=None):
                 continue
         recipes[name] = factory() if factory is not None else None
     return recipes
+
+
+# gfx950's blockwise FP8 GEMM reads the scale format from this var on every call.
+PRECISION_ENV = {
+    "fp8_block_e8m0": {"NVTE_FP8_BLOCK_SCALING_FP32_SCALES": None},
+    "fp8_block_fp32": {"NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1"},
+}
 
 
 # ---------------------------------------------------------------------------

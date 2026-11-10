@@ -40,6 +40,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from utils import (
+    PRECISION_ENV,
     build_recipes,
     generate_gemm_test_cases,
     apply_backend_env, compute_tflops, direction_records,
@@ -55,7 +56,7 @@ RECIPES = build_recipes()
 # unified selector) or the legacy NVTE_USE_GEMM_TRITON=1 toggle (PR #667), resolved
 # per build by _triton_gemm_env. mxfp8 defaults to HipKittens, forced to hipBLASLt via
 # NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. Blockwise FP8
-# (fp8_block) GEMMs only run on HipKittens (rocm_gemm.cu). FlyDSL
+# (fp8_block_*) GEMMs only run on HipKittens (rocm_gemm.cu). FlyDSL
 # (gfx950-only, BF16/FP8/MXFP8) is NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
 # mxfp4 runs AITER a4w4 unless NVTE_ROCM_USE_HIPBLASLT_MXFP4=1 (cpp_extensions/gemm.py);
 # that hipBLASLt path fails in the te.Linear backward, so it isn't benchmarked.
@@ -79,7 +80,8 @@ GEMM_BACKENDS = {
 _BACKENDS_BY_PRECISION = {
     "bf16": ["hipblaslt", "triton", "flydsl"],
     "fp8": ["hipblaslt", "flydsl"],
-    "fp8_block": ["hipkittens"],
+    "fp8_block_e8m0": ["hipkittens"],
+    "fp8_block_fp32": ["hipkittens"],
     "mxfp8": ["hipblaslt", "hipkittens", "flydsl"],
     "mxfp4": ["aiter"],
 }
@@ -268,7 +270,7 @@ def test_gemm(microbench, case, monkeypatch):
                        else (case["K"], case["N"], case["M"]))
         if any(dim % kmul for dim in contraction):
             pytest.skip(f"MXFP8 GEMM needs the contraction dim divisible by {kmul}")
-    if case["Precision"] == "fp8_block":
+    if case["Precision"].startswith("fp8_block"):
         # HipKittens' blockwise kernel needs GEMM dims divisible by 16; gfx942 needs K % 128
         # (TE pads only the grouped GEMM), so be conservative there.
         kmul = 128 if _device_cc() == (9, 4) else 16
@@ -290,6 +292,7 @@ def test_gemm(microbench, case, monkeypatch):
     # Triton's selector varies by TE version (NVTE_GEMM_BACKEND=TRITON or legacy toggle).
     backend_env = _triton_gemm_env() if case["Backend"] == "triton" else GEMM_BACKENDS[case["Backend"]]
     apply_backend_env(monkeypatch, backend_env)
+    apply_backend_env(monkeypatch, PRECISION_ENV.get(case["Precision"], {}))
     microbench.run(
         case,
         lambda: bench_gemm(

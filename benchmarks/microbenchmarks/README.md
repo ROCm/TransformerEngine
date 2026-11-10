@@ -8,7 +8,8 @@ For how to read the results and why the harness measures the way it does, see
 ## Benchmarks
 
 - `benchmark_gemm.py`: dense GEMM benchmark sweeping BF16 plus the supported
-  low-precision recipes (FP8, blockwise FP8, MXFP8, MXFP4, NVFP4) via `autocast`
+  low-precision recipes (FP8, blockwise FP8 with E8M0 and with FP32 scales, MXFP8, MXFP4,
+  NVFP4) via `autocast`
 - `benchmark_grouped_gemm.py`: grouped GEMM benchmark for MoE-style shapes
 - `benchmark_casting.py`: quantize / dequantize benchmark across FP8, blockwise FP8, MXFP8,
   NVFP4, and MXFP4 (blockwise FP8 and MXFP4 quantize only)

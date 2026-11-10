@@ -62,7 +62,8 @@ NORM_TYPES = [
 BENCHMARK_LABEL = "Normalization"
 
 # bf16 is the plain baseline (Quantize is an identity outside autocast).
-RECIPES = build_recipes()
+# The blockwise FP8 scale format (E8M0 vs FP32) only matters to the GEMMs, which run both.
+RECIPES = build_recipes(names=("bf16", "fp8", "fp8_block_e8m0", "mxfp8", "mxfp4", "nvfp4"))
 
 # Forward output bytes/elem by precision. Under autocast the norm quantizes
 # through the recipe-created quantizers, which default to columnwise usage on, so
@@ -71,14 +72,15 @@ RECIPES = build_recipes()
 # Input is always bf16 (2 bytes/elem).
 #   bf16  : 2.0                    (single bf16 output; Quantize is identity)
 #   fp8   : 2.0                    (rowwise + columnwise E4M3/E5M2 data; scale ~ 0)
-#   fp8_block: 2.0 + 2*4/128 = 2 + 1/16  (rowwise + columnwise data, FP32 scale per 1x128)
+#   fp8_block_e8m0: 2.0 + 2*4/128 = 2 + 1/16  (rowwise + columnwise data, power-of-2 scale
+#                   per 1x128, stored as FP32)
 #   mxfp8 : 2.0 + 2/32 = 2 + 1/16  (rowwise + columnwise data + both E8M0 scales)
 #   mxfp4 : 1.0 + 2/32 = 1 + 1/16  (packed E2M1 data x2 + E8M0 scale per 32)
 #   nvfp4 : 1.0 + 2/16 = 1 + 1/8   (packed E2M1 data x2 + E4M3 scale per 16)
 _FWD_WRITE_BYTES = {
     "bf16": 2.0,
     "fp8": 2.0,
-    "fp8_block": 2.0 + 1.0 / 16,
+    "fp8_block_e8m0": 2.0 + 1.0 / 16,
     "mxfp8": 2.0 + 1.0 / 16,
     "mxfp4": 1.0 + 1.0 / 16,
     "nvfp4": 1.0 + 1.0 / 8,
