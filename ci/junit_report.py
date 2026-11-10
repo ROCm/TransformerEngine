@@ -6,10 +6,11 @@
 """Summarize pytest/ctest JUnit XML results into a GitHub Actions report.
 
 Reads every ``*.xml`` file in the given directory -- each produced by a single
-pytest file invocation (see ``get_pytest_junitxml`` in ``_utils.sh``) or a
-ctest run -- aggregates pass/fail/error/skip/timeout counts, writes a Markdown
-digest to ``$GITHUB_STEP_SUMMARY`` (or stdout when run locally), and emits
-``::error::`` workflow annotations for the failing tests.
+pytest file invocation (see ``get_pytest_junitxml`` in ``_utils.sh``), a ctest
+run, or one example (``.github/scripts/run_example.py``) -- aggregates
+pass/fail/error/skip/timeout counts, writes a Markdown digest to
+``$GITHUB_STEP_SUMMARY`` (or stdout when run locally), and emits ``::error::``
+workflow annotations for the failing tests.
 
 Design notes:
   * Standard library only, so it runs on any runner without provisioning.
@@ -170,7 +171,10 @@ def emit(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: junit_report.py <results-dir> [--title TITLE]", file=sys.stderr)
+        print(
+            "usage: junit_report.py <results-dir> [--title TITLE]",
+            file=sys.stderr,
+        )
         return 0
     results_dir = sys.argv[1]
     title = "Test Results"
@@ -182,18 +186,27 @@ def main():
     # writing its JUnit XML (glob.glob("*.xml") does not match "*.xml.partial").
     partial_files = sorted(glob.glob(os.path.join(results_dir, "*.xml.partial")))
 
-    lines = []
-    lines.append(f"## {title}\n")
-
     if not xml_files and not partial_files:
-        lines.append(
-            "> :warning: **No JUnit XML files were produced.** No test file "
-            "completed far enough to write results -- the run likely crashed or "
-            "hung before any suite finished. Inspect the uploaded `*.log` "
-            "artifacts to see where it stopped.\n"
-        )
+        lines = [f"## {title}\n"]
+        if os.path.exists(os.path.join(results_dir, "not_rerun")):
+            # ci/run_queue.sh skipped this suite on a re-run: all of it passed on an
+            # earlier attempt. Keep the heading so it does not look lost.
+            lines.append(
+                "> :white_check_mark: **Nothing to re-run.** Every test in this "
+                "suite passed on an earlier attempt of this run.\n"
+            )
+        else:
+            lines.append(
+                "> :warning: **No JUnit XML files were produced.** No test file "
+                "completed far enough to write results -- the run likely crashed or "
+                "hung before any suite finished. Inspect the uploaded `*.log` "
+                "artifacts to see where it stopped.\n"
+            )
         emit(lines)
         return 0
+
+    lines = []
+    lines.append(f"## {title}\n")
 
     totals = defaultdict(float)  # passed/failed/error/skipped/timeout/incomplete/time
     per_file = []                # (name, counts, time)

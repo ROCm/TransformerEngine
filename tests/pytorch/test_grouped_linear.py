@@ -2067,12 +2067,53 @@ def _reset_fp8_state(monkeypatch):
     monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
 
 
+@pytest.mark.parametrize("use_op_fuser", (False, True), ids=("module", "op"))
+@pytest.mark.parametrize(
+    "single_grouped_weight,single_grouped_bias",
+    [(None, None), (False, False), (True, False), (False, True), (True, True)],
+    ids=("default", "discrete", "single-weight", "single-bias", "single-weight-and-bias"),
+)
+def test_grouped_parameter_layout_selected_by_constructor(
+    use_op_fuser, single_grouped_weight, single_grouped_bias
+):
+    """Constructor options alone select registered parameters; defaults stay per-expert."""
+    kwargs = {}
+    if single_grouped_weight is not None:
+        kwargs.update(
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+        )
+    if use_op_fuser:
+        linear = te.ops.GroupedLinear(2, 64, 64, device="cuda", dtype=torch.bfloat16, **kwargs)
+    else:
+        linear = GroupedLinear(
+            2,
+            64,
+            64,
+            device="cuda",
+            params_dtype=torch.bfloat16,
+            use_grouped_tensor=True,
+            **kwargs,
+        )
+
+    assert linear.single_grouped_weight is bool(single_grouped_weight)
+    assert linear.single_grouped_bias is bool(single_grouped_bias)
+    parameters = dict(linear.named_parameters())
+    expected_weights = {"weight"} if single_grouped_weight else {"weight0", "weight1"}
+    expected_biases = {"bias"} if single_grouped_bias else {"bias0", "bias1"}
+    assert parameters.keys() == expected_weights | expected_biases
+    if single_grouped_weight:
+        assert isinstance(parameters["weight"], GroupedTensor)
+    if single_grouped_bias:
+        assert isinstance(parameters["bias"], GroupedTensor)
+
+
 @pytest.mark.parametrize(
     "m_splits,exception",
     [([256, 256], ValueError), (torch.tensor([256, 256]), ValueError)],
     ids=["python-list", "cpu-tensor"],
 )
-def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exception):
+def test_single_grouped_weight_rejects_host_m_splits(m_splits, exception):
     """A single parent parameter must never fall back to host-split per-expert GEMMs."""
     if not is_module_grouped_tensor_path_supported(
         None,
@@ -2080,7 +2121,6 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
     ):
         pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
 
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     grouped_linear = GroupedLinear(
         2,
         64,
@@ -2120,7 +2160,7 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
         ),
     ],
 )
-def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch, fp8_recipe):
+def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     """Match single and discrete weights while both use CUDA m_splits and grouped GEMM."""
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
@@ -2128,7 +2168,6 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
     ):
         pytest.skip("Recipe is not supported with a single grouped weight on this system.")
 
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
 
     num_gemms = 3
@@ -2189,7 +2228,7 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
+def test_single_grouped_weight_mxfp8_workspace_cache():
     """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
     mxfp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(
@@ -2197,7 +2236,6 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     grouped_linear = GroupedLinear(
         2,
@@ -2242,9 +2280,8 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 @pytest.mark.parametrize("fp8_recipe", [recipe.MXFP8BlockScaling()], ids=recipe_id)
-def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_recipe):
+def test_single_grouped_weight_with_disabled_weight_preswizzle(fp8_recipe):
     """Grouped weight preparation preserves a disabled preswizzle decision."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=True, recipe=fp8_recipe):
         grouped_linear = GroupedLinear(
@@ -2289,7 +2326,7 @@ def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
+def test_single_grouped_primary_mxfp8_bypasses_weight_workspace():
     """An MXFP8 primary grouped parameter is already GEMM-ready and is not requantized."""
     mxfp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(
@@ -2297,7 +2334,6 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=True, recipe=mxfp8_recipe):
         grouped_linear = GroupedLinear(
@@ -2505,7 +2541,6 @@ _GROUPED_PARAMETER_LAYOUTS = [
 @pytest.mark.parametrize("delay_wgrad_compute", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", _ALL_BOOLEAN)
 def test_grouped_parameter_layout_matches_cpu_m_splits(
-    monkeypatch,
     use_bias,
     single_grouped_weight,
     single_grouped_bias,
@@ -2539,7 +2574,6 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         biases = (0.1 * torch.randn(num_gemms, out_features, device="cuda")).to(torch.bfloat16)
 
     # The CPU m_splits baseline is explicitly the legacy, discrete-parameter contract.
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
     reference = _run_grouped_parameter_layout(
         use_grouped_tensor=False,
         fp8_recipe=fp8_recipe,
@@ -2555,9 +2589,7 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         m_splits=m_splits,
     )
 
-    # Enable single parameters only for the CUDA m_splits target. The explicit layout flags
-    # below still decide whether this particular case uses discrete or grouped parameters.
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    # The explicit layout flags select discrete or grouped parameters for the CUDA target.
     result = _run_grouped_parameter_layout(
         use_grouped_tensor=True,
         fp8_recipe=fp8_recipe,
@@ -2638,7 +2670,6 @@ def test_grouped_tensor_save_original_input_matches_saved_grouped_input(
         "transformer_engine.pytorch.module._split_quantization._split_quantize",
         reject_split_fallback,
     )
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
     torch.manual_seed(1234)
     num_gemms = 2
@@ -2898,7 +2929,7 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
-def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
+def test_grouped_linear_returns_single_grouped_bias_parameter():
     """return_bias preserves the grouped parent and accumulates dbias into it.
 
     This mirrors how MCore applies a returned MoE bias::
@@ -2923,7 +2954,6 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
     dtype = torch.bfloat16
     num_gemms = 2
