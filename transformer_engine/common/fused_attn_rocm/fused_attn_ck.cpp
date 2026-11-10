@@ -173,44 +173,6 @@ bool is_ck_backend_supported(
 #endif // USE_FUSED_ATTN_CK
 }
 
-bool is_small_seq_supported_static(DType dtype,
-                                   NVTE_QKV_Layout qkv_layout,
-                                   NVTE_Bias_Type bias_type,
-                                   NVTE_Mask_Type mask_type,
-                                   float dropout,
-                                   size_t head_dim_qk,
-                                   size_t head_dim_v,
-                                   size_t num_attn_heads,
-                                   size_t num_gqa_groups,
-                                   NVTE_Softmax_Type softmax_type,
-                                   int64_t window_size_left,
-                                   int64_t window_size_right) {
-  if(dropout != 0.0f) return false;
-  if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
-  if(softmax_type != NVTE_VANILLA_SOFTMAX) return false;
-  if(dtype != DType::kBFloat16) return false;
-  if(head_dim_qk != head_dim_v) return false;
-  if(head_dim_qk != 128 && head_dim_qk != 256) return false;
-  if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) return false;
-  if(num_attn_heads != num_gqa_groups) return false;
-  if(num_attn_heads != 16 && num_attn_heads != 32) return false;
-  // the small-seq kernels take Q, K and V as separate tensors without strides
-  if(nvte_get_qkv_layout_group(qkv_layout) != NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) return false;
-  // they apply no causal mask or sliding window
-  if(mask_type != NVTE_Mask_Type::NVTE_NO_MASK && mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) return false;
-  if(window_size_left != -1 || window_size_right != -1) return false;
-  // the BSHD ones take no sequence lengths
-  if(nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD && is_padding_mask(mask_type)) return false;
-  return true;
-}
-
-bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
-                                    size_t runtime_max_seqlen_kv) {
-  return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
-         runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
-}
-
-
 #ifdef USE_FUSED_ATTN_CK
 ck_fused_attn::DType nvte_to_ck_dtype(DType t_dtype){
 #define CAST_TYPE(aname, dtname) if (t_dtype == DType::aname) return ck_fused_attn::DType::dtname
@@ -717,6 +679,41 @@ std::array<void*, 3> carve_like(WorkspacePlanner& planner, NVTE_QKV_Layout_Group
   return out;
 }
 
+// Small-seq eligibility is split into static and runtime checks:
+// - Static: config known at call time (dtype, layout, head dims, heads, bias, dropout, mask, window).
+//   Used during workspace sizing to reserve THD probe buffers and to gate the small-seq path
+//   before any device data is read.
+// - Runtime: actual per-batch max seqlen for THD/ragged inputs (from cu_seqlens on device).
+//   Even when static config matches, individual batches may exceed kSmallSeqMaxSeqlen; probe
+//   at execute time and fall back to regular CK when out of range.
+constexpr size_t kSmallSeqMaxSeqlen = 17;
+
+static bool is_small_seq_supported_static(const CkAttnProblem& p){
+  if(p.dropout_probability != 0.0f) return false;
+  if(p.bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
+  if(p.softmax_type != NVTE_VANILLA_SOFTMAX) return false;
+  if(p.dtype != DType::kBFloat16) return false;
+  if(p.d_qk != p.d_v) return false;
+  if(p.d_qk != 128 && p.d_qk != 256) return false;
+  if(p.hg == 0 || p.h % p.hg != 0) return false;
+  if(p.h != p.hg) return false;
+  if(p.h != 16 && p.h != 32) return false;
+  // the small-seq kernels take Q, K and V as separate tensors without strides
+  if(p.layout_group != NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) return false;
+  // they apply no causal mask or sliding window
+  if(p.mask_type != NVTE_Mask_Type::NVTE_NO_MASK && p.mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) return false;
+  if(p.window_size_left != -1 || p.window_size_right != -1) return false;
+  // the BSHD ones take no sequence lengths
+  if(p.is_BSHD && p.is_padding) return false;
+  return true;
+}
+
+static bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
+                                           size_t runtime_max_seqlen_kv){
+  return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
+         runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
+}
+
 // Static small-seq gate shared by fwd and bwd (NVTE_FUSED_ATTN_CK_SMALLSEQ=1, gfx942/gfx950).
 // THD additionally reserves the workspace for the runtime max-seqlen probe.
 bool plan_small_seq(const CkAttnProblem& p, WorkspacePlanner& planner, void** probe_workspace){
@@ -727,9 +724,7 @@ bool plan_small_seq(const CkAttnProblem& p, WorkspacePlanner& planner, void** pr
   if(cuda::sm_arch() != 94 && cuda::sm_arch() != 95){
     return false;
   }
-  if(!is_small_seq_supported_static(p.dtype, p.layout, p.bias_type, p.mask_type, p.dropout_probability,
-                                    p.d_qk, p.d_v, p.h, p.hg, p.softmax_type,
-                                    p.window_size_left, p.window_size_right)){
+  if(!is_small_seq_supported_static(p)){
     return false;
   }
   if(p.is_ragged){
