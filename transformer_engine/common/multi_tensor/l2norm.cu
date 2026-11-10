@@ -279,8 +279,6 @@ __global__ void custom_multi_tensor_l2norm_kernel(
 
   const float inv_scale_val = UNSCALE ? *inv_scale : 0.f;
 
-  // Elements left in the tensor from this chunk's start; int64 because a tensor
-  // may hold 2^31 or more elements.
   int64_t n = 0;
   x_t *x = nullptr;
   if (global_chunk < total_chunks) {

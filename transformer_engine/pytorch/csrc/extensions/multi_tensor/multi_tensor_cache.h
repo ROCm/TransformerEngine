@@ -146,7 +146,6 @@ struct CustomMultiTensorCache {
 };
 
 // Cache for L2 norm computation (single tensor list, includes output/ret buffers).
-// Sizes are int64: a single tensor may hold 2^31 or more elements.
 struct CustomL2NormCache {
   std::vector<int64_t> addresses_host;
   std::vector<int64_t> sizes_host;
