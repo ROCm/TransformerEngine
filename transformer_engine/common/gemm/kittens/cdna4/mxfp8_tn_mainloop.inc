@@ -191,7 +191,16 @@
             k++;
         }
 
-        { // Epilogue k = k_iters - 2
+        // Opaque single-trip loops make the peeled stages' MFMAs accumulate in place; without them the
+        // persistent grouped kernel copies the accumulators and spills. Plain blocks for the standalone GEMM.
+#ifdef MXFP8_TN_OPAQUE_PEEL
+        int once = 1;
+        asm volatile("" : "+s"(once));
+#define MXFP8_TN_PEEL for (int o = once; o > 0; o--)
+#else
+#define MXFP8_TN_PEEL
+#endif
+        MXFP8_TN_PEEL { // Epilogue k = k_iters - 2
             constexpr int TIC = 0;
             constexpr int TOC = TIC ^ 1;
             int k = k_iters - 2;
@@ -250,7 +259,7 @@
             __builtin_amdgcn_sched_barrier(0);
         }
 
-        { // Final epilogue k = k_iters - 1
+        MXFP8_TN_PEEL { // Final epilogue k = k_iters - 1
             constexpr int TIC = 1;
             asm volatile("s_waitcnt vmcnt(0)");
             asm volatile("s_waitcnt lgkmcnt(0)");
@@ -294,6 +303,8 @@
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
+
+#undef MXFP8_TN_PEEL
 
 #ifdef MXFP8_AG_SKEW_CLOSE
         // Closes the warp_m skew the AG prologue opens; the standalone GEMM never opens one.

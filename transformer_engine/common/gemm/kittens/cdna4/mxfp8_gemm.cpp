@@ -1276,7 +1276,9 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
 #include "mxfp8_tn_preload.inc"
 
+#define MXFP8_TN_OPAQUE_PEEL 1
 #include "mxfp8_tn_mainloop.inc"
+#undef MXFP8_TN_OPAQUE_PEEL
 
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
@@ -1395,7 +1397,9 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
 #include "mxfp8_nn_preload.inc"
 
+#define MXFP8_NN_OPAQUE_PEEL 1
 #include "mxfp8_nn_mainloop.inc"
+#undef MXFP8_NN_OPAQUE_PEEL
 
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
@@ -2021,7 +2025,11 @@ void mxfp8_wgrad_nt_kernel(
             k++;
         }
 
-        { // Epilogue k = k_iters - 2
+        // Opaque single-trip loops make the peeled stages' MFMAs accumulate in place; without them the
+        // persistent kernel copies the accumulators and spills.
+        int once = 1;
+        asm volatile("" : "+s"(once));
+        for (int o = once; o > 0; o--) { // Epilogue k = k_iters - 2
             constexpr int TIC = 0;
             constexpr int TOC = TIC ^ 1;
             int k = k_iters - 2;
@@ -2090,7 +2098,7 @@ void mxfp8_wgrad_nt_kernel(
             __builtin_amdgcn_sched_barrier(0);
         }
 
-        { // Final epilogue k = k_iters - 1
+        for (int o = once; o > 0; o--) { // Final epilogue k = k_iters - 1
             constexpr int TIC = 1;
             asm volatile("s_waitcnt vmcnt(0)");
             asm volatile("s_waitcnt lgkmcnt(0)");
