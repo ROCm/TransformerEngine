@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include <utility>
-#include <filesystem>
 
 #include <hip/hip_runtime_api.h>
 
@@ -160,39 +159,80 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const CKAttnCommonArgs* a
   return std::make_pair(bias_type, bias_shape);
 }
 
-__global__ void get_runtime_max_seqlen_kernel(
-  uint64_t b,
-  const int32_t* cu_seqlen_ptr, 
-  const int32_t* cu_seqlen_padded_ptr, 
-  uint64_t *out) {
+namespace {
 
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  if(tid >= b){
-    return;
+constexpr int kMaxSeqlenThreads = 256;
+
+// One block per cu_seqlens array: block x reduces max(cu[i+1] - cu[i]) over i in [0, b) and writes out[x].
+// No atomics, so the output needs no pre-zeroing. Negative lengths (malformed input) clamp to 0.
+__global__ void __launch_bounds__(kMaxSeqlenThreads) runtime_max_seqlen_kernel(
+  uint64_t b,
+  const int32_t* cu_seqlen_0,
+  const int32_t* cu_seqlen_1,
+  uint64_t* out) {
+  __shared__ int32_t smem[kMaxSeqlenThreads];
+  const int32_t* cu_seqlen = blockIdx.x == 0 ? cu_seqlen_0 : cu_seqlen_1;
+  const int tid = threadIdx.x;
+
+  int32_t local_max = 0;
+  for(uint64_t i = tid; i < b; i += kMaxSeqlenThreads){
+    local_max = max(local_max, cu_seqlen[i + 1] - cu_seqlen[i]);
   }
-  if(cu_seqlen_padded_ptr){
-    atomicMax(out, cu_seqlen_padded_ptr[tid+1] - cu_seqlen_padded_ptr[tid]);
-  }else{
-    atomicMax(out, cu_seqlen_ptr[tid+1] - cu_seqlen_ptr[tid]);
+  smem[tid] = local_max;
+  __syncthreads();
+  for(int stride = kMaxSeqlenThreads / 2; stride > 0; stride >>= 1){
+    if(tid < stride){
+      smem[tid] = max(smem[tid], smem[tid + stride]);
+    }
+    __syncthreads();
+  }
+  if(tid == 0){
+    out[blockIdx.x] = static_cast<uint64_t>(smem[0]);
   }
 }
 
+void check_hip(hipError_t err, const char* what){
+  if(err != hipSuccess){
+    throw std::runtime_error(std::string("ck_fused_attn: ") + what + " failed: " + hipGetErrorString(err));
+  }
+}
+
+// Reduce num_arrays (1 or 2) cu_seqlens arrays in a single launch with a single blocking readback.
+// workspace must hold num_arrays uint64_t values.
+void runtime_max_seqlens(uint64_t b, int num_arrays, const void* cu_seqlen_0, const void* cu_seqlen_1,
+                         void* workspace, uint64_t* host_out, hipStream_t stream){
+  uint64_t* dev_out = static_cast<uint64_t*>(workspace);
+  runtime_max_seqlen_kernel<<<num_arrays, kMaxSeqlenThreads, 0, stream>>>(
+    b,
+    static_cast<const int32_t*>(cu_seqlen_0),
+    static_cast<const int32_t*>(cu_seqlen_1),
+    dev_out);
+  check_hip(hipGetLastError(), "runtime_max_seqlen_kernel launch");
+  check_hip(hipMemcpyAsync(host_out, dev_out, num_arrays * sizeof(uint64_t), hipMemcpyDeviceToHost, stream),
+            "runtime max_seqlen readback");
+  check_hip(hipStreamSynchronize(stream), "runtime max_seqlen sync");
+}
+
+}  // namespace
+
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream){
-  uint64_t* runtime_max_seqlen_ptr = static_cast<uint64_t*>(workspace);
-  uint64_t runtime_max_seqlen;
-  //reset the result buffer to 0
-  hipMemsetAsync(runtime_max_seqlen_ptr, 0, sizeof(uint64_t), stream);
-  constexpr int threads = 128;
-  // in case b ==0
-  const int blocks = (static_cast<int64_t>(b) - 1) / threads + 1; // ceil
-  get_runtime_max_seqlen_kernel<<<blocks, threads, 0, stream>>>(
-    b, 
-    static_cast<const int32_t*>(cu_seqlen_ptr),
-    static_cast<const int32_t*>(cu_seqlen_padded_ptr),
-    runtime_max_seqlen_ptr);
-  hipMemcpyAsync(&runtime_max_seqlen, runtime_max_seqlen_ptr, sizeof(uint64_t), hipMemcpyDeviceToHost, stream);
-  hipStreamSynchronize(stream);
-  return runtime_max_seqlen;
+  uint64_t result = 0;
+  runtime_max_seqlens(b, 1, cu_seqlen_padded_ptr ? cu_seqlen_padded_ptr : cu_seqlen_ptr, nullptr,
+                      workspace, &result, stream);
+  return result;
+}
+
+std::pair<uint64_t, uint64_t> get_runtime_max_seqlens(
+  uint64_t b,
+  const void* cu_seqlen_q_ptr, const void* cu_seqlen_q_padded_ptr,
+  const void* cu_seqlen_kv_ptr, const void* cu_seqlen_kv_padded_ptr,
+  void* workspace, hipStream_t stream){
+  uint64_t result[2] = {0, 0};
+  runtime_max_seqlens(b, 2,
+                      cu_seqlen_q_padded_ptr ? cu_seqlen_q_padded_ptr : cu_seqlen_q_ptr,
+                      cu_seqlen_kv_padded_ptr ? cu_seqlen_kv_padded_ptr : cu_seqlen_kv_ptr,
+                      workspace, result, stream);
+  return {result[0], result[1]};
 }
 
 }//namespace ck_fused_attn

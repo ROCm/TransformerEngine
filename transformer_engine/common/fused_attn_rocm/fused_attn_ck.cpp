@@ -738,10 +738,8 @@ bool plan_small_seq(const CkAttnProblem& p, WorkspacePlanner& planner, void** pr
 bool small_seq_thd_fits(const CkAttnProblem& p, void* probe_workspace,
                         void* cu_seqlen_padded_q, void* cu_seqlen_padded_kv,
                         const char* tag, bool log, cudaStream_t stream){
-  const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      p.b, p.cu_seqlens_q, cu_seqlen_padded_q, probe_workspace, stream));
-  const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      p.b, p.cu_seqlens_kv, cu_seqlen_padded_kv, byte_offset(probe_workspace, sizeof(uint64_t)), stream));
+  const auto [runtime_max_seqlen_q, runtime_max_seqlen_kv] = ck_fused_attn::get_runtime_max_seqlens(
+      p.b, p.cu_seqlens_q, cu_seqlen_padded_q, p.cu_seqlens_kv, cu_seqlen_padded_kv, probe_workspace, stream);
   const bool fits = is_small_seq_supported_runtime(runtime_max_seqlen_q, runtime_max_seqlen_kv);
   if(log){
     std::cout << std::endl << tag << "(ck small-seq, THD): runtime_max_seqlen_q: "
@@ -1023,8 +1021,9 @@ void fused_attn_ck_bwd_impl(const CkBwdProblem& p, void* workspace, size_t* work
   void* small_seq_probe_workspace = nullptr;
   const bool small_seq = plan_small_seq(p, planner, &small_seq_probe_workspace);
 
-  // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
-  void* lse_workspace = planner.allocate(p.h*p.max_tokens_q*sizeof(float));
+  // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed). The CK wrapper also
+  // uses it as scratch for the NVTE_CK_RUNTIME_MAX_SEQLEN probe (two uint64_t), hence the floor.
+  void* lse_workspace = planner.allocate(std::max(p.h*p.max_tokens_q*sizeof(float), 2*sizeof(uint64_t)));
 
   // Everything except the workspace-dependent pointers is set here. The same object sizes
   // AITER's internal bwd workspace (launcher metadata + dq_acc accumulator) and drives the

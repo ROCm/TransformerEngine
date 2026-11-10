@@ -10,6 +10,7 @@
 #include<iostream>
 #include<string>
 #include<cstdint>
+#include<utility>
 #include<hip/hip_runtime.h>
 
 namespace ck_fused_attn{
@@ -194,11 +195,23 @@ int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
 // Extra workspace in particular is needed for split-KV support.
 size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
 
+// Max per-sequence length from a device cu_seqlens array (the padded array if non-null), read back to
+// the host. Blocks on the stream. workspace: >= sizeof(uint64_t) device bytes.
 uint64_t get_runtime_max_seqlen(uint64_t b,
                                 const void* cu_seqlen_ptr,
                                 const void* cu_seqlen_padded_ptr,
                                 void* workspace,
                                 hipStream_t stream);
+
+// q and kv variant of get_runtime_max_seqlen: one launch and one sync. Returns {max_seqlen_q, max_seqlen_kv}.
+// workspace: >= 2 * sizeof(uint64_t) device bytes.
+std::pair<uint64_t, uint64_t> get_runtime_max_seqlens(uint64_t b,
+                                                      const void* cu_seqlen_q_ptr,
+                                                      const void* cu_seqlen_q_padded_ptr,
+                                                      const void* cu_seqlen_kv_ptr,
+                                                      const void* cu_seqlen_kv_padded_ptr,
+                                                      void* workspace,
+                                                      hipStream_t stream);
 
 // ---------------------------------------------------------------------------
 // Small-sequence attention (gfx942/gfx950, NVTE_FUSED_ATTN_CK_SMALLSEQ=1)

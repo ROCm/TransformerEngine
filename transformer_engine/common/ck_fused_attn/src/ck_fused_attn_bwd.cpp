@@ -573,8 +573,10 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       if(log_file){
         *log_file << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
-      fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, nullptr, args.lse_workspace_ptr, stream);
-      fmha_args.max_seqlen_k = get_runtime_max_seqlen(args.b, args.cu_seqlen_kv_ptr, nullptr, args.lse_workspace_ptr, stream);
+      const auto [max_seqlen_q, max_seqlen_k] = get_runtime_max_seqlens(
+        args.b, args.cu_seqlen_q_ptr, nullptr, args.cu_seqlen_kv_ptr, nullptr, args.lse_workspace_ptr, stream);
+      fmha_args.max_seqlen_q = max_seqlen_q;
+      fmha_args.max_seqlen_k = max_seqlen_k;
     }
   }
 
