@@ -77,7 +77,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
  */
 void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
                                           const NVTEDType input_dtype, const int64_t *addresses,
-                                          const int *sizes, const int *block_to_tensor,
+                                          const int64_t *sizes, const int *block_to_tensor,
                                           const int *chunk_offsets, int total_chunks,
                                           NVTETensor output,
                                           NVTETensor ret, cudaStream_t stream);
@@ -89,7 +89,7 @@ void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
  */
 void nvte_multi_tensor_unscale_l2norm_cuda_custom(
     int chunk_size, NVTETensor noop_flag, const NVTEDType input_dtype,
-    const int64_t *addresses, const int *sizes, const int *block_to_tensor,
+    const int64_t *addresses, const int64_t *sizes, const int *block_to_tensor,
     const int *chunk_offsets, int total_chunks,
     NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream);
 #endif  // __HIP_PLATFORM_AMD__
