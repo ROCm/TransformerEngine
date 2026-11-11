@@ -7,7 +7,6 @@
 
 import atexit
 import ctypes
-import os
 from functools import partial
 
 import jax
@@ -157,12 +156,15 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+<<<<<<< HEAD
     if is_hip_extension():
         raise NotImplementedError("Expert parallelism is not supported on ROCm.")
     # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
     # at prepare time for the combine backward. Respect an explicit user override.
     os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
 
+=======
+>>>>>>> 1f251a125
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
@@ -348,9 +350,8 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)

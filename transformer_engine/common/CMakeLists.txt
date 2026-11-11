@@ -369,9 +369,16 @@ list(APPEND transformer_engine_cuda_sources
      dropout/dropout.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
+<<<<<<< HEAD
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu #CUDA-only
      fused_attn/fused_attn_fp8.cu #CUDA-only
      fused_attn/utils.cu #CUDA-only
+=======
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/utils.cu
+     gemm/cublaslt_batched_gemm.cu
+>>>>>>> 1f251a125
      gemm/cublaslt_gemm.cu
      gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -436,7 +443,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
-     cast/fused_group_requantize.cu
+     cast/mxfp8/requantize_mxfp8.cu
      fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu #CUDA-only
      hadamard_transform/group_hadamard_transform.cu #CUDA-only

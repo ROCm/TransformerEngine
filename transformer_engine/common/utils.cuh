@@ -960,9 +960,15 @@ __forceinline__ __device__ float warp_reduce_max_broadcast(const float val) {
     const float val_other = __shfl_down(val_tmp, offset, THREADS_PER_WARP);
 #else
     const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset);
+<<<<<<< HEAD
 #endif
     __builtin_assume(val_tmp >= 0);
     __builtin_assume(val_other >= 0);
+=======
+    // val_tmp and val_other could be NaN, which loses all comparison with non-NaN values and returns false
+    __builtin_assume(!(val_tmp < 0));
+    __builtin_assume(!(val_other < 0));
+>>>>>>> 1f251a125
     val_tmp = fmaxf(val_tmp, val_other);
   }
   // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
