@@ -23,7 +23,7 @@ constexpr size_t THREADS_PER_CHUNK = rocm_colwise_mxfp8::kThreads;
 
 // The gfx1250 TDM kernel gives each wave of a block its own kWaveSize columns of the chunk.
 constexpr int kWaveSize = 32;
-constexpr int kWaves = CHUNK_DIM_X / kWaveSize;  // 4
+constexpr int kWaves    = CHUNK_DIM_X / kWaveSize;  // 4
 static_assert(kWaves * kWaveSize == THREADS_PER_CHUNK, "A wave per kWaveSize columns");
 
 // rocm_colwise_mxfp8::store_tile<T, true> of a wave's columns of a tile.
@@ -31,7 +31,7 @@ template <typename T>
 __device__ __forceinline__ void store_wave_tile(
     const T (&src)[rocm_colwise_mxfp8::kTileRows][kWaveSize], T *dst, const size_t row_base,
     const size_t col_base, const size_t rows, const size_t cols) {
-  constexpr int kVec = ROCM_VEC_BYTES / sizeof(T);
+  constexpr int kVec        = ROCM_VEC_BYTES / sizeof(T);
   constexpr int kVecsPerRow = kWaveSize / kVec;
   for (int i = threadIdx.x % kWaveSize; i < rocm_colwise_mxfp8::kTileRows * kVecsPerRow;
        i += kWaveSize) {
@@ -178,7 +178,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
     __builtin_amdgcn_wave_barrier();
     const size_t row_base = block_offset_Y + stage * kTileRows;
-    const auto &act = act_sh[wave][stage % 2];
+    const auto &act  = act_sh[wave][stage % 2];
     const auto &gate = gate_sh[wave][stage % 2];
     if (col < cols) {
       float values[kTileRows];

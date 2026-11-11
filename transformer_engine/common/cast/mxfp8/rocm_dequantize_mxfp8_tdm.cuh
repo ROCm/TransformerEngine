@@ -12,8 +12,8 @@
 // Each wave moves its own TDM_BAND_Y-row band of the chunk global->LDS->global, so waves never
 // wait for each other.
 constexpr size_t TDM_WAVE_SIZE = 32;
-constexpr size_t TDM_WAVES = THREADS_PER_CHUNK / TDM_WAVE_SIZE;  // 4
-constexpr size_t TDM_BAND_Y = CHUNK_DIM_Y / TDM_WAVES;          // 32
+constexpr size_t TDM_WAVES     = THREADS_PER_CHUNK / TDM_WAVE_SIZE;  // 4
+constexpr size_t TDM_BAND_Y    = CHUNK_DIM_Y / TDM_WAVES;            // 32
 
 // Dequantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor.
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
@@ -31,7 +31,7 @@ __device__ __forceinline__ void dequantize_chunk(const IType *input_ptr, OType *
 
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / TDM_WAVE_SIZE);
   const int lane = threadIdx.x % TDM_WAVE_SIZE;
-  const size_t band_offset_Y = chunk_Y * CHUNK_DIM_Y + wave * TDM_BAND_Y;
+  const size_t band_offset_Y  = chunk_Y * CHUNK_DIM_Y + wave * TDM_BAND_Y;
   const size_t chunk_offset_X = chunk_X * CHUNK_DIM_X;
   if (band_offset_Y >= rows) {
     return;
@@ -59,7 +59,7 @@ __device__ __forceinline__ void dequantize_chunk(const IType *input_ptr, OType *
   if constexpr (USE_ROWWISE_SCALING) {
     // Per step, THREADS_PER_CHUNK_X_ROWWISE lanes cover one row of the band.
     constexpr size_t ROWS_PER_STEP = TDM_WAVE_SIZE / THREADS_PER_CHUNK_X_ROWWISE;  // 4
-    constexpr size_t STEPS = TDM_BAND_Y / ROWS_PER_STEP;                           // 8
+    constexpr size_t STEPS         = TDM_BAND_Y / ROWS_PER_STEP;                   // 8
     const int lane_offset_Y = lane / THREADS_PER_CHUNK_X_ROWWISE;
     const int lane_offset_X = (lane % THREADS_PER_CHUNK_X_ROWWISE) * ELEMS_PER_THREAD;
     e8m0_t biased_exponent[STEPS];
@@ -188,7 +188,7 @@ inline bool group_dequantize_tdm(const GroupedTensor &input, GroupedTensor *outp
   const bool rowwise = input.has_data();
   const SimpleTensor &input_data = rowwise ? input.data : input.columnwise_data;
   const size_t first_logical_dim = input.logical_shape.data[0];
-  const size_t last_logical_dim = input.logical_shape.data[1];
+  const size_t last_logical_dim  = input.logical_shape.data[1];
   const bool same_last_dim = input.all_same_last_dim();
   const auto chunk_aligned = [](const int64_t dim) { return dim % CHUNK_DIM_X == 0; };
   if (!tdm_kernel::use_tdm(first_logical_dim, last_logical_dim,
@@ -199,11 +199,11 @@ inline bool group_dequantize_tdm(const GroupedTensor &input, GroupedTensor *outp
         !std::all_of(host_last_dims.begin(), host_last_dims.end(), chunk_aligned)))) {
     return false;
   }
-  const auto *const scales_ptr = reinterpret_cast<const e8m0_t *>(
+  const auto *const scales_ptr     = reinterpret_cast<const e8m0_t *>(
       rowwise ? input.scale_inv.dptr : input.columnwise_scale_inv.dptr);
-  const auto *const offsets_ptr = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
+  const auto *const offsets_ptr    = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
   const auto *const first_dims_ptr = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
-  const auto *const last_dims_ptr = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
+  const auto *const last_dims_ptr  = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
   TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
       (rowwise ? 1 : 32), SCALE_DIM_Y,
       TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(

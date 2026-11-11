@@ -14,7 +14,6 @@
 #include <initializer_list>
 
 #include "../../util/rocm_device_utils.cuh"
-#include "../../util/rocm_tdm.cuh"
 #include "grouped_layout.cuh"
 #include "rocm_quantize_common.cuh"
 
@@ -65,7 +64,7 @@ __device__ __forceinline__ GroupChunk find_group_chunk(const size_t chunk, const
                                                        const int64_t *last_dims) {
   constexpr size_t CHUNK_ELTS = CHUNK_DIM_Y * CHUNK_DIM_X;
   const size_t chunk_offset = chunk * CHUNK_ELTS;
-  const size_t tensor_id = find_tensor_from_offsets(offsets, num_tensors, chunk_offset);
+  const size_t tensor_id    = find_tensor_from_offsets(offsets, num_tensors, chunk_offset);
   GroupChunk c{};
   c.offset = static_cast<size_t>(offsets[tensor_id]);
   c.rows = first_dims != nullptr ? static_cast<size_t>(first_dims[tensor_id]) : first_logical_dim;
@@ -74,7 +73,7 @@ __device__ __forceinline__ GroupChunk find_group_chunk(const size_t chunk, const
     c.rows = 0;
     return c;
   }
-  const size_t chunks_X = c.cols / CHUNK_DIM_X;
+  const size_t chunks_X     = c.cols / CHUNK_DIM_X;
   const size_t tensor_chunk = (chunk_offset - c.offset) / CHUNK_ELTS;
   c.chunk_Y = tensor_chunk / chunks_X;
   c.chunk_X = tensor_chunk % chunks_X;
@@ -83,10 +82,10 @@ __device__ __forceinline__ GroupChunk find_group_chunk(const size_t chunk, const
 
 namespace tdm_dbias_kernel {
 
-constexpr size_t CHUNK_DIM_Y = 128;  // input rows per partial row
-constexpr size_t SLAB_DIM_X = 128;
-constexpr size_t BAND_Y = 32;
-constexpr size_t WAVES = 8;
+constexpr size_t CHUNK_DIM_Y   = 128;  // input rows per partial row
+constexpr size_t SLAB_DIM_X    = 128;
+constexpr size_t BAND_Y        = 32;
+constexpr size_t WAVES         = 8;
 constexpr size_t COLS_PER_LANE = SLAB_DIM_X / ROCM_CT_WARP_SIZE;  // 4
 
 // Sums each tensor's dbias partials, one row per chunk, into its row of dbias. A block covers
@@ -100,16 +99,16 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
   __shared__ alignas(128) float band_sh[WAVES][BAND_Y][SLAB_DIM_X];
 
   const size_t tensor_id = blockIdx.y;
-  size_t tensor_rows = partial_rows / gridDim.y;
+  size_t tensor_rows     = partial_rows / gridDim.y;
   size_t tensor_offset_Y = tensor_id * tensor_rows;
   if (offsets_ptr != nullptr) {
     tensor_rows = static_cast<size_t>(first_dims_ptr[tensor_id]) / CHUNK_DIM_Y;
     tensor_offset_Y = static_cast<size_t>(offsets_ptr[tensor_id]) / cols / CHUNK_DIM_Y;
   }
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / ROCM_CT_WARP_SIZE);
-  const size_t block_cols = WAVES / waves_per_slab * SLAB_DIM_X;
+  const size_t block_cols     = WAVES / waves_per_slab * SLAB_DIM_X;
   const size_t block_offset_X = blockIdx.x * block_cols;
-  const size_t slab_offset_X = block_offset_X + wave / waves_per_slab * SLAB_DIM_X;
+  const size_t slab_offset_X  = block_offset_X + wave / waves_per_slab * SLAB_DIM_X;
   const int lane_offset_X = (threadIdx.x % ROCM_CT_WARP_SIZE) * COLS_PER_LANE;
   const float *const tensor_partial = partial + tensor_offset_Y * cols;
   auto &band = band_sh[wave];
@@ -175,7 +174,7 @@ void reduce_dbias_tdm(OType *dbias, const float *partial, const size_t cols,
 namespace tdm_amax_kernel {
 
 constexpr size_t TILE_BYTES = 16384;
-constexpr size_t WAVES = 8;
+constexpr size_t WAVES      = 8;
 
 // Max |x| over the n elements of input, which the waves stream a row tile at a time. Atomics on
 // one address serialize, so a block reduces its waves' amaxes first and grid has a block per CU.
@@ -184,7 +183,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     amax_tdm_kernel(const IType *input, float *amax_ptr, const size_t n, const float *noop) {
 #ifdef __gfx1250__
   constexpr size_t TILE = TILE_BYTES / sizeof(IType);
-  constexpr size_t VEC = 16 / sizeof(IType);
+  constexpr size_t VEC  = 16 / sizeof(IType);
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -249,9 +248,9 @@ bool compute_amax_tdm(const IType *input, float *amax, const size_t n, const flo
 
 namespace tdm_amax_kernel {
 
-constexpr int RHT_TILE_Y = 64;
-constexpr int RHT_TILE_X = 128;
-constexpr int RHT_DIM = 16;
+constexpr int RHT_TILE_Y        = 64;
+constexpr int RHT_TILE_X        = 128;
+constexpr int RHT_DIM           = 16;
 constexpr int RHT_COLS_PER_LANE = RHT_TILE_X / ROCM_CT_WARP_SIZE;  // 4
 
 // The splits of a tensor along dimension 0 whose amaxes split_amax_tdm_kernel computes.
@@ -281,8 +280,8 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
   const int lane = threadIdx.x % ROCM_CT_WARP_SIZE;
   auto &tile = tile_sh[wave];
   const uint32_t tiles_x = DIVUP(cols, static_cast<uint32_t>(RHT_TILE_X));
-  const uint32_t tiles = DIVUP(rows, static_cast<uint32_t>(RHT_TILE_Y)) * tiles_x;
-  float amax = 0;
+  const uint32_t tiles   = DIVUP(rows, static_cast<uint32_t>(RHT_TILE_Y)) * tiles_x;
+  float amax   = 0;
   float amax_t = 0;
   for (uint32_t t = blockIdx.x * WAVES + wave; t < tiles; t += gridDim.x * WAVES) {
     tdm::load_2d(tile, input, rows, cols, cols, t / tiles_x * RHT_TILE_Y,
@@ -321,17 +320,22 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     }
   }
   amax = rocm_subwarp_allreduce<ROCM_CT_WARP_SIZE>(amax, rocm_op::max{});
-  amax_t = rocm_subwarp_allreduce<ROCM_CT_WARP_SIZE>(amax_t, rocm_op::max{});
+  if constexpr (kRHT) {
+    amax_t = rocm_subwarp_allreduce<ROCM_CT_WARP_SIZE>(amax_t, rocm_op::max{});
+  } else {
+    amax_t = amax;
+  }
   if (lane == 0) {
     amax_sh[0][wave] = amax;
     amax_sh[1][wave] = amax_t;
   }
   __syncthreads();
   if (threadIdx.x < 2) {
+    const float *const wave_amax = amax_sh[threadIdx.x];
     float block_amax = 0;
 #pragma unroll
     for (int w = 0; w < WAVES; w++) {
-      block_amax = fmaxf(block_amax, amax_sh[kRHT ? threadIdx.x : 0][w]);
+      block_amax = fmaxf(block_amax, wave_amax[w]);
     }
     float *const ptr = threadIdx.x == 0 ? args.amax[blockIdx.y] : args.amax_t[blockIdx.y];
     if (ptr != nullptr) {
@@ -359,7 +363,7 @@ template <bool kRHT, int kMaxSplits>
 void launch_split_amax_tdm(const SplitAmaxArgs<kMaxSplits> &args, const int splits,
                            const size_t cols, const uint16_t sign_mask, const bool zero,
                            hipStream_t stream) {
-  size_t max_rows = 0;
+  size_t max_rows   = 0;
   size_t total_rows = 0;
   for (int t = 0; t < splits; t++) {
     max_rows = std::max<size_t>(max_rows, args.rows[t]);
@@ -412,7 +416,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
                             const uint32_t cols, const float *noop) {
 #ifdef __gfx1250__
   constexpr uint32_t TILE = TILE_BYTES / sizeof(IType);
-  constexpr uint32_t VEC = 16 / sizeof(IType);
+  constexpr uint32_t VEC  = 16 / sizeof(IType);
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }

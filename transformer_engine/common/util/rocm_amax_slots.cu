@@ -11,7 +11,6 @@
 #include "../common.h"
 #include "cuda_runtime.h"
 #include "logging.h"
-#include "rocm_amax_slots.cuh"
 #include "rocm_device_utils.cuh"
 #include "system.h"
 

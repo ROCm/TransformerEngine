@@ -17,9 +17,7 @@
 
 #include "../../recipe/recipe_common.cuh"
 #include "../../util/math.h"
-#include "../../util/rocm_amax_slots.cuh"
 #include "../../util/rocm_device_utils.cuh"
-#include "../../util/rocm_tdm.cuh"
 #include "../core/rocm_tdm_common.cuh"
 
 namespace transformer_engine {
@@ -29,14 +27,14 @@ namespace tdm_kernel {
 
 using common::use_tdm;
 
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t CHUNK_DIM_Y       = 128;
+constexpr size_t CHUNK_DIM_X       = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;
-constexpr size_t WAVE_SIZE = 32;
-constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
-constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
-constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
-constexpr size_t QUADS = BAND_Y / 4;                       // 8
+constexpr size_t WAVE_SIZE         = 32;
+constexpr size_t WAVES             = THREADS_PER_CHUNK / WAVE_SIZE;  // 4
+constexpr size_t BAND_Y            = CHUNK_DIM_Y / WAVES;            // 32
+constexpr size_t COLS_PER_LANE     = CHUNK_DIM_X / WAVE_SIZE;        // 4
+constexpr size_t QUADS             = BAND_Y / 4;                     // 8
 constexpr size_t MULTI_MAX_TENSORS = 256;
 static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
               "A dbias partial row covers a chunk");
@@ -118,13 +116,13 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
   // densely.
   __shared__ alignas(128) OType t_sh[TRANSPOSE ? WAVES : 1][BAND_Y][CHUNK_DIM_Y];
 
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
-  const int lane = threadIdx.x % WAVE_SIZE;
+  const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane          = threadIdx.x % WAVE_SIZE;
   const int lane_offset_X = lane * COLS_PER_LANE;
   const size_t chunk_offset_Y = chunk_Y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = chunk_X * CHUNK_DIM_X;
-  const size_t band_offset_Y = chunk_offset_Y + wave * BAND_Y;
-  auto &in = in_sh[wave];
+  const size_t band_offset_Y  = chunk_offset_Y + wave * BAND_Y;
+  auto &in  = in_sh[wave];
   auto &out = out_sh[wave];
   // Out-of-bounds elements are zero in LDS and every activation (or derivative times a zero
   // gradient) keeps them zero, so they leave the amax and dbias unchanged.
@@ -275,7 +273,7 @@ struct MultiCastTransposeArgs {
 template <typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     multi_cast_transpose_fp8_tdm_kernel(const MultiCastTransposeArgs args) {
-  int t = 0;
+  int t  = 0;
   int hi = args.num_tensors - 1;
   while (t < hi) {
     const int mid = t + (hi - t) / 2;
@@ -285,7 +283,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       hi = mid;
     }
   }
-  const size_t cols = args.cols[t];
+  const size_t cols    = args.cols[t];
   const size_t chunk_Y = blockIdx.y - args.first_chunk_Y[t];
   if (blockIdx.x * CHUNK_DIM_X >= cols) {
     return;
@@ -321,35 +319,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 WAVES * sizeof(band_t<IType>));
   // The act, gate and, with IS_DGATED, grad bands of the waves
   __shared__ alignas(128) band_t<IType> in_sh[IS_DGATED ? 3 : 2][WAVES];
-  __shared__ alignas(128) band_t<OType> out_sh[TRANSPOSE ? 1 : HALVES][TRANSPOSE ? 1 : WAVES];
-  auto &act_sh = in_sh[0];
+  __shared__ alignas(128) band_t<OType> out_sh[TRANSPOSE ? 1 : WAVES][TRANSPOSE ? 1 : HALVES];
+  auto &act_sh  = in_sh[0];
   auto &gate_sh = in_sh[1];
   auto &grad_sh = in_sh[IS_DGATED ? 2 : 0];
-  // A wave's amax goes after its output bands, or into its grad band if they fill the act band.
-  const auto wave_amax = [&](const int w) -> float * {
-    if constexpr (HALVES * sizeof(band_t<OType>) < sizeof(band_t<IType>)) {
-      return reinterpret_cast<float *>(reinterpret_cast<char *>(act_sh[w]) +
-                                       HALVES * sizeof(band_t<OType>));
-    } else {
-      return reinterpret_cast<float *>(grad_sh[w]);
-    }
-  };
+  // Wave w's amax goes to wave_amax[w * AMAX_STRIDE]: after its output bands in its act band, or
+  // into its grad band if those fill the act band.
+  constexpr bool AMAX_IN_ACT = HALVES * sizeof(band_t<OType>) < sizeof(band_t<IType>);
+  constexpr size_t AMAX_STRIDE = sizeof(band_t<IType>) / sizeof(float);
+  float *const wave_amax = reinterpret_cast<float *>(
+      AMAX_IN_ACT ? reinterpret_cast<char *>(act_sh) + HALVES * sizeof(band_t<OType>)
+                  : reinterpret_cast<char *>(grad_sh));
 
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
-  const int lane = threadIdx.x % WAVE_SIZE;
+  const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane          = threadIdx.x % WAVE_SIZE;
   const int lane_offset_X = lane * COLS_PER_LANE;
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
-  const size_t band_offset_Y = chunk_offset_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = chunk_offset_Y + wave * BAND_Y;
   const bool has_band = band_offset_Y < rows;
   const float scale = scale_ptr != nullptr ? *scale_ptr : 1.0f;
-  const auto out_band = [&](const int h) -> band_t<OType> & {
-    if constexpr (TRANSPOSE) {
-      return reinterpret_cast<band_t<OType> *>(act_sh[wave])[h];
-    } else {
-      return out_sh[h][wave];
-    }
-  };
+  // The wave's HALVES output bands: in its act band with TRANSPOSE, else in out_sh
+  band_t<OType> *const out_bands =
+      TRANSPOSE ? reinterpret_cast<band_t<OType> *>(act_sh[wave]) : out_sh[wave];
   // Out-of-bounds elements are zero and every gated activation and gradient keeps them zero.
   float amax = 0;
   // As in quantize_chunk, the lanes start at different quads to spread the transposed writes. The
@@ -381,7 +373,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #pragma unroll
         for (int j = 0; j < COLS_PER_LANE; j++) {
           const float act_in = static_cast<float>(a.data.elt[j]);
-          float gate_in = static_cast<float>(g.data.elt[j]);
+          float gate_in  = static_cast<float>(g.data.elt[j]);
           float dgate_in = 1.0f;
           if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
             const float limit = p.limit;
@@ -411,7 +403,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           packed[step][h][i] = cvt_4x_to_fp8<OType, false>(elt[h][0] * scale, elt[h][1] * scale,
                                                            elt[h][2] * scale, elt[h][3] * scale);
           if constexpr (!TRANSPOSE) {
-            *reinterpret_cast<uint32_t *>(&out_band(h)[y][lane_offset_X]) = packed[step][h][i];
+            *reinterpret_cast<uint32_t *>(&out_bands[h][y][lane_offset_X]) = packed[step][h][i];
           }
         }
       }
@@ -426,7 +418,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         for (int i = 0; i < 4; i++) {
 #pragma unroll
           for (int h = 0; h < HALVES; h++) {
-            *reinterpret_cast<uint32_t *>(&out_band(h)[quad * 4 + i][lane_offset_X]) =
+            *reinterpret_cast<uint32_t *>(&out_bands[h][quad * 4 + i][lane_offset_X]) =
                 packed[step][h][i];
           }
         }
@@ -434,7 +426,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 #pragma unroll
     for (int h = 0; h < HALVES; h++) {
-      tdm::store_2d(output + h * cols, out_band(h), rows, cols, HALVES * cols, band_offset_Y,
+      tdm::store_2d(output + h * cols, out_bands[h], rows, cols, HALVES * cols, band_offset_Y,
                     chunk_offset_X);
     }
   }
@@ -443,7 +435,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if (amax_ptr != nullptr) {
     const float reduced = rocm_subwarp_allreduce<WAVE_SIZE>(amax, rocm_op::max{});
     if (lane == 0) {
-      *wave_amax(wave) = reduced;
+      wave_amax[wave * AMAX_STRIDE] = reduced;
     }
   }
   if constexpr (TRANSPOSE) {
@@ -477,7 +469,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     float block_amax = 0;
 #pragma unroll
     for (int w = 0; w < WAVES; w++) {
-      block_amax = fmaxf(block_amax, *wave_amax(w));
+      block_amax = fmaxf(block_amax, wave_amax[w * AMAX_STRIDE]);
     }
     float *const amax_dst =
         rocm_amax_target(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x);
@@ -499,7 +491,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_fp8_tdm_kernel(const IType *input, OType *output, const float *scale_inv_ptr,
                               const size_t rows, const size_t cols) {
 #ifdef __gfx1250__
-  constexpr int ELEMS = 16;
+  constexpr int ELEMS         = 16;
   constexpr int LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
   constexpr int ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
@@ -507,7 +499,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
   const int lane = threadIdx.x % WAVE_SIZE;
-  const size_t band_offset_Y = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
   if (band_offset_Y >= rows) {
     return;
@@ -547,14 +539,14 @@ __device__ __forceinline__ void quantize_block2d_chunk(
   __shared__ alignas(128) band_t<OType> out_sh[WAVES];
   __shared__ alignas(128) OType t_sh[TRANSPOSE ? WAVES : 1][BAND_Y][CHUNK_DIM_Y];
 
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
-  const int lane = threadIdx.x % WAVE_SIZE;
+  const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane          = threadIdx.x % WAVE_SIZE;
   const int lane_offset_X = lane * COLS_PER_LANE;
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
-  const size_t band_offset_Y = chunk_offset_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = chunk_offset_Y + wave * BAND_Y;
   const bool has_band = band_offset_Y < rows;
-  auto &in = in_sh[wave];
+  auto &in  = in_sh[wave];
   auto &out = out_sh[wave];
 
   // Out-of-bounds elements are zero in LDS and leave the amax unchanged.
@@ -647,7 +639,7 @@ __device__ __forceinline__ void quantize_block1d_chunk(
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     const bool pow_2_scaling) {
 #ifdef __gfx1250__
-  constexpr int ELEMS = 16;
+  constexpr int ELEMS         = 16;
   constexpr int LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
   constexpr int ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
@@ -658,9 +650,9 @@ __device__ __forceinline__ void quantize_block1d_chunk(
   const int lane = threadIdx.x % WAVE_SIZE;
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
-  const size_t band_offset_Y = chunk_offset_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = chunk_offset_Y + wave * BAND_Y;
   const bool has_band = band_offset_Y < rows;
-  auto &in = in_sh[wave];
+  auto &in  = in_sh[wave];
   auto &out = out_sh[wave];
 
   if (has_band) {
@@ -822,7 +814,7 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
                              rows * cols <= MAX_GENERIC_AMAX_CT_ELEMS;
   // The transpose's rows are rows long.
   if (!output->has_data() || !is_tensor_scaling(output->scaling_mode) ||
-      is_fp8_dtype(input.dtype()) || !is_fp8_dtype(output->dtype()) || rows == 0 ||
+      !is_high_precision_dtype(input.dtype()) || !is_fp8_dtype(output->dtype()) || rows == 0 ||
       (transpose && rows % 16 != 0) || (FUSED && has_noop) || small_amax_ct ||
       (IS_DACT && (act_input == nullptr || !act_input->has_data())) ||
       (IS_DBIAS && (dbias == nullptr || workspace == nullptr)) ||
@@ -913,8 +905,9 @@ bool multi_cast_transpose_tdm(const std::vector<Tensor *> &input_list,
   for (size_t i = 0; i < num_tensors; i++) {
     const Tensor &output = *output_list[i];
     const size_t rows = output.data.shape[0];
-    if (!is_tensor_scaling(output.scaling_mode) || is_fp8_dtype(input_list[i]->dtype()) ||
-        !is_fp8_dtype(output.dtype()) || rows % 16 != 0 ||
+    if (!is_tensor_scaling(output.scaling_mode) ||
+        !is_high_precision_dtype(input_list[i]->dtype()) || !is_fp8_dtype(output.dtype()) ||
+        rows % 16 != 0 ||
         !use_tdm(rows, output.data.shape[1],
                  {input_list[i]->data.dptr, output.data.dptr, output.columnwise_data.dptr})) {
       return false;
@@ -927,7 +920,7 @@ bool multi_cast_transpose_tdm(const std::vector<Tensor *> &input_list,
     args.first_chunk_Y[0] = 0;
     size_t chunks_X = 0;
     for (size_t j = 0; j < count; j++) {
-      const Tensor &input = *input_list[first + j];
+      const Tensor &input  = *input_list[first + j];
       const Tensor &output = *output_list[first + j];
       const size_t rows = output.data.shape[0];
       const size_t cols = output.data.shape[1];
@@ -970,7 +963,8 @@ bool quantize_gated_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *o
   const size_t cols = gated_input.flat_last_dim() / 2;
   // The transpose's rows are rows long.
   if (!output->has_data() || !is_fp8_dtype(output->dtype()) ||
-      is_fp8_dtype(gated_input.dtype()) || rows == 0 || (transpose && rows % 16 != 0) ||
+      !is_high_precision_dtype(gated_input.dtype()) || rows == 0 ||
+      (transpose && rows % 16 != 0) ||
       !use_tdm(rows, cols,
                {gated_input.data.dptr, IS_BWD ? grad.data.dptr : nullptr, output->data.dptr,
                 output->columnwise_data.dptr})) {
@@ -1039,7 +1033,7 @@ bool quantize_blockwise_tdm(const SimpleTensor &input, const SimpleTensor &outpu
                             hipStream_t stream) {
   using namespace tdm_kernel;
   // The transpose's rows are rows long.
-  if (is_fp8_dtype(input.dtype) || rows == 0 || cols == 0 ||
+  if (!is_high_precision_dtype(input.dtype) || rows == 0 || cols == 0 ||
       (return_transpose && rows % 16 != 0) ||
       !use_tdm(rows, cols,
                {input.dptr, rowwise ? output.dptr : nullptr,

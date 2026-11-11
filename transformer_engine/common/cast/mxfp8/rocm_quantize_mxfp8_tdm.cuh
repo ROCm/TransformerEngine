@@ -13,7 +13,6 @@
 // to have included the common headers.
 
 #include "../../util/rocm_device_utils.cuh"
-#include "../../util/rocm_tdm.cuh"
 #include "../core/rocm_tdm_common.cuh"
 
 namespace transformer_engine {
@@ -26,14 +25,14 @@ using common::find_tensor_from_offsets;
 using common::reduce_dbias_tdm;
 using common::use_tdm;
 
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t CHUNK_DIM_Y       = 128;
+constexpr size_t CHUNK_DIM_X       = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;
-constexpr size_t WAVE_SIZE = 32;
-constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
-constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
-constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
-constexpr size_t TILE_2D = 32;  // 2D scaling shares a scale per TILE_2D x TILE_2D tile
+constexpr size_t WAVE_SIZE         = 32;
+constexpr size_t WAVES             = THREADS_PER_CHUNK / WAVE_SIZE;  // 4
+constexpr size_t BAND_Y            = CHUNK_DIM_Y / WAVES;            // 32
+constexpr size_t COLS_PER_LANE     = CHUNK_DIM_X / WAVE_SIZE;        // 4
+constexpr size_t TILE_2D           = 32;  // 2D scaling shares a scale per TILE_2D x TILE_2D tile
 constexpr size_t MULTI_MAX_TENSORS = 1024;
 static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
               "A dbias partial row covers a chunk");
@@ -76,11 +75,11 @@ __device__ __forceinline__ float quantize_band_rowwise(const band_t<IType> &in, 
                                                        const size_t valid_rows,
                                                        const size_t valid_scales,
                                                        const uint32_t tile_exponents = 0) {
-  constexpr size_t ELEMS = 16;
-  constexpr size_t LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
-  constexpr size_t ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
-  constexpr size_t LANES_PER_SCALE = SCALE_DIM_X / ELEMS;      // 2
-  const int lane = threadIdx.x % WAVE_SIZE;
+  constexpr size_t ELEMS           = 16;
+  constexpr size_t LANES_PER_ROW   = CHUNK_DIM_X / ELEMS;        // 8
+  constexpr size_t ROWS_PER_STEP   = WAVE_SIZE / LANES_PER_ROW;  // 4
+  constexpr size_t LANES_PER_SCALE = SCALE_DIM_X / ELEMS;        // 2
+  const int lane          = threadIdx.x % WAVE_SIZE;
   const int lane_offset_Y = lane / LANES_PER_ROW;
   const int lane_offset_X = (lane % LANES_PER_ROW) * ELEMS;
   const size_t scale_offset_X = lane_offset_X / SCALE_DIM_X;
@@ -196,9 +195,9 @@ __device__ __forceinline__ void quantize_chunk(
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
   constexpr bool COMPUTE_ACTIVATIONS = IS_ACT || IS_DACT;
   constexpr size_t OUT_BAND_BYTES = sizeof(band_t<OType>);
-  constexpr size_t OUT_BYTES = (USE_ROWWISE_SCALING + USE_COLWISE_SCALING) * OUT_BAND_BYTES;
-  constexpr size_t ACT_BYTES = IS_DACT ? sizeof(band_t<IType>) : 0;
-  constexpr size_t AUX_BYTES = std::max({OUT_BYTES, ACT_BYTES, size_t{1}});
+  constexpr size_t OUT_BYTES      = (USE_ROWWISE_SCALING + USE_COLWISE_SCALING) * OUT_BAND_BYTES;
+  constexpr size_t ACT_BYTES      = IS_DACT ? sizeof(band_t<IType>) : 0;
+  constexpr size_t AUX_BYTES      = std::max({OUT_BYTES, ACT_BYTES, size_t{1}});
   static_assert(!USE_COLWISE_SCALING || SCALE_DIM_Y == BAND_Y,
                 "A band must be one colwise scale block");
   static_assert(!IS_2D || TILE_2D == BAND_Y, "A band must be one row of tiles");
@@ -207,13 +206,13 @@ __device__ __forceinline__ void quantize_chunk(
   // Stages the activation input of DACT, then holds the outputs once in_sh has the activations.
   __shared__ alignas(128) unsigned char aux_sh[WAVES][AUX_BYTES];
 
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
-  const int lane = threadIdx.x % WAVE_SIZE;
+  const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane          = threadIdx.x % WAVE_SIZE;
   const int lane_offset_X = lane * COLS_PER_LANE;
-  const size_t band_offset_Y = chunk_Y * CHUNK_DIM_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = chunk_Y * CHUNK_DIM_Y + wave * BAND_Y;
   const size_t chunk_offset_X = chunk_X * CHUNK_DIM_X;
-  auto &in = in_sh[wave];
-  auto &act_in = *reinterpret_cast<band_t<IType> *>(aux_sh[wave]);
+  auto &in          = in_sh[wave];
+  auto &act_in      = *reinterpret_cast<band_t<IType> *>(aux_sh[wave]);
   auto &out_rowwise = *reinterpret_cast<band_t<OType> *>(aux_sh[wave]);
   auto &out_colwise =
       *reinterpret_cast<band_t<OType> *>(aux_sh[wave] + (USE_ROWWISE_SCALING ? OUT_BAND_BYTES : 0));
@@ -450,7 +449,7 @@ struct MultiQuantizeArgs {
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     multi_quantize_mxfp8_tdm_kernel(const MultiQuantizeArgs args) {
-  int t = 0;
+  int t  = 0;
   int hi = args.num_tensors - 1;
   while (t < hi) {
     const int mid = t + (hi - t) / 2;
@@ -460,8 +459,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       hi = mid;
     }
   }
-  const size_t rows = args.rows[t];
-  const size_t cols = args.cols[t];
+  const size_t rows    = args.rows[t];
+  const size_t cols    = args.cols[t];
   const size_t chunk_Y = blockIdx.y - args.first_chunk_Y[t];
   if (chunk_Y * CHUNK_DIM_Y >= rows || blockIdx.x * CHUNK_DIM_X >= cols) {
     return;
@@ -543,9 +542,9 @@ bool group_quantize_tdm(const GroupedTensor *input, const GroupedTensor *activat
   const bool rowwise = output->has_data();
   const bool colwise = output->has_columnwise_data();
   const size_t first_logical_dim = input->logical_shape.data[0];
-  const size_t last_logical_dim = input->logical_shape.data[1];
-  const size_t num_tensors = input->num_tensors;
-  const bool same_shape = output->all_same_shape();
+  const size_t last_logical_dim  = input->logical_shape.data[1];
+  const size_t num_tensors       = input->num_tensors;
+  const bool same_shape    = output->all_same_shape();
   const bool same_last_dim = output->all_same_last_dim();
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
   // Varying dimensions are device-side and, as upstream requires, divisible by 128. Upstream also
@@ -561,7 +560,7 @@ bool group_quantize_tdm(const GroupedTensor *input, const GroupedTensor *activat
     return false;
   }
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
-  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
+  const int64_t *const last_dims_ptr  = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
   const dim3 grid = same_last_dim ? dim3(DIVUP(last_logical_dim, CHUNK_DIM_X),
                                          DIVUP(first_logical_dim, CHUNK_DIM_Y))

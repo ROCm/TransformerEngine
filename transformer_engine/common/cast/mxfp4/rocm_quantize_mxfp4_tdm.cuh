@@ -12,7 +12,6 @@
 // rounds to nearest even with the hardware conversion, as that kernel does on gfx950.
 
 #include "../../util/rocm_device_utils.cuh"
-#include "../../util/rocm_tdm.cuh"
 #include "../core/rocm_quantize_common.cuh"
 #include "../core/rocm_tdm_common.cuh"
 
@@ -24,19 +23,19 @@ namespace tdm_kernel {
 using common::store_bytes;
 using common::use_tdm;
 
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t CHUNK_DIM_Y       = 128;
+constexpr size_t CHUNK_DIM_X       = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;
-constexpr size_t WAVE_SIZE = 32;
-constexpr size_t WAVES = THREADS_PER_CHUNK / WAVE_SIZE;    // 4
-constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;             // 32
-constexpr size_t COLS_PER_LANE = CHUNK_DIM_X / WAVE_SIZE;  // 4
-constexpr size_t BLOCK_SIZE = 32;
-constexpr size_t SCALES_PER_ROW = CHUNK_DIM_X / BLOCK_SIZE;  // 4
-constexpr size_t BAND_BYTES = BAND_Y * CHUNK_DIM_X / 2;  // packed FP4 of a band
-constexpr size_t CHUNK_BYTES = CHUNK_DIM_Y * CHUNK_DIM_X / 2;
+constexpr size_t WAVE_SIZE         = 32;
+constexpr size_t WAVES             = THREADS_PER_CHUNK / WAVE_SIZE;  // 4
+constexpr size_t BAND_Y            = CHUNK_DIM_Y / WAVES;            // 32
+constexpr size_t COLS_PER_LANE     = CHUNK_DIM_X / WAVE_SIZE;        // 4
+constexpr size_t BLOCK_SIZE        = 32;
+constexpr size_t SCALES_PER_ROW    = CHUNK_DIM_X / BLOCK_SIZE;  // 4
+constexpr size_t BAND_BYTES        = BAND_Y * CHUNK_DIM_X / 2;  // packed FP4 of a band
+constexpr size_t CHUNK_BYTES       = CHUNK_DIM_Y * CHUNK_DIM_X / 2;
 // The shuffled FP4 layouts store each 16-row group contiguously, in 16-byte column slices.
-constexpr size_t SHUFFLE_ROWS = 16;
+constexpr size_t SHUFFLE_ROWS  = 16;
 constexpr size_t SHUFFLE_SLICE = 16;
 static_assert(BAND_Y == BLOCK_SIZE, "A band must be one colwise scale block");
 static_assert(BAND_Y == WAVE_SIZE, "A lane per band row writes the rowwise scales");
@@ -103,7 +102,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
   const int lane = threadIdx.x % WAVE_SIZE;
-  const uint32_t band_offset_Y = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
+  const uint32_t band_offset_Y  = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
   const uint32_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
   // The columnwise stores need every wave at the barrier.
   const bool active = band_offset_Y < rows;
@@ -118,12 +117,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   if (ROWWISE && active) {
     // Per step, 8 lanes cover a row with 16 elements, one Hadamard half, each.
-    constexpr int ELEMS = 16;
+    constexpr int ELEMS         = 16;
     constexpr int LANES_PER_ROW = CHUNK_DIM_X / ELEMS;  // 8
     constexpr int ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
     const int lane_offset_Y = lane / LANES_PER_ROW;
     const int lane_offset_X = (lane % LANES_PER_ROW) * ELEMS;
-    const int packed_X = lane_offset_X / 2;
+    const int packed_X      = lane_offset_X / 2;
     uint8_t *const out = rowwise_sh[wave];
     auto &scales = rowwise_scale_sh[wave];
 #pragma unroll
@@ -209,7 +208,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const uint8_t e8m0 = block_scale<1>(x, BAND_Y, scale);
         const uint4 packed = make_uint4(cvt_8x_to_fp4(x, scale), cvt_8x_to_fp4(x + 8, scale),
                                         cvt_8x_to_fp4(x + 16, scale), cvt_8x_to_fp4(x + 24, scale));
-        const int c = lane_offset_X + i;
+        const int c      = lane_offset_X + i;
         const int offset = shuffle_colwise
                                ? c / SHUFFLE_ROWS * (SHUFFLE_ROWS * CHUNK_DIM_Y / 2) +
                                      wave * (SHUFFLE_ROWS * SHUFFLE_SLICE) +
@@ -238,7 +237,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
     if (wave == 0) {
       const uint32_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-      const uint32_t packed_rows = rows / 2;
+      const uint32_t packed_rows    = rows / 2;
       if (shuffle_colwise) {
         tdm::store_2d(colwise_fp4,
                       *reinterpret_cast<uint8_t(*)[CHUNK_DIM_X / SHUFFLE_ROWS]
@@ -268,8 +267,8 @@ bool quantize_tdm(const Tensor &input, Tensor *output, const bool use_hadamard,
   using namespace tdm_kernel;
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-  const bool rowwise = output->has_data();
-  const bool colwise = output->has_columnwise_data();
+  const bool rowwise         = output->has_data();
+  const bool colwise         = output->has_columnwise_data();
   const bool shuffle_rowwise = rowwise && output->mxfp4_shuffle_rowwise_data;
   const bool shuffle_colwise = colwise && output->mxfp4_shuffle_columnwise_data;
   // Every block and, in the shuffled layouts, 16-row group of 32 packed bytes is complete.
@@ -282,22 +281,18 @@ bool quantize_tdm(const Tensor &input, Tensor *output, const bool use_hadamard,
     return false;
   }
   const dim3 grid(DIVUP(cols, CHUNK_DIM_X), DIVUP(rows, CHUNK_DIM_Y));
-  const auto launch = [&](auto kernel) {
-    kernel<<<grid, THREADS_PER_CHUNK, 0, stream>>>(
-        reinterpret_cast<const uint16_t *>(input.data.dptr),
-        reinterpret_cast<uint8_t *>(output->data.dptr),
-        reinterpret_cast<uint8_t *>(output->columnwise_data.dptr), rowwise_scales, colwise_scales,
-        rows, cols, shuffle_rowwise, shuffle_colwise);
-  };
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_hadamard, HADAMARD,
-      if (rowwise && colwise) {
-        launch(quantize_mxfp4_tdm_kernel<true, true, HADAMARD>);
-      } else if (rowwise) {
-        launch(quantize_mxfp4_tdm_kernel<true, false, HADAMARD>);
-      } else {
-        launch(quantize_mxfp4_tdm_kernel<false, true, HADAMARD>);
-      });  // NOLINT(*)
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          rowwise, ROWWISE,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              colwise, COLWISE,
+              quantize_mxfp4_tdm_kernel<ROWWISE, COLWISE, HADAMARD>
+              <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+                  reinterpret_cast<const uint16_t *>(input.data.dptr),
+                  reinterpret_cast<uint8_t *>(output->data.dptr),
+                  reinterpret_cast<uint8_t *>(output->columnwise_data.dptr), rowwise_scales,
+                  colwise_scales, rows, cols, shuffle_rowwise, shuffle_colwise);)));  // NOLINT(*)
   NVTE_CHECK_CUDA(hipGetLastError());
   return true;
 }
