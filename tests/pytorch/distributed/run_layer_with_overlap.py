@@ -364,6 +364,13 @@ def _digest(tensors):
 
 
 def _compare_tensors(name, test, ref, rtol, atol):
+    if test.shape != ref.shape:
+        numerics_info = (
+            f"NUMERICAL CHECK FAILED: {name} has shape {list(test.shape)}, "
+            f"expected {list(ref.shape)}."
+        )
+        return 1, numerics_info
+
     # Make sure tensors aren't zero and we don't pass trivially
     if test.count_nonzero() == 0:
         if ref.count_nonzero() == 0:

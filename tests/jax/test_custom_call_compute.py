@@ -32,7 +32,6 @@ from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize_dbias,
     GroupedQuantizePrimitive,
 )
-from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.quantize import (
@@ -568,9 +567,7 @@ class TestNorm:
 
         precise_comparison = True
 
-        if (
-            get_cudnn_version() < (9, 10, 0) or is_hip_extension()
-        ) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if is_hip_extension() and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
             precise_comparison = False
