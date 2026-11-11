@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL GEMM kernels (dense, non-grouped) for BF16/FP16/FP32/FP8/MXFP8."""
+"""FlyDSL dense GEMM kernels: BF16/FP16/FP32/FP8/MXFP8 (gfx950), MXFP4 (gfx1250)."""
 
 # Supported flydsl release series. Single source of truth for the version
 # requirement, since flydsl is user-installed (not a declared dependency). A
