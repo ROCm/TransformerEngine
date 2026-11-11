@@ -13,6 +13,7 @@
 
 #include "../../util/rocm_device_utils.cuh"
 #include "../../util/rocm_tdm.cuh"
+#include "../core/rocm_quantize_common.cuh"
 #include "../core/rocm_tdm_common.cuh"
 
 namespace transformer_engine {

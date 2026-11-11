@@ -114,5 +114,7 @@ TYPED_TEST(RocmTdmTest, RoundTrip2D) {
   }
   run_roundtrip<TypeParam>(64, 128, 128, 128);  // whole tiles
   run_roundtrip<TypeParam>(100, 200, 256, 216);  // partial tiles, row pitch != cols
+  run_roundtrip<TypeParam>(256, 128, 128, 128);  // rows > cols
+  run_roundtrip<TypeParam>(200, 100, 112, 128);  // rows > cols, partial tiles
   run_roundtrip<TypeParam>(1, 1, 16, 16);
 }

@@ -29,6 +29,24 @@ using Philox =
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
 #ifdef __gfx1250__
+// cvt_8x_to_fp4, rounding stochastically with a random byte of rbits per value. The conversion
+// rounds its first value up when bits 15:0 of its random operand plus the 16-bit fraction to the
+// next FP4 value carry, its second likewise with bits 31:16, and the other 6 with shifts of the
+// same bits, so each conversion takes only 2 values.
+__device__ __forceinline__ uint32_t cvt_8x_to_fp4_sr(const float *x, const uint2 rbits,
+                                                     const float scale) {
+  uint32_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const uint32_t bytes = ((i < 2 ? rbits.x : rbits.y) >> (16 * (i % 2))) & 0xFFFF;
+    // The bytes on top of half a byte, so that the probability of rounding up rounds to nearest.
+    const uint32_t r = (bytes & 0xFF) << 8 | (bytes & 0xFF00) << 16 | 0x00800080;
+    const dispatch::common::f32x8 v = {x[2 * i], x[2 * i + 1], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    packed |= (__builtin_amdgcn_cvt_scalef32_sr_pk8_fp4_f32(v, r, scale) & 0xFF) << (8 * i);
+  }
+  return packed;
+}
+
 // src[0..N) as floats, read up to 16 bytes at a time.
 template <int N, typename IType>
 __device__ __forceinline__ void load_floats(const IType *src, float *x) {
@@ -56,9 +74,8 @@ __device__ __forceinline__ uint2 encode_block(const float *x, const float encode
   }
   if constexpr (kSR) {
     const uint4 rbits = rng.generate4();
-    return make_uint2(
-        dispatch::common::cvt_8x_to_fp4_sr(y, make_uint2(rbits.x, rbits.y), 1.0f),
-        dispatch::common::cvt_8x_to_fp4_sr(y + 8, make_uint2(rbits.z, rbits.w), 1.0f));
+    return make_uint2(cvt_8x_to_fp4_sr(y, make_uint2(rbits.x, rbits.y), 1.0f),
+                      cvt_8x_to_fp4_sr(y + 8, make_uint2(rbits.z, rbits.w), 1.0f));
   } else {
     return make_uint2(dispatch::common::cvt_8x_to_fp4(y, 1.0f),
                       dispatch::common::cvt_8x_to_fp4(y + 8, 1.0f));

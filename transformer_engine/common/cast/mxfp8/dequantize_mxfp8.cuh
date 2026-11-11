@@ -30,6 +30,7 @@
 #include "../../util/cuda_runtime.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../util/system.h"
+#include "../core/rocm_quantize_common.cuh"
 #include "./rocm_quantize_mxfp8_tdm.cuh"
 #include "./rocm_vectorized_2d.cuh"
 #endif

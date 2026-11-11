@@ -22,7 +22,7 @@ namespace mxfp8 {
 namespace tdm_kernel {
 
 using common::find_group_chunk;
-using common::find_tensor;
+using common::find_tensor_from_offsets;
 using common::reduce_dbias_tdm;
 using common::use_tdm;
 
@@ -396,7 +396,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       tensor_id = chunk_offset_Y / rows_per_tensor;
       tensor_offset = tensor_id * rows_per_tensor * cols;
     } else {
-      tensor_id = find_tensor(offsets_ptr, num_tensors, chunk_offset_Y * cols);
+      tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, chunk_offset_Y * cols);
       tensor_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
     }
     rows = first_dims_ptr != nullptr ? static_cast<size_t>(first_dims_ptr[tensor_id])
