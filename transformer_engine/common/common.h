@@ -773,6 +773,7 @@ using fp8ue5m3 = __nv_fp8_ue5m3;
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
+using fp8ue5m3 = te_hip_fp8_ue5m3;
 #endif //__HIP_PLATFORM_AMD__
 using e8m0_t = uint8_t;
 
@@ -798,6 +799,7 @@ TRANSFORMER_ENGINE_TYPE_NAME(half)
 TRANSFORMER_ENGINE_TYPE_NAME(hip_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_e5m2)
+TRANSFORMER_ENGINE_TYPE_NAME(te_hip_fp8_ue5m3)
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__hip_fp4_e2m1)
 #endif
@@ -905,6 +907,14 @@ struct TypeInfo {
   } break;
 #else
 #define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
+#endif
+#ifdef __HIP_PLATFORM_AMD__
+#undef SWITCH_FP8UE5M3_TYPE_HANDLE
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
+  case DType::kFloat8UE5M3: {                  \
+    using type = fp8ue5m3;                     \
+    { __VA_ARGS__ }                            \
+  } break;
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \

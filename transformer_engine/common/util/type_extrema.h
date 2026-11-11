@@ -79,6 +79,13 @@ struct TypeExtrema<fp8ue5m3> {
   static constexpr float max_inverse = 1.0 / max;
 };
 #endif
+#ifdef __HIP_PLATFORM_AMD__
+template <>
+struct TypeExtrema<fp8ue5m3> {
+  static constexpr float max = 114688.f;
+  static constexpr float max_inverse = 1.0 / max;
+};
+#endif
 
 template <>
 struct TypeExtrema<bf16> {

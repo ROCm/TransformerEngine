@@ -79,7 +79,7 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 template <typename ScaleType>
 constexpr float get_scale_max(int scale_max = 0) {
   static_assert(std::is_same_v<ScaleType, fp8e4m3>
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)
                 || std::is_same_v<ScaleType, fp8ue5m3>
 #endif
                 , "Unsupported NVFP4 scale type.");
@@ -89,7 +89,7 @@ constexpr float get_scale_max(int scale_max = 0) {
     }
     return static_cast<float>(scale_max);
   }
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)
   if constexpr (std::is_same_v<ScaleType, fp8ue5m3>) {
     if (scale_max == 0) {
       scale_max = 114688;
@@ -1695,7 +1695,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
             performTest<InputType, fp8e4m3>(
                 OP, tensor_dims, use_fast_math, scaling_mode, config.mode, config.scale_max,
                 config.err_use_fast_math);
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)
         } else if (scale_type == DType::kFloat8UE5M3) {
             performTest<InputType, fp8ue5m3>(
                 OP, tensor_dims, use_fast_math, scaling_mode, config.mode, config.scale_max,
@@ -1865,7 +1865,7 @@ INSTANTIATE_TEST_SUITE_P(
         return name;
     });
 
-#if CUDA_VERSION >= 13040 && FP4_TYPE_SUPPORTED
+#if (CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)) && FP4_TYPE_SUPPORTED
 INSTANTIATE_TEST_SUITE_P(
     OperatorTestUE5M3,
     FusedCastTransposeNVFP4TestSuite,
@@ -1883,6 +1883,9 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 TEST(NVFP4UE5M3ReferenceTest, Grouped) {
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Grouped NVFP4 quantization is not supported on ROCm";
+#endif
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }

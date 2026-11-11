@@ -1074,8 +1074,10 @@ def general_gemm(
     # Temporary hack to route NVFP4 GEMM with UE5M3 scale factors to
     # cuDNN Frontend kernels. UE5M3-specific logic should be removed
     # in its entirety once TE supports NVFP4-UE5M3 GEMMs natively.
+    # ROCm runs UE5M3 through TE's own (hipBLASLt) GEMM.
     if (
-        isinstance(A, NVFP4TensorStorage)
+        not IS_HIP_EXTENSION
+        and isinstance(A, NVFP4TensorStorage)
         and isinstance(B, NVFP4TensorStorage)
         and A._scale_dtype == DType.kFloat8UE5M3
         and B._scale_dtype == DType.kFloat8UE5M3

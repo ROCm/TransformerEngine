@@ -171,7 +171,11 @@ class NVFP4Quantizer(Quantizer):
         if self.scale_dtype not in (DType.kFloat8E4M3, DType.kFloat8UE5M3):
             raise ValueError("scale_dtype must be DType.kFloat8E4M3 or DType.kFloat8UE5M3.")
         if IS_HIP_EXTENSION and self.scale_dtype == DType.kFloat8UE5M3:
-            raise NotImplementedError("NVFP4 with FP8 UE5M3 block scales is not supported on ROCm.")
+            from ..quantization import check_fp8_ue5m3_support
+
+            ue5m3_supported, reason = check_fp8_ue5m3_support()
+            if not ue5m3_supported:
+                raise NotImplementedError(reason)
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction

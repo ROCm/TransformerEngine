@@ -338,7 +338,7 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
 // FP4 e2m1 lookup table
 __device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 
-// Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
+// Dequantize FP4 (e2m1) packed data with FP8 (E4M3 or UE5M3) block scales to BF16.
 // Only applies block scales: output = fp4_value * block_scale.
 // The per-tensor amax correction is applied separately via the GEMM alpha scalar.
 //
@@ -348,9 +348,10 @@ __device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 // Scale layout: 2D tensor of shape {num_rows_padded, scale_stride} where
 // scale_stride = roundup(num_cols / 16, 4).  Each scale covers a block of 16
 // consecutive elements along the fast (column) dimension.
+template <typename ScaleType>
 __global__ void dequant_fp4_to_bf16_kernel(
     const uint8_t* __restrict__ data,
-    const fp8e4m3* __restrict__ scale_inv,
+    const ScaleType* __restrict__ scale_inv,
     hip_bfloat16* __restrict__ output,
     int64_t total_elements,
     int64_t num_cols,
@@ -379,7 +380,7 @@ __global__ void dequant_fp4_to_bf16_kernel(
 
 // Launch helper for dequant kernel
 static void launch_dequant_fp4_to_bf16(
-    const void* data, const void* scale_inv,
+    const void* data, const void* scale_inv, DType scale_dtype,
     void* output, int64_t total_elements,
     int64_t num_cols, int64_t scale_stride,
     hipStream_t stream)
@@ -388,11 +389,21 @@ static void launch_dequant_fp4_to_bf16(
   const int64_t total_pairs = total_elements / 2;
   const int64_t num_blocks = (total_pairs + kBlockSize - 1) / kBlockSize;
 
-  dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-      reinterpret_cast<const uint8_t*>(data),
-      reinterpret_cast<const fp8e4m3*>(scale_inv),
-      reinterpret_cast<hip_bfloat16*>(output),
-      total_elements, num_cols, scale_stride);
+  if (scale_dtype == DType::kFloat8UE5M3) {
+    dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(data),
+        reinterpret_cast<const fp8ue5m3*>(scale_inv),
+        reinterpret_cast<hip_bfloat16*>(output),
+        total_elements, num_cols, scale_stride);
+  } else {
+    NVTE_CHECK(scale_dtype == DType::kFloat8E4M3, "Unsupported NVFP4 scale dtype ",
+               to_string(scale_dtype));
+    dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(data),
+        reinterpret_cast<const fp8e4m3*>(scale_inv),
+        reinterpret_cast<hip_bfloat16*>(output),
+        total_elements, num_cols, scale_stride);
+  }
 }
 
 // Compute per-row alpha vector on device for NVFP4 GEMM:
@@ -768,7 +779,7 @@ static void dequant_fp4_gemm_inputs(
     const int64_t num_cols = use_rowwise ? input.data.shape.back()
                                         : input.columnwise_data.shape.back();
     const int64_t scale_stride = (sinv.shape.size() >= 2) ? sinv.shape[1] : (num_cols / 16);
-    launch_dequant_fp4_to_bf16(op_data, op_scale_inv, bf16_buf,
+    launch_dequant_fp4_to_bf16(op_data, op_scale_inv, sinv.dtype, bf16_buf,
                                rows * cols, num_cols, scale_stride, stream);
     op_data = bf16_buf;
     op_type = DType::kBFloat16;
@@ -781,6 +792,58 @@ static void dequant_fp4_gemm_inputs(
   stage_fp4_operand(param.Btype, param.B, param.B_scale_inv,
                     inputB, transb == CUBLAS_OP_N, k, n, b_bf16_bytes);
 }
+
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+// Whether hipBLASLt has native NVFP4 kernels with UE5M3 block-16 scales for this output type. Older
+// libraries (e.g. ROCm 10.1) have none, and the E5M3 logic only covers BF16 output. Its GridBased
+// logic covers all sizes, so one small TN problem per (device, output type) answers it.
+static bool nvfp4_ue5m3_native_available(hipblasLtHandle_t handle, int device_id,
+                                         hipDataType d_type, size_t workspace_size) {
+  static std::mutex mutex;
+  static std::map<std::pair<int, int>, bool> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto key = std::make_pair(device_id, static_cast<int>(d_type));
+  if (auto it = cache.find(key); it != cache.end()) {
+    return it->second;
+  }
+
+  constexpr int dim = 256;
+  hipblasLtMatrixLayout_t a_desc, b_desc, d_desc;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&a_desc, HIP_R_4F_E2M1, dim, dim, dim));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&b_desc, HIP_R_4F_E2M1, dim, dim, dim));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutCreate(&d_desc, d_type, dim, dim, dim));
+  hipblasLtMatmulDesc_t op_desc;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescCreate(&op_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+  const hipblasOperation_t trans_a = HIPBLAS_OP_T;
+  const hipblasOperation_t trans_b = HIPBLAS_OP_N;
+  const hipblasLtMatmulMatrixScale_t scale_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3_EXT;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                                       &trans_a, sizeof(trans_a)));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                                       &trans_b, sizeof(trans_b)));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                       &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                       &scale_mode, sizeof(scale_mode)));
+  hipblasLtMatmulPreference_t pref;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&pref));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
+      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
+  hipblasLtMatmulHeuristicResult_t result{};
+  int count = 0;
+  const bool available =
+      hipblasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, d_desc, d_desc, pref, 1,
+                                      &result, &count) == HIPBLAS_STATUS_SUCCESS &&
+      count > 0;
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(pref));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescDestroy(op_desc));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(d_desc));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(b_desc));
+  NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(a_desc));
+  cache[key] = available;
+  return available;
+}
+#endif
 
 
 static class HandlePool {
@@ -1498,12 +1561,47 @@ void hipblaslt_gemm(const Tensor *inputA,
   // would match both).
   const bool use_nvfp4 =
       is_nvfp_scaling(inputA->scaling_mode) || is_nvfp_scaling(inputB->scaling_mode);
-  // Native NVFP4 GEMM on gfx1250: hipBLASLt consumes the FP8 (E4M3) block scales directly, but it
-  // reads them in a K-tiled layout (setup_nvfp4_gemm_native re-lays TE's row-major scales into it).
-  // Every other architecture, and hipBLASLt versions without the VEC16_UE4M3 scale mode, use the
-  // BF16 dequant fallback instead.
+  // Block-scale dtype of each NVFP4 operand as read (mirrors CanonicalizeGemmInput): E4M3, or
+  // UE5M3 for the wider-range variant.
+  auto nvfp4_scale_dtype = [](const Tensor* t, bool rowwise) {
+    if (!is_nvfp_scaling(t->scaling_mode)) {
+      return DType::kFloat8E4M3;
+    }
+    return rowwise ? t->scale_inv.dtype : t->columnwise_scale_inv.dtype;
+  };
+  const DType nvfp4_a_scale_dtype = nvfp4_scale_dtype(inputA, transa == CUBLAS_OP_T);
+  const DType nvfp4_b_scale_dtype = nvfp4_scale_dtype(inputB, transb == CUBLAS_OP_N);
+
+  // Obtained before the NVFP4 path decision: its UE5M3 kernel probe queries hipBLASLt.
+  int device_id;
+  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
+
+  if (handle == nullptr) {
+    handle = cached_handles.get(device_id);
+    if (handle == nullptr)
+    {
+      handle = cached_handles.obtain(device_id);
+    }
+  }
+
+  // Native NVFP4 GEMM on gfx1250: hipBLASLt consumes the FP8 (E4M3 or UE5M3) block scales directly,
+  // but it reads them in a K-tiled layout (setup_nvfp4_gemm_native re-lays TE's row-major scales
+  // into it). Every other architecture, hipBLASLt versions without the VEC16_UE4M3 scale mode, and
+  // UE5M3 GEMMs hipBLASLt has no kernels for (older libraries, non-BF16 output, mixed E4M3 x
+  // UE5M3 operands), use the BF16 dequant fallback instead.
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-  const bool use_nvfp4_native = use_nvfp4 && cuda::sm_arch() == 125;
+  bool use_nvfp4_native = use_nvfp4 && cuda::sm_arch() == 125;
+  if (use_nvfp4_native && (nvfp4_a_scale_dtype == DType::kFloat8UE5M3 ||
+                           nvfp4_b_scale_dtype == DType::kFloat8UE5M3)) {
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+    use_nvfp4_native = nvfp4_a_scale_dtype == nvfp4_b_scale_dtype &&
+                       nvfp4_ue5m3_native_available(handle, device_id,
+                                                    get_hipblaslt_dtype(outputD->data.dtype),
+                                                    workspaceSize);
+#else
+    use_nvfp4_native = false;  // no VEC16_UE5M3 scale mode before hipBLASLt 1.3
+#endif
+  }
 #else
   const bool use_nvfp4_native = false;
 #endif
@@ -1603,17 +1701,6 @@ void hipblaslt_gemm(const Tensor *inputA,
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
 #endif
-
-  int device_id;
-  NVTE_CHECK_CUDA(hipGetDevice(&device_id));
-
-  if (handle == nullptr) {
-    handle = cached_handles.get(device_id);
-    if (handle == nullptr)
-    {
-      handle = cached_handles.obtain(device_id);
-    }
-  }
 
   hipblasLtMatmulDesc_t       operationDesc = nullptr;
   hipblasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
@@ -1719,11 +1806,17 @@ void hipblaslt_gemm(const Tensor *inputA,
 
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
   if (use_nvfp4_native) {
-    // Native NVFP4 GEMM (gfx1250): the FP4 (E2M1) operands carry FP8 (E4M3) scales, one per
-    // 16-element block along the contraction (innermost) dimension. hipBLASLt applies these block
-    // scales (K-tiled, see setup_nvfp4_gemm_native); the per-tensor amax correction rides on the
-    // host scalar alpha (c0) so it is folded into the GEMM itself.
+    // Native NVFP4 GEMM (gfx1250): the FP4 (E2M1) operands carry FP8 (E4M3 or UE5M3) scales, one
+    // per 16-element block along the contraction (innermost) dimension. hipBLASLt applies these
+    // block scales (K-tiled, see setup_nvfp4_gemm_native); the per-tensor amax correction rides on
+    // the host scalar alpha (c0) so it is folded into the GEMM itself.
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+    scaling_mode = (nvfp4_a_scale_dtype == DType::kFloat8UE5M3)
+                       ? HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3_EXT
+                       : HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+#else
     scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+#endif
     NVTE_CHECK_HIPBLASLT(
         hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                         &nvfp4_scaleA_swz, sizeof(nvfp4_scaleA_swz)));
