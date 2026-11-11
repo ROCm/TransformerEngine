@@ -78,11 +78,13 @@ workload). Weights are not rotated.
     default for MXFP8 on gfx950).
   - `hipkittens_grouped`: one HipKittens grouped kernel on the main stream (opt-in in TE).
   - `ck_tile`, `triton`: CK and Triton grouped kernels.
-- Dense MXFP4 GEMM runs only the `aiter` backend (AITER a4w4, TE's default); TE's opt-in
-  hipBLASLt MXFP4 path fails in the `te.Linear` backward.
+- Dense MXFP4 GEMM has no backend choice: TE runs it on AITER a4w4 on gfx950 (`aiter`) and
+  on FlyDSL on gfx1250 (`flydsl`, no fallback). TE's opt-in hipBLASLt MXFP4 path (gfx950)
+  fails in the `te.Linear` backward.
 - HipKittens needs gfx950 and N and K divisible by 256; MXFP8 and MXFP4 GEMMs need
-  32-aligned dimensions (hipBLASLt MXFP8 on gfx950 needs K divisible by 128). Unaligned
-  shapes are skipped.
+  32-aligned dimensions (hipBLASLt MXFP8 on gfx950 needs K divisible by 128; FlyDSL MXFP4
+  needs each GEMM's output dims divisible by 256 and K divisible by 128). Unaligned shapes
+  are skipped.
 - Known backend bugs on specific shapes are marked xfail (failing configs) or skipped
   (configs that hang); the reasons are in the benchmark files.
 

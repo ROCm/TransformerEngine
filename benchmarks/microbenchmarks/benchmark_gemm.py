@@ -58,8 +58,9 @@ RECIPES = build_recipes()
 # NVTE_ROCM_USE_HIPBLASLT_MXFP8 (rocm_gemm.cu). fp8 has a single backend. Blockwise FP8
 # (fp8_block_*) GEMMs only run on HipKittens (rocm_gemm.cu). FlyDSL
 # (gfx950-only, BF16/FP8/MXFP8) is NVTE_GEMM_BACKEND=FLYDSL (cpp_extensions/gemm.py).
-# mxfp4 runs AITER a4w4 unless NVTE_ROCM_USE_HIPBLASLT_MXFP4=1 (cpp_extensions/gemm.py);
-# that hipBLASLt path fails in the te.Linear backward, so it isn't benchmarked.
+# mxfp4 has no selector: on gfx1250 every MXFP4 GEMM runs FlyDSL (PR #786, no fallback);
+# on gfx950 it runs AITER a4w4 unless NVTE_ROCM_USE_HIPBLASLT_MXFP4=1 (cpp_extensions/
+# gemm.py); that hipBLASLt path fails in the te.Linear backward, so it isn't benchmarked.
 _GEMM_TRITON = "NVTE_USE_GEMM_TRITON"
 _HIPBLASLT_MXFP8 = "NVTE_ROCM_USE_HIPBLASLT_MXFP8"
 _HIPBLASLT_MXFP4 = "NVTE_ROCM_USE_HIPBLASLT_MXFP4"
@@ -83,7 +84,7 @@ _BACKENDS_BY_PRECISION = {
     "fp8_block_e8m0": ["hipkittens"],
     "fp8_block_fp32": ["hipkittens"],
     "mxfp8": ["hipblaslt", "hipkittens", "flydsl"],
-    "mxfp4": ["aiter"],
+    "mxfp4": ["aiter", "flydsl"],
 }
 
 
@@ -255,10 +256,23 @@ def pytest_generate_tests(metafunc):
 
 @pytest.mark.benchmark
 def test_gemm(microbench, case, monkeypatch):
-    if case["Precision"] == "mxfp4" and any(
-        dim % 32 for dim in (case["M"], case["N"], case["K"])
-    ):
-        pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
+    if case["Precision"] == "mxfp4":
+        # TE has no MXFP4 backend selector: it runs FlyDSL on gfx1250 (PR #786) and
+        # AITER a4w4 on gfx950, so record each arch only under the backend that runs.
+        mxfp4_backend = "flydsl" if _device_cc() == (12, 5) else "aiter"
+        if case["Backend"] != mxfp4_backend:
+            pytest.skip(f"MXFP4 GEMM always runs {mxfp4_backend} on this GPU")
+        if any(dim % 32 for dim in (case["M"], case["N"], case["K"])):
+            pytest.skip("MXFP4 GEMM needs M/N/K divisible by 32")
+        if mxfp4_backend == "flydsl":
+            # FlyDSL MXFP4 tiles 256x256x128 and can't fall back: each GEMM needs its
+            # output dims divisible by 256 and its contraction dim by 128 (at least 256).
+            # bwd adds dgrad (M x K over N) and wgrad (N x K over M).
+            out_dims = ((case["M"], case["N"]) if case["Direction"] == "fwd"
+                        else (case["M"], case["N"], case["K"]))
+            if any(dim % 256 for dim in out_dims) or case["K"] % 128 or case["K"] < 256:
+                pytest.skip("FlyDSL MXFP4 GEMM needs 256-aligned output dims and K "
+                            "divisible by 128 (at least 256)")
     if case["Precision"] == "mxfp8":
         # Block-quantize needs every operand dim divisible by 32; the GEMM needs
         # each contraction dim divisible by _mxfp8_gemm_k_multiple() -- K for fwd,
@@ -285,7 +299,8 @@ def test_gemm(microbench, case, monkeypatch):
     if (case["Backend"] == "hipkittens" and case["Precision"] == "mxfp8"
             and (case["N"] % 256 or case["K"] % 256)):
         pytest.skip("HipKittens MXFP8 GEMM needs 256-aligned N/K")
-    if case["Backend"] == "flydsl" and not _flydsl_gemm_supported():
+    if (case["Backend"] == "flydsl" and case["Precision"] != "mxfp4"
+            and not _flydsl_gemm_supported()):
         pytest.skip("FlyDSL GEMM backend not available (needs gfx950 + flydsl package)")
     if case["Backend"] == "aiter" and importlib.util.find_spec("aiter") is None:
         pytest.skip("aiter is not installed (required for the MXFP4 GEMM backend)")
