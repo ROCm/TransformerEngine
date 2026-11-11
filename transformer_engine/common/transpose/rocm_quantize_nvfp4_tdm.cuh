@@ -86,7 +86,6 @@ __device__ __forceinline__ uint2 encode_block(const float *x, const float encode
 // The tensor-level scales of an encoding, as block_scaled_1d_cast_transpose_kernel derives them.
 struct GlobalScales {
   float encode;
-  float encode_multiplier;
   float decode;
   float amax;  // what 4over6 dequantizes with
 };
@@ -96,7 +95,6 @@ __device__ __forceinline__ GlobalScales global_scales(const float *global_amax,
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   GlobalScales s;
   s.encode = global_amax == nullptr ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
-  s.encode_multiplier = s.encode * (1.0f / fp4_max);
   s.decode = 1.0 / s.encode;
   s.amax = global_amax == nullptr ? fp4_max * e4m3_max : global_amax[0];
   return s;
@@ -109,7 +107,6 @@ __device__ __forceinline__ GlobalScales row_global_scales(const float *global_am
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   GlobalScales s;
   s.encode = row < rows ? ComputeGlobalEncodeScaleFP4(global_amax[row], e4m3_max) : 1.0f;
-  s.encode_multiplier = s.encode * (1.0f / fp4_max);
   s.decode = 1.0f / s.encode;
   s.amax = row < rows ? global_amax[row] : fp4_max * e4m3_max;
   return s;
@@ -123,7 +120,8 @@ __device__ __forceinline__ fp8e4m3 block_scale(const float *x, const float amax,
                                                const float err_denom, float err6, float err4,
                                                float &encode_scale) {
   if constexpr (!k4Over6) {
-    const fp8e4m3 scale_inv = ComputeDecodeScaleFP4<fp8e4m3>(amax, g.encode_multiplier);
+    const fp8e4m3 scale_inv =
+        dispatch::nvfp4::core::compute_decoding_scaling_factor<fp8e4m3>(amax, g.encode);
     encode_scale = ComputeEncodeScaleFP4<fp8e4m3>(scale_inv, g.decode);
     return scale_inv;
   } else {

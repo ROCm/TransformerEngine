@@ -5,84 +5,16 @@
 # Blockwise FP8 grouped GEMM Triton kernels (MoE), adapted from AMD Primus-Turbo
 # (primus_turbo/triton/grouped_gemm/grouped_gemm_fp8_kernel.py).
 
-import contextlib
-import os
-
 import torch
 import triton
 import triton.language as tl
 
-from .common import is_cdna3
+from .common import _amd_compiler_knobs
 from .gmm.pid_preprocessing import remap_xcd_chunked
 
 
 def get_num_cus() -> int:
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-
-
-# ── AMD compiler knobs (scoped) ──
-# The AMD codegen toggles live on ``triton.knobs.amd`` and are process-global: they
-# are read when a kernel is compiled, so leaving them set would silently change the
-# codegen of every unrelated Triton kernel compiled afterwards (cast, gmm, MXFP8,
-# ...). We therefore apply them only around our own launches and restore the prior
-# state on exit. Triton's setter keeps the backing env var in sync with the
-# attribute, so we snapshot/restore both.
-_AMD_KNOB_ENV = {
-    "use_async_copy": "TRITON_HIP_USE_ASYNC_COPY",
-    "scalarize_packed_fops": "AMDGCN_SCALARIZE_PACKED_FOPS",
-    "use_block_pingpong": "TRITON_HIP_USE_BLOCK_PINGPONG",
-}
-
-
-def _amd_knob_overrides(*, is_tn: bool) -> dict:
-    """Knob values to apply for the enclosed GEMM launch.
-
-    gfx950 (CDNA4): force async_copy / scalarize / block_pingpong on.
-    gfx942 (CDNA3): async_copy / scalarize help NT/NN but regress TN/wgrad
-    ~5-8%, so gate them on the GEMM layout (block_pingpong left at its default).
-    """
-    if is_cdna3():
-        enable = not is_tn
-        return {"use_async_copy": enable, "scalarize_packed_fops": enable}
-    return {
-        "use_async_copy": True,
-        "scalarize_packed_fops": True,
-        "use_block_pingpong": True,
-    }
-
-
-@contextlib.contextmanager
-def _amd_compiler_knobs(*, is_tn: bool):
-    """Temporarily apply AMD Triton compiler knobs, restoring prior state on exit.
-
-    Scoped rather than set once because the knobs are process-global and read at
-    kernel compile time; leaving them set would leak into other kernels' codegen.
-    """
-    amd = getattr(getattr(triton, "knobs", None), "amd", None)
-    if amd is None:
-        yield
-        return
-    overrides = _amd_knob_overrides(is_tn=is_tn)
-    saved = {
-        name: (name in amd.__dict__, amd.__dict__.get(name), os.environ.get(env_key))
-        for name, env_key in _AMD_KNOB_ENV.items()
-        if name in overrides
-    }
-    try:
-        for name, value in overrides.items():
-            setattr(amd, name, value)
-        yield
-    finally:
-        for name, (had_override, override_val, env_val) in saved.items():
-            if had_override:
-                amd.__dict__[name] = override_val
-            else:
-                amd.__dict__.pop(name, None)
-            env_key = _AMD_KNOB_ENV[name]
-            if env_val is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = env_val
 
 
 # Number of XCDs used for round-robin PID swizzling (see ``remap_xcd_chunked``)
