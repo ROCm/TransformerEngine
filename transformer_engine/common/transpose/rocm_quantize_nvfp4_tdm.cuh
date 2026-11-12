@@ -490,14 +490,17 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 // Whether quantize_kernel takes an NVFP4 quantize: TDM applies, packed rows are whole 16-byte TDM
-// units, and it is not one of the modes left to block_scaled_1d_cast_transpose_kernel; swizzled
-// scales are requested only on GPUs without TDM, and 4over6 never with stochastic rounding.
+// units, the block scales are E4M3, and it is not one of the modes left to
+// block_scaled_1d_cast_transpose_kernel; swizzled scales are requested only on GPUs without TDM,
+// and 4over6 never with stochastic rounding.
 inline bool supported(const SimpleTensor &input, const SimpleTensor &output,
-                      const SimpleTensor &output_t, const size_t rows, const size_t cols,
+                      const SimpleTensor &output_t, const SimpleTensor &scale_inv,
+                      const SimpleTensor &scale_inv_t, const size_t rows, const size_t cols,
                       const bool rowwise, const bool colwise, const bool swizzled,
                       const bool use_4over6, const bool use_sr) {
   return !(use_4over6 && use_sr) && !swizzled && is_high_precision_dtype(input.dtype) &&
-         (!rowwise || cols % 32 == 0) && (!colwise || rows % 32 == 0) &&
+         (!rowwise || (cols % 32 == 0 && scale_inv.dtype == DType::kFloat8E4M3)) &&
+         (!colwise || (rows % 32 == 0 && scale_inv_t.dtype == DType::kFloat8E4M3)) &&
          dispatch::common::use_tdm(rows, cols, {input.dptr, rowwise ? output.dptr : nullptr,
                                                 colwise ? output_t.dptr : nullptr});
 }
@@ -539,8 +542,8 @@ inline bool quantize(const SimpleTensor &input, const SimpleTensor &global_amax,
                      const NVTENVFP44Over6Mode mode_4over6, const float *noop,
                      const float e4m3_max, cudaStream_t stream) {
   const bool use_4over6 = mode_4over6 != kNVTENVFP44Over6Disabled;
-  if (!supported(input, output, output_t, rows, cols, rowwise, colwise, swizzled, use_4over6,
-                 use_sr)) {
+  if (!supported(input, output, output_t, scale_inv, scale_inv_t, rows, cols, rowwise, colwise,
+                 swizzled, use_4over6, use_sr)) {
     return false;
   }
   const auto *amax = reinterpret_cast<const float *>(global_amax.dptr);
@@ -567,12 +570,14 @@ inline bool quantize(const SimpleTensor &input, const SimpleTensor &global_amax,
 
 // Whether quantize_rht applies: BF16 input, 1D scaling, and what quantize_kernel takes.
 inline bool supported_rht(const SimpleTensor &input, const SimpleTensor &output,
-                          const SimpleTensor &output_t, const size_t rows, const size_t cols,
+                          const SimpleTensor &output_t, const SimpleTensor &scale_inv,
+                          const SimpleTensor &scale_inv_t, const size_t rows, const size_t cols,
                           const bool use_2d, const bool swizzled) {
   const bool rowwise = output.dptr != nullptr;
   const bool colwise = output_t.dptr != nullptr;
   return input.dtype == DType::kBFloat16 && !use_2d && (rowwise || colwise) &&
-         supported(input, output, output_t, rows, cols, rowwise, colwise, swizzled, false, false);
+         supported(input, output, output_t, scale_inv, scale_inv_t, rows, cols, rowwise, colwise,
+                   swizzled, false, false);
 }
 
 // The rowwise NVFP4 of the BF16 input and the columnwise NVFP4 of the RHT of its transpose, as
@@ -665,7 +670,8 @@ inline bool group_quantize(const Tensor &input, const std::vector<Tensor *> &out
     if (output.has_data() != rowwise || output.has_columnwise_data() != colwise ||
         output_e4m3_max != e4m3_max || output.row_scaled_nvfp4 ||
         !supported(SimpleTensor(const_cast<void *>(split), {rows, cols}, DType::kBFloat16),
-                   output.data, output.columnwise_data, rows, cols, rowwise, colwise,
+                   output.data, output.columnwise_data, output.scale_inv,
+                   output.columnwise_scale_inv, rows, cols, rowwise, colwise,
                    output.with_gemm_swizzled_scales, use_4over6, use_sr) ||
         (with_rht && rows % kBlockDim != 0)) {
       return false;

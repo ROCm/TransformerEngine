@@ -1350,7 +1350,8 @@ bool quantize_with_hadamard_transform_supported(const Tensor& input, const Tenso
   using namespace transformer_engine::quantize_transpose_nvfp4;
   const auto [num_rows, row_length] = input.flat_2d_dims();
   return config.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled && !output.row_scaled_nvfp4 &&
-         nvfp4_tdm::supported_rht(input.data, output.data, output.columnwise_data, num_rows,
+         nvfp4_tdm::supported_rht(input.data, output.data, output.columnwise_data,
+                                  output.scale_inv, output.columnwise_scale_inv, num_rows,
                                   row_length, config.nvfp4_2d_quantization,
                                   output.with_gemm_swizzled_scales);
 }
