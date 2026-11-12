@@ -2280,9 +2280,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
 #endif
   }
+#ifdef USE_HIPKITTENS_GEMM
   if (is_fp8_block_scaling(inputA->scaling_mode) || is_fp8_block_scaling(inputB->scaling_mode)) {
     check_blockwise_fp8_gemm(inputA, inputB, is_transa, is_transb, k);
   }
+#endif
 
   const int lda = is_transa ? k : m;
   const int ldb = is_transb ? n : k;

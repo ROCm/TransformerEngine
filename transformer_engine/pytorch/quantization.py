@@ -363,6 +363,7 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         return 256
     if IS_HIP_EXTENSION and recipe.float8_block_scaling():
         # ROCm blockwise FP8 GEMMs need K % 128 == 0, and the split size is K in grouped wgrad.
+        # Triton GroupedLinear pads K itself but falls back to these GEMMs when ineligible.
         return 128
     return 16
 

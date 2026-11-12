@@ -1014,7 +1014,7 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
                               cudaStream_t stream) {
   using namespace transformer_engine;
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_HIPKITTENS_GEMM
   // Check the blockwise FP8 rules of every GEMM before any is queued on the compute streams.
   for (int i = 0; i < num_gemms; i++) {
     const Tensor *inputA = convertNVTETensorCheck(A[i]);
