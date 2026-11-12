@@ -16,7 +16,6 @@
 #include <transformer_engine/cast.h>
 
 #include <algorithm>
-#include <limits>
 
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
@@ -28,6 +27,8 @@
 #include "specialized/swizzle.cuh"
 #include "swizzle.cuh"
 #else
+#include <limits>
+
 #include "../rocm_fused_group_requantize.cuh"
 #endif
 

@@ -629,14 +629,13 @@ struct GroupedTensor {
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
         with_gemm_swizzled_scales(false),
-        row_scaled_nvfp4(false)
 #ifdef __HIP_PLATFORM_AMD__
-        ,
+        row_scaled_nvfp4(false),
         mxfp4_shuffle_rowwise_data(false),
-        mxfp4_shuffle_columnwise_data(false)
+        mxfp4_shuffle_columnwise_data(false) {}
+#else
+        row_scaled_nvfp4(false) {}
 #endif
-  {
-  }
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 

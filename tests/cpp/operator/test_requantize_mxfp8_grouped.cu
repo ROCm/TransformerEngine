@@ -303,10 +303,6 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
   }
-  constexpr bool kSwizzled = true;
-#else
-  // ROCm writes compact output scales only.
-  constexpr bool kSwizzled = false;
 #endif
 
   const GroupShapeInfo shape_info = make_shape_info({"Single", {{128, 128}}});
@@ -324,8 +320,11 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   auto output = make_grouped_tensor(shape_info, DType::kFloat8E4M3,
                                     NVTE_MXFP8_1D_SCALING,
                                     /*rowwise=*/false, /*columnwise=*/true,
-                                    /*swizzled=*/kSwizzled);
-#ifdef __HIP_PLATFORM_AMD__
+#ifndef __HIP_PLATFORM_AMD__
+                                    /*swizzled=*/true);
+#else
+                                    /*swizzled=*/false);
+  // ROCm writes compact output scales only.
   output.tensor->set_with_gemm_swizzled_scales(true);
   EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
                std::runtime_error);
@@ -341,7 +340,9 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
   output.tensor->set_with_gemm_swizzled_scales(false);
   nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
-  output.tensor->set_with_gemm_swizzled_scales(kSwizzled);
+#ifndef __HIP_PLATFORM_AMD__
+  output.tensor->set_with_gemm_swizzled_scales(true);
+#endif
 
   output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
                                    data_shape);
@@ -358,10 +359,10 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
 
   output.tensor->set_rowwise_scale_inv(input.rowwise_scale_inv.get(),
                                         DType::kFloat8E8M0, scale_shape);
-  if (kSwizzled) {
-    EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
-                 std::runtime_error);
-  }
+#ifndef __HIP_PLATFORM_AMD__
+  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
+               std::runtime_error);
+#endif
 
   output.tensor->set_with_gemm_swizzled_scales(false);
   nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0);

@@ -7,7 +7,7 @@
 add_executable(test_operator
                test_cast.cu
                test_cast_current_scaling.cu
-               test_cast_current_scaling_grouped.cu #CUDA-only test
+               test_cast_current_scaling_grouped.cu
                test_cast_dbias.cu
                test_cast_dbias_dgelu.cu
                test_cast_gated_swiglu.cu
@@ -17,14 +17,14 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
-               test_row_scaled_nvfp4_grouped_amax.cu #CUDA-only test
-               test_row_scaled_nvfp4_grouped_cast.cu #CUDA-only test
+               test_row_scaled_nvfp4_grouped_amax.cu
+               test_row_scaled_nvfp4_grouped_cast.cu
                test_cast_float8blockwise.cu
-               test_cast_float8blockwise_grouped.cu #CUDA-only test
+               test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
                test_requantize_mxfp8_grouped.cu
-               test_dequantize_float8blockwise_grouped.cu #CUDA-only test
+               test_dequantize_float8blockwise_grouped.cu
                test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
@@ -46,9 +46,9 @@ add_executable(test_operator
                test_causal_softmax.cu
                test_swizzle.cu
                test_multi_swizzle.cu
-               test_swizzle_block_scaling.cu #CUDA-only test
+               test_swizzle_block_scaling.cu
                test_swap_first_dims.cu
-               test_grouped_gemm.cu #CUDA-only test
+               test_grouped_gemm.cu
                ../test_common.cu)
 
 if(USE_ROCM)
