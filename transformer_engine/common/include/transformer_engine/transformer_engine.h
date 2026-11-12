@@ -598,15 +598,12 @@ enum NVTEGroupedTensorParam {
       9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
   kNVTEGroupedWithGEMMSwizzledScales =
       10, /*!< Whether scaling factors are in format expected by GEMM */
-<<<<<<< HEAD
-#ifdef USE_ROCM
-  kNVTEGroupedMXFP4ShuffleRowwiseData = 11,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
-  kNVTEGroupedMXFP4ShuffleColumnwiseData = 12,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
-#endif
-=======
   kNVTEGroupedRowScaledNVFP4 =
       11, /*!< Whether NVFP4 data uses row scaling instead of tensor scaling */
->>>>>>> 1f251a125
+#ifdef USE_ROCM
+  kNVTEGroupedMXFP4ShuffleRowwiseData = 12,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
+  kNVTEGroupedMXFP4ShuffleColumnwiseData = 13,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
+#endif
   kNVTENumGroupedTensorParams
 };
 
@@ -1377,7 +1374,11 @@ class GroupedTensorWrapper {
     nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
-<<<<<<< HEAD
+  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
+    const auto val = static_cast<uint8_t>(row_scaled_nvfp4);
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val));
+  }
+
 #ifdef USE_ROCM
   void set_mxfp4_shuffle_rowwise_data(bool shuffle_rowwise_data) {
     const auto val = static_cast<uint8_t>(shuffle_rowwise_data);
@@ -1390,15 +1391,7 @@ class GroupedTensorWrapper {
   }
 #endif
 
-// Parameter getters
-=======
-  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
-    const auto val = static_cast<uint8_t>(row_scaled_nvfp4);
-    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val));
-  }
-
   // Parameter getters
->>>>>>> 1f251a125
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
     NVTEBasicTensor ret;
     nvte_get_grouped_tensor_param(tensor_, param, &ret, sizeof(ret), nullptr);
@@ -1444,7 +1437,12 @@ class GroupedTensorWrapper {
     return static_cast<bool>(val);
   }
 
-<<<<<<< HEAD
+  bool get_row_scaled_nvfp4() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
 #ifdef USE_ROCM
   bool get_mxfp4_shuffle_rowwise_data() const {
     uint8_t val = 0;
@@ -1459,14 +1457,6 @@ class GroupedTensorWrapper {
   }
 #endif
 
-=======
-  bool get_row_scaled_nvfp4() const {
-    uint8_t val = 0;
-    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val), nullptr);
-    return static_cast<bool>(val);
-  }
-
->>>>>>> 1f251a125
   /*! \brief Get an underlying NVTEGroupedTensor.
    *
    *  \return NVTEGroupedTensor held by this GroupedTensorWrapper.

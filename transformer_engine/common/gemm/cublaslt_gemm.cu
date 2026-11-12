@@ -953,7 +953,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 }  // namespace transformer_engine
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 int nvte_get_cublaslt_build_version() { return CUBLAS_VERSION; }
+#endif
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,

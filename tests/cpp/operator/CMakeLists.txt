@@ -17,23 +17,14 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
-<<<<<<< HEAD
                test_row_scaled_nvfp4_grouped_amax.cu #CUDA-only test
-=======
-               test_row_scaled_nvfp4_grouped_amax.cu
-               test_row_scaled_nvfp4_grouped_cast.cu
->>>>>>> 1f251a125
+               test_row_scaled_nvfp4_grouped_cast.cu #CUDA-only test
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
-<<<<<<< HEAD
-               test_fused_group_requantize_mxfp8.cu
-               test_dequantize_float8blockwise_grouped.cu #CUDA-only test
-=======
                test_requantize_mxfp8_grouped.cu
-               test_dequantize_float8blockwise_grouped.cu
->>>>>>> 1f251a125
+               test_dequantize_float8blockwise_grouped.cu #CUDA-only test
                test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
@@ -55,7 +46,7 @@ add_executable(test_operator
                test_causal_softmax.cu
                test_swizzle.cu
                test_multi_swizzle.cu
-               test_swizzle_block_scaling.cu
+               test_swizzle_block_scaling.cu #CUDA-only test
                test_swap_first_dims.cu
                test_grouped_gemm.cu #CUDA-only test
                ../test_common.cu)
@@ -66,6 +57,8 @@ if(USE_ROCM)
   list(REMOVE_ITEM test_cuda_sources
               test_grouped_gemm.cu
               test_row_scaled_nvfp4_grouped_amax.cu
+              test_row_scaled_nvfp4_grouped_cast.cu
+              test_swizzle_block_scaling.cu
               test_cast_current_scaling_grouped.cu
               test_cast_float8blockwise_grouped.cu
               test_dequantize_float8blockwise_grouped.cu)
@@ -110,9 +103,6 @@ else()
 # Keep all operator tests in one process so CUDA initialization and, when enabled,
 # the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
 # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
-<<<<<<< HEAD
-add_test(NAME test_operator COMMAND test_operator)
-=======
 # For debugging, configure with NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL=1 to register each GoogleTest case as
 # its own ctest test, so failures are reported per case and can be selected with `ctest -R`.
 if("$ENV{NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL}" STREQUAL "1")
@@ -120,5 +110,5 @@ if("$ENV{NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL}" STREQUAL "1")
   gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600 DISCOVERY_MODE PRE_TEST)
 else()
   add_test(NAME test_operator COMMAND test_operator)
->>>>>>> 1f251a125
+endif()
 endif()

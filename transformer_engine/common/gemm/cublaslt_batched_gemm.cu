@@ -1,9 +1,12 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 #include <cublasLt.h>
 #include <cuda.h>
 #include <transformer_engine/gemm.h>
@@ -400,3 +403,29 @@ void nvte_cublas_gemm_strided_batched_mxfp8(int transa, int transb, const float 
       transb ? CUBLAS_OP_T : CUBLAS_OP_N, MakeBatchedMatrix(C_tensor->data, batch_dim_d, "C"),
       MakeBatchedMatrix(D_tensor->data, batch_dim_d, "D"), alpha, beta, workspace, config, stream);
 }
+
+#else  // __HIP_PLATFORM_AMD__
+
+#include <transformer_engine/gemm.h>
+
+#include "../util/logging.h"
+
+void nvte_cublas_gemm_strided_batched(int transa, int transb, const float *alpha,
+                                      const NVTETensor A, int batch_dim_a, const NVTETensor B,
+                                      int batch_dim_b, const float *beta, const NVTETensor C,
+                                      NVTETensor D, int batch_dim_d, NVTETensor workspace,
+                                      NVTEMatmulConfig config, cudaStream_t stream) {
+  NVTE_ERROR("nvte_cublas_gemm_strided_batched is not supported on ROCm yet");
+}
+
+void nvte_cublas_gemm_strided_batched_mxfp8(int transa, int transb, const float *alpha,
+                                            const NVTETensor A_data, const NVTETensor A_scale_inv,
+                                            int batch_dim_a, const NVTETensor B_data,
+                                            const NVTETensor B_scale_inv, int batch_dim_b,
+                                            const float *beta, const NVTETensor C, NVTETensor D,
+                                            int batch_dim_d, NVTETensor workspace,
+                                            NVTEMatmulConfig config, cudaStream_t stream) {
+  NVTE_ERROR("nvte_cublas_gemm_strided_batched_mxfp8 is not supported on ROCm yet");
+}
+
+#endif  // __HIP_PLATFORM_AMD__

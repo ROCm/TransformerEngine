@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -107,7 +109,11 @@ __global__ void __launch_bounds__(kScanThreads) kernel(KernelArgs args) {
       if (tid == 0) {
         NVTE_DEVICE_ERROR(
             "Grouped split size must be nonnegative and divisible by split_alignment.");
+#ifdef __HIP_PLATFORM_AMD__
+        __builtin_trap();
+#else
         __trap();  // NVTE_DEVICE_ERROR's assert is compiled out of release builds.
+#endif
       }
       return;
     }

@@ -584,15 +584,13 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
-<<<<<<< HEAD
+  /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
+  bool row_scaled_nvfp4 = false;
+
 #ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_shuffle_rowwise_data = false;
   bool mxfp4_shuffle_columnwise_data = false;
 #endif
-=======
-  /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
-  bool row_scaled_nvfp4 = false;
->>>>>>> 1f251a125
 
   /*! Map from NVTEGroupedTensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -606,17 +604,13 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
-<<<<<<< HEAD
-      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
 #ifdef __HIP_PLATFORM_AMD__
       ,
       sizeof(uint8_t),          // kNVTEGroupedMXFP4ShuffleRowwiseData
       sizeof(uint8_t)           // kNVTEGroupedMXFP4ShuffleColumnwiseData
 #endif
-=======
-      sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
-      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
->>>>>>> 1f251a125
   };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -634,16 +628,15 @@ struct GroupedTensor {
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
-<<<<<<< HEAD
-#ifdef __HIP_PLATFORM_AMD__
-        mxfp4_shuffle_rowwise_data(false),
-        mxfp4_shuffle_columnwise_data(false),
-#endif
-        with_gemm_swizzled_scales(false) {}
-=======
         with_gemm_swizzled_scales(false),
-        row_scaled_nvfp4(false) {}
->>>>>>> 1f251a125
+        row_scaled_nvfp4(false)
+#ifdef __HIP_PLATFORM_AMD__
+        ,
+        mxfp4_shuffle_rowwise_data(false),
+        mxfp4_shuffle_columnwise_data(false)
+#endif
+  {
+  }
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
@@ -696,14 +689,11 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
-<<<<<<< HEAD
+    row_scaled_nvfp4 = false;
 #ifdef __HIP_PLATFORM_AMD__
     mxfp4_shuffle_rowwise_data = false;
     mxfp4_shuffle_columnwise_data = false;
 #endif
-=======
-    row_scaled_nvfp4 = false;
->>>>>>> 1f251a125
   }
 };
 
@@ -1271,13 +1261,10 @@ template <>
 struct is_fp4<fp4e2m1> : std::true_type {};
 #endif
 
-<<<<<<< HEAD
-#ifndef __HIP_PLATFORM_AMD__
-=======
 // Number of values represented by one MXFP8 E8M0 scaling factor.
 constexpr size_t MXFP8_SCALE_DIM = 32;
 
->>>>>>> 1f251a125
+#ifndef __HIP_PLATFORM_AMD__
 // [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;

@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -14,15 +16,20 @@
 #include <transformer_engine/cast.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/ptx.cuh"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "../core/grouped_tma.cuh"
 #include "specialized/swizzle.cuh"
 #include "swizzle.cuh"
+#else
+#include "../rocm_fused_group_requantize.cuh"
+#endif
 
 #ifdef NVTE_WITH_CUTEDSL
 #include "requantize_mxfp8_cutedsl.cuh"
@@ -31,6 +38,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
+#ifndef __HIP_PLATFORM_AMD__  // ROCm kernel in rocm_fused_group_requantize.cuh
 namespace group_requantize_kernel {
 
 using namespace dispatch::common;
@@ -785,18 +793,23 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
 }
 
 }  // namespace group_requantize_kernel
+#endif  // __HIP_PLATFORM_AMD__
 
 void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
                       cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   using namespace group_requantize_kernel;
 
   checkCuDriverContext(stream);
+#endif
   NVTE_CHECK(input.scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Grouped requantization currently supports only MXFP8 1D scaling for the input.");
   NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Grouped requantization currently supports only MXFP8 1D scaling for the output.");
+#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK(is_supported_by_CC_100(),
              "Grouped MXFP8 requantization requires Blackwell (SM100+) hardware.");
+#endif
   CheckInputGroupedTensor(input, "group_requantize_input");
   // The rowwise output is optional, including when its data aliases the input
   // but no scale copy is requested. Validate the mandatory columnwise output
@@ -851,9 +864,15 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
              "Input and output grouped shape representations must match.");
   NVTE_CHECK(input.data.dptr != output->columnwise_data.dptr,
              "In-place MXFP8 data requantization is not supported.");
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_CHECK(is_aligned_ptr(input.data.dptr, ROCM_VEC_BYTES) &&
+                 is_aligned_ptr(output->columnwise_data.dptr, ROCM_VEC_BYTES),
+             "Input and output data pointers must be 16-byte aligned.");
+#else
   NVTE_CHECK(is_aligned_ptr(input.data.dptr, TMA_GMEM_ALIGNMENT) &&
                  is_aligned_ptr(output->columnwise_data.dptr, TMA_GMEM_ALIGNMENT),
              "Input and output data pointers must be 16-byte aligned.");
+#endif
 
   ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   if (input.all_same_shape()) {
@@ -888,6 +907,35 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
 
+#ifdef __HIP_PLATFORM_AMD__
+  // The ROCm kernel writes compact scales only, for groups that share the hidden dimension.
+  NVTE_CHECK(!output->with_gemm_swizzled_scales,
+             "GEMM-swizzled requantization output scales are not supported on ROCm.");
+  NVTE_CHECK(shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM,
+             "Grouped MXFP8 requantization with varying last dimensions is not supported on ROCm.");
+  // Each group's row count must be a multiple of 128 too. Those counts live on the device,
+  // so that half is the caller's contract rather than an assertion.
+  NVTE_CHECK(first_logical_dim % 128 == 0 && last_logical_dim % 128 == 0,
+             "Grouped MXFP8 requantization on ROCm requires dims that are multiples of 128, but "
+             "got (",
+             first_logical_dim, ", ", last_logical_dim, ").");
+  constexpr size_t kMaxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+  NVTE_CHECK(first_logical_dim <= kMaxInt && last_logical_dim <= kMaxInt,
+             "Grouped MXFP8 requantization dimensions must fit in int32.");
+  NVTE_CHECK(first_logical_dim / rocm_colwise_mxfp8::kTileRows <= 65535,
+             "The number of rows is too large for the 2D launch grid.");
+  if (first_logical_dim == 0) {
+    return;
+  }
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      input.data.dtype, IType,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          return_dequantized, RETURN_DEQUANTIZED,
+          requantize::rocm_launch_group_requantize<IType, RETURN_DEQUANTIZED>(
+              input, output, dequantized, static_cast<int>(first_logical_dim),
+              static_cast<int>(last_logical_dim), stream);););  // NOLINT(*)
+#else
 #ifdef NVTE_WITH_CUTEDSL
   if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, stream)) {
     NVTE_CHECK_CUDA(cudaGetLastError());
@@ -909,6 +957,7 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
                     last_logical_dim, total_elements, offsets_ptr, first_dims_ptr, last_dims_ptr,
                     shape_rep, stream);
               }););););  // NOLINT(*), readability/fn_size
+#endif  // __HIP_PLATFORM_AMD__
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

@@ -678,6 +678,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
                  "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
       NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
                  "Grouped row-scaled NVFP4 quantization does not support 4over6.");
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
       if (input_tensor->num_tensors == 0) {
         break;
       }
@@ -689,6 +690,9 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
           scale_dtype, ScaleType,
           nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
               input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
+#else
+      NVTE_ERROR("Grouped NVFP4 quantization is not supported on ROCm platform.");
+#endif
       break;
     }
     default:

@@ -172,15 +172,12 @@
         py::call_guard<py::gil_scoped_release>());                                                 \
   m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
         py::call_guard<py::gil_scoped_release>());                                                 \
-<<<<<<< HEAD
+  m.def("nvte_cublasmp_version", &nvte_cublasmp_version,                                           \
+        py::call_guard<py::gil_scoped_release>());                                                 \
   NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                          \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
       .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
       .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);
-=======
-  m.def("nvte_cublasmp_version", &nvte_cublasmp_version, py::call_guard<py::gil_scoped_release>());
-
->>>>>>> 1f251a125
 #endif

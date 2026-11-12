@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -297,9 +299,15 @@ TEST(GroupedRequantizeTest, RejectsUnsupportedScalingModes) {
 }
 
 TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
+#ifndef __HIP_PLATFORM_AMD__
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
   }
+  constexpr bool kSwizzled = true;
+#else
+  // ROCm writes compact output scales only.
+  constexpr bool kSwizzled = false;
+#endif
 
   const GroupShapeInfo shape_info = make_shape_info({"Single", {{128, 128}}});
   const std::vector<size_t> data_shape = {shape_info.total_elements};
@@ -316,7 +324,13 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   auto output = make_grouped_tensor(shape_info, DType::kFloat8E4M3,
                                     NVTE_MXFP8_1D_SCALING,
                                     /*rowwise=*/false, /*columnwise=*/true,
-                                    /*swizzled=*/true);
+                                    /*swizzled=*/kSwizzled);
+#ifdef __HIP_PLATFORM_AMD__
+  output.tensor->set_with_gemm_swizzled_scales(true);
+  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
+               std::runtime_error);
+  output.tensor->set_with_gemm_swizzled_scales(false);
+#endif
   // Both rowwise output fields may be absent, including with an unallocated
   // optional dequantized descriptor (the faster path must still be selected).
   TensorWrapper unallocated;
@@ -327,7 +341,7 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
   output.tensor->set_with_gemm_swizzled_scales(false);
   nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
-  output.tensor->set_with_gemm_swizzled_scales(true);
+  output.tensor->set_with_gemm_swizzled_scales(kSwizzled);
 
   output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
                                    data_shape);
@@ -344,8 +358,10 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
 
   output.tensor->set_rowwise_scale_inv(input.rowwise_scale_inv.get(),
                                         DType::kFloat8E8M0, scale_shape);
-  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
-               std::runtime_error);
+  if (kSwizzled) {
+    EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
+                 std::runtime_error);
+  }
 
   output.tensor->set_with_gemm_swizzled_scales(false);
   nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0);
@@ -359,9 +375,11 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
 }
 
 TEST(GroupedRequantizeTest, BF16IntermediateIgnoresFastMath) {
+#ifndef __HIP_PLATFORM_AMD__
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
   const auto shape_info = make_shape_info({"Single", {{128, 128}}});
   auto input = make_grouped_tensor(shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
                                    /*rowwise=*/true, /*columnwise=*/false);
@@ -400,9 +418,11 @@ TEST(GroupedRequantizeTest, BF16IntermediateIgnoresFastMath) {
 }
 
 TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
+#ifndef __HIP_PLATFORM_AMD__
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
   }
+#endif
 
   const auto &test_case = std::get<0>(GetParam());
   const DType input_dtype = std::get<1>(GetParam());
@@ -410,6 +430,14 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   const bool output_swizzled = std::get<3>(GetParam());
   const DType intermediate_dtype = DType::kBFloat16;
   const GroupShapeInfo shape_info = make_shape_info(test_case);
+#ifdef __HIP_PLATFORM_AMD__
+  if (output_swizzled) {
+    GTEST_SKIP() << "ROCm writes compact requantization output scales only";
+  }
+  if (!shape_info.same_last_dim) {
+    GTEST_SKIP() << "ROCm requantization requires groups that share the hidden dimension";
+  }
+#endif
 
   // Build a production-like wire tensor: high precision -> grouped rowwise
   // MXFP8 with compact scales. This is the only input representation accepted

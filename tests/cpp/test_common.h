@@ -119,20 +119,10 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-<<<<<<< HEAD
-            // DType may list more types than this build provides (e.g. FP8 UE5M3 needs CUDA 13.4)
-            if constexpr (i >= static_cast<int>(std::tuple_size<types>::value)) {
-                return DType::kNumTypes;
-            } else if constexpr (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
-                return current;
-            } else {
-                return Helper<U, static_cast<DType>(i + 1)>::getType();
-=======
             if constexpr (i < static_cast<int>(std::tuple_size<types>::value)) {
                 if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
                     return current;
                 }
->>>>>>> 1f251a125
             }
             return Helper<U, static_cast<DType>(i + 1)>::getType();
         }

@@ -31,9 +31,6 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-<<<<<<< HEAD
-#ifndef __HIP_PLATFORM_AMD__
-=======
 __device__ __forceinline__ size_t mxfp8_gemm_swizzled_scale_idx(size_t row, size_t col,
                                                                 size_t num_tiles_x) {
   constexpr size_t tile_dim_x = 4;
@@ -90,7 +87,7 @@ __global__ void pack_mxfp8_columnwise_scales_for_batched_gemm_kernel(
   output[output_idx] = input[input_row * input_row_stride + input_col];
 }
 
->>>>>>> 1f251a125
+#ifndef __HIP_PLATFORM_AMD__
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
