@@ -4532,6 +4532,10 @@ class TestSequentialModules:
     ) -> None:
         """LayerNorm/RMSNorm + Linear + SwiGLU + Linear"""
 
+        # ROCm blockwise FP8 GEMMs need K % 128; the second Linear's K is ffn_hidden_size // 2.
+        if IS_HIP_EXTENSION and quantization == "fp8_block_scaling":
+            ffn_hidden_size = 512
+
         # Make input shape
         in_shape = (sequence_length, batch_size, hidden_size)
         ffn_shape = in_shape[:-1] + (ffn_hidden_size,)
