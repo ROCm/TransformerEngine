@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -60,6 +62,33 @@ __global__ void __launch_bounds__(block_size)
   // Note: Each thread loads num_iterations subtiles and transposes in
   // registers.
   OVec local_output[nvec_in][num_iterations];
+#ifdef __HIP_PLATFORM_AMD__
+  // Issue all loads before transposing in registers. With the loads interleaved with the
+  // element shuffle, the AMDGPU backend waits for each load before issuing the next one when
+  // store_size is 8, leaving one or two loads in flight per wave.
+  IVec local_input[num_iterations][nvec_out];
+#pragma unroll
+  for (size_t iter = 0; iter < num_iterations; ++iter) {
+    const size_t i1 = tidy + iter * bdimy;
+    const size_t j1 = tidx;
+#pragma unroll
+    for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+      const size_t row = tile_row + i1 * nvec_out + i2;
+      const size_t col = tile_col + j1 * nvec_in;
+      local_input[iter][i2].load_from(&input[row * row_length + col]);
+    }
+  }
+#pragma unroll
+  for (size_t iter = 0; iter < num_iterations; ++iter) {
+#pragma unroll
+    for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+#pragma unroll
+      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+        local_output[j2][iter].data.elt[i2] = local_input[iter][i2].data.elt[j2];
+      }
+    }
+  }
+#else
 #pragma unroll
   for (size_t iter = 0; iter < num_iterations; ++iter) {
     const size_t i1 = tidy + iter * bdimy;
@@ -76,6 +105,7 @@ __global__ void __launch_bounds__(block_size)
       }
     }
   }
+#endif  // __HIP_PLATFORM_AMD__
 
   // Copy from registers to shared memory to global memory
   __shared__ OVec shared_output[THREADS_PER_WARP][THREADS_PER_WARP + 1];

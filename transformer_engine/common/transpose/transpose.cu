@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -251,23 +253,34 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
         const size_t store_size = kernel_config.store_size;
         const size_t num_blocks = kernel_config.num_blocks;
 
+#ifdef __HIP_PLATFORM_AMD__
+        // 8-byte stores run faster with twice the warps per tile (half the subtiles per
+        // thread). The tile, and so num_blocks, is unchanged; the config choice above still
+        // uses warps_per_tile.
+        const size_t rtc_warps_per_tile = store_size == 8 ? 2 * warps_per_tile : warps_per_tile;
+#else
+        const size_t rtc_warps_per_tile = warps_per_tile;
+#endif  // __HIP_PLATFORM_AMD__
+        const size_t rtc_block_size = THREADS_PER_WARP * rtc_warps_per_tile;
+
         // Compile NVRTC kernel if needed and launch
         auto &rtc_manager = rtc::KernelManager::instance();
         const std::string kernel_label = concat_strings(
             "transpose"
             ",type=",
-            type_name, ",load_size=", load_size, ",store_size=", store_size);
+            type_name, ",load_size=", load_size, ",store_size=", store_size,
+            ",warps_per_tile=", rtc_warps_per_tile);
         if (!rtc_manager.is_compiled(kernel_label)) {
           std::string code = string_code_transpose_rtc_transpose_cu;
           code = regex_replace(code, "__TYPE__", type_name);
           code = regex_replace(code, "__LOAD_SIZE__", load_size);
           code = regex_replace(code, "__STORE_SIZE__", store_size);
-          code = regex_replace(code, "__WARPS_PER_TILE__", warps_per_tile);
-          code = regex_replace(code, "__BLOCK_SIZE__", block_size);
+          code = regex_replace(code, "__WARPS_PER_TILE__", rtc_warps_per_tile);
+          code = regex_replace(code, "__BLOCK_SIZE__", rtc_block_size);
           rtc_manager.compile(kernel_label, "transpose_optimized_kernel", code,
                               "transformer_engine/common/transpose/rtc/transpose.cu");
         }
-        rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
+        rtc_manager.launch(kernel_label, num_blocks, rtc_block_size, 0, stream,
                            static_cast<const Type *>(input.data.dptr),
                            static_cast<const fp32 *>(noop.data.dptr),
                            static_cast<Type *>(output.data.dptr), row_length, num_rows);
