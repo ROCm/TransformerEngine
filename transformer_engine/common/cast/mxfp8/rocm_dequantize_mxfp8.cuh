@@ -32,6 +32,8 @@ __device__ __forceinline__ size_t mx_preswizzle_scale_idx(size_t i, size_t j, si
   return (j / GROUP) * (padded_dim * GROUP) + i * GROUP + (j % GROUP);
 }
 
+using common::cvt_from_float;
+
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED,
           bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void
@@ -124,14 +126,14 @@ __device__ __forceinline__ void
 
 #pragma unroll
       for (int j = 0; j < ELEMS_PER_THREAD; j++) {
-        out.data.elt[j] = static_cast<OType>(block_scale * static_cast<float>(in.data.elt[j]));
+        out.data.elt[j] = cvt_from_float<OType>(block_scale * static_cast<float>(in.data.elt[j]));
       }
       out.store_to(&out_sh[shmem_offset_y][shmem_offset_x]);
     } else {
 #pragma unroll
       for (int i = 0; i < BUFFER_DIM_Y; i++) {
         const float elt = static_cast<float>(in_sh[i][tid_colwise_X]);
-        out_sh[i][tid_colwise_X] = static_cast<OType>(block_scale * elt);
+        out_sh[i][tid_colwise_X] = cvt_from_float<OType>(block_scale * elt);
       }
     }
 

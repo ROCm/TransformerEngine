@@ -21,6 +21,10 @@
 #include "common/transpose/cast_transpose.h"
 #include "common/util/cuda_runtime.h"
 #include "common/utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/util/system.h"
+#include "common/cast/fp8/rocm_quantize_fp8_tdm.cuh"
+#endif
 
 namespace transformer_engine {
 namespace {
@@ -953,6 +957,20 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
 
   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
+
+#ifdef __HIP_PLATFORM_AMD__
+  static_assert(dispatch::fp8::tdm_kernel::CHUNK_DIM_X == static_cast<size_t>(kTileDim) &&
+                dispatch::fp8::tdm_kernel::CHUNK_DIM_Y == static_cast<size_t>(kTileDim));
+  if (columnwise_option != FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT &&
+      dispatch::fp8::quantize_blockwise_tdm<1>(
+          input, output, output_t, scale_inv, scale_inv_t, num_rows, row_length,
+          rowwise_option != FP8BlockwiseRowwiseOption::NONE,
+          columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY,
+          scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, pow2_scale,
+          noop_ptr, stream)) {
+    return;
+  }
+#endif
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,

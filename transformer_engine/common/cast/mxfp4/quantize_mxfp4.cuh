@@ -12,7 +12,10 @@
 #define TRANSFORMER_ENGINE_QUANTIZE_MXFP4_CUH_
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
+#include "../../util/system.h"
 #include "cast_transpose_mxfp4_shuffled.cuh"
+#include "rocm_quantize_mxfp4_tdm.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -85,6 +88,17 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
     colwise_scale_stride = static_cast<int>(output->columnwise_scale_inv.shape[1]);
     colwise_scale_M_pad = static_cast<int>(output->columnwise_scale_inv.shape[0]);
     colwise_scale_N_pad = static_cast<int>(output->columnwise_scale_inv.shape[1]);
+  }
+
+  const tdm_kernel::ScaleLayout rowwise_scales{
+      reinterpret_cast<uint8_t *>(output->scale_inv.dptr), static_cast<size_t>(rowwise_scale_stride),
+      rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad, scale_shuffle};
+  const tdm_kernel::ScaleLayout colwise_scales{
+      reinterpret_cast<uint8_t *>(output->columnwise_scale_inv.dptr),
+      static_cast<size_t>(colwise_scale_stride), colwise_scale_N, colwise_scale_M_pad,
+      colwise_scale_N_pad, scale_shuffle};
+  if (quantize_tdm(input, output, use_hadamard, rowwise_scales, colwise_scales, stream)) {
+    return;
   }
 
   nvte_cast_transpose_mxfp4_fused_shuffle(

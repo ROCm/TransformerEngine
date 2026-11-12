@@ -15,6 +15,11 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../util/cuda_runtime.h"
+#include "../util/system.h"
+#include "../cast/fp8/rocm_quantize_fp8_tdm.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 
@@ -261,6 +266,10 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
   }
 
 #ifdef __HIP_PLATFORM_AMD__
+  if (dispatch::fp8::multi_cast_transpose_tdm(input_list, output_list, valid_num_rows_list,
+                                              stream)) {
+    return;
+  }
   {
     const size_t n = input_list.size();
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
