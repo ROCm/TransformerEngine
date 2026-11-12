@@ -460,7 +460,7 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
                 reinterpret_cast<OType *>(launch_params.z_tensor->columnwise_data.dptr),
                 scales_rowwise_ptr, scales_colwise_ptr,
                 nullptr, nullptr, nullptr,
-                rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                rows, cols, scale_stride_rowwise, scale_stride_colwise, 0, 0);
           );
       );
   );

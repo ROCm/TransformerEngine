@@ -24,14 +24,6 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
 static_assert(ITERATIONS >= 1);
 
-// MX pre-swizzle inverse index (matches swizzle_scaling_factors_mx in swizzle.cu):
-//   dst = (j / 4) * (padded_dim * 4) + i * 4 + (j % 4)
-// The grouped-by-4 dimension is j; the contiguous dimension is i.
-__device__ __forceinline__ size_t mx_preswizzle_scale_idx(size_t i, size_t j, size_t padded_dim) {
-  constexpr size_t GROUP = 4;  // MX_PRESWIZZLE_GROUP_SIZE
-  return (j / GROUP) * (padded_dim * GROUP) + i * GROUP + (j % GROUP);
-}
-
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED,
           bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void

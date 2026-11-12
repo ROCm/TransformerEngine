@@ -13,7 +13,8 @@
 //   Defines         : HAS_CVT_4xFLOAT8, DIVUP
 //   Local variables : block_id_Y, block_id_X, dbias_y_offset
 //   Kernel params   : input_ptr, act_input_ptr, output_rowwise, output_colwise, scales_rowwise, scales_colwise,
-//                     rows, cols, scale_stride_rowwise, scale_stride_colwise, dbias_workspace, amax_ptr
+//                     rows, cols, scale_stride_rowwise, scale_stride_colwise, dbias_workspace, amax_ptr,
+//                     swizzle_dim_rowwise, swizzle_dim_colwise (nonzero: MX pre-swizzled scale layout)
 
   constexpr size_t ELEMS_PER_THREAD   = 16;
   constexpr size_t MXFP8_BUFFER_DIM_Y = 32;
@@ -179,6 +180,9 @@
         static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
             "SCALES_PER_GROUP must be < 4 or a multiple of 4");
         uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
+        if (swizzle_dim_rowwise && !col_valid) {
+          my_scale = MXFP8_SCALE_IDENTITY;
+        }
         if constexpr (SCALES_PER_GROUP >= 4) {
 #pragma unroll
           for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
@@ -188,15 +192,19 @@
             uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
             uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
             if (tid_rowwise_X == 0 && row_valid && col_valid) {
-              const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
-              reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+              const size_t scale_X   = scales_rowwise_block_offset_X + g * 4;
+              const size_t scale_idx = swizzle_dim_rowwise
+                  ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                  : row * scale_stride_rowwise + scale_X;
+              *reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx]) = packed;
             }
           }
         } else {
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
-            const int scale_idx =
-                row * scale_stride_rowwise +
-                scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+            const size_t scale_X   = scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+            const size_t scale_idx = swizzle_dim_rowwise
+                ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                : row * scale_stride_rowwise + scale_X;
             scales_rowwise[scale_idx] = biased_exponent;
           }
         }
@@ -326,6 +334,9 @@
             static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
                 "SCALES_PER_GROUP must be < 4 or a multiple of 4");
             uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
+            if (swizzle_dim_rowwise && !col_valid) {
+              my_scale = MXFP8_SCALE_IDENTITY;
+            }
             if constexpr (SCALES_PER_GROUP >= 4) {
 #pragma unroll
               for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
@@ -335,14 +346,19 @@
                 uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
                 uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
                 if (tid_rowwise_X == 0 && row_valid && col_valid) {
-                  const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
-                  reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+                  const size_t scale_X   = scales_rowwise_block_offset_X + g * 4;
+                  const size_t scale_idx = swizzle_dim_rowwise
+                      ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                      : row * scale_stride_rowwise + scale_X;
+                  *reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx]) = packed;
                 }
               }
             } else {
               if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
-                const int scale_idx = row * scale_stride_rowwise +
-                    scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+                const size_t scale_X   = scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+                const size_t scale_idx = swizzle_dim_rowwise
+                    ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                    : row * scale_stride_rowwise + scale_X;
                 scales_rowwise[scale_idx] = biased_exponent;
               }
             }
@@ -450,8 +466,10 @@
         const e8m0_t biased_exponent = ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
 
         if (col_valid_colwise && row_base < rows) {
-          const int scale_idx =
-              (scales_colwise_block_offset_Y + iter) * scale_stride_colwise + col;
+          const size_t scale_Y   = scales_colwise_block_offset_Y + iter;
+          const size_t scale_idx = swizzle_dim_colwise
+              ? mx_preswizzle_scale_idx(col, scale_Y, swizzle_dim_colwise)
+              : scale_Y * scale_stride_colwise + col;
           scales_colwise[scale_idx] = biased_exponent;
         }
 

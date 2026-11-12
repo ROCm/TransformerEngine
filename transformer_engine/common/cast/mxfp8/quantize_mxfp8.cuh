@@ -721,6 +721,17 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
+  // GEMM-swizzled scales use the layout of swizzle_scaling_factors_mx, with padding set to the identity scale.
+  const bool mx_preswizzle = output->with_gemm_swizzled_scales && cuda::sm_arch() == 125;
+  const size_t swizzle_dim_rowwise =
+      (mx_preswizzle && use_rowwise_scaling) ? output->scale_inv.shape[0] : 0;
+  const size_t swizzle_dim_colwise =
+      (mx_preswizzle && use_colwise_scaling) ? output->columnwise_scale_inv.shape[1] : 0;
+  NVTE_CHECK(!swizzle_dim_rowwise || output->scale_inv.shape[1] % 4 == 0,
+             "Swizzled rowwise MXFP8 scales must be padded to a multiple of 4.");
+  NVTE_CHECK(!swizzle_dim_colwise || output->columnwise_scale_inv.shape[0] % 4 == 0,
+             "Swizzled columnwise MXFP8 scales must be padded to a multiple of 4.");
+
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
     use_large_chunks, USE_LARGE_CHUNKS,
 
@@ -747,6 +758,22 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       }
     }
 
+    // The fill must be skipped whenever the quantize kernel skips on noop.
+    const float *const fill_noop_ptr = (IS_DBIAS || IS_DACT || IS_ACT) ? nullptr : noop_ptr;
+    constexpr size_t fill_threads = 256;
+    if (swizzle_dim_rowwise && output->scale_inv.numel() > rows * DIVUP(cols, size_t{32})) {
+      const size_t num_scales = output->scale_inv.numel();
+      fill_scales_kernel<<<DIVUP(num_scales, fill_threads), fill_threads, 0, stream>>>(
+          scales_rowwise_ptr, num_scales, MXFP8_SCALE_IDENTITY, fill_noop_ptr);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    }
+    if (swizzle_dim_colwise && output->columnwise_scale_inv.numel() > DIVUP(rows, size_t{32}) * cols) {
+      const size_t num_scales = output->columnwise_scale_inv.numel();
+      fill_scales_kernel<<<DIVUP(num_scales, fill_threads), fill_threads, 0, stream>>>(
+          scales_colwise_ptr, num_scales, MXFP8_SCALE_IDENTITY, fill_noop_ptr);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    }
+
     float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -771,7 +798,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                         reinterpret_cast<OType *>(output->columnwise_data.dptr),
                         scales_rowwise_ptr, scales_colwise_ptr,
                         noop_ptr, workspace_ptr, amax_ptr,
-                        rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                        rows, cols, scale_stride_rowwise, scale_stride_colwise,
+                        swizzle_dim_rowwise, swizzle_dim_colwise);
                     NVTE_CHECK_CUDA(cudaGetLastError());
             ))))));
 
