@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-set(KITTENS_SUPPORTED_ARCHS gfx942 gfx950)
+set(KITTENS_SUPPORTED_ARCHS gfx942 gfx950 gfx1250 gfx1250-strict)
 
 set(_kittens_enabled_archs "")
 foreach(_arch IN LISTS KITTENS_SUPPORTED_ARCHS)
@@ -31,8 +31,14 @@ else()
     set(_kittens_have_defs "")
 
     function(kittens_add_arch)
-        cmake_parse_arguments(A "" "TAG;GFX" "SOURCES;FLAGS;SOURCE_FLAGS" ${ARGN})
-        if(NOT "${A_GFX}" IN_LIST _kittens_enabled_archs)
+        cmake_parse_arguments(A "" "TAG" "GFX;SOURCES;FLAGS;SOURCE_FLAGS" ${ARGN})
+        set(_gfx "")
+        foreach(_arch IN LISTS A_GFX)
+            if(_arch IN_LIST _kittens_enabled_archs)
+                list(APPEND _gfx ${_arch})
+            endif()
+        endforeach()
+        if(NOT _gfx)
             return()
         endif()
         if(NOT EXISTS "${HIPKITTENS_INCLUDE_DIR}/kittens.cuh")
@@ -65,7 +71,7 @@ else()
         endif()
 
         set_target_properties(${_target} PROPERTIES
-            HIP_ARCHITECTURES "${A_GFX}" POSITION_INDEPENDENT_CODE ON)
+            HIP_ARCHITECTURES "${_gfx}" POSITION_INDEPENDENT_CODE ON)
         target_include_directories(${_target} PRIVATE
             ${HIP_INCLUDE_DIRS} "${HIPKITTENS_INCLUDE_DIR}")
         target_compile_options(${_target} PRIVATE
@@ -83,6 +89,14 @@ else()
                      SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp
                              cdna4/overlap/comm_gemm.cpp
                      FLAGS -gline-tables-only)
+
+    set(_cdna5_flags "")
+    if(DEFINED ENV{NVTE_HK_GFX1250_MCAST})
+        list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
+    endif()
+    kittens_add_arch(TAG cdna5 GFX gfx1250 gfx1250-strict
+                     SOURCES cdna5/bf16_gemm.cpp cdna5/mxfp8_gemm.cpp
+                     FLAGS ${_cdna5_flags})
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)

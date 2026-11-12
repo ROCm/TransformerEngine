@@ -43,6 +43,17 @@ class MXFP8Quantizer(Quantizer):
     dtype: DType
     with_2d_quantization: bool
 
+    if IS_HIP_EXTENSION:
+        # ROCm MXFP8 quantize writes compact scales; gfx1250 GEMMs trust the swizzled tag,
+        # so it must stay false there.
+        @property
+        def optimize_for_gemm(self):
+            return self.__dict__["optimize_for_gemm"] and get_device_compute_capability() != (12, 5)
+
+        @optimize_for_gemm.setter
+        def optimize_for_gemm(self, value):
+            self.__dict__["optimize_for_gemm"] = value
+
     def __init__(
         self,
         fp8_dtype: Union[DType, tex.DType],
