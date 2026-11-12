@@ -584,6 +584,9 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+  /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
+  bool row_scaled_nvfp4 = false;
+
 #ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_shuffle_rowwise_data = false;
   bool mxfp4_shuffle_columnwise_data = false;
@@ -601,7 +604,8 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
-      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
 #ifdef __HIP_PLATFORM_AMD__
       ,
       sizeof(uint8_t),          // kNVTEGroupedMXFP4ShuffleRowwiseData
@@ -624,11 +628,14 @@ struct GroupedTensor {
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
+        with_gemm_swizzled_scales(false),
 #ifdef __HIP_PLATFORM_AMD__
+        row_scaled_nvfp4(false),
         mxfp4_shuffle_rowwise_data(false),
-        mxfp4_shuffle_columnwise_data(false),
+        mxfp4_shuffle_columnwise_data(false) {}
+#else
+        row_scaled_nvfp4(false) {}
 #endif
-        with_gemm_swizzled_scales(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
@@ -681,6 +688,7 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
+    row_scaled_nvfp4 = false;
 #ifdef __HIP_PLATFORM_AMD__
     mxfp4_shuffle_rowwise_data = false;
     mxfp4_shuffle_columnwise_data = false;
@@ -1251,6 +1259,9 @@ struct is_fp4 : std::false_type {};
 template <>
 struct is_fp4<fp4e2m1> : std::true_type {};
 #endif
+
+// Number of values represented by one MXFP8 E8M0 scaling factor.
+constexpr size_t MXFP8_SCALE_DIM = 32;
 
 #ifndef __HIP_PLATFORM_AMD__
 // [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors

@@ -177,5 +177,7 @@
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
       .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
-      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);
+      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);                \
+  m.def("nvte_cublasmp_version", &nvte_cublasmp_version, py::call_guard<py::gil_scoped_release>());
+
 #endif

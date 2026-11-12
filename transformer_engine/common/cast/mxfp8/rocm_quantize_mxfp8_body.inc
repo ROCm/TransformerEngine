@@ -111,7 +111,9 @@
         }
       }
 
-      float thread_amax = 0;
+      // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+      // so per-block amax will be NaN if all values in the block are NaN.
+      float thread_amax = __int_as_float(0x7FC00000);
       float in_compute[ELEMS_PER_THREAD];
 
 #pragma unroll
@@ -136,11 +138,16 @@
         in_compute[j] = elt;
         if (!out_of_bounds) {
           thread_amax = fmaxf(thread_amax, fabsf(elt));
+        } else {
+          // If the element is OOB, it's seen as a 0 and we need to update thread_amax by comparing against it,
+          // so a all-NaN partial block's thread_amax is 0
+          thread_amax = fmaxf(thread_amax, 0.0f);
         }
       }
 
       __builtin_assume(block_amax >= 0);
-      __builtin_assume(thread_amax >= 0);
+      // thread_amax could be NaN, which loses all comparison with non-NaN values and returns false
+      __builtin_assume(!(thread_amax < 0));
       block_amax = fmaxf(block_amax, thread_amax);
 
       const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
@@ -258,7 +265,9 @@
             act_in.load_from(&act_in_sh[shmem_y][thread_offset_X_rowwise]);
           }
 
-          float thread_amax = 0;
+          // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+          // so per-block amax will be NaN if all values in the block are NaN.
+          float thread_amax = __int_as_float(0x7FC00000);
           float in_compute[ELEMS_PER_THREAD];
 
 #pragma unroll
@@ -283,11 +292,16 @@
             in_compute[j] = elt;
             if (!out_of_bounds) {
               thread_amax = fmaxf(thread_amax, fabsf(elt));
+            } else {
+              // If the element is OOB, it's seen as a 0 and we need to update thread_amax by comparing against it,
+              // so a all-NaN partial block's thread_amax is 0
+              thread_amax = fmaxf(thread_amax, 0.0f);
             }
           }
 
           __builtin_assume(block_amax >= 0);
-          __builtin_assume(thread_amax >= 0);
+          // thread_amax could be NaN, which loses all comparison with non-NaN values and returns false
+          __builtin_assume(!(thread_amax < 0));
           block_amax = fmaxf(block_amax, thread_amax);
 
           const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
@@ -378,7 +392,9 @@
 
       if (threadIdx.x < CHUNK_DIM_X) {
         float in_compute[SCALE_DIM_Y];
-        float amax = 0;
+        // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+        // so per-block amax will be NaN if all values in the block are NaN.
+        float amax = __int_as_float(0x7FC00000);
 
 #pragma unroll
         for (int i = 0; i < SCALE_DIM_Y; i++) {
@@ -409,11 +425,16 @@
           in_compute[i] = elt;
           if (!out_of_bounds) {
             amax = fmaxf(amax, fabsf(elt));
+          } else {
+            // If the element is OOB, it's seen as a 0 and we need to update amax by comparing against it,
+            // so a all-NaN partial block's amax is 0
+            amax = fmaxf(amax, 0.0f);
           }
         }
 
         __builtin_assume(block_amax >= 0);
-        __builtin_assume(amax >= 0);
+        // amax could be NaN, which loses all comparison with non-NaN values and returns false
+        __builtin_assume(!(amax < 0));
         block_amax = fmaxf(block_amax, amax);
 
         const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);

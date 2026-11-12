@@ -3,6 +3,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import ctypes
 import os
 import subprocess
 from pathlib import Path
@@ -21,7 +22,28 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+<<<<<<< HEAD
 bulk_available = not IS_HIP_EXTENSION
+=======
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+
+
+def _loaded_cublasmp_version() -> int:
+    """Version of the cuBLASMp library loaded by Transformer Engine, or 0 if there is none."""
+    if not tex.nvte_built_with_cublasmp():
+        return 0
+    try:
+        version = ctypes.c_int(0)
+        ctypes.CDLL("libcublasmp.so.0").cublasMpGetVersion(ctypes.byref(version))
+    except (OSError, AttributeError):
+        return 0
+    return version.value
+
+
+# NVFP4 with cuBLASMp applies the global scales through a device-side alpha (cuBLASMp 0.11.0+)
+cublasmp_nvfp4_available = _loaded_cublasmp_version() >= 1100
+reason_for_no_cublasmp_nvfp4 = "NVFP4 with cuBLASMp requires cuBLASMp 0.11.0 or newer."
+>>>>>>> 1f251a125
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -47,6 +69,8 @@ COMM_GEMM_QUANTIZATION_PARAMS = [
     pytest.param(True, "none", id="cublasmp-bf16"),
     pytest.param(True, "fp8", id="cublasmp-fp8"),
     pytest.param(True, "mxfp8", id="cublasmp-mxfp8"),
+    # Userbuffers does not support NVFP4
+    pytest.param(True, "nvfp4", id="cublasmp-nvfp4"),
 ]
 if IS_HIP_EXTENSION:
     COMM_GEMM_QUANTIZATION_PARAMS = [p for p in COMM_GEMM_QUANTIZATION_PARAMS if not p.values[0]]
@@ -110,6 +134,8 @@ def _run_gemm_with_overlap(
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
         test_cmd.append(f"--quantization={quantization}")
         if p2p:
             test_cmd.append("--p2p")
@@ -122,6 +148,8 @@ def _run_gemm_with_overlap(
         if use_cublasmp:
             if not tex.nvte_built_with_cublasmp():
                 pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+            if quantization == "nvfp4" and not cublasmp_nvfp4_available:
+                pytest.skip(reason_for_no_cublasmp_nvfp4)
             if comm_type == "RS" and not p2p and not tex.device_supports_multicast():
                 pytest.skip(
                     "cuBLASMp non-P2P reduce-scatter requires NVSwitch (multicast support)."
@@ -178,12 +206,19 @@ def _run_layer_with_overlap(
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4":
+            if not nvfp4_available:
+                pytest.skip(reason_for_no_nvfp4)
+            if not use_cublasmp:
+                pytest.skip("Userbuffers does not support NVFP4.")
         test_cmd.append("--fp8")
         test_cmd.append(f"--quantization={quantization}")
 
     if use_cublasmp:
         if not tex.nvte_built_with_cublasmp():
             pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+        if fp8 and quantization == "nvfp4" and not cublasmp_nvfp4_available:
+            pytest.skip(reason_for_no_cublasmp_nvfp4)
         test_cmd.append("--use-cublasmp")
 
     test_env = os.environ.copy()
@@ -356,7 +391,7 @@ def test_linear_with_overlap_compile(
 @pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
 @pytest.mark.parametrize(
     "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
+    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
@@ -412,6 +447,7 @@ def test_layers_with_overlap_fp8(
         quantization,
         use_cublasmp=use_cublasmp,
     )
+<<<<<<< HEAD
 
 
 @pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
@@ -504,3 +540,5 @@ def test_multi_layer_with_overlap_fp8(
         num_layers,
         use_cublasmp=use_cublasmp,
     )
+=======
+>>>>>>> 1f251a125
