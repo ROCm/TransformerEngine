@@ -3,6 +3,7 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+#include <algorithm>
 #include <type_traits>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
@@ -1842,6 +1843,8 @@ void hipblaslt_gemm(const Tensor *inputA,
 
     int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
     int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
+    // gfx942/gfx950 reach their power limit within ~20 ms; gfx1250 runs above it for ~100 ms
+    int tuneWarmupMs = getIntEnv("TE_HIPBLASLT_TUNING_WARMUP_MS", cuda::sm_arch() == 125 ? 200 : 25, 0);
     int algoTuneCount = 1;
     std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
 
@@ -1885,35 +1888,9 @@ void hipblaslt_gemm(const Tensor *inputA,
         using tuning_clock = std::chrono::steady_clock;
         tuning_clock::now(); //the first call takes little longer so do it outside the loop
         tuning_clock::duration bestTime = tuning_clock::duration::max();
-
-        for (int algo=firstAlgo; algo<algoTuneCount; algo++)
+        auto runAlgo = [&](int algo, int64_t count)
         {
-            if (algoArr[algo].state != HIPBLAS_STATUS_SUCCESS)
-            {
-              continue;
-            }
-            // Warm-up call
-            NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
-                                            operationDesc,
-                                            alpha_ptr,                                /* alpha */
-                                            param.A,                                      /* A */
-                                            Adesc,
-                                            param.B,                                      /* B */
-                                            Bdesc,
-                                            beta_ptr,                                 /* beta */
-                                            C,                                      /* C */
-                                            Cdesc,
-                                            D,                                      /* D */
-                                            Ddesc,
-                                            &algoArr[algo].algo,                    /* algo */
-                                            workspace,                              /* workspace */
-                                            workspaceSize,
-                                            profilingStream));                       /* stream */
-          NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
-
-          //Profiling loop
-          tuning_clock::time_point startTime = tuning_clock::now();
-          for (int loop=0; loop<tuneLoopCount; loop++)
+          for (int64_t loop=0; loop<count; loop++)
           {
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
@@ -1933,7 +1910,39 @@ void hipblaslt_gemm(const Tensor *inputA,
                                             profilingStream));                       /* stream */
           }
           NVTE_CHECK_CUDA(hipStreamSynchronize(profilingStream));
+        };
+
+        for (int algo=firstAlgo; algo<algoTuneCount; algo++)
+        {
+            if (algoArr[algo].state != HIPBLAS_STATUS_SUCCESS)
+            {
+              continue;
+            }
+          tuning_clock::time_point warmupStart = tuning_clock::now();
+          // Warm-up call; it may load the kernel, so tuneWarmupMs starts after it
+          runAlgo(algo, 1);
+          // Run for tuneWarmupMs (syncing ~every 10 ms) so timing sees this algo's own power-limited clock
+          const tuning_clock::time_point warmupEnd = tuning_clock::now() + std::chrono::milliseconds(tuneWarmupMs);
+          for (int64_t batch = 1; tuning_clock::now() < warmupEnd;)
+          {
+            const tuning_clock::time_point batchStart = tuning_clock::now();
+            runAlgo(algo, batch);
+            const tuning_clock::duration perCall = (tuning_clock::now() - batchStart) / batch;
+            batch = std::max<int64_t>(1, std::chrono::milliseconds(10) / std::max(perCall, tuning_clock::duration(1)));
+          }
+
+          //Profiling loop
+          tuning_clock::time_point startTime = tuning_clock::now();
+          runAlgo(algo, tuneLoopCount);
           tuning_clock::duration algoTime = tuning_clock::now() - startTime; 
+          if (logTuning) {
+            std::cout << "[INFO] hipBLASLt algo [" << algo << "] " << cached_algo.getAlgoId(algoArr[algo].algo)
+                      << ": warm-up "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(startTime - warmupStart).count()
+                      << " us, "
+                      << std::chrono::duration_cast<std::chrono::nanoseconds>(algoTime).count() / tuneLoopCount
+                      << " ns per run" << std::endl;
+          }
           if (algoTime < bestTime)
           {
             bestAlgo = algo;

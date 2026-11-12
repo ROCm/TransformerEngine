@@ -173,6 +173,7 @@ This ability is controlled by environment variables when calling GEMM operations
 * TE_HIPBLASLT_ALGO_SELECTION - algorithm index to use in the list returned by hipBlasLt for the config or the first algorithm to select from if auto-selection is enabled; default=0.
 * TE_HIPBLASLT_TUNING_RUN_COUNT - number of profiling loops for algorithm auto-selection; default=0 which means no auto-selection. For small tasks where run-to-run time variation is relatively high, using higher number of loops may give better auto-selection results.
 * TE_HIPBLASLT_TUNING_ALGO_COUNT - maximal number of algorithms to check when auto-selection is enabled; default=16.
+* TE_HIPBLASLT_TUNING_WARMUP_MS - time in milliseconds to run each algorithm before profiling it, so it is profiled at its own sustained clock rather than in the power state left by the previous algorithm; default=200 on gfx1250, which runs above its power limit for about 100 ms after a load change, and 25 elsewhere; 0 means a single warm-up call. Auto-selection takes at least this time per algorithm checked.
 * TE_HIPBLASLT_ALGO_LOAD - filename of algorithm selection data saved by previous GEMM operation runs; if file does not exist, algorithm selection logic proceeds as if no filename were specified
 * TE_HIPBLASLT_ALGO_SAVE - filename to save algorithm selection data to; can be the same as a filename to load in which case the file will be read first and then overwritten with updated results; filename may contain %i, that is replaced with the process ID. For example `auto_tune_%i.csv`.
 
