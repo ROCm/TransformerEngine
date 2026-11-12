@@ -37,7 +37,8 @@ typedef short mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
           size_t SCALE_DIM_X, bool IS_ALIGNED,
-          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64>
+          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64,
+          bool IS_2D_SCALING = false>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(
       const IType *input_ptr, const IType *act_input_ptr,
@@ -58,7 +59,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
           size_t SCALE_DIM_X, bool IS_ALIGNED,
-          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64>
+          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64,
+          bool IS_2D_SCALING = false>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     grouped_quantize_mxfp8_kernel(
       const IType *input_ptr, const IType *act_input_ptr,
@@ -177,6 +179,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool IS_DBIAS = false;
   constexpr bool IS_DACT  = false;
   constexpr bool IS_ACT   = false;
+  constexpr bool IS_2D_SCALING = false;
   using ParamOP = Empty;
   constexpr float (*OP)(float, const Empty &) = nullptr;
 

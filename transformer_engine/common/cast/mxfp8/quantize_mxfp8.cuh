@@ -759,9 +759,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                     !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    use_2d_quantization, IS_2D_SCALING,
                     quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                         SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
-                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
+                                        CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK, IS_2D_SCALING>
                       <<<grid, block_size, 0, stream>>>(
                         reinterpret_cast<const IType *>(input.data.dptr),
                         (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
@@ -771,7 +773,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                         noop_ptr, workspace_ptr, amax_ptr,
                         rows, cols, scale_stride_rowwise, scale_stride_colwise);
                     NVTE_CHECK_CUDA(cudaGetLastError());
-            )))));
+            ))))));
 
     if constexpr (IS_DBIAS) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(

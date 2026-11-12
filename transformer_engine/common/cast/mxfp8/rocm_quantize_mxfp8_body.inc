@@ -9,7 +9,7 @@
 //
 // Required in scope before #include:
 //   Template params : SCALE_DIM_X, SCALE_DIM_Y, CHUNK_DIM_X, CHUNK_DIM_Y, THREADS_PER_CHUNK,
-//                     IS_DBIAS, IS_DACT, IS_ACT, IS_ALIGNED, IType, OType, ParamOP, OP
+//                     IS_DBIAS, IS_DACT, IS_ACT, IS_ALIGNED, IS_2D_SCALING, IType, OType, ParamOP, OP
 //   Defines         : HAS_CVT_4xFLOAT8, DIVUP
 //   Local variables : block_id_Y, block_id_X, dbias_y_offset
 //   Kernel params   : input_ptr, act_input_ptr, output_rowwise, output_colwise, scales_rowwise, scales_colwise,
@@ -78,6 +78,33 @@
 
   constexpr size_t ROWS_PER_THREAD = CHUNK_DIM_Y / THREADS_PER_CHUNK_Y_ROWWISE;
 
+  // 2D scaling: one scale per 32x32 tile, shared by the rowwise and colwise outputs.
+  constexpr size_t TILE_DIM_2D = 32;
+  static_assert(!IS_2D_SCALING || THREADS_PER_CHUNK_Y_ROWWISE == TILE_DIM_2D,
+      "2D scaling requires each rowwise step to cover exactly one tile row");
+  constexpr bool USE_2D_AMAX_SH = IS_2D_SCALING && USE_ROWWISE_SCALING;
+  __shared__ float amax_2d_sh[USE_2D_AMAX_SH ? THREADS_PER_CHUNK_Y_ROWWISE : 1]
+                             [USE_2D_AMAX_SH ? SCALES_ROWWISE_PER_BLOCK_X : 1];
+  // Reduces the per-row amax of a rowwise step over the tile's rows. Called by all threads.
+  auto rowwise_scale_amax = [&](const float subwarp_amax) {
+    if constexpr (!IS_2D_SCALING) {
+      return subwarp_amax;
+    } else {
+      const int scale_X = tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+      if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
+        amax_2d_sh[tid_rowwise_Y][scale_X] = subwarp_amax;
+      }
+      __syncthreads();
+      float tile_amax = 0;
+#pragma unroll
+      for (int i = 0; i < THREADS_PER_CHUNK_Y_ROWWISE; i++) {
+        tile_amax = fmaxf(tile_amax, amax_2d_sh[i][scale_X]);
+      }
+      __syncthreads();
+      return tile_amax;
+    }
+  };
+
   if constexpr (USE_ROWWISE_SCALING && !USE_COLWISE_SCALING) {
     const size_t col_start = block_offset_X + thread_offset_X_rowwise;
     const bool col_valid   = (col_start < cols);
@@ -145,7 +172,7 @@
 
       const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
       const e8m0_t biased_exponent =
-          ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(rowwise_scale_amax(subwarp_amax) * Quantized_Limits<OType>::max_norm_rcp);
 
       {
         constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
@@ -292,7 +319,7 @@
 
           const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
           const e8m0_t biased_exponent =
-              ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
+              ptx::float_to_e8m0(rowwise_scale_amax(subwarp_amax) * Quantized_Limits<OType>::max_norm_rcp);
 
           {
             constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
@@ -416,7 +443,11 @@
         __builtin_assume(amax >= 0);
         block_amax = fmaxf(block_amax, amax);
 
-        const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);
+        float scale_amax = amax;
+        if constexpr (IS_2D_SCALING) {
+          scale_amax = rocm_subwarp_allreduce<TILE_DIM_2D>(amax, rocm_op::max{});
+        }
+        const e8m0_t biased_exponent = ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
 
         if (col_valid_colwise && row_base < rows) {
           const int scale_idx =

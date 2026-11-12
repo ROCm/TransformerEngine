@@ -1151,6 +1151,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
   const bool is_single_tensor = output->all_same_shape() || output->all_same_last_dim();
+  const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim  = input->logical_shape.data[1];
@@ -1216,9 +1217,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
               (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
                 TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(last_logical_dim % (32 * sizeof(IType))), IS_ALIGNED,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  use_2d_quantization, IS_2D_SCALING,
                   grouped_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                       SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
-                                      CDY, CDX, TPC>
+                                      CDY, CDX, TPC, IS_2D_SCALING>
                     <<<grid, TPC, 0, stream>>>(
                       reinterpret_cast<const IType *>(input->data.dptr),
                       (IS_DACT) ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr,
@@ -1231,7 +1234,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                       num_tensors, offsets_ptr, first_dims_ptr, last_dims_ptr,
                       first_logical_dim);
                   NVTE_CHECK_CUDA(cudaGetLastError());
-          )))));
+          ))))));
 
   if constexpr (IS_DBIAS) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
