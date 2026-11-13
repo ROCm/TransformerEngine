@@ -76,6 +76,7 @@ using fp8e5m2 = __nv_fp8_e5m2;
 using bf16 = hip_bfloat16;
 using fp8e4m3 = te_hip_fp8_e4m3;
 using fp8e5m2 = te_hip_fp8_e5m2;
+using fp8ue5m3 = te_hip_fp8_ue5m3;
 #endif //USE_ROCM
 using fp8e8m0 = uint8_t;
 #if CUDA_VERSION >= 13040
@@ -107,7 +108,7 @@ struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
     using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3,
                              fp8e5m2, fp8e8m0, fp4e2m1
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(USE_ROCM)
                              , fp8ue5m3
 #endif
                              >;
@@ -728,7 +729,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
 #define SWITCH_FP4_TYPE_HANDLE(type, ...) // do nothing
 #endif
 
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(USE_ROCM)
 #define SWITCH_UE5M3_TYPE_HANDLE(type, ...)     \
   case DType::kFloat8UE5M3: {                   \
     using type = fp8ue5m3;                      \

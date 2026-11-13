@@ -36,23 +36,24 @@ namespace {
 
 constexpr size_t kFP4BlockSize1D = 16;
 
-// Generates random FP8 (E4M3) scale values by sampling raw 8-bit patterns.
+// Generates random FP8 (E4M3 or UE5M3) scale values by sampling raw 8-bit patterns.
 // Only finite, non-negative scales are allowed.
 // Values are written using memcpy to preserve exact
 // bit patterns rather than relying on numeric conversion.
-void generate_1d_scales(fp8e4m3* scale_buffer,
+template <typename ScaleType>
+void generate_1d_scales(ScaleType* scale_buffer,
                         const size_t unpadded_blocks_Y,
                         const size_t unpadded_blocks_X,
                         const size_t scales_stride,
                         std::mt19937& gen,
-                        std::uniform_int_distribution<int>& finite_nonneg_e4m3_dis) {
+                        std::uniform_int_distribution<int>& finite_nonneg_scale_dis) {
     const size_t total_elems = unpadded_blocks_Y * scales_stride;
-    std::memset(scale_buffer, 0, total_elems * sizeof(fp8e4m3));
+    std::memset(scale_buffer, 0, total_elems * sizeof(ScaleType));
 
     for (size_t row = 0; row < unpadded_blocks_Y; ++row) {
         for (size_t block = 0; block < unpadded_blocks_X; ++block) {
             const size_t scale_idx = row * scales_stride + block;
-            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_e4m3_dis(gen));
+            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_scale_dis(gen));
             std::memcpy(&scale_buffer[scale_idx], &scale, sizeof(scale));
         }
     }
@@ -105,18 +106,19 @@ float get_fp4_value(const fp4e2m1* data, const size_t idx) {
     return E2M1_LUT[nibble];
 }
 
-// Reference implementation: dequantize packed FP4 (E2M1) input using per-block FP8_E4M3 scales.
-// Each block of 1x16 elements shares one scale; values are decoded to float and scaled.
-template <typename OutputType>
+// Reference implementation: dequantize packed FP4 (E2M1) input using per-block FP8 (E4M3 or UE5M3)
+// scales. Each block of 1x16 elements shares one scale; values are decoded to float and scaled.
+template <typename OutputType, typename ScaleType>
 void compute_ref(const fp4e2m1* input,
                  OutputType* output,
-                 const fp8e4m3* scales,
+                 const ScaleType* scales,
                  const float amax,
                  const size_t rows,
                  const size_t cols,
                  const size_t scale_stride) {
 #ifdef __HIP_PLATFORM_AMD__
-    const float fp8_max = Numeric_Traits<fp8e4m3>::maxNorm;
+    const float fp8_max = std::is_same_v<ScaleType, fp8ue5m3> ? 114688.0f
+                                                              : Numeric_Traits<fp8e4m3>::maxNorm;
     const float factor_inv = 1.0f / (6.0f * fp8_max);
 #else
     constexpr float factor_inv = 1.0f / (6.0f * 448.0f);
@@ -139,7 +141,7 @@ void compute_ref(const fp4e2m1* input,
     }
 }
 
-template <typename OutputType>
+template <typename OutputType, typename ScaleType>
 void run_single_case(const std::string& case_name,
                      Tensor& input,
                      const size_t rows,
@@ -162,7 +164,7 @@ void run_single_case(const std::string& case_name,
 
     compute_ref(input.rowwise_cpu_dptr<fp4e2m1>(),
                 ref_output.get(),
-                input.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                input.rowwise_cpu_scale_inv_ptr<ScaleType>(),
                 amax,
                 rows,
                 cols,
@@ -174,7 +176,7 @@ void run_single_case(const std::string& case_name,
 
 // End-to-end test: generate random FP4 input and FP8 scales.
 // Only tests row-wise 1D dequant since the kernel is hardwired for that.
-template <typename OutputType>
+template <typename OutputType, typename ScaleType = fp8e4m3>
 void performTest(const size_t rows, const size_t cols, DType otype) {
 #ifdef __HIP_PLATFORM_AMD__
     const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16, NVTE_NVFP4_1D_SCALING);
@@ -193,11 +195,14 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                  std::vector<size_t>{rows, cols},
                  itype,
                  true, false,
-                 NVTE_NVFP4_1D_SCALING);
+                 NVTE_NVFP4_1D_SCALING,
+                 TypeInfo<ScaleType>::dtype);
 
+    constexpr bool is_ue5m3 = std::is_same_v<ScaleType, fp8ue5m3>;
     static std::mt19937 gen(42);
     std::uniform_int_distribution<int> e2m1_dis(0, 15);
-    std::uniform_int_distribution<int> finite_nonneg_e4m3_dis(0, 126);
+    // Largest finite non-negative encoding: E4M3 0x7E (448), UE5M3 0xFE (114688).
+    std::uniform_int_distribution<int> finite_nonneg_scale_dis(0, is_ue5m3 ? 0xFE : 0x7E);
 
     generate_data(input.rowwise_cpu_dptr<fp4e2m1>(),
                   rows,
@@ -206,26 +211,26 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                   e2m1_dis);
 
     // Row-wise 1D scales on [rows, cols]
-    generate_1d_scales(input.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+    generate_1d_scales(input.rowwise_cpu_scale_inv_ptr<ScaleType>(),
                        unpadded_blocks_Y,
                        unpadded_blocks_X,
                        scales_stride,
                        gen,
-                       finite_nonneg_e4m3_dis);
+                       finite_nonneg_scale_dis);
 
     // The NVFP4 Tensor helper allocates a zero-initialized amax buffer. Null it so the
-    // dequant kernel uses a unit global scale (amax = fp4_max * e4m3_max), matching the
+    // dequant kernel uses a unit global scale (amax = fp4_max * scale_max), matching the
     // reference below.
     input.set_tensor_amax_nullptr();
-    const float amax = 6.0f * 448.0f;
+    const float amax = 6.0f * (is_ue5m3 ? 114688.0f : 448.0f);
 
-    run_single_case<OutputType>("rowwise_1d_dequant",
-                                input,
-                                rows,
-                                cols,
-                                scales_stride,
-                                amax,
-                                otype);
+    run_single_case<OutputType, ScaleType>("rowwise_1d_dequant",
+                                           input,
+                                           rows,
+                                           cols,
+                                           scales_stride,
+                                           amax,
+                                           otype);
 }
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
@@ -266,6 +271,32 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(tensor_dims),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16)),
     [](const testing::TestParamInfo<DequantizeNVFP4TestSuite::ParamType>& info) {
+        std::string name =
+            std::to_string(std::get<0>(info.param).first) + "X" +
+            std::to_string(std::get<0>(info.param).second) + "X" +
+            test::typeName(std::get<1>(info.param));
+        return name;
+    });
+
+class DequantizeNVFP4UE5M3TestSuite : public DequantizeNVFP4TestSuite {};
+
+TEST_P(DequantizeNVFP4UE5M3TestSuite, TestDequantizeNVFP4UE5M3) {
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+    const auto tensor_size = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
+        output_type, OutputType,
+        performTest<OutputType, fp8ue5m3>(tensor_size.first, tensor_size.second, output_type););
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestUE5M3Scales,
+    DequantizeNVFP4UE5M3TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(tensor_dims),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16)),
+    [](const testing::TestParamInfo<DequantizeNVFP4UE5M3TestSuite::ParamType>& info) {
         std::string name =
             std::to_string(std::get<0>(info.param).first) + "X" +
             std::to_string(std::get<0>(info.param).second) + "X" +
