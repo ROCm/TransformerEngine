@@ -82,6 +82,23 @@ def isolate_test_state():
     torch.cuda.synchronize()
 
 
+def init_main_grad(module):
+    """Give ``module.weight`` a random FP32 main_grad for the wgrad GEMM to accumulate into."""
+    main_grad = torch.randn(module.weight.shape, dtype=torch.float32, device=module.weight.device)
+    module.weight.main_grad = main_grad.clone()
+    return main_grad
+
+
+def weight_grads(native_module, ref_module, main_grad_init):
+    """(native, reference) weight gradients. With fused wgrad accumulation, the native one is
+    what the GEMM added to main_grad, rounded like the reference gradient."""
+    if main_grad_init is not None:
+        ref_wgrad = ref_module.weight.grad.detach().clone()
+        return (native_module.weight.main_grad - main_grad_init).to(ref_wgrad.dtype), ref_wgrad
+    grads = (native_module.weight.grad, ref_module.weight.grad)
+    return tuple(g.detach().clone() if g is not None else None for g in grads)
+
+
 def check_mxfp4_module_versus_reference(
     module_class,
     in_features: int,
@@ -90,6 +107,7 @@ def check_mxfp4_module_versus_reference(
     x_dtype: torch.dtype,
     num_steps: int = 1,
     use_hadamard: bool = False,
+    fuse_wgrad_accumulation: bool = False,
 ):
     """Compare native MXFP4 module against reference implementation."""
     isolate_test_state()
@@ -107,6 +125,7 @@ def check_mxfp4_module_versus_reference(
             bias=bias,
             device=device,
             params_dtype=x_dtype,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
         )
     elif module_class == te.LayerNormLinear:
         native_module = te.LayerNormLinear(
@@ -115,6 +134,7 @@ def check_mxfp4_module_versus_reference(
             bias=bias,
             device=device,
             params_dtype=x_dtype,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
         )
     else:
         raise ValueError(f"Unsupported module class: {module_class}")
@@ -154,6 +174,9 @@ def check_mxfp4_module_versus_reference(
     mxfp4_recipe = GetRecipes.mxfp4_recipe_to_test(use_hadamard)
     mxfp4_ref_factory = get_mxfp4_quantizer_factory(use_hadamard)
     mxfp4_ref_recipe = recipe.CustomRecipe(qfactory=mxfp4_ref_factory)
+    main_grad_init = init_main_grad(native_module) if fuse_wgrad_accumulation else None
+    # is_first_microbatch=True would overwrite main_grad instead of accumulating into it
+    first_microbatch = (lambda step: None) if fuse_wgrad_accumulation else (lambda step: step == 0)
 
     native_outputs = []
     ref_outputs = []
@@ -174,23 +197,20 @@ def check_mxfp4_module_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         with te.autocast(enabled=True, recipe=mxfp4_recipe):
-            y_native = native_module(x_native, is_first_microbatch=(step == 0))
+            y_native = native_module(x_native, is_first_microbatch=first_microbatch(step))
         y_native.backward(grad_output)
 
         with te.autocast(enabled=True, recipe=mxfp4_ref_recipe):
             y_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
+        native_wgrad, ref_wgrad = weight_grads(native_module, ref_module, main_grad_init)
         native_outputs.append(
             {
                 "output": y_native.detach().clone(),
                 "input_grad": (
                     x_native.grad.detach().clone() if x_native.grad is not None else None
                 ),
-                "weight_grad": (
-                    native_module.weight.grad.detach().clone()
-                    if native_module.weight.grad is not None
-                    else None
-                ),
+                "weight_grad": native_wgrad,
                 "bias_grad": (
                     native_module.bias.grad.detach().clone()
                     if bias and native_module.bias.grad is not None
@@ -203,11 +223,7 @@ def check_mxfp4_module_versus_reference(
             {
                 "output": y_ref.detach().clone(),
                 "input_grad": (x_ref.grad.detach().clone() if x_ref.grad is not None else None),
-                "weight_grad": (
-                    ref_module.weight.grad.detach().clone()
-                    if ref_module.weight.grad is not None
-                    else None
-                ),
+                "weight_grad": ref_wgrad,
                 "bias_grad": (
                     ref_module.bias.grad.detach().clone()
                     if bias and ref_module.bias.grad is not None
@@ -270,6 +286,9 @@ def check_mxfp4_module_versus_reference(
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("num_steps", [1], ids=["single_step"])
 @pytest.mark.parametrize("use_hadamard", [True, False], ids=["with_hadamard", "no_hadamard"])
+@pytest.mark.parametrize(
+    "fuse_wgrad_accumulation", [False, True], ids=["no_fuse_wgrad", "fuse_wgrad_accumulation"]
+)
 def test_mxfp4_linear_versus_reference(
     in_features: int,
     out_features: int,
@@ -277,6 +296,7 @@ def test_mxfp4_linear_versus_reference(
     x_dtype: torch.dtype,
     num_steps: int,
     use_hadamard: bool,
+    fuse_wgrad_accumulation: bool,
 ):
     """Test MXFP4 Linear module against reference implementation."""
     if x_dtype != torch.bfloat16:
@@ -291,6 +311,7 @@ def test_mxfp4_linear_versus_reference(
         x_dtype=x_dtype,
         num_steps=num_steps,
         use_hadamard=use_hadamard,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )
 
 
@@ -302,6 +323,7 @@ def check_mxfp4_layernorm_linear_versus_reference(
     x_dtype: torch.dtype,
     num_steps: int = 1,
     use_hadamard: bool = False,
+    fuse_wgrad_accumulation: bool = False,
 ):
     """Compare native MXFP4 LayerNormLinear against reference, including ln_out."""
     isolate_test_state()
@@ -320,6 +342,7 @@ def check_mxfp4_layernorm_linear_versus_reference(
         params_dtype=x_dtype,
         normalization=normalization,
         return_layernorm_output=True,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )
 
     reset_rng_states()
@@ -348,6 +371,9 @@ def check_mxfp4_layernorm_linear_versus_reference(
     mxfp4_recipe = GetRecipes.mxfp4_recipe_to_test(use_hadamard)
     mxfp4_ref_factory = get_mxfp4_quantizer_factory(use_hadamard)
     mxfp4_ref_recipe = recipe.CustomRecipe(qfactory=mxfp4_ref_factory)
+    main_grad_init = init_main_grad(native_module) if fuse_wgrad_accumulation else None
+    # is_first_microbatch=True would overwrite main_grad instead of accumulating into it
+    first_microbatch = (lambda step: None) if fuse_wgrad_accumulation else (lambda step: step == 0)
 
     native_outputs = []
     ref_outputs = []
@@ -368,12 +394,15 @@ def check_mxfp4_layernorm_linear_versus_reference(
         grad_output = grad_output_val.clone().detach()
 
         with te.autocast(enabled=True, recipe=mxfp4_recipe):
-            y_native, ln_out_native = native_module(x_native, is_first_microbatch=(step == 0))
+            y_native, ln_out_native = native_module(
+                x_native, is_first_microbatch=first_microbatch(step)
+            )
         y_native.backward(grad_output)
 
         with te.autocast(enabled=True, recipe=mxfp4_ref_recipe):
             y_ref, ln_out_ref = ref_module(x_ref)
         y_ref.backward(grad_output)
+        native_wgrad, ref_wgrad = weight_grads(native_module, ref_module, main_grad_init)
 
         native_outputs.append(
             {
@@ -382,11 +411,7 @@ def check_mxfp4_layernorm_linear_versus_reference(
                 "input_grad": (
                     x_native.grad.detach().clone() if x_native.grad is not None else None
                 ),
-                "weight_grad": (
-                    native_module.weight.grad.detach().clone()
-                    if native_module.weight.grad is not None
-                    else None
-                ),
+                "weight_grad": native_wgrad,
             }
         )
         ref_outputs.append(
@@ -394,11 +419,7 @@ def check_mxfp4_layernorm_linear_versus_reference(
                 "output": y_ref.detach().clone(),
                 "ln_out": ln_out_ref.detach().clone(),
                 "input_grad": (x_ref.grad.detach().clone() if x_ref.grad is not None else None),
-                "weight_grad": (
-                    ref_module.weight.grad.detach().clone()
-                    if ref_module.weight.grad is not None
-                    else None
-                ),
+                "weight_grad": ref_wgrad,
             }
         )
 
@@ -438,6 +459,9 @@ def check_mxfp4_layernorm_linear_versus_reference(
 @pytest.mark.parametrize("num_steps", [1], ids=["single_step"])
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"], ids=["LayerNorm", "RMSNorm"])
 @pytest.mark.parametrize("use_hadamard", [True, False], ids=["with_hadamard", "no_hadamard"])
+@pytest.mark.parametrize(
+    "fuse_wgrad_accumulation", [False, True], ids=["no_fuse_wgrad", "fuse_wgrad_accumulation"]
+)
 def test_mxfp4_layernorm_linear_versus_reference(
     in_features: int,
     out_features: int,
@@ -446,6 +470,7 @@ def test_mxfp4_layernorm_linear_versus_reference(
     x_dtype: torch.dtype,
     num_steps: int,
     use_hadamard: bool,
+    fuse_wgrad_accumulation: bool,
 ):
     skip_if_unsupported_shape(in_features, out_features)
     check_mxfp4_layernorm_linear_versus_reference(
@@ -456,4 +481,5 @@ def test_mxfp4_layernorm_linear_versus_reference(
         x_dtype=x_dtype,
         num_steps=num_steps,
         use_hadamard=use_hadamard,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )

@@ -34,7 +34,8 @@ config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
 not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT
-with FP32 / BF16 / FP16 output against a torch.matmul reference only. FlyDSL kernels require tile-aligned
+with FP32 / BF16 / FP16 output, with and without accumulation into the output,
+against a torch.matmul reference only. FlyDSL kernels require tile-aligned
 launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
 rather than reusing the odd-sized Triton edge-mask cases.
 """
@@ -173,6 +174,8 @@ FLYDSL_MXFP8_SHAPES = [
 ]
 
 FLYDSL_MXFP4_SHAPES = [
+    (512, 256, 512),  # two K tiles: no K step after the prologue
+    (512, 384, 512),  # three K tiles
     (512, 512, 512),
     (512, 1024, 512),
     (512, 512, 1024),  # M != N
@@ -1159,6 +1162,45 @@ def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
     expected = compute_pytorch_reference(A_deq, B_deq, layout)
 
     assert output.dtype == out_dtype
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize("beta", [None, -0.5], ids=["beta=default", "beta=-0.5"])
+def test_flydsl_vs_pytorch_mxfp4_accumulate(M, K, N, layout, out_dtype, beta):
+    """MXFP4 FlyDSL GEMM accumulating into ``out`` (``D = A @ B + beta * D``).
+
+    This is the wgrad GEMM accumulating into ``main_grad`` (FP32 in practice); ``beta=None``
+    is what TE passes, which resolves to 1.
+    """
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    expected = ab + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, _, _, _ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        beta=beta,
+        accumulate=True,
+    )
+
+    assert output.data_ptr() == d.data_ptr()
     if out_dtype == torch.float32:
         assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
     else:
