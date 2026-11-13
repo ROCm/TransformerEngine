@@ -102,6 +102,7 @@ class CMakeExtension(setuptools.Extension):
             configure_command += [
                 f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
                 f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_HIP_COMPILER_LAUNCHER={ccache_bin}",
             ]
         if rocm_build():
             # An inplace build leaves the objects in the source tree, out of
