@@ -32,8 +32,6 @@ using namespace kittens;
 #define COMM_WG 8
 #endif
 
-// RS_MAX_TP, the RS_SENT_* poison, RsPeers and pull_reduce_all_sent come from hk_overlap; this is
-// the device-side copy of the poison, mirroring the bf16 RS path.
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
 
 using G = kittens::group<NUM_WARPS>;

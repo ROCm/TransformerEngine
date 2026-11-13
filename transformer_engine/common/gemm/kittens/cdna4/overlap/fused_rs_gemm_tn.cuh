@@ -30,8 +30,6 @@ using namespace kittens;
 #define COMM_WG 8
 #endif
 
-// RS_MAX_TP, the RS_SENT_* poison and RsPeers come from hk_overlap; this is the device-side copy of
-// the poison that comm_gemm.cpp's sentinel_pattern_agrees() reads back to confirm host/device agree.
 __device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
 
 struct CdWalk {

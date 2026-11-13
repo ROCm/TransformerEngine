@@ -2,8 +2,7 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Kernel setup for the NT bulk RS+GEMM, mirroring mxfp8_gemm_nt_kernel's. The caller defines
-//! A_local, B_local and k_iters.
+//! Kernel setup for the NT bulk RS+GEMM, mirroring mxfp8_gemm_nt_kernel's.
     using ST_A     = st_fp8e4m3<BLOCK_K, HALF_ROW, st_16x128_s>;
     using ST_B     = st_fp8e4m3<BLOCK_K, HALF_COL, st_16x128_s>;
     using RT_A     = rt<fp8e4m3, REG_M, BLOCK_K, col_l, rt_16x128_s>;

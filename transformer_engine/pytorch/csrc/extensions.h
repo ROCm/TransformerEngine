@@ -877,8 +877,6 @@ void rocshmem_finalize();
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-// Takes CommOverlapCore, where bulk_overlap_external_ag is declared virtual: on ROCm every
-// "fused" overlap name is backed by CommOverlapP2P, which does not derive from CommOverlap.
 void bulk_overlap_ag_with_external_gemm(transformer_engine::CommOverlapCore &allgather_communicator,
                                         at::Stream send_stream, at::Stream recv_stream);
 

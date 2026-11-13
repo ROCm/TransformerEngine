@@ -338,8 +338,6 @@ constexpr int RS_MAX_TP = 8;
 #define RS_SENT_BF16 0xFFAAu
 #define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
 
-// Per-PE pointer to each peer's reduce-scatter staging buffer. Unlike PeerPtrsT this is not
-// templated: the stage always holds the bf16 output, whatever the operand dtype was.
 struct RsPeers {
     kittens::bf16 *stage[RS_MAX_TP];
 };

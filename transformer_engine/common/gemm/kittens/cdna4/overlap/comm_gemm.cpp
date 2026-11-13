@@ -953,8 +953,6 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
-    // The A slot holds args.B and the B slot args.A, so the scale buffers follow them across that
-    // swap. Both operands are K-major here, which is what COLWISE packs.
     launch_pack_scales<true, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
                                     args.stream);
     launch_pack_scales<true, 32, 8>((const uint8_t *)args.scale_A, packed_sb, N, scale_K, k_iters,
@@ -1094,8 +1092,6 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();
 
-    // Operands arrive BLAS-canonical (A = weight, B = activation). This kernel puts tokens on its
-    // M axis, so the activation goes in the A slot -- the same swap run_bulk_rs makes.
     launch_persistent_rs(M, N_TOTAL, K, static_cast<bf16 *>(const_cast<void *>(args.B)),
                          static_cast<bf16 *>(const_cast<void *>(args.A)), local_stage,
                          static_cast<bf16 *>(args.D), static_cast<TileDesc *>(plan.queue),
@@ -1204,8 +1200,6 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
         args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
 
     RsLaunchCfg cfg;
-    // rs_comm_wg_tn_mxfp8 is (tokens, hidden, k_local); under this path's BLAS roles N_TOTAL is
-    // the token axis and M the hidden one, the opposite of run_fused_rs's naming.
     cfg.comm_wg    = rs_comm_wg_tn_mxfp8(N_TOTAL, M, K);
     cfg.wb_group   = rs_wb_group(K);
     cfg.warn_ticks = ag_ready_warn_ticks();

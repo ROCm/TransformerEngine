@@ -489,8 +489,6 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
     return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
 }
 
-// dW is [M, N], not the [N, M] mxfp8_gemm.cpp's NT path writes, so the col_l accumulator already
-// carries C's orientation and stores straight through -- that file's NN epilogue, not its NT one.
 template<typename RT_C, typename OutGL>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -645,8 +643,6 @@ static void dispatch(mxfp8_rs_globals g) {
 
 using bulk_rs_mxfp8_fn_t = void (*)(mxfp8_rs_globals);
 
-// MFMA cbsz/blgp operand format codes: 0 = e4m3, 1 = e5m2, per operand. The arguments are the
-// kernel's A and B slots, which the host fills from args.B and args.A respectively.
 static bulk_rs_mxfp8_fn_t get_bulk_rs_mxfp8_fn(KittensDType a_dt, KittensDType b_dt) {
     const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
     if (a_fp8_code == 0 && b_fp8_code == 0) return dispatch<0, 0>;
