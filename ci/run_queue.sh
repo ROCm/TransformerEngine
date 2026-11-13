@@ -270,9 +270,11 @@ probe_supported() {
 }
 : "${TE_CI_SUPPORTS_MXFP8=$(probe_supported mxfp8)}"
 : "${TE_CI_SUPPORTS_FLASH_ATTN=$(probe_supported flash_attn)}"
-export TE_CI_SUPPORTS_MXFP8 TE_CI_SUPPORTS_FLASH_ATTN
+: "${TE_CI_SUPPORTS_PERMUTE_FREE=$(probe_supported permute_free)}"
+export TE_CI_SUPPORTS_MXFP8 TE_CI_SUPPORTS_FLASH_ATTN TE_CI_SUPPORTS_PERMUTE_FREE
 echo "== Supports: mxfp8=${TE_CI_SUPPORTS_MXFP8:-no answer}" \
-     "flash_attn=${TE_CI_SUPPORTS_FLASH_ATTN:-no answer} =="
+     "flash_attn=${TE_CI_SUPPORTS_FLASH_ATTN:-no answer}" \
+     "permute_free=${TE_CI_SUPPORTS_PERMUTE_FREE:-no answer} =="
 
 # Learned item durations, keyed by arch, TEST_LEVEL and GPU count. Only the sGPU
 # queue keeps them: mGPU items run one at a time on the whole box, so their order
