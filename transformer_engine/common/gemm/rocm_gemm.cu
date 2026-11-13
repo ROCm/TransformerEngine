@@ -637,6 +637,15 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
+// Block-scale bound of an NVFP4 operand. gfx942 stores E4M3 as FNUZ (max 240); UE5M3 has no FNUZ form.
+static float nvfp4_scale_max(const transformer_engine::Tensor& t) {
+  const DType scale_dtype = t.scale_inv.has_data() ? t.scale_inv.dtype : t.columnwise_scale_inv.dtype;
+  if (te_fp8_fnuz() && scale_dtype != DType::kFloat8UE5M3) {
+    return 240.0f;
+  }
+  return static_cast<float>(t.get_nvfp4_scale_max());
+}
+
 // Prepare a native (gfx1250) NVFP4 hipBLASLt GEMM: swizzle the block scales and fold the per-tensor
 // amax correction into a HOST scalar alpha.
 //
@@ -662,8 +671,8 @@ static void setup_nvfp4_gemm_native(
 
   const float fp4_max = 6.0f;
   // Read the bound per operand: 4over6 tensors carry 256, not 448.
-  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.get_nvfp4_scale_max());
-  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.get_nvfp4_scale_max());
+  const float fp8_max_A = nvfp4_scale_max(inputA);
+  const float fp8_max_B = nvfp4_scale_max(inputB);
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
@@ -735,8 +744,8 @@ static void dequant_fp4_gemm_inputs(
 
   const float fp4_max = 6.0f;
   // Read the bound per operand as upstream does: 4over6 tensors carry 256, not 448.
-  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.get_nvfp4_scale_max());
-  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.get_nvfp4_scale_max());
+  const float fp8_max_A = nvfp4_scale_max(inputA);
+  const float fp8_max_B = nvfp4_scale_max(inputB);
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
@@ -814,9 +823,10 @@ static void dequant_fp4_gemm_inputs(
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
 // Whether hipBLASLt has native NVFP4 kernels with UE5M3 block-16 scales for this output type. Older
 // libraries (e.g. ROCm 10.1) have none, and the E5M3 logic only covers BF16 output. Its GridBased
-// logic covers all sizes, so one small TN problem per (device, output type) answers it.
+// logic covers all sizes, so one small TN problem per (device, output type) answers it. Only kernels
+// that need no workspace count, so the cached answer holds for whatever workspace a GEMM gets.
 static bool nvfp4_ue5m3_native_available(hipblasLtHandle_t handle, int device_id,
-                                         hipDataType d_type, size_t workspace_size) {
+                                         hipDataType d_type) {
   static std::mutex mutex;
   static std::map<std::pair<int, int>, bool> cache;
   std::lock_guard<std::mutex> lock(mutex);
@@ -845,8 +855,9 @@ static bool nvfp4_ue5m3_native_available(hipblasLtHandle_t handle, int device_id
                                                        &scale_mode, sizeof(scale_mode)));
   hipblasLtMatmulPreference_t pref;
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&pref));
+  const size_t no_workspace = 0;
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
-      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
+      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &no_workspace, sizeof(no_workspace)));
   hipblasLtMatmulHeuristicResult_t result{};
   int count = 0;
   const bool available =
@@ -1614,8 +1625,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
     use_nvfp4_native = nvfp4_a_scale_dtype == nvfp4_b_scale_dtype &&
                        nvfp4_ue5m3_native_available(handle, device_id,
-                                                    get_hipblaslt_dtype(outputD->data.dtype),
-                                                    workspaceSize);
+                                                    get_hipblaslt_dtype(outputD->data.dtype));
 #else
     use_nvfp4_native = false;  // no VEC16_UE5M3 scale mode before hipBLASLt 1.3
 #endif

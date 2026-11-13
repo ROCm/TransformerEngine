@@ -225,12 +225,12 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
     const float amax = 6.0f * (is_ue5m3 ? 114688.0f : 448.0f);
 
     run_single_case<OutputType, ScaleType>("rowwise_1d_dequant",
-                                input,
-                                rows,
-                                cols,
-                                scales_stride,
-                                amax,
-                                otype);
+                                           input,
+                                           rows,
+                                           cols,
+                                           scales_stride,
+                                           amax,
+                                           otype);
 }
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {

@@ -899,7 +899,7 @@ struct TypeInfo {
 #else
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
 #endif
-#if CUDA_VERSION >= 13040
+#if CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)
 #define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
   case DType::kFloat8UE5M3: {                  \
     using type = fp8ue5m3;                     \
@@ -907,14 +907,6 @@ struct TypeInfo {
   } break;
 #else
 #define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
-#endif
-#ifdef __HIP_PLATFORM_AMD__
-#undef SWITCH_FP8UE5M3_TYPE_HANDLE
-#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
-  case DType::kFloat8UE5M3: {                  \
-    using type = fp8ue5m3;                     \
-    { __VA_ARGS__ }                            \
-  } break;
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \
