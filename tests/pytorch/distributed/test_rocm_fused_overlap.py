@@ -355,16 +355,11 @@ def test_fused_mlp_rs_overlap(nprocs, quantization):
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
-@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-def test_fused_rs_overlap(nprocs, quantization):
-    """bf16 or mxfp8 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
+def test_fused_rs_overlap_bf16(nprocs):
+    """bf16 at an aligned shape: the fused reduce-scatter runs and the result is correct."""
     result = _run_fused_row_parallel_layer(
-        nprocs,
-        [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
-        quantization=quantization,
+        nprocs, [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"]
     )
     _assert_numerics_passed(result)
     stderr = result.stderr.decode()
@@ -372,7 +367,7 @@ def test_fused_rs_overlap(nprocs, quantization):
     disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
     assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
     assert "proj_fprop" not in disabled, disabled
-    _assert_fused_rs_precision(result, quantization)
+    _assert_fused_rs_precision(result, "none")
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -392,6 +387,10 @@ def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
     # is a stub on every backend.
     assert "Operation not supported" not in stderr, stderr
     assert "failed to launch" not in stderr, stderr
+    disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
+    assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
+    assert "proj_fprop" not in disabled, disabled
+    _assert_fused_rs_precision(result, "mxfp8")
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
