@@ -23,16 +23,20 @@ import argparse
 import re
 import sys
 
-# Suite labels, as named in ci/ci_sgpu_queue.conf and ci/ci_mgpu_queue.conf.
-# run_queue.sh rejects a --suites name its config does not define, so a label
-# renamed there without renaming it here fails loudly instead of gating wrongly.
+# Suite labels, as named in ci/ci_sgpu_queue.conf, ci/ci_mgpu_queue.conf and
+# ci/ci_emu_queue.conf. run_queue.sh rejects a --suites name its config does not
+# define, so a label renamed there without renaming it here fails loudly instead
+# of gating wrongly.
 SGPU_SUITES = ("examples", "torch", "jax", "core")
 MGPU_SUITES = ("torch-mgpu", "jax-mgpu")
-EVERYTHING = frozenset(SGPU_SUITES + MGPU_SUITES)
+EMU_SUITES = ("gfx1250-emu",)
+EVERYTHING = frozenset(SGPU_SUITES + MGPU_SUITES + EMU_SUITES)
 NOTHING = frozenset()
 
 TORCH = frozenset({"torch", "torch-mgpu"})
 JAX = frozenset({"jax", "jax-mgpu"})
+# ci/rocjitsu.sh runs C++ tests and a few PyTorch tests on an emulated gfx1250
+EMU = frozenset(EMU_SUITES)
 
 # (pattern, suites, why). First match wins, so a specific pattern must come
 # before the general one it carves out of. In a pattern, "**" matches across
@@ -85,26 +89,30 @@ RULES = [
     # mGPU-only.
     ("tests/pytorch/distributed/**", frozenset({"torch-mgpu"}), "PyTorch mGPU tests"),
     ("tests/pytorch/attention/*with_cp*", frozenset({"torch-mgpu"}), "PyTorch mGPU tests"),
+    ("tests/pytorch/conftest.py", TORCH | EMU, "PyTorch test configuration"),
+    ("tests/pytorch/nvfp4/**", TORCH | EMU, "PyTorch tests, also run on emulated gfx1250"),
     ("tests/pytorch/**", TORCH, "PyTorch tests and helpers"),
     ("tests/jax/test_distributed_*.py", frozenset({"jax-mgpu"}), "JAX mGPU tests"),
     ("tests/jax/**", JAX, "JAX tests and helpers"),
-    ("tests/cpp/**", frozenset({"core"}), "C++ tests"),
+    ("tests/cpp/**", frozenset({"core"}) | EMU, "C++ tests"),
     ("tests/cpp_distributed/**", NOTHING, "not run by ROCm CI"),
     ("examples/pytorch/**", frozenset({"examples"}), "examples suite"),
     ("examples/jax/**", frozenset({"examples"}), "examples suite"),
     ("examples/**", NOTHING, "not run by CI"),
     # Framework bindings. The examples suite runs the PyTorch and JAX MNIST and
     # encoder examples, so it follows either framework.
-    ("transformer_engine/pytorch/**", TORCH | {"examples"}, "PyTorch bindings"),
+    ("transformer_engine/pytorch/**", TORCH | EMU | {"examples"}, "PyTorch bindings"),
     ("transformer_engine/debug/**", TORCH | {"examples"}, "PyTorch-only debug tools"),
     ("transformer_engine/jax/**", JAX | {"examples"}, "JAX bindings"),
     # Suite scripts
     ("ci/pytorch.sh", TORCH, "PyTorch suite script"),
     ("ci/jax.sh", JAX, "JAX suite script"),
     ("ci/core.sh", frozenset({"core"}), "C++ suite script"),
+    ("ci/rocjitsu.sh", EMU, "emulated gfx1250 suite script"),
     # Queue configs: each is read only by its own queue
     ("ci/ci_sgpu_queue.conf", frozenset(SGPU_SUITES), "sGPU queue config"),
     ("ci/ci_mgpu_queue.conf", frozenset(MGPU_SUITES), "mGPU queue config"),
+    ("ci/ci_emu_queue.conf", EMU, "emulated-GPU queue config"),
     # The CI docker images: a new image runs every suite
     ("ci/ci_config.json", EVERYTHING, "names the CI docker images"),
     # Everything else every suite shares: the C++ library all frameworks link,
@@ -183,12 +191,18 @@ def summary_lines(needed, decisions, reason):
     """Markdown for the job summary: the verdict, then why, path by path."""
     sgpu = ordered(needed, SGPU_SUITES) or "none"
     mgpu = ordered(needed, MGPU_SUITES) or "none"
+    emu = ordered(needed, EMU_SUITES) or "none"
     out = ["## CI scope", ""]
     if reason:
         out += [f"Running every suite: {reason}.", ""]
         return out
     if needed:
-        out += [f"- sGPU suites: **{sgpu}**", f"- mGPU suites: **{mgpu}**", ""]
+        out += [
+            f"- sGPU suites: **{sgpu}**",
+            f"- mGPU suites: **{mgpu}**",
+            f"- Emulated GPU suites: **{emu}**",
+            "",
+        ]
     else:
         out += ["Nothing this PR changes is built or tested by CI, so no test job runs.", ""]
     out += [
@@ -218,7 +232,7 @@ def main():
     parser.add_argument(
         "--github-output",
         metavar="FILE",
-        help="append run_build, sgpu_suites and mgpu_suites to FILE ($GITHUB_OUTPUT)",
+        help="append run_build, sgpu_suites, mgpu_suites and emu_suites to FILE ($GITHUB_OUTPUT)",
     )
     parser.add_argument("--summary", metavar="FILE", help="append a Markdown explanation to FILE")
     args = parser.parse_args()
@@ -230,17 +244,20 @@ def main():
 
     sgpu = ordered(needed, SGPU_SUITES)
     mgpu = ordered(needed, MGPU_SUITES)
+    emu = ordered(needed, EMU_SUITES)
     for path, pattern, suites, _ in decisions:
         runs = "everything" if suites == EVERYTHING else " ".join(sorted(suites)) or "nothing"
         print(f"  {path}: {runs}  [{pattern}]", file=sys.stderr)
     print(f"sgpu_suites={sgpu}")
     print(f"mgpu_suites={mgpu}")
+    print(f"emu_suites={emu}")
 
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8") as handle:
             handle.write(f"run_build={'true' if needed else 'false'}\n")
             handle.write(f"sgpu_suites={sgpu}\n")
             handle.write(f"mgpu_suites={mgpu}\n")
+            handle.write(f"emu_suites={emu}\n")
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as handle:
             handle.write("\n".join(summary_lines(needed, decisions, args.all)) + "\n")
