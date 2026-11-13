@@ -557,7 +557,6 @@ __device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
     return total;
 }
 
-// Persistent: the reducers fold, then join the GEMM; the last workgroup out resets the counters.
 template <int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
