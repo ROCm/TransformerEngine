@@ -906,6 +906,26 @@ bool bulk_rs_shape_ok_mxfp8(int M, int N, int K, int nred) {
            nred >= 0 && nred % 8 == 0;
 }
 
+// The MXFP8 bulk RS kernel's per-XCD tile cursors and exit count, per userbuffer. Kept outside the
+// caller's workspace, which other GEMMs overwrite between calls; the kernel's last workgroup zeroes
+// them, so the host only clears them on the first call.
+std::map<const void *, int *> g_bulk_rs_counters;
+
+static int *bulk_rs_mxfp8_counters(const void *ub, hipStream_t stream) {
+    int *&c = g_bulk_rs_counters[ub];
+    if (!c) {
+        const size_t bytes = (hk_mxfp8_rs_nt::NUM_XCDS + 1) * sizeof(int);
+        void *p = nullptr;
+        if (hipMalloc(&p, bytes) != hipSuccess) return nullptr;
+        if (hipMemsetAsync(p, 0, bytes, stream) != hipSuccess) {
+            static_cast<void>(hipFree(p));
+            return nullptr;
+        }
+        c = static_cast<int *>(p);
+    }
+    return c;
+}
+
 bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     using namespace hk_mxfp8_rs_nt;
 
@@ -959,6 +979,9 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     }
     peers.base[args.rank] = static_cast<bf16 *>(args.ub);
 
+    int *counters = bulk_rs_mxfp8_counters(args.ub, args.stream);
+    if (!counters) return false;
+
     if (args.arrive_peers && args.arrive_local) {
         ag_ready_kernel<<<1, 64, 0, args.stream>>>(
             static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
@@ -977,7 +1000,8 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
                     nullptr, nullptr, nullptr),
         gl_scale_rt(reinterpret_cast<fp8e8m0 *>(packed_sb), 2 * k_iters * tiles_N,
                     nullptr, nullptr, nullptr),
-        nred, bands, bands, tp_size, args.rank, comm.fold_deep, peers, shard_elems, band_elems, args.stream};
+        nred, bands, bands, tp_size, args.rank, comm.fold_deep, peers, shard_elems, band_elems, args.stream,
+        counters};
     launch(g);
     return hipGetLastError() == hipSuccess;
 }
@@ -1311,6 +1335,10 @@ void kittens_persistent_plans_reset_cdna4() {
         if (kv.second.counters) static_cast<void>(hipFree(kv.second.counters));
     }
     g_rs_regions.clear();
+    for (auto &kv : g_bulk_rs_counters) {
+        if (kv.second) static_cast<void>(hipFree(kv.second));
+    }
+    g_bulk_rs_counters.clear();
     g_peers.clear();
 }
 

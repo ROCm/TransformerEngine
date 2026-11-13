@@ -526,44 +526,59 @@ struct mxfp8_rs_globals {
     size_t shard_elems;            // (tokens/tp) * hidden
     size_t band_elems;             // RS_BAND_ROWS * hidden
     hipStream_t stream;
+    int *counters;                 // [NUM_XCDS] per-XCD tile cursors, then the exit count; self-resetting
     int M = c.rows();
     int N = c.cols();
     int K = a.rows();
-    dim3 grid()  { return dim3((N / BLOCK_COL) * (M / BLOCK_ROW) + nred); }
+    // Persistent: at most GRID_CAP workgroups, the reducers among them.
+    dim3 grid() {
+        const int want = (N / BLOCK_COL) * (M / BLOCK_ROW) + nred;
+        return dim3(want > GRID_CAP ? GRID_CAP : want);
+    }
     dim3 block() { return dim3(NUM_THREADS); }
 };
 
+constexpr int NUM_XCDS = 8;
+
+// Next tile of this workgroup's XCD share -- the tiles t = xcd + NUM_XCDS * i that
+// chiplet_transform_chunked maps onto that XCD -- else one stolen from another XCD's share.
+__device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
+    const int x0 = (int)blockIdx.x;
+#pragma unroll 1
+    for (int s = 0; s < NUM_XCDS; s++) {
+        const int x   = (x0 + s) & (NUM_XCDS - 1);
+        const int cnt = (total - x + NUM_XCDS - 1) / NUM_XCDS;
+        if (__hip_atomic_load(&bucket_ctr[x], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) >= cnt) {
+            continue;
+        }
+        const int i = atomicAdd(&bucket_ctr[x], 1);
+        if (i < cnt) {
+            return x + NUM_XCDS * i;
+        }
+    }
+    return total;
+}
+
+// Persistent: the reducers fold, then join the GEMM workgroups, each claiming its own XCD's tiles
+// first. No workgroup waits on another, so any grid completes, and the last one out resets the
+// counters for the next call.
 template <int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     if ((int)blockIdx.x < g.nred) {
         hk_rs_nt::rs_pull_fold((int)blockIdx.x, g.nred, g.bands, g.gband, g.tp_size, g.my_pe,
                                g.peers, g.shard_elems, g.band_elems, g.fold_deep);
-        return;
     }
 
     const int k_iters = K / BLOCK_K;
     const int tiles_M = M / BLOCK_ROW;
     const int tiles_N = N / BLOCK_COL;
+    const int total   = tiles_M * tiles_N;
 
-    const int NUM_XCDS = 8;
-    const int WGM      = 8;
-    int wgid = kittens::chiplet_transform_chunked((int)blockIdx.x - g.nred,
-                                                  (int)gridDim.x - g.nred, NUM_XCDS, WGM * WGM);
-    int num_wgid_in_group = WGM * tiles_N;
-    int group_id     = wgid / num_wgid_in_group;
-    int first_pid_m  = group_id * WGM;
-    int group_size_m = min(tiles_M - first_pid_m, WGM);
-    int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+    const int WGM = 8;
 
-    int a_row_tile = m_tile;
-    int block_row  = m_tile;
-    int block_col  = n_tile;
-    int sa_batch   = m_tile;
-    int sa_stride  = tiles_M;
-    int sb_batch   = n_tile;
-    int sb_stride  = tiles_N;
+    const int sa_stride = tiles_M;
+    const int sb_stride = tiles_N;
 
     const gl_fp8_rt   A_local    = g.a;
     const gl_fp8_rt   B_local    = g.b;
@@ -572,16 +587,66 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
 
 #include "mxfp8_nt_prologue.inc"
 
-    RT_A a;
-    RT_B b0, b1;
-    RT_C cA, cB, cC, cD;
-    kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
+#pragma unroll 1
+    while (true) {
+        __shared__ int s_tile_idx;
+        if (threadIdx.x == 0) {
+            s_tile_idx = claim_xcd_tile(g.counters, total);
+        }
+        __syncthreads();
+        const int t = s_tile_idx;
+        if (t >= total) {
+            break;
+        }
+
+        const int wgid              = kittens::chiplet_transform_chunked(t, total, NUM_XCDS, WGM * WGM);
+        const int num_wgid_in_group = WGM * tiles_N;
+        const int group_id          = wgid / num_wgid_in_group;
+        const int first_pid_m       = group_id * WGM;
+        const int group_size_m      = min(tiles_M - first_pid_m, WGM);
+        const int m_tile            = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+        const int n_tile            = (wgid % num_wgid_in_group) / group_size_m;
+
+        const int a_row_tile = m_tile;
+        const int block_row  = m_tile;
+        const int block_col  = n_tile;
+        const int sa_batch   = m_tile;
+        const int sb_batch   = n_tile;
+
+        RT_A a;
+        RT_B b0, b1;
+        RT_C cA, cB, cC, cD;
+        kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
 #include "../mxfp8_nt_preload.inc"
 
+#define MXFP8_NT_OPAQUE_PEEL 1
 #include "../mxfp8_nt_mainloop.inc"
+#undef MXFP8_NT_OPAQUE_PEEL
 
-    gemm_epilogue<RT_C>(cA, cB, cC, cD, g.c, block_row, block_col, warp_m, warp_n);
+        // The output row stride is hidden from LICM: hoisted, the per-lane epilogue offsets stay live
+        // across the whole K-loop and spill.
+        gl_bf16_rt c_out = g.c;
+        asm volatile("" : "+s"(c_out.cols_internal));
+        gemm_epilogue<RT_C>(cA, cB, cC, cD, c_out, block_row, block_col, warp_m, warp_n);
+
+        // Close the warp_m skew the preload opens before the next tile's barriers pair up.
+        if (warp_m == 0) {
+            __builtin_amdgcn_s_barrier();
+        }
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    }
+
+    // Every workgroup, reducers included, has made its last claim before it gets here, so once the
+    // exit count reaches the grid no one touches the cursors again.
+    if (threadIdx.x == 0) {
+        if (__hip_atomic_fetch_add(&g.counters[NUM_XCDS], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
+            == (int)gridDim.x - 1) {
+            for (int x = 0; x <= NUM_XCDS; x++) {
+                __hip_atomic_store(&g.counters[x], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            }
+        }
+    }
 }
 
 template <int CBSZ, int BLGP>
