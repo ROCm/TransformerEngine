@@ -75,12 +75,13 @@ def _consumed_klast(tq, use_rowwise: bool, rows: int, k: int):
 
 def check_mxfp4_gemm_versus_reference(
     m, n, k, out_dtype, *, a_quant, b_quant, layout="TN", accumulate=False,
-    fp32_accumulate=False, alpha=1.0,
+    fp32_accumulate=False, alpha=1.0, gelu=False,
 ):
     """MXFP4 GEMM (AITER a4w4, hipBLASLt F4F4 or FlyDSL) vs the Python MXFP4 reference.
 
     ``fp32_accumulate`` scales the FP32 product by ``alpha`` and adds ``out`` before narrowing to
-    ``out_dtype``, as hipBLASLt and FlyDSL do, rather than adding in ``out_dtype``.
+    ``out_dtype``, as hipBLASLt and FlyDSL do, rather than adding in ``out_dtype``. ``gelu``
+    (GELU_AUX, FP32 reference only) also checks the pre-activation aux output.
     """
     from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
@@ -100,7 +101,7 @@ def check_mxfp4_gemm_versus_reference(
     A_q = _mxfp4_quant(A_src, **a_quant)
     B_q = _mxfp4_quant(B_src, **b_quant)
 
-    y_native, *_ = general_gemm(
+    y_native, _, aux_native, _ = general_gemm(
         A_q,
         B_q,
         out_dtype=out_dtype,
@@ -111,6 +112,7 @@ def check_mxfp4_gemm_versus_reference(
         out=out.clone() if accumulate else None,
         accumulate=accumulate,
         alpha=alpha,
+        gelu=gelu,
     )
 
     # --- Reference: plain re-quant of the same source, dequant the consumed buffer ---
@@ -126,9 +128,12 @@ def check_mxfp4_gemm_versus_reference(
         )  # Beff @ Aeff^T -> (n, m), matching general_gemm's output orientation
         if accumulate:
             y_ref = y_ref + out.float()
+        if gelu:
+            torch.testing.assert_close(aux_native, y_ref.to(out_dtype), atol=8e-3, rtol=8e-3)
+            y_ref = torch.nn.functional.gelu(y_ref, approximate="tanh")
         y_ref = y_ref.to(out_dtype)
     else:
-        assert alpha == 1.0, "the out_dtype reference has no alpha"
+        assert alpha == 1.0 and not gelu, "the out_dtype reference has no alpha or GELU"
         y_ref = ref.qgemm(
             qx=qB, qw=qA, m_params=None, out_dtype=out_dtype, sx=sB, sw=sA,
             bias=None, out=out.clone() if accumulate else None, accumulate=accumulate, layout=layout,
@@ -210,6 +215,7 @@ def test_mxfp4_gemm_hipblaslt_versus_reference(
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("alpha", [1.0, -2.5], ids=["alpha=1", "alpha=-2.5"])
+@pytest.mark.parametrize("gelu", [False, True], ids=["no_gelu", "gelu_aux"])
 def test_mxfp4_gemm_flydsl_versus_reference(
     M: int,
     K: int,
@@ -218,12 +224,15 @@ def test_mxfp4_gemm_flydsl_versus_reference(
     layout: str,
     accumulate: bool,
     alpha: float,
+    gelu: bool,
 ):
     """FlyDSL MXFP4 GEMM vs the Python MXFP4 reference."""
     if M % 256 or N % 256:
         pytest.skip("FlyDSL MXFP4 requires M and N to be multiples of 256")
+    if gelu and accumulate:
+        pytest.skip("FlyDSL MXFP4 does not fuse GELU with accumulation")
     quant = dict(swizzled_scales=False)
     check_mxfp4_gemm_versus_reference(
         m=M, n=N, k=K, out_dtype=out_dtype, layout=layout, accumulate=accumulate,
-        fp32_accumulate=True, alpha=alpha, a_quant=quant, b_quant=quant,
+        fp32_accumulate=True, alpha=alpha, gelu=gelu, a_quant=quant, b_quant=quant,
     )

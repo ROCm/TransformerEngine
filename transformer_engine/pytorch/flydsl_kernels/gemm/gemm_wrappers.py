@@ -1067,8 +1067,12 @@ def _run_mxfp4(
     accumulate=False,
     alpha=1.0,
     beta=0.0,
+    gelu=False,
 ):
     """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT.
+
+    With ``gelu`` (GELU_AUX), D = gelu_tanh(alpha * A @ B) and the pre-activation is returned as
+    the aux output.
 
     ``D = alpha * A @ B``, plus ``beta * D`` with ``accumulate`` (C is aliased to D, as in
     hipBLASLt).
@@ -1114,6 +1118,7 @@ def _run_mxfp4(
         device=a_flydsl.device,
         backend_name=f"MXFP4 {layout}",
     )
+    aux = torch.empty_like(D) if gelu else None
     mxfp4_matmul(
         a_flydsl,
         a_scale,
@@ -1123,8 +1128,9 @@ def _run_mxfp4(
         accumulate=accumulate,
         alpha=alpha,
         beta=beta,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1417,8 +1423,10 @@ def te_generic_gemm_flydsl(
             raise ValueError("Mixed MXFP4 and non-MXFP4 FlyDSL GEMM inputs are not supported")
         if bias is not None:
             raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused bias is not implemented")
-        if gelu:
-            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused GELU is not implemented")
+        if gelu and accumulate:
+            raise FlyDSLUnsupportedError(
+                "FlyDSL MXFP4 GEMM fused GELU with accumulation is not implemented"
+            )
 
         mxfp4_output_dtypes = {
             None: torch.bfloat16,
@@ -1431,7 +1439,7 @@ def te_generic_gemm_flydsl(
                 f"FlyDSL MXFP4 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
 
-        D = _run_mxfp4(
+        D, gelu_input = _run_mxfp4(
             A,
             transa,
             B,
@@ -1441,8 +1449,9 @@ def te_generic_gemm_flydsl(
             accumulate=accumulate,
             alpha=alpha,
             beta=beta,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if a_kind == "mxfp8" or b_kind == "mxfp8":
         # Validate both are MXFP8
