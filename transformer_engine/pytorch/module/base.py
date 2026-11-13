@@ -784,17 +784,6 @@ def fused_ag_gemm_eligible(
     return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
 
 
-def as_cuda_stream(stream: torch.Stream) -> torch.cuda.Stream:
-    """Retype a Userbuffers communication stream so torch.cuda.stream() accepts it on ROCm."""
-    if isinstance(stream, torch.cuda.Stream):
-        return stream
-    return torch.cuda.Stream(
-        stream_id=stream.stream_id,
-        device_index=stream.device_index,
-        device_type=torch.cuda.Stream().device_type,
-    )
-
-
 def fused_rs_gemm_eligible(
     name: str,
     weight: torch.Tensor,
