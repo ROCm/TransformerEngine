@@ -785,12 +785,7 @@ def fused_ag_gemm_eligible(
 
 
 def as_cuda_stream(stream: torch.Stream) -> torch.cuda.Stream:
-    """Retype a Userbuffers communication stream so torch.cuda.stream() accepts it.
-
-    get_communication_stream() returns a generic torch.Stream. On ROCm its device reports as
-    "hip", and torch.cuda.stream() -> _get_device_index() rejects anything whose device.type is
-    not "cuda". The underlying handle is fine, so rebuild it as a torch.cuda.Stream.
-    """
+    """Retype a Userbuffers communication stream so torch.cuda.stream() accepts it on ROCm."""
     if isinstance(stream, torch.cuda.Stream):
         return stream
     return torch.cuda.Stream(

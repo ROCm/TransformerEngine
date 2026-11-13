@@ -440,4 +440,93 @@ void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
     }
 }
 
+#ifndef COMM_WG
+#define COMM_WG 8
+#endif
+
+__device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
+
+struct RsLaunchCfg {
+    int comm_wg  = COMM_WG;
+    int wb_group = 1;
+    uint64_t warn_ticks = 0;   // 0 disables the fold's stall report
+    kittens::bf16 *next_stage = nullptr;
+};
+
+struct CdWalk {
+    int q, tf, dq, dr;
+};
+
+__host__ __device__ __forceinline__
+CdWalk cd_walk_init(int pos, int stride, int tiles_free) {
+    CdWalk w;
+    w.q  = pos / tiles_free;
+    w.tf = pos - w.q * tiles_free;
+    w.dq = stride / tiles_free;
+    w.dr = stride - w.dq * tiles_free;
+    return w;
+}
+
+template <int TP, bool BANDS_ON_N, typename TD>
+__host__ __device__ __forceinline__
+TD cd_walk_desc(CdWalk w, int my_pe, int bands) {
+    const int j    = w.q % TP;
+    const int band = w.q / TP;
+    TD td;
+    td.chunk_id = (j == 0) ? my_pe : ((j - 1 < my_pe) ? j - 1 : j);
+    if constexpr (BANDS_ON_N) {
+        td.tile_n = td.chunk_id * bands + band;
+        td.tile_m = w.tf;
+    } else {
+        td.tile_m = td.chunk_id * bands + band;
+        td.tile_n = w.tf;
+    }
+    return td;
+}
+
+__host__ __device__ __forceinline__
+CdWalk cd_walk_next(CdWalk w, int tiles_free) {
+    w.q  += w.dq;
+    w.tf += w.dr;
+    if (w.tf >= tiles_free) {
+        w.tf -= tiles_free;
+        w.q  += 1;
+    }
+    return w;
+}
+
+template <bool BANDS_ON_N, typename TD>
+static std::vector<TD> build_rs_work_queue(int M, int N_total, int tp_size, int my_pe) {
+    const int tiles_free = BANDS_ON_N ? M / BLOCK_ROW : N_total / BLOCK_COL;
+    const int bands      = BANDS_ON_N ? (N_total / tp_size) / BLOCK_COL : (M / tp_size) / BLOCK_ROW;
+
+    std::vector<TD> queue;
+    queue.reserve((size_t)tiles_free * bands * tp_size);
+
+    auto emit = [&](int chunk, int band) {
+        for (int f = 0; f < tiles_free; f++) {
+            TD td{};
+            td.chunk_id = chunk;
+            if constexpr (BANDS_ON_N) {
+                td.tile_m = f;
+                td.tile_n = chunk * bands + band;
+            } else {
+                td.tile_m = chunk * bands + band;
+                td.tile_n = f;
+            }
+            queue.push_back(td);
+        }
+    };
+
+    for (int band = 0; band < bands; band++) {
+        emit(my_pe, band);
+        for (int c = 0; c < tp_size; c++) {
+            if (c != my_pe) {
+                emit(c, band);
+            }
+        }
+    }
+    return queue;
+}
+
 }  // namespace hk_overlap

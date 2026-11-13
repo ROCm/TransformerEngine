@@ -28,12 +28,6 @@ struct TileDesc {
 
 using namespace kittens;
 
-#ifndef COMM_WG
-#define COMM_WG 8
-#endif
-
-__device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
-
 using G = kittens::group<NUM_WARPS>;
 
 // The MXFP8 K step, 128 rather than hk_overlap::K_STEP's bf16 64.
@@ -65,43 +59,6 @@ __device__ __forceinline__ void gemm_epilogue(
     kittens::store(C, oB, oc(WARPS_COL + warp_n, warp_m));
     kittens::store(C, oC, oc(warp_n, WARPS_ROW + warp_m));
     kittens::store(C, oD, oc(WARPS_COL + warp_n, WARPS_ROW + warp_m));
-}
-
-struct CdWalk {
-    int q, tf, dq, dr;   // tf indexes the free axis: M, now that the bands run along N
-};
-
-__host__ __device__ __forceinline__
-CdWalk cd_walk_init(int pos, int stride, int tiles_free) {
-    CdWalk w;
-    w.q  = pos / tiles_free;
-    w.tf = pos - w.q * tiles_free;
-    w.dq = stride / tiles_free;
-    w.dr = stride - w.dq * tiles_free;
-    return w;
-}
-
-template <int TP>
-__host__ __device__ __forceinline__
-TileDesc cd_walk_desc(CdWalk w, int my_pe, int bands) {
-    const int j   = w.q % TP;
-    const int tnb = w.q / TP;
-    TileDesc td;
-    td.chunk_id = (j == 0) ? my_pe : ((j - 1 < my_pe) ? j - 1 : j);
-    td.tile_n   = td.chunk_id * bands + tnb;
-    td.tile_m   = w.tf;
-    return td;
-}
-
-__host__ __device__ __forceinline__
-CdWalk cd_walk_next(CdWalk w, int tiles_free) {
-    w.q  += w.dq;
-    w.tf += w.dr;
-    if (w.tf >= tiles_free) {
-        w.tf -= tiles_free;
-        w.q  += 1;
-    }
-    return w;
 }
 
 // Grid layout: [0, ncomm) communication workgroups, the rest draining the tile queue.
@@ -156,7 +113,7 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
         TileDesc desc;
         if (hy_static) {
-            desc    = cd_walk_desc<TP>(hy_cd, my_pe, bands);
+            desc    = cd_walk_desc<TP, true, TileDesc>(hy_cd, my_pe, bands);
             hy_cd   = cd_walk_next(hy_cd, tiles_M);
             hy_tick += hy_ncw;
             hy_left -= 1;
@@ -221,42 +178,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         }
     }
 }
-
-static std::vector<TileDesc> build_rs_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
-    (void)K;
-    const int tiles_M = M / BLOCK_ROW;
-    const int bands   = (N_total / tp_size) / BLOCK_COL;
-
-    std::vector<TileDesc> queue;
-    queue.reserve((size_t)tiles_M * bands * tp_size);
-
-    auto emit = [&](int chunk, int tn) {
-        for (int tm = 0; tm < tiles_M; tm++) {
-            TileDesc td{};
-            td.chunk_id = chunk;
-            td.tile_m   = tm;
-            td.tile_n   = chunk * bands + tn;
-            queue.push_back(td);
-        }
-    };
-
-    for (int tn = 0; tn < bands; tn++) {
-        emit(my_pe, tn);
-        for (int c = 0; c < tp_size; c++) {
-            if (c != my_pe) {
-                emit(c, tn);
-            }
-        }
-    }
-    return queue;
-}
-
-struct RsLaunchCfg {
-    int comm_wg  = COMM_WG;
-    int wb_group = 1;
-    uint64_t warn_ticks = 0;   // 0 disables the fold's stall report
-    bf16 *next_stage = nullptr;   // the other stage half, poisoned in-kernel for the next call
-};
 
 template <int CBSZ, int BLGP>
 static void launch_persistent_rs(int M, int N_TOTAL, int K, fp8e4m3 *d_a, fp8e4m3 *d_b,

@@ -47,7 +47,7 @@ bool sentinel_pattern_agrees() {
     static bool agrees  = false;
     if (!checked) {
         unsigned int device_dw = 0;
-        agrees = hipMemcpyFromSymbol(&device_dw, HIP_SYMBOL(hk_rs_tn::rs_sent_dw_device),
+        agrees = hipMemcpyFromSymbol(&device_dw, HIP_SYMBOL(hk_overlap::rs_sent_dw_device),
                                      sizeof(device_dw)) == hipSuccess && device_dw == RS_SENT_DW;
         checked = true;
     }
@@ -1042,7 +1042,7 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
     auto it = g_rs_plans.find(key);
     if (it == g_rs_plans.end()) {
         RsPlan plan;
-        auto queue = build_rs_work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        auto queue = build_rs_work_queue<false, TileDesc>(M, N_TOTAL, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
         if (!upload_plan(plan, queue)) return false;
         it = g_rs_plans.emplace(key, plan).first;
@@ -1130,7 +1130,7 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     auto it = g_rs_plans.find(key);
     if (it == g_rs_plans.end()) {
         RsPlan plan;
-        auto queue = build_rs_work_queue(M, N_TOTAL, K, tp_size, args.rank);
+        auto queue = build_rs_work_queue<true, TileDesc>(M, N_TOTAL, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
         if (!upload_plan(plan, queue)) return false;
         it = g_rs_plans.emplace(key, plan).first;
