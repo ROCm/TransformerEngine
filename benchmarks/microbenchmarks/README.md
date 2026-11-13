@@ -52,12 +52,23 @@ The samples CSV (`<module>_samples.csv` by default) contains one row per timing
 sample with columns for all benchmark parameters plus `label`, `sample_idx`,
 and `time_ms`.
 
-The `benchmark_gemm.py` CSV also has a `Kernels` column with the GEMM kernels the timed
-direction launched (`;`-separated, in launch order): hipBLASLt kernel names (Tensile names
-are cut after the tile and matrix-instruction sizes and get a `~<crc32>` of the full name)
-and, for Triton, the autotuned kernel with the config it picked, e.g.
-`matmul_kernel[128x256x32 GROUP_SIZE_M=4 waves_per_eu=0 num_warps=8 num_stages=3]`. It is
-empty for the other backends.
+The `benchmark_gemm.py` and `benchmark_grouped_gemm.py` CSVs also have a `Kernels` column
+with the GEMM kernels the timed direction launched, for every backend (`;`-separated, in
+launch order; other kernels such as quantization are left out), so a backend that fell back
+to another one or a kernel pick that changed between runs or versions shows up in the data:
+
+- hipBLASLt: Tensile names cut after the tile and matrix-instruction sizes, plus a
+  `~<crc32>` of the full name (`Cijk_..._MT256x128x64_MI16x16x1~43f075eb`); rocRoller names
+  (`RR_GEMM_*`) in full.
+- Triton: autotuned kernels with the config they picked, e.g.
+  `matmul_kernel[128x256x32 GROUP_SIZE_M=4 waves_per_eu=0 num_warps=8 num_stages=3]`;
+  other Triton kernels (the bf16 grouped GEMM, which reads its config from a table) by name.
+- C++ kernels (CK, HipKittens): the qualified name plus a `~<crc32>` of the full template
+  instance, CK as its kernel class and block tile
+  (`ck_tile::GroupedGemmKernel[256x128x64]~d6e76a06`).
+
+`name*N` marks N consecutive launches of one kernel, e.g. one per expert on the per-expert
+grouped GEMM path.
 
 ### Selecting cases
 

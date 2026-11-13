@@ -207,7 +207,7 @@ def _marks_for(c):
     return tuple(marks)
 
 
-def bench_gemm(Case, Precision, Direction, M, N, K, dtype, kernel_names=False):
+def bench_gemm(Case, Precision, Direction, M, N, K, dtype):
     device = "cuda"
 
     recipe = RECIPES[Precision]
@@ -240,7 +240,7 @@ def bench_gemm(Case, Precision, Direction, M, N, K, dtype, kernel_names=False):
         fwd_func, bwd_func, fwd_flops, 2 * fwd_flops,
     )
     timed, prepare = (fwd_func, None) if Direction == "fwd" else (bwd_func, fwd_func)
-    records[0]["kernel_names"] = gemm_kernel_names(timed, prepare) if kernel_names else ""
+    records[0]["kernel_names"] = gemm_kernel_names(timed, prepare)
     return records
 
 
@@ -313,6 +313,5 @@ def test_gemm(microbench, case, monkeypatch):
         lambda: bench_gemm(
             case["Case"], case["Precision"], case["Direction"],
             case["M"], case["N"], case["K"], case["dtype"],
-            kernel_names=case["Backend"] in ("hipblaslt", "triton"),
         ),
     )

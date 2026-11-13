@@ -38,6 +38,7 @@ from utils import (
     build_recipes,
     compute_tflops,
     direction_records,
+    gemm_kernel_names,
     make_input,
     te_honors_env,
 )
@@ -317,11 +318,14 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype, recipe, Direction):
     fwd_total_flops = 2 * sum_M * N * K
     # The per-expert path overlaps the experts on several streams, which a per-kernel sum
     # double-counts, so measure elapsed device time by makespan.
-    return direction_records(
+    records = direction_records(
         Direction, BENCHMARK_LABEL, "TFLOPS", compute_tflops,
         fwd_func, bwd_func, fwd_total_flops, 2 * fwd_total_flops,
         kernel_method="event",
     )
+    timed, prepare = (fwd_func, None) if Direction == "fwd" else (bwd_func, fwd_func)
+    records[0]["kernel_names"] = gemm_kernel_names(timed, prepare)
+    return records
 
 
 def generate_cases():

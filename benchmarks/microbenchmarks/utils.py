@@ -382,12 +382,62 @@ def _kernel_times_ms(fn, warmup=100, iters=100, method=None, prepare=None, block
 # Tensile kernel names spell out every tuning parameter (~900 chars): keep them up to the
 # tile and matrix-instruction sizes, plus a checksum of the full name.
 _TENSILE_NAME_RE = re.compile(r"^(Cijk_.*?_MT\d+x\d+x\d+_MI\d+x\d+x\d+)_")
+# GEMM kernels of all backends, matched on the short name: hipBLASLt (Tensile Cijk_*, rocRoller
+# RR_GEMM_*), Triton, CK, HipKittens (micro_tk: blockwise FP8), FlyDSL and AITER.
+_GEMM_KERNEL_RE = re.compile(r"^Cijk_|gemm|matmul|gmm|wgrad|micro_tk", re.IGNORECASE)
+# CK launches a kernel class through ck_tile::kentry<...>; its first sequence<M, N, K> is the block
+# tile. The profiler leaves some names mangled (sequenceIJLi<M>ELi<N>ELi<K>E).
+_CK_TILE_RE = re.compile(r"sequence<(\d+), (\d+), (\d+)>|8sequenceIJLi(\d+)ELi(\d+)ELi(\d+)E")
+
+
+def _qualified_name(name):
+    """``ns::func`` of a C++ function name, demangled or Itanium-mangled (``_ZN2ns4funcI...``)."""
+    if not name.startswith("_Z"):
+        name = name.removeprefix("void ").replace("(anonymous namespace)::", "")
+        return re.split(r"[<(]", name, maxsplit=1)[0]
+    parts, i = [], re.match(r"_ZN?[KVrL]*", name).end()
+    while m := re.match(r"\d+", name[i:]):
+        i += m.end() + int(m.group())
+        parts.append(name[i - int(m.group()):i])
+    return "::".join(p for p in parts if not p.startswith("_GLOBAL__N")) or name[:40]
+
+
+def _ck_kernel_class(name):
+    """The ``...Kernel`` class a CK ``kentry`` launches, from a demangled or mangled name."""
+    if not name.startswith("_Z"):
+        m = re.search(r"::(\w+Kernel)<", name)
+        return m and m.group(1)
+    for m in re.finditer(r"(?<!\d)\d+", name):
+        ident = name[m.end():m.end() + int(m.group())]
+        if ident.endswith("Kernel") and re.fullmatch(r"[A-Za-z_]\w*", ident):
+            return ident
+    return None
 
 
 def _short_kernel_name(name):
-    name = name.removesuffix(".kd")
+    """*name* (a profiler kernel record) with a checksum of the full name where it is shortened:
+    Tensile names up to the tile and matrix-instruction sizes, C++ kernels (CK, HipKittens, TE)
+    to their qualified name, CK kernels to ``ck_tile::<kernel class>[<block tile>]``.
+    """
+    name = name.removesuffix(".kd").removesuffix(" [clone .kd]")
+    crc = f"~{zlib.crc32(name.encode()):08x}"
     m = _TENSILE_NAME_RE.match(name)
-    return f"{m.group(1)}~{zlib.crc32(name.encode()):08x}" if m else name
+    if m:
+        return m.group(1) + crc
+    if not (name.startswith("_Z") or "<" in name or "(" in name):
+        return name
+    head = _qualified_name(name)
+    if head.endswith("::kentry") and (kernel := _ck_kernel_class(name)):
+        head = f"{head.removesuffix('::kentry')}::{kernel}"
+        if tile := _CK_TILE_RE.search(name):
+            head += f"[{'x'.join(g for g in tile.groups() if g)}]"
+    return head + crc
+
+
+def _count_repeats(names):
+    """*names* with each run of N > 1 equal consecutive names written once as ``name*N``."""
+    runs = ((name, sum(1 for _ in group)) for name, group in itertools.groupby(names))
+    return [name if n == 1 else f"{name}*{n}" for name, n in runs]
 
 
 def _triton_config_name(name, config):
@@ -400,9 +450,11 @@ def _triton_config_name(name, config):
 
 
 def gemm_kernel_names(fn, prepare=None):
-    """``;``-joined GEMM kernels that one call of *fn* launches, in launch order: hipBLASLt
-    kernels (Tensile ``Cijk_*``, rocRoller ``RR_GEMM_*``) and Triton autotuned kernels with the
-    config they run. *prepare* is as in :func:`_kernel_times_profiler_ms`.
+    """``;``-joined GEMM kernels that one call of *fn* launches, in launch order, for all
+    backends (see :data:`_GEMM_KERNEL_RE`): Triton autotuned kernels with the config they run,
+    long names shortened (:func:`_short_kernel_name`), and N > 1 consecutive launches of one
+    kernel (the per-expert grouped GEMM) as ``name*N``. *prepare* is as in
+    :func:`_kernel_times_profiler_ms`.
     """
     from torch.autograd import DeviceType
     from torch.profiler import profile, ProfilerActivity
@@ -417,7 +469,7 @@ def gemm_kernel_names(fn, prepare=None):
         def tracked_run(self, *args, **kwargs):
             out = run(self, *args, **kwargs)
             base, config = getattr(self, "base_fn", None), getattr(self, "best_config", None)
-            if base is not None and config is not None:
+            if base is not None and config is not None and _GEMM_KERNEL_RE.search(base.__name__):
                 launches.append((base.__name__, _triton_config_name(base.__name__, config)))
             return out
 
@@ -440,14 +492,17 @@ def gemm_kernel_names(fn, prepare=None):
         for e in sorted((e for e in prof.events() if e.device_type != DeviceType.CPU),
                         key=lambda e: e.time_range.start):
             name = e.name.removesuffix(".kd")
-            if name.startswith(("Cijk_", "RR_GEMM_")):
-                names.append(_short_kernel_name(name))
-            elif triton_configs.get(name):
+            if triton_configs.get(name):
                 names.append(triton_configs[name].pop(0))
-        # Prefer a pass where every Triton launch matched its kernel record.
-        best = max(best, (not any(triton_configs.values()), names),
-                   key=lambda r: (r[0], len(r[1])))
-    return ";".join(best[1])
+            elif _GEMM_KERNEL_RE.search(short := _short_kernel_name(name)):
+                names.append(short)
+        # Prefer a pass where every Triton launch matched its kernel record; two equal passes
+        # are taken as complete.
+        complete = not any(triton_configs.values())
+        if complete and best == (True, names):
+            break
+        best = max(best, (complete, names), key=lambda r: (r[0], len(r[1])))
+    return ";".join(_count_repeats(best[1]))
 
 
 def time_func_dual(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
