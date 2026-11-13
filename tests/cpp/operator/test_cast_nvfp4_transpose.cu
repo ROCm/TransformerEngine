@@ -1850,6 +1850,9 @@ TEST_P(CastNVFP4RowScaledTransposeTestSuite, MatchesRowScaledReference) {
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#ifdef __HIP_PLATFORM_AMD__
+    GTEST_SKIP() << "Row-scaled NVFP4 columnwise output is not supported on ROCm";
+#endif
     performTestRowScaledTranspose<bf16>(GetParam());
 }
 

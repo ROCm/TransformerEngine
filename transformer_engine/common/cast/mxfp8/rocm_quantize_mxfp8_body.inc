@@ -9,11 +9,12 @@
 //
 // Required in scope before #include:
 //   Template params : SCALE_DIM_X, SCALE_DIM_Y, CHUNK_DIM_X, CHUNK_DIM_Y, THREADS_PER_CHUNK,
-//                     IS_DBIAS, IS_DACT, IS_ACT, IS_ALIGNED, IType, OType, ParamOP, OP
+//                     IS_DBIAS, IS_DACT, IS_ACT, IS_ALIGNED, IS_2D_SCALING, IType, OType, ParamOP, OP
 //   Defines         : HAS_CVT_4xFLOAT8, DIVUP
 //   Local variables : block_id_Y, block_id_X, dbias_y_offset
 //   Kernel params   : input_ptr, act_input_ptr, output_rowwise, output_colwise, scales_rowwise, scales_colwise,
-//                     rows, cols, scale_stride_rowwise, scale_stride_colwise, dbias_workspace, amax_ptr
+//                     rows, cols, scale_stride_rowwise, scale_stride_colwise, dbias_workspace, amax_ptr,
+//                     swizzle_dim_rowwise, swizzle_dim_colwise (nonzero: MX pre-swizzled scale layout)
 
   constexpr size_t ELEMS_PER_THREAD   = 16;
   constexpr size_t MXFP8_BUFFER_DIM_Y = 32;
@@ -77,6 +78,33 @@
   float block_amax = 0;
 
   constexpr size_t ROWS_PER_THREAD = CHUNK_DIM_Y / THREADS_PER_CHUNK_Y_ROWWISE;
+
+  // 2D scaling: one scale per 32x32 tile, shared by the rowwise and colwise outputs.
+  constexpr size_t TILE_DIM_2D = 32;
+  static_assert(!IS_2D_SCALING || THREADS_PER_CHUNK_Y_ROWWISE == TILE_DIM_2D,
+      "2D scaling requires each rowwise step to cover exactly one tile row");
+  constexpr bool USE_2D_AMAX_SH = IS_2D_SCALING && USE_ROWWISE_SCALING;
+  __shared__ float amax_2d_sh[USE_2D_AMAX_SH ? THREADS_PER_CHUNK_Y_ROWWISE : 1]
+                             [USE_2D_AMAX_SH ? SCALES_ROWWISE_PER_BLOCK_X : 1];
+  // Reduces the per-row amax of a rowwise step over the tile's rows. Called by all threads.
+  auto rowwise_scale_amax = [&](const float subwarp_amax) {
+    if constexpr (!IS_2D_SCALING) {
+      return subwarp_amax;
+    } else {
+      const int scale_X = tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+      if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
+        amax_2d_sh[tid_rowwise_Y][scale_X] = subwarp_amax;
+      }
+      __syncthreads();
+      float tile_amax = 0;
+#pragma unroll
+      for (int i = 0; i < THREADS_PER_CHUNK_Y_ROWWISE; i++) {
+        tile_amax = fmaxf(tile_amax, amax_2d_sh[i][scale_X]);
+      }
+      __syncthreads();
+      return tile_amax;
+    }
+  };
 
   if constexpr (USE_ROWWISE_SCALING && !USE_COLWISE_SCALING) {
     const size_t col_start = block_offset_X + thread_offset_X_rowwise;
@@ -145,13 +173,16 @@
 
       const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
       const e8m0_t biased_exponent =
-          ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(rowwise_scale_amax(subwarp_amax) * Quantized_Limits<OType>::max_norm_rcp);
 
       {
         constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
         static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
             "SCALES_PER_GROUP must be < 4 or a multiple of 4");
         uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
+        if (swizzle_dim_rowwise && !col_valid) {
+          my_scale = MXFP8_SCALE_IDENTITY;
+        }
         if constexpr (SCALES_PER_GROUP >= 4) {
 #pragma unroll
           for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
@@ -161,15 +192,19 @@
             uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
             uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
             if (tid_rowwise_X == 0 && row_valid && col_valid) {
-              const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
-              reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+              const size_t scale_X   = scales_rowwise_block_offset_X + g * 4;
+              const size_t scale_idx = swizzle_dim_rowwise
+                  ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                  : row * scale_stride_rowwise + scale_X;
+              *reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx]) = packed;
             }
           }
         } else {
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
-            const int scale_idx =
-                row * scale_stride_rowwise +
-                scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+            const size_t scale_X   = scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+            const size_t scale_idx = swizzle_dim_rowwise
+                ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                : row * scale_stride_rowwise + scale_X;
             scales_rowwise[scale_idx] = biased_exponent;
           }
         }
@@ -292,13 +327,16 @@
 
           const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
           const e8m0_t biased_exponent =
-              ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
+              ptx::float_to_e8m0(rowwise_scale_amax(subwarp_amax) * Quantized_Limits<OType>::max_norm_rcp);
 
           {
             constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
             static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
                 "SCALES_PER_GROUP must be < 4 or a multiple of 4");
             uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
+            if (swizzle_dim_rowwise && !col_valid) {
+              my_scale = MXFP8_SCALE_IDENTITY;
+            }
             if constexpr (SCALES_PER_GROUP >= 4) {
 #pragma unroll
               for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
@@ -308,14 +346,19 @@
                 uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
                 uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
                 if (tid_rowwise_X == 0 && row_valid && col_valid) {
-                  const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
-                  reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+                  const size_t scale_X   = scales_rowwise_block_offset_X + g * 4;
+                  const size_t scale_idx = swizzle_dim_rowwise
+                      ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                      : row * scale_stride_rowwise + scale_X;
+                  *reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx]) = packed;
                 }
               }
             } else {
               if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
-                const int scale_idx = row * scale_stride_rowwise +
-                    scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+                const size_t scale_X   = scales_rowwise_block_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE;
+                const size_t scale_idx = swizzle_dim_rowwise
+                    ? mx_preswizzle_scale_idx(row, scale_X, swizzle_dim_rowwise)
+                    : row * scale_stride_rowwise + scale_X;
                 scales_rowwise[scale_idx] = biased_exponent;
               }
             }
@@ -416,11 +459,17 @@
         __builtin_assume(amax >= 0);
         block_amax = fmaxf(block_amax, amax);
 
-        const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);
+        float scale_amax = amax;
+        if constexpr (IS_2D_SCALING) {
+          scale_amax = rocm_subwarp_allreduce<TILE_DIM_2D>(amax, rocm_op::max{});
+        }
+        const e8m0_t biased_exponent = ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
 
         if (col_valid_colwise && row_base < rows) {
-          const int scale_idx =
-              (scales_colwise_block_offset_Y + iter) * scale_stride_colwise + col;
+          const size_t scale_Y   = scales_colwise_block_offset_Y + iter;
+          const size_t scale_idx = swizzle_dim_colwise
+              ? mx_preswizzle_scale_idx(col, scale_Y, swizzle_dim_colwise)
+              : scale_Y * scale_stride_colwise + col;
           scales_colwise[scale_idx] = biased_exponent;
         }
 

@@ -33,18 +33,34 @@ struct MultiQuantizeMXFP8Args {
 typedef short mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
 #endif  // #ifdef HAS_CVT_4xFLOAT8
 
+constexpr e8m0_t MXFP8_SCALE_IDENTITY = 127;  // E8M0 encoding of 1.0
+
+// Fills a scale buffer with a constant (used for the padding of swizzled scales).
+static __global__ void __launch_bounds__(256)
+    fill_scales_kernel(e8m0_t *const ptr, const size_t size, const e8m0_t value, const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  for (size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < size; idx += stride) {
+    ptr[idx] = value;
+  }
+}
+
 // Single tensor quantize
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
           size_t SCALE_DIM_X, bool IS_ALIGNED,
-          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64>
+          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64,
+          bool IS_2D_SCALING = false>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(
       const IType *input_ptr, const IType *act_input_ptr,
       OType *output_rowwise, OType *output_colwise,
       e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
       const float *noop, float *const dbias_workspace, float *amax_ptr,
-      size_t rows, size_t cols, size_t scale_stride_rowwise, size_t scale_stride_colwise) {
+      size_t rows, size_t cols, size_t scale_stride_rowwise, size_t scale_stride_colwise,
+      size_t swizzle_dim_rowwise, size_t swizzle_dim_colwise) {
   if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
     if (noop != nullptr && noop[0] == 1.0f) return;
   }
@@ -58,7 +74,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
           size_t SCALE_DIM_X, bool IS_ALIGNED,
-          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64>
+          size_t CHUNK_DIM_Y = 64, size_t CHUNK_DIM_X = 64, size_t THREADS_PER_CHUNK = 64,
+          bool IS_2D_SCALING = false>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     grouped_quantize_mxfp8_kernel(
       const IType *input_ptr, const IType *act_input_ptr,
@@ -148,6 +165,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if (scales_colwise) scales_colwise += colwise_offset;
   }
 
+  constexpr size_t swizzle_dim_rowwise = 0;
+  constexpr size_t swizzle_dim_colwise = 0;
   const int dbias_y_offset = blockIdx.y;
 #include "rocm_quantize_mxfp8_body.inc"
 }
@@ -177,6 +196,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool IS_DBIAS = false;
   constexpr bool IS_DACT  = false;
   constexpr bool IS_ACT   = false;
+  constexpr bool IS_2D_SCALING = false;
   using ParamOP = Empty;
   constexpr float (*OP)(float, const Empty &) = nullptr;
 
@@ -190,6 +210,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   float *amax_ptr              = args.amax_list[tensor_id];
   const size_t scale_stride_rowwise = DIVUP(cols, SCALE_DIM_X);
   const size_t scale_stride_colwise = cols;
+  constexpr size_t swizzle_dim_rowwise = 0;
+  constexpr size_t swizzle_dim_colwise = 0;
   const int dbias_y_offset     = block_id_Y;
 #include "rocm_quantize_mxfp8_body.inc"
 }
