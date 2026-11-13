@@ -49,9 +49,6 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
     return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
 }
 
-// C is [N_TOTAL, M], the orientation mxfp8_gemm.cpp writes, so the col_l accumulators are
-// transposed before the store. Identical to the AG TN epilogue; the RS path just aims it at the
-// staging buffer instead of the caller's output.
 template<typename RT_C, typename RT_C_T, typename OutGL>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -199,9 +196,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 #undef MXFP8_TN_OPAQUE_PEEL
 #undef MXFP8_AG_SKEW_CLOSE
 
-        // The stage is [dest_rank][band][BLOCK_COL x M]; destination `chunk_id` owns a contiguous
-        // run of N tiles, so chunk_id*bands + (tile_n - chunk_id*bands) == tile_n == block_col and
-        // the whole stage indexes as one [N_TOTAL, M] array -- the AG path's C, verbatim.
         gemm_epilogue<RT_C, RT_C_T>(cA, cB, cC, cD, C_stage, block_row, block_col, warp_m, warp_n);
 
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
@@ -221,10 +215,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         __builtin_amdgcn_fence(__ATOMIC_RELEASE, "");
     }
 
-    // tile_counter is [cursor, exits] and lives across calls, so the last workgroup out zeroes
-    // both for the next call instead of the host doing it per call. Every workgroup, comm ones
-    // included, drains the queue through the cursor and has consumed its last fetch_add before
-    // it gets here, so once the exit count reaches the grid no one touches the cursor again.
     if (threadIdx.x == 0) {
         if (__hip_atomic_fetch_add(&tile_counter[1], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
             == (int)gridDim.x - 1) {
@@ -317,9 +307,6 @@ using persistent_rs_fn_t = void (*)(int, int, int, fp8e4m3 *, fp8e4m3 *, bf16 *,
                                     uint32_t *, TileDesc *, int, int *, RsPeers, int, int,
                                     const RsLaunchCfg &, hipStream_t);
 
-// MFMA cbsz/blgp operand format codes: 0 = e4m3, 1 = e5m2, per operand. HYBRID recipes quantize
-// backward tensors e5m2 while forward ones stay e4m3, so the pair genuinely mixes. Unlike the AG
-// side there is no layout dimension to dispatch on: fused RS is TN only.
 static persistent_rs_fn_t get_persistent_rs_fn(KittensDType a_dt, KittensDType b_dt) {
     const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
     if (a_fp8_code == 0 && b_fp8_code == 0) return launch_persistent_rs<0, 0>;

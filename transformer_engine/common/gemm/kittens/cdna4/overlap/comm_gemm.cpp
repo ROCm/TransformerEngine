@@ -812,15 +812,6 @@ int rs_comm_wg_bulk(int out_local, int tp_size) {
     return hk_rs_nt::RS_COMM_WG_DEFAULT;
 }
 
-// Comm side of the MXFP8 bulk RS: comm workgroups per peer, and whether rs_pull_fold keeps two
-// loads in flight per thread. The GEMM's work grows with out_local and the reduce-scatter's does
-// not, so out_local alone says which one bounds the call (GEMM ~ reduce alone near 5k).
-//   - Comm-bound: the two-deep fold on 4 workgroups per peer beats one-at-a-time on 8 by 2-8%;
-//     one-at-a-time on 4 cannot keep up (23-29% slower on 70B-Down), and deeper or wider both
-//     congest the fabric.
-//   - GEMM-bound: one-at-a-time on 8 disturbs the GEMM least (405B-Down: the two-deep fold on 4
-//     is 0.5-6% slower); from out_local 8192 the reduce needs only 4, and 2 loses 41%.
-// Swept on MI355X, 24 shapes plus out_local 8192/16384; no shape falls between 3584 and 6656.
 struct BulkRsCommCfg {
     int  comm_wg;
     bool fold_deep;
@@ -1014,9 +1005,6 @@ std::map<PlanKey, RsPlan> g_rs_plans;
 
 std::map<const void *, uint64_t> g_rs_epoch;
 
-// Per-userbuffer state the MXFP8 fused RS keeps across calls: its self-resetting [cursor, exits]
-// tile counter (not carved from the caller's workspace, which other GEMMs overwrite between
-// calls) and the stage size the last kernel poisoned ahead for.
 struct RsRegion {
     int   *counters    = nullptr;
     size_t stage_bytes = 0;
@@ -1032,8 +1020,6 @@ int rs_comm_wg_tn(int tokens, int hidden, int k_local) {
     return COMM_WG;
 }
 
-// MXFP8 finishes the GEMM ~1.5x sooner than bf16 at the same shape, so the reduce needs more
-// workgroups to keep pace: rs_comm_wg_tn's K >= 4096 -> 4 starves it. Swept on MI350X, 24 shapes.
 int rs_comm_wg_tn_mxfp8(int tokens, int hidden, int k_local) {
     const int tiles = (tokens / hk_rs_tn::BLOCK_ROW) * (hidden / hk_rs_tn::BLOCK_COL);
     const int waves = tiles / hk_rs_tn::GRID_CAP;
@@ -1121,8 +1107,6 @@ bool run_fused_rs(const KittensRsGemmArgs &args) {
 // Shape and pointer requirements shared by rs entry points
 static_assert(hk_rs_tn::BLOCK_ROW == 256 && hk_rs_tn::BLOCK_COL == 256 && hk_rs_tn::K_STEP == 64,
               "rs_guards_ok literals are stale against hk_rs_tn geometry");
-// The MXFP8 RS path shares the 256x256 tile but steps K by BLOCK_K, not the bf16 K_STEP; ok_k's
-// "% 128" literal is that step, so it has to be pinned here as well.
 static_assert(hk_mxfp8_rs_tn::BLOCK_ROW == 256 && hk_mxfp8_rs_tn::BLOCK_COL == 256 &&
               hk_mxfp8_rs_tn::BLOCK_K == 128,
               "rs_guards_ok literals are stale against hk_mxfp8_rs_tn geometry");
@@ -1172,9 +1156,6 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
 
-    // First call on this userbuffer, or a different stage size than the last kernel poisoned
-    // ahead for: the host zeroes the counters and arms the working half below. Every other call
-    // finds both already reset and poisoned by the previous call's kernel.
     RsRegion &region = g_rs_regions[args.ub];
     if (!region.counters) {
         void *c = nullptr;
@@ -1238,11 +1219,6 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
-// Named by role rather than by either kernel's M/N spelling, because the two RS kernels disagree
-// on that spelling and the difference is pure naming: run_fused_rs swaps m/n so tokens land on its
-// M axis, run_fused_rs_mxfp8 keeps mxfp8_gemm.cpp's BLAS roles so tokens stay on its N axis. Both
-// read args.n as tokens and args.m as hidden, and BLOCK_ROW == BLOCK_COL == 256, so every predicate
-// below is value-identical for the two -- only `bands` moves axis, not extent.
 bool rs_guards_ok(const KittensRsGemmArgs &args) {
     const int tokens  = args.n;
     const int hidden  = args.m;

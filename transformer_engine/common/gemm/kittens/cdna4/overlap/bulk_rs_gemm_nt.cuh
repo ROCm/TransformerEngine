@@ -43,9 +43,6 @@ struct PeerPtrs {
 };
 
 
-// deep: load two sources before adding them instead of one, so each thread keeps two remote loads
-// in flight. It pays with fewer comm workgroups on comm-bound shapes; one-at-a-time with more
-// workgroups disturbs a GEMM-bound shape's GEMM least.
 __device__ __forceinline__
 void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
                   const PeerPtrs &peers, size_t shard_elems, size_t band_elems, bool deep = false)

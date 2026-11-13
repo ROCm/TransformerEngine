@@ -364,19 +364,6 @@ unsigned int sent_slot_pending(const int *__restrict__ v) {
     return hit;
 }
 
-// The reduce half of a fused GEMM+RS: fold every peer's stage slot reserved for `my_pe` into `out`,
-// spinning per 16-byte line until the producing GEMM has replaced the poison. Shared by the bf16 and
-// MXFP8 TN kernels -- they differ in which axis the bands run along, but a band is contiguous in the
-// stage either way, so the fold only ever sees `bands` and `band_elems`.
-//
-// `next_stage`, when set, is this rank's other stage half: the one the next call on this userbuffer
-// works in. As each line folds, the workgroup poisons the same (source, band, line) slots of that
-// half, which covers the whole half exactly once across the comm workgroups, so the host need not
-// arm the sentinel per call. The stores sit on the success path so a line still spinning on the
-// sentinel does not rewrite its poison on every retry. Safe because this call's arrival handshake
-// already proved no peer is still reading that half (it was last used two calls ago), and the next
-// call's handshake, issued after this kernel on the same stream, publishes the poison before any
-// peer pulls from it.
 template <int TP, bool NT>
 __device__ __forceinline__
 void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
