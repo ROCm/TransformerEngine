@@ -3,8 +3,8 @@
 
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
-D[M, N] = a[M, K] @ b[N, K]^T (+ beta * D) with K-contiguous packed FP4 operands and E8M0 scales
-along K. TE's MXFP4 columnwise storage is a materialized transpose, so this one kernel serves
+D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) with K-contiguous packed FP4 operands and E8M0
+scales along K. TE's MXFP4 columnwise storage is a materialized transpose, so this one kernel serves
 TN/NN/NT. Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS
 by TDM.
 """
@@ -54,11 +54,13 @@ def gemm_kernel(
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
+    alpha: fx.Float32,
     beta: fx.Float32,
     K_SHORT: fx.Constexpr[int],
     K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
     ACC: fx.Constexpr[int],
+    SCALE: fx.Constexpr[int],
 ):
 
     def as_words(t, rows, words_per_row):
@@ -564,6 +566,10 @@ def gemm_kernel(
 
     if const_expr(not ACC):
         gC_wave, tdm_C, lds_C_wave = make_c_tdm()
+        if const_expr(SCALE):
+            for acc_row in frag_acc:
+                for acc in acc_row:
+                    acc.store(acc.load() * alpha)
 
     if const_expr(OUT_KIND == 0):
         frag_c = frag_acc
@@ -594,7 +600,10 @@ def gemm_kernel(
                 c_vals = c_old.load()
                 if const_expr(OUT_KIND != 0):
                     c_vals = c_vals.to(fx.Float32)
-                acc.store(acc.load() + c_vals * beta)
+                acc_vals = acc.load()
+                if const_expr(SCALE):
+                    acc_vals = acc_vals * alpha
+                acc.store(acc_vals + c_vals * beta)
                 if const_expr(OUT_KIND != 0):
                     frag_c[4 * h + ii][j].store(acc.load().to(out_fx))
 
@@ -642,16 +651,18 @@ def launch_gemm(
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
+    alpha: fx.Float32,
     beta: fx.Float32,
     K_SHORT: fx.Constexpr[int],
     K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
     ACC: fx.Constexpr[int],
+    SCALE: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_tot = (M // BLOCK_M) * (N // BLOCK_N)
     gemm_kernel(
-        A, B, A_s, B_s, C, M, N, K, As_sw, Bs_sw, beta, K_SHORT, K_REM, OUT_KIND, ACC
+        A, B, A_s, B_s, C, M, N, K, As_sw, Bs_sw, alpha, beta, K_SHORT, K_REM, OUT_KIND, ACC, SCALE
     ).launch(grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
 
@@ -704,13 +715,14 @@ def mxfp4_matmul(
     D: torch.Tensor,
     stream=None,
     accumulate: bool = False,
+    alpha: float = 1.0,
     beta: float = 1.0,
 ):
-    """D[M, N] = dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``).
+    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``).
 
     a [M, K/2] and b [N, K/2] packed FP4; scales E8M0 covering [M, K/32] and [N, K/32];
     D float32, bfloat16 or float16. With ``accumulate``, D's existing values are read back
-    and ``beta * D`` is added to the FP32 accumulator before narrowing to D's dtype.
+    and ``beta * D`` is added to the FP32 accumulator (scaled by ``alpha``) before narrowing.
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
@@ -747,11 +759,13 @@ def mxfp4_matmul(
         k,
         _scale_row_words(a_scale, m, k),
         _scale_row_words(b_scale, n, k),
+        float(alpha),
         float(beta),
         *k_loop_constexprs(k),
         OUT_KINDS[D.dtype],
         # beta == 0 does not read D, as in hipBLASLt
         int(accumulate and float(beta) != 0.0),
+        int(float(alpha) != 1.0),
         stream=stream,
     )
     return D

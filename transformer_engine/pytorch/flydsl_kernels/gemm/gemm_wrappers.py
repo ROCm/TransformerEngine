@@ -89,13 +89,15 @@ def _validate_common_epilogue(
     alpha,
     beta,
     supports_accumulate=False,
+    supports_alpha=False,
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
     Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
     backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) and
     DGELU (fused GELU gradient) are not implemented anywhere yet. Accumulation
-    is implemented only by MXFP4 (``supports_accumulate``).
+    and alpha != 1 are implemented only by MXFP4 (``supports_accumulate``,
+    ``supports_alpha``).
 
     Unsupported configurations raise ``FlyDSLUnsupportedError`` so
     ``general_gemm`` transparently falls back to the C++ backend rather than
@@ -108,10 +110,12 @@ def _validate_common_epilogue(
     if accumulate and not supports_accumulate:
         raise FlyDSLUnsupportedError("FlyDSL GEMM accumulation is not implemented")
 
-    if float(alpha) != 1.0 or (float(beta) != 0.0 and not accumulate):
-        raise FlyDSLUnsupportedError(
-            "FlyDSL GEMM currently supports only alpha=1, and beta=0 unless accumulating"
-        )
+    # TODO: Add alpha to the non-MXFP4 backends
+    if float(alpha) != 1.0 and not supports_alpha:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1")
+
+    if float(beta) != 0.0 and not accumulate:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM supports beta != 0 only when accumulating")
 
     # Forward BIAS is implemented across all backends; the fused bias-gradient
     # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
@@ -1061,11 +1065,13 @@ def _run_mxfp4(
     *,
     output_dtype: torch.dtype,
     accumulate=False,
+    alpha=1.0,
     beta=0.0,
 ):
     """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT.
 
-    With ``accumulate``, ``D = A @ B + beta * D`` (C is aliased to D, as in hipBLASLt).
+    ``D = alpha * A @ B``, plus ``beta * D`` with ``accumulate`` (C is aliased to D, as in
+    hipBLASLt).
     """
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
@@ -1109,7 +1115,14 @@ def _run_mxfp4(
         backend_name=f"MXFP4 {layout}",
     )
     mxfp4_matmul(
-        a_flydsl, a_scale, b_flydsl, b_scale, D.view(m, n), accumulate=accumulate, beta=beta
+        a_flydsl,
+        a_scale,
+        b_flydsl,
+        b_scale,
+        D.view(m, n),
+        accumulate=accumulate,
+        alpha=alpha,
+        beta=beta,
     )
     return D
 
@@ -1396,6 +1409,7 @@ def te_generic_gemm_flydsl(
         alpha=alpha,
         beta=beta,
         supports_accumulate=is_mxfp4,
+        supports_alpha=is_mxfp4,
     )
 
     if is_mxfp4:
@@ -1425,6 +1439,7 @@ def te_generic_gemm_flydsl(
             D,
             output_dtype=mxfp4_output_dtypes[output_dtype],
             accumulate=accumulate,
+            alpha=alpha,
             beta=beta,
         )
         return D, None, None, None
