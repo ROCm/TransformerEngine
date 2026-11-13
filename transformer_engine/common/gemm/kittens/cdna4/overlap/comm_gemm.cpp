@@ -1130,7 +1130,7 @@ static_assert(hk_mxfp8_rs_tn::BLOCK_ROW == 256 && hk_mxfp8_rs_tn::BLOCK_COL == 2
 bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     using namespace hk_mxfp8_rs_tn;
 
-    // TN keeps mxfp8_gemm.cpp's BLAS convention (A = weight on M, B = gathered activation on N);
+    // TN keeps mxfp8_gemm.cpp's BLAS convention: A = weight on M, B = activation on N.
     const int M       = args.m;
     const int N_TOTAL = args.n;
     const int K       = args.k;
@@ -1140,6 +1140,9 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     const int tiles_n = N_TOTAL / BLOCK_COL;
     const int k_iters = K / BLOCK_K;
     const int scale_K = K / 32;
+
+    auto launch = get_persistent_rs_fn(args.a_dtype, args.b_dtype);
+    if (!launch) return false;   // unexpected operand format pair
 
     std::lock_guard<std::mutex> lock(g_mu);
 
@@ -1160,8 +1163,8 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
     size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_n * 512 * sizeof(uint32_t), 256);
 
-    uint32_t* packed_sa = static_cast<uint32_t*>(ws.take(sa_bytes));
-    uint32_t* packed_sb = static_cast<uint32_t*>(ws.take(sb_bytes));
+    uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
+    uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
 
     launch_pack_scales<false, 64, 4>((const uint8_t *)args.scale_A, packed_sa, M, scale_K, k_iters, args.stream);
@@ -1227,10 +1230,6 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     cfg.warn_ticks = ag_ready_warn_ticks();
     cfg.next_stage = reinterpret_cast<bf16 *>(lb + next_off);
 
-    // 4. Operands are MXFP8, not bf16; CBSZ/BLGP travel with them.
-    auto launch = get_persistent_rs_fn(args.a_dtype, args.b_dtype);
-    if (!launch) return false;   // unexpected operand format pair
-
     launch(M, N_TOTAL, K, static_cast<fp8e4m3 *>(const_cast<void *>(args.A)),
            static_cast<fp8e4m3 *>(const_cast<void *>(args.B)), local_stage,
            static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
@@ -1272,29 +1271,6 @@ bool rs_guards_ok(const KittensRsGemmArgs &args) {
             "tp:%d rank:%d tokens:%d hidden:%d k:%d bands:%d shard:%d ptrs:%d\n",
             tokens, hidden, K, tp_size, bands, args.shard_bytes, l.stage_bytes, l.total_bytes,
             ok_tp, ok_rank, ok_tokens, ok_hidden, ok_k, ok_bands, ok_shard, ok_ptrs);
-    }
-    return ok;
-}
-
-// The MXFP8 RS path adds the operand preconditions the shape core cannot see: both operands are
-// FP8 (either format per operand, as HYBRID recipes mix them) and each carries a scale buffer that
-// launch_pack_scales dereferences unconditionally.
-bool rs_guards_ok_mxfp8(const KittensRsGemmArgs &args) {
-    if (!rs_guards_ok(args)) return false;
-
-    const auto is_fp8 = [](KittensDType dt) {
-        return dt == KITTENS_FP8E4M3 || dt == KITTENS_FP8E5M2;
-    };
-    const bool ok_dtype = is_fp8(args.a_dtype) && is_fp8(args.b_dtype);
-    const bool ok_scale = args.scale_A && args.scale_B;
-    // MXFP8 scales one e8m0 per 32 elements along K; ok_k's "% 128" already implies "% 32", so the
-    // scale rows divide evenly and no separate predicate is needed here.
-    const bool ok = ok_dtype && ok_scale;
-
-    if (!ok && std::getenv("NVTE_RS_DIAG")) {
-        std::fprintf(stderr, "[RS_DIAG] mxfp8 a_dtype=%d b_dtype=%d dtype:%d scale:%d\n",
-                     static_cast<int>(args.a_dtype), static_cast<int>(args.b_dtype),
-                     ok_dtype, ok_scale);
     }
     return ok;
 }
@@ -1414,22 +1390,13 @@ bool bulk_rs_guards_ok(const KittensRsGemmArgs &args) {
     return true;
 }
 
-bool bulk_rs_guards_ok_mxfp8(const KittensRsGemmArgs &args) {
-    if (!bulk_rs_guards_ok(args)) return false;
-
-    const auto is_fp8 = [](KittensDType dt) {
-        return dt == KITTENS_FP8E4M3 || dt == KITTENS_FP8E5M2;
-    };
-    return is_fp8(args.a_dtype) && is_fp8(args.b_dtype) && args.scale_A && args.scale_B;
-}
-
 bool kittens_bulk_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
     if (!bulk_rs_guards_ok(args)) return false;
     return run_bulk_rs(args);
 }
 
 bool kittens_bulk_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args) {
-    if (!bulk_rs_guards_ok_mxfp8(args)) return false;
+    if (!bulk_rs_guards_ok(args) || !args.scale_A || !args.scale_B) return false;
     return run_bulk_rs_mxfp8(args);
 }
 
@@ -1465,6 +1432,6 @@ bool kittens_fused_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args) {
 }
 
 bool kittens_fused_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args) {
-    if (!rs_guards_ok_mxfp8(args)) return false;
+    if (!rs_guards_ok(args) || !args.scale_A || !args.scale_B) return false;
     return run_fused_rs_mxfp8(args);
 }

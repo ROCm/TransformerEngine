@@ -369,6 +369,14 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
   return kittens_fused_ag_gemm_bf16(args);
 }
 
+// Once per call site under NVTE_RS_DIAG: which RS kernel ran, for the fused overlap tests.
+static void rs_diag_once(bool &traced, const char *what) {
+  if (!traced && std::getenv("NVTE_RS_DIAG")) {
+    traced = true;
+    std::fprintf(stderr, "[RS_DIAG] %s\n", what);
+  }
+}
+
 // Fused GEMM + reduce-scatter, launched by fused_overlap_rs below.
 static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                              bool transb, const TensorWrapper &bias,
@@ -382,35 +390,22 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
   NVTE_CHECK(rs_output.dtype() == DType::kBFloat16, "fused GEMM+RS reached with a non-bf16 output");
   NVTE_CHECK(transa, "fused GEMM+RS is TN only");
 
-  bool is_bf16_input = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
-  auto is_fp8_dt = [](DType dt) {
-    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
-  };
-  bool is_fp8_input = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype());
-  NVTE_CHECK(is_bf16_input || is_fp8_input,
+  const bool is_fp8 = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype());
+  NVTE_CHECK(is_fp8 || (A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16),
              "fused GEMM+RS reached with unsupported operand types");
 
   auto A_tensor = convertNVTETensorCheck(A.data());
   auto B_tensor = convertNVTETensorCheck(B.data());
-
-  NVTE_CHECK(A_tensor->scaling_mode == B_tensor->scaling_mode,
-             "fused GEMM+RS expects A and B tensors to have the same scaling mode");
-  if (is_fp8_input  && A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
-    NVTE_ERROR("fused GEMM+RS with fp8 UB only supports MXFP8_1D_SCALING recipe");
+  if (is_fp8) {
+    NVTE_CHECK(A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                   B_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING,
+               "fused GEMM+RS with FP8 operands only supports MXFP8_1D_SCALING");
+    NVTE_CHECK(A_tensor->has_data() && B_tensor->has_data(),
+               "fused GEMM+RS with MXFP8 reached with an operand missing row-wise usage");
   }
 
-  // require row-wise for both operands for TN
-  if (is_fp8_input) {
-      NVTE_CHECK(A_tensor->has_data(), "fused GEMM+RS with MXFP8 reached with A missing row-wise usage");
-      NVTE_CHECK(B_tensor->has_data(), "fused GEMM+RS with MXFP8 reached with B missing row-wise usage");
-  }
-
-  const void* scale_A = nullptr;
-  const void* scale_B = nullptr;
-  if (is_fp8_input) {
-    scale_A =  A_tensor->scale_inv.dptr;
-    scale_B =  B_tensor->scale_inv.dptr;
-  }
+  const void *scale_A = is_fp8 ? A_tensor->scale_inv.dptr : nullptr;
+  const void *scale_B = is_fp8 ? B_tensor->scale_inv.dptr : nullptr;
 
   const size_t m       = (transa) ? flat_rows(A) : flat_cols(A);
   const size_t k       = (transa) ? flat_cols(A) : flat_rows(A);
@@ -431,21 +426,15 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(tokens), static_cast<int>(k),
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
-  if (A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+  if (is_fp8) {
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
     static bool traced_mxfp8 = false;
-    if (!traced_mxfp8 && std::getenv("NVTE_RS_DIAG")) {
-      traced_mxfp8 = true;
-      std::fprintf(stderr, "[RS_DIAG] launched mxfp8\n");
-    }
+    rs_diag_once(traced_mxfp8, "launched mxfp8");
     return kittens_fused_rs_gemm_mxfp8(args);
   }
   static bool traced_bf16 = false;
-  if (!traced_bf16 && std::getenv("NVTE_RS_DIAG")) {
-    traced_bf16 = true;
-    std::fprintf(stderr, "[RS_DIAG] launched bf16\n");
-  }
+  rs_diag_once(traced_bf16, "launched bf16");
   return kittens_fused_rs_gemm_bf16(args);
 }
 
@@ -520,12 +509,14 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
   if (transa || !transb || accumulate || bias.numel() != 0 || pre_gelu_out.numel() != 0) {
     return false;
   }
-  auto is_fp8_dt = [](DType dt) {
-    return dt == DType::kFloat8E4M3 || dt == DType::kFloat8E5M2;
-  };
-  const bool is_bf16_input = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
-  const bool is_fp8_input  = is_fp8_dt(A.dtype()) && is_fp8_dt(B.dtype());
-  if (!is_bf16_input && !is_fp8_input) {
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
+  const bool bulk_bf16 = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
+  const bool bulk_fp8  = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype()) &&
+                         A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                         B_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                         A_tensor->has_columnwise_data() && B_tensor->has_columnwise_data();
+  if (!bulk_bf16 && !bulk_fp8) {
     return false;
   }
   if (D.dtype() != DType::kBFloat16 || ubuf.dtype() != DType::kBFloat16) {
@@ -535,28 +526,8 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
     return false;
   }
 
-  const void *a_ptr   = A.dptr();
-  const void *b_ptr   = B.dptr();
-  const void *scale_A = nullptr;
-  const void *scale_B = nullptr;
-  if (is_fp8_input) {
-    auto A_tensor = convertNVTETensorCheck(A.data());
-    auto B_tensor = convertNVTETensorCheck(B.data());
-    if (A_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING ||
-        B_tensor->scaling_mode != NVTE_MXFP8_1D_SCALING) {
-      return false;
-    }
-    if (!A_tensor->has_columnwise_data() || !B_tensor->has_columnwise_data()) {
-      return false;
-    }
-    a_ptr   = A_tensor->columnwise_data.dptr;
-    b_ptr   = B_tensor->columnwise_data.dptr;
-    scale_A = A_tensor->columnwise_scale_inv.dptr;
-    scale_B = B_tensor->columnwise_scale_inv.dptr;
-    if (!a_ptr || !b_ptr || !scale_A || !scale_B) {
-      return false;
-    }
-  }
+  const void *scale_A = bulk_fp8 ? A_tensor->columnwise_scale_inv.dptr : nullptr;
+  const void *scale_B = bulk_fp8 ? B_tensor->columnwise_scale_inv.dptr : nullptr;
   if (tp_size != 4 && tp_size != 8) {
     return false;
   }
@@ -579,7 +550,8 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      a_ptr, b_ptr, D.dptr(), scale_A, scale_B, ubuf.dptr(),
+      bulk_fp8 ? A.columnwise_dptr() : A.dptr(), bulk_fp8 ? B.columnwise_dptr() : B.dptr(), D.dptr(),
+      scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -587,21 +559,15 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), tp_id, tp_size,
       tokens / tp_size * hidden * ubuf.element_size(), workspace.dptr(), workspace.bytes(), stream};
-  if (is_fp8_input) {
+  if (bulk_fp8) {
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
-    static bool traced_bulk_mxfp8 = false;
-    if (!traced_bulk_mxfp8 && std::getenv("NVTE_RS_DIAG")) {
-      traced_bulk_mxfp8 = true;
-      std::fprintf(stderr, "[RS_DIAG] bulk launched mxfp8\n");
-    }
+    static bool traced_mxfp8 = false;
+    rs_diag_once(traced_mxfp8, "bulk launched mxfp8");
     return kittens_bulk_rs_gemm_mxfp8(args);
   }
-  static bool traced_bulk_bf16 = false;
-  if (!traced_bulk_bf16 && std::getenv("NVTE_RS_DIAG")) {
-    traced_bulk_bf16 = true;
-    std::fprintf(stderr, "[RS_DIAG] bulk launched bf16\n");
-  }
+  static bool traced_bf16 = false;
+  rs_diag_once(traced_bf16, "bulk launched bf16");
   return kittens_bulk_rs_gemm_bf16(args);
 }
 #endif
