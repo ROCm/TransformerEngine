@@ -88,12 +88,17 @@ def _validate_common_epilogue(
     accumulate,
     alpha,
     beta,
+    supports_accumulate=False,
+    supports_alpha=False,
+    supports_dgelu=False,
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
     Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
-    backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) and
-    DGELU (fused GELU gradient) are not implemented anywhere yet.
+    backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) is
+    not implemented anywhere yet. Accumulation, alpha != 1 and DGELU (fused GELU
+    gradient) are implemented only by MXFP4 (``supports_accumulate``,
+    ``supports_alpha``, ``supports_dgelu``).
 
     Unsupported configurations raise ``FlyDSLUnsupportedError`` so
     ``general_gemm`` transparently falls back to the C++ backend rather than
@@ -102,21 +107,24 @@ def _validate_common_epilogue(
     if quantizer is not None:
         raise FlyDSLUnsupportedError("FlyDSL GEMM output quantization is not implemented")
 
-    if float(alpha) != 1.0 or float(beta) != 0.0:
-        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1 and beta=0")
-
-    # TODO: Add accumulate option
-    if accumulate:
+    # TODO: Add accumulate option to the non-MXFP4 backends
+    if accumulate and not supports_accumulate:
         raise FlyDSLUnsupportedError("FlyDSL GEMM accumulation is not implemented")
+
+    # TODO: Add alpha to the non-MXFP4 backends
+    if float(alpha) != 1.0 and not supports_alpha:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1")
+
+    if float(beta) != 0.0 and not accumulate:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM supports beta != 0 only when accumulating")
 
     # Forward BIAS is implemented across all backends; the fused bias-gradient
     # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
     if grad and bias is not None and bias.numel() != 0:
         raise FlyDSLUnsupportedError("FlyDSL GEMM fused bias gradient (BGRADB) is not implemented")
 
-    # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
-    # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
-    if gelu and grad:
+    # TODO: Add DGELU to the non-MXFP4 backends
+    if gelu and grad and not supports_dgelu:
         raise FlyDSLUnsupportedError("FlyDSL GEMM fused GELU gradient (DGELU) is not implemented")
 
 
@@ -1056,8 +1064,19 @@ def _run_mxfp4(
     D,
     *,
     output_dtype: torch.dtype,
+    accumulate=False,
+    alpha=1.0,
+    beta=0.0,
+    gelu=False,
+    gelu_in=None,
 ):
-    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT."""
+    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT.
+
+    ``D = alpha * A @ B``, plus ``beta * D`` with ``accumulate`` (C is aliased to D, as in
+    hipBLASLt). With ``gelu`` (GELU_AUX), D = gelu_tanh(alpha * A @ B) and the pre-activation is
+    returned as the aux output. With ``gelu_in`` (DGELU), D = alpha * A @ B * dgelu_tanh(gelu_in),
+    and ``gelu_in`` is returned in its place, as the C++ backend does.
+    """
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
         A, transa, B, transb
@@ -1078,6 +1097,8 @@ def _run_mxfp4(
             f"{a_flydsl.device} and {b_flydsl.device}"
         )
 
+    if accumulate and D is None:
+        raise ValueError("FlyDSL MXFP4 accumulation requires an output tensor D to accumulate into")
     if D is not None:
         output_shape = torch.Size(D.shape)
     elif transb:
@@ -1097,8 +1118,28 @@ def _run_mxfp4(
         device=a_flydsl.device,
         backend_name=f"MXFP4 {layout}",
     )
-    mxfp4_matmul(a_flydsl, a_scale, b_flydsl, b_scale, D.view(m, n))
-    return D
+    if gelu_in is not None:
+        if gelu_in.dtype != D.dtype or not gelu_in.is_contiguous():
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 DGELU needs a contiguous {D.dtype} gelu_in, got "
+                f"{gelu_in.dtype} with strides {gelu_in.stride()}"
+            )
+        if gelu_in.numel() != m * n:
+            raise ValueError(f"gelu_in shape {tuple(gelu_in.shape)} does not match output {(m, n)}")
+    aux = torch.empty_like(D) if gelu else None
+    mxfp4_matmul(
+        a_flydsl,
+        a_scale,
+        b_flydsl,
+        b_scale,
+        D.view(m, n),
+        accumulate=accumulate,
+        alpha=alpha,
+        beta=beta,
+        aux=aux.view(m, n) if aux is not None else None,
+        gelu_in=gelu_in.view(m, n) if gelu_in is not None else None,
+    )
+    return D, gelu_in if gelu_in is not None else aux
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1346,10 +1387,8 @@ def te_generic_gemm_flydsl(
       - FP32 input with FP32 output
     """
     # These are hints or unused given the epilogue/dtype guards below: bias_type
-    # is inferred, gelu_in is only for DGELU (rejected), and FlyDSL has no
-    # separate workspace or split-accumulator path.
+    # is inferred, and FlyDSL has no separate workspace or split-accumulator path.
     del bias_type
-    del gelu_in
     del workspace
     del workspaceSize
     del use_split_accumulator
@@ -1373,6 +1412,7 @@ def te_generic_gemm_flydsl(
     if transa and transb:
         raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
+    is_mxfp4 = a_kind == "mxfp4" or b_kind == "mxfp4"
     _validate_common_epilogue(
         quantizer=quantizer,
         bias=bias,
@@ -1381,15 +1421,24 @@ def te_generic_gemm_flydsl(
         accumulate=accumulate,
         alpha=alpha,
         beta=beta,
+        supports_accumulate=is_mxfp4,
+        supports_alpha=is_mxfp4,
+        supports_dgelu=is_mxfp4,
     )
 
-    if a_kind == "mxfp4" or b_kind == "mxfp4":
+    if is_mxfp4:
         if a_kind != b_kind:
             raise ValueError("Mixed MXFP4 and non-MXFP4 FlyDSL GEMM inputs are not supported")
         if bias is not None:
             raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused bias is not implemented")
-        if gelu:
-            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused GELU is not implemented")
+        # TODO: fused (D)GELU with accumulation; no TE caller combines them yet
+        if gelu and accumulate:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL MXFP4 GEMM fused {'DGELU' if grad else 'GELU'} with accumulation is not "
+                "implemented"
+            )
+        if gelu and grad and gelu_in is None:
+            raise ValueError("FlyDSL MXFP4 DGELU requires the pre-activation gelu_in")
 
         mxfp4_output_dtypes = {
             None: torch.bfloat16,
@@ -1402,15 +1451,20 @@ def te_generic_gemm_flydsl(
                 f"FlyDSL MXFP4 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
 
-        D = _run_mxfp4(
+        D, gelu_input = _run_mxfp4(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=mxfp4_output_dtypes[output_dtype],
+            accumulate=accumulate,
+            alpha=alpha,
+            beta=beta,
+            gelu=gelu and not grad,
+            gelu_in=gelu_in if gelu and grad else None,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if a_kind == "mxfp8" or b_kind == "mxfp8":
         # Validate both are MXFP8

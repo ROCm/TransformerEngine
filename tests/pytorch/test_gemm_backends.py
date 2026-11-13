@@ -34,9 +34,11 @@ config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
 not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT
-with FP32 / BF16 / FP16 output against a torch.matmul reference only. FlyDSL kernels require tile-aligned
-launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
-rather than reusing the odd-sized Triton edge-mask cases.
+with FP32 / BF16 / FP16 output, with and without accumulation into the output,
+alpha scaling and the GELU_AUX and DGELU epilogues, against a torch.matmul reference
+only. FlyDSL kernels require tile-aligned launch dimensions, so its shapes are
+aligned to the 256x256x128 kernel contract rather than reusing the odd-sized Triton
+edge-mask cases.
 """
 
 import importlib.util
@@ -173,6 +175,8 @@ FLYDSL_MXFP8_SHAPES = [
 ]
 
 FLYDSL_MXFP4_SHAPES = [
+    (512, 256, 512),  # two K tiles: no K step after the prologue
+    (512, 384, 512),  # three K tiles
     (512, 512, 512),
     (512, 1024, 512),
     (512, 512, 1024),  # M != N
@@ -1163,6 +1167,269 @@ def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
         assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
     else:
         assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize("beta", [None, -0.5], ids=["beta=default", "beta=-0.5"])
+def test_flydsl_vs_pytorch_mxfp4_accumulate(M, K, N, layout, out_dtype, beta):
+    """MXFP4 FlyDSL GEMM accumulating into ``out`` (``D = A @ B + beta * D``).
+
+    This is the wgrad GEMM accumulating into ``main_grad`` (FP32 in practice); ``beta=None``
+    is what TE passes, which resolves to 1.
+    """
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    expected = ab + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, _, _, _ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        beta=beta,
+        accumulate=True,
+    )
+
+    assert output.data_ptr() == d.data_ptr()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize(
+    "alpha, beta, accumulate",
+    [(-2.5, None, False), (-2.5, None, True), (0.5, -0.5, True)],
+    ids=["alpha=-2.5", "alpha=-2.5,acc", "alpha=0.5,acc-beta=-0.5"],
+)
+def test_flydsl_vs_pytorch_mxfp4_alpha(M, K, N, layout, out_dtype, alpha, beta, accumulate):
+    """MXFP4 FlyDSL GEMM with ``alpha`` (``D = alpha * A @ B [+ beta * D]``), as the fused
+    ``te.ops`` linear+scale(+add) pipelines call it."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    expected = alpha * ab
+    if accumulate:
+        expected = expected + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, _, _, _ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        alpha=alpha,
+        beta=beta,
+        accumulate=accumulate,
+    )
+
+    assert output.data_ptr() == d.data_ptr()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize("alpha", [1.0, -2.5], ids=["alpha=1", "alpha=-2.5"])
+def test_flydsl_vs_pytorch_mxfp4_gelu(M, K, N, layout, out_dtype, alpha):
+    """MXFP4 FlyDSL forward GELU_AUX: D = gelu_tanh(alpha * A @ B), pre-activation in aux."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    pre_act = alpha * compute_pytorch_reference(A_deq, B_deq, layout)
+
+    _set_backend(True, "FLYDSL")
+    output, bias_grad, gelu_input, extra_output = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        alpha=alpha,
+        gelu=True,
+    )
+    assert bias_grad is None and extra_output is None
+    assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
+    assert output.dtype == gelu_input.dtype == out_dtype
+
+    if out_dtype == torch.float32:
+        tols = dict(atol=1e-3, rtol=1e-4)
+    else:
+        tols = dict(atol=5e-3, rtol=1e-2)
+    assert_gemm_close(gelu_input, pre_act, **tols)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), **tols)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", [(512, 512, 512), (1024, 512, 1024)])
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("spread", [1.0, 2.0], ids=["std=1", "std=2"])
+def test_flydsl_mxfp4_gelu_fp32_accuracy(M, K, N, layout, spread):
+    """FP32 GELU_AUX epilogue math vs an FP64 tanh GELU of the kernel's own pre-activation.
+
+    alpha scales the pre-activation to ``spread`` std, where GELU is most sensitive. On these
+    inputs IEEE exp and division stay within 1.50 ulp of the input, a fast reciprocal alone
+    reaches 1.59-2.02, so the bound asserts IEEE-level accuracy.
+    """
+    torch.manual_seed(42)
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    alpha = spread / compute_pytorch_reference(A_deq, B_deq, layout).std().item()
+
+    _set_backend(True, "FLYDSL")
+    output, _, gelu_input, _ = general_gemm(
+        A=A_mxfp4, B=B_mxfp4, out_dtype=torch.float32, layout=layout, alpha=alpha, gelu=True
+    )
+
+    x = gelu_input.double()
+    exact = 0.5 * x * (1 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x**3)))
+    x_abs = gelu_input.abs()
+    x_ulp = (torch.nextafter(x_abs, torch.full_like(x_abs, float("inf"))) - x_abs).double()
+    err_ulp = ((output.double() - exact).abs() / x_ulp).max().item()
+    assert err_ulp <= 1.55, f"GELU error {err_ulp:.3f} ulp of the input exceeds 1.55"
+
+
+def dgelu_tanh_ref(x):
+    """Derivative of the tanh-approx GELU, in the input's precision."""
+    k, c = 0.7978845608028654, 0.044715
+    t = torch.tanh(k * (x + c * x**3))
+    return 0.5 * (1 + t) + 0.5 * x * (1 - t * t) * k * (1 + 3 * c * x * x)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize("alpha", [1.0, -2.5], ids=["alpha=1", "alpha=-2.5"])
+def test_flydsl_vs_pytorch_mxfp4_dgelu(M, K, N, layout, out_dtype, alpha):
+    """MXFP4 FlyDSL DGELU: D = alpha * A @ B * dgelu_tanh(gelu_in), as in the fc2 dgrad GEMM."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = alpha * compute_pytorch_reference(A_deq, B_deq, layout)
+    gelu_in = (torch.randn(ab.shape, device="cuda") * 2).to(out_dtype)
+
+    _set_backend(True, "FLYDSL")
+    output, bias_grad, gelu_input, extra_output = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        alpha=alpha,
+        grad=True,
+        gelu=True,
+        gelu_in=gelu_in,
+    )
+    assert bias_grad is None and extra_output is None
+    assert gelu_input is gelu_in
+    assert output.dtype == out_dtype
+
+    expected = (ab.double() * dgelu_tanh_ref(gelu_in.double())).float()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", [(512, 512, 512), (1024, 512, 1024)])
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("spread", [1.0, 2.0], ids=["std=1", "std=2"])
+def test_flydsl_mxfp4_dgelu_fp32_accuracy(M, K, N, layout, spread):
+    """FP32 DGELU epilogue math vs an FP64 dgelu times the kernel's own A @ B.
+
+    The error is measured in ulp of |A @ B| (dgelu crosses zero, so its relative error is not
+    meaningful). On these inputs IEEE exp and division reach 4.11, computing 1 - tanh^2 directly
+    reaches 9.9-80 or NaN.
+    """
+    torch.manual_seed(42)
+    A_mxfp4, B_mxfp4, _, _ = create_mxfp4_tensors(M, K, N, layout)
+
+    _set_backend(True, "FLYDSL")
+    ab, *_ = general_gemm(A=A_mxfp4, B=B_mxfp4, out_dtype=torch.float32, layout=layout)
+    gelu_in = torch.randn(ab.shape, device="cuda") * spread
+    output, *_ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=torch.float32,
+        layout=layout,
+        grad=True,
+        gelu=True,
+        gelu_in=gelu_in,
+    )
+
+    exact = ab.double() * dgelu_tanh_ref(gelu_in.double())
+    ab_abs = ab.abs()
+    ab_ulp = (torch.nextafter(ab_abs, torch.full_like(ab_abs, float("inf"))) - ab_abs).double()
+    err_ulp = ((output.double() - exact).abs() / ab_ulp).max().item()
+    assert err_ulp <= 4.5, f"DGELU error {err_ulp:.3f} ulp of |A @ B| exceeds 4.5"
+
+
+@requires_flydsl_mxfp4_backend
+def test_flydsl_mxfp4_dgelu_invalid_raises():
+    """DGELU needs gelu_in and is not fused with accumulation; gfx1250 has no fallback."""
+    from transformer_engine.pytorch.flydsl_kernels.gemm import FlyDSLUnsupportedError
+
+    torch.manual_seed(42)
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(512, 512, 512, "NN")
+    shape = compute_pytorch_reference(A_deq, B_deq, "NN").shape
+    _set_backend(True, "FLYDSL")
+    kwargs = dict(A=A_mxfp4, B=B_mxfp4, out_dtype=torch.float32, layout="NN", grad=True, gelu=True)
+    with pytest.raises(ValueError):
+        general_gemm(**kwargs)
+    gelu_in, out = torch.randn(shape, device="cuda"), torch.zeros(shape, device="cuda")
+    with pytest.raises(FlyDSLUnsupportedError):
+        general_gemm(**kwargs, gelu_in=gelu_in, out=out, accumulate=True)
+    with pytest.raises(FlyDSLUnsupportedError):
+        general_gemm(**kwargs, gelu_in=gelu_in.to(torch.bfloat16))
+
+
+@requires_flydsl_mxfp4_backend
+def test_flydsl_mxfp4_gelu_accumulate_raises():
+    """Fused GELU with accumulation is not implemented; gfx1250 has no fallback, so it raises."""
+    from transformer_engine.pytorch.flydsl_kernels.gemm import FlyDSLUnsupportedError
+
+    torch.manual_seed(42)
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(512, 512, 512, "TN")
+    out = torch.zeros(compute_pytorch_reference(A_deq, B_deq, "TN").shape, device="cuda")
+    _set_backend(True, "FLYDSL")
+    with pytest.raises(FlyDSLUnsupportedError):
+        general_gemm(
+            A=A_mxfp4,
+            B=B_mxfp4,
+            out_dtype=torch.float32,
+            layout="TN",
+            out=out,
+            gelu=True,
+            accumulate=True,
+        )
 
 
 @requires_flydsl_mxfp4_backend
