@@ -2,9 +2,7 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Main K-loop for the MXFP8 NT GEMM, shared by mxfp8_gemm_nt_kernel (mxfp8_gemm.cpp) and the
-//! bulk RS+GEMM overlap (overlap/bulk_rs_gemm_nt.cuh); only the C writeback is left to the caller.
-//! Split-K is the caller's business: it offsets A_local/B_local and sa_batch/sb_batch per slice.
+//! Main K-loop for the MXFP8 NT GEMM, shared by mxfp8_gemm_nt_kernel and the bulk RS+GEMM overlap.
         int k = 0;
         if (s0) {
             constexpr int TIC = 1;
@@ -171,8 +169,7 @@
             k++;
         }
 
-        // Opaque single-trip loops make the peeled stages' MFMAs accumulate in place; without them a
-        // persistent caller copies the accumulators and spills. Plain blocks for the standalone GEMM.
+        // Opaque single-trip loops keep a persistent caller from copying the accumulators and spilling.
 #ifdef MXFP8_NT_OPAQUE_PEEL
         int once = 1;
         asm volatile("" : "+s"(once));

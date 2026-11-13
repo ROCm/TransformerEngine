@@ -2,11 +2,8 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-//! Kernel setup for the NT bulk RS+GEMM, mirroring mxfp8_gemm_nt_kernel's. It DECLARES the names
-//! the shared NT preload and main loop use (As, Bs, scale_smem, sw_A, a_srd, a_frag, s0, ...), so
-//! the include site is where those come into scope. The caller defines A_local/B_local (offset per
-//! split-K slice, as mxfp8_gemm_nt_kernel does) and k_iters. Unlike TN, neither operand is
-//! gathered, so both carry an SRD.
+//! Kernel setup for the NT bulk RS+GEMM, mirroring mxfp8_gemm_nt_kernel's. The caller defines
+//! A_local, B_local and k_iters.
     using ST_A     = st_fp8e4m3<BLOCK_K, HALF_ROW, st_16x128_s>;
     using ST_B     = st_fp8e4m3<BLOCK_K, HALF_COL, st_16x128_s>;
     using RT_A     = rt<fp8e4m3, REG_M, BLOCK_K, col_l, rt_16x128_s>;

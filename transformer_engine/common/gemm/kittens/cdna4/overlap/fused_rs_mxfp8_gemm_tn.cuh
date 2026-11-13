@@ -193,9 +193,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
 
 #include "../mxfp8_tn_preload.inc"
 
-        // The AG-style prologue opens a warp_m skew that the shared main loop closes under
-        // MXFP8_AG_SKEW_CLOSE; OPAQUE_PEEL keeps the peeled stages' MFMAs accumulating in place,
-        // as in the persistent grouped GEMM, so the persistent loop does not copy them and spill.
 #define MXFP8_AG_SKEW_CLOSE 1
 #define MXFP8_TN_OPAQUE_PEEL 1
 #include "../mxfp8_tn_mainloop.inc"

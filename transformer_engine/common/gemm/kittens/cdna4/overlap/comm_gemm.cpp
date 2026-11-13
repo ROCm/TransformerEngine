@@ -906,9 +906,7 @@ bool bulk_rs_shape_ok_mxfp8(int M, int N, int K, int nred) {
            nred >= 0 && nred % 8 == 0;
 }
 
-// The MXFP8 bulk RS kernel's per-XCD tile cursors and exit count, per userbuffer. Kept outside the
-// caller's workspace, which other GEMMs overwrite between calls; the kernel's last workgroup zeroes
-// them, so the host only clears them on the first call.
+// Per-userbuffer, self-resetting tile counters for the MXFP8 bulk RS kernel.
 std::map<const void *, int *> g_bulk_rs_counters;
 
 static int *bulk_rs_mxfp8_counters(const void *ub, hipStream_t stream) {

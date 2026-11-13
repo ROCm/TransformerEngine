@@ -530,7 +530,6 @@ struct mxfp8_rs_globals {
     int M = c.rows();
     int N = c.cols();
     int K = a.rows();
-    // Persistent: at most GRID_CAP workgroups, the reducers among them.
     dim3 grid() {
         const int want = (N / BLOCK_COL) * (M / BLOCK_ROW) + nred;
         return dim3(want > GRID_CAP ? GRID_CAP : want);
@@ -540,8 +539,7 @@ struct mxfp8_rs_globals {
 
 constexpr int NUM_XCDS = 8;
 
-// Next tile of this workgroup's XCD share -- the tiles t = xcd + NUM_XCDS * i that
-// chiplet_transform_chunked maps onto that XCD -- else one stolen from another XCD's share.
+// Next tile of this XCD's share (t = xcd + NUM_XCDS * i), else one stolen from another XCD.
 __device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
     const int x0 = (int)blockIdx.x;
 #pragma unroll 1
@@ -559,9 +557,7 @@ __device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
     return total;
 }
 
-// Persistent: the reducers fold, then join the GEMM workgroups, each claiming its own XCD's tiles
-// first. No workgroup waits on another, so any grid completes, and the last one out resets the
-// counters for the next call.
+// Persistent: the reducers fold, then join the GEMM; the last workgroup out resets the counters.
 template <int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
@@ -624,21 +620,18 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
 #include "../mxfp8_nt_mainloop.inc"
 #undef MXFP8_NT_OPAQUE_PEEL
 
-        // The output row stride is hidden from LICM: hoisted, the per-lane epilogue offsets stay live
-        // across the whole K-loop and spill.
+        // Hide the output stride from LICM; hoisted, the epilogue offsets spill.
         gl_bf16_rt c_out = g.c;
         asm volatile("" : "+s"(c_out.cols_internal));
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_out, block_row, block_col, warp_m, warp_n);
 
-        // Close the warp_m skew the preload opens before the next tile's barriers pair up.
+        // Close the preload's warp_m skew.
         if (warp_m == 0) {
             __builtin_amdgcn_s_barrier();
         }
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
     }
 
-    // Every workgroup, reducers included, has made its last claim before it gets here, so once the
-    // exit count reaches the grid no one touches the cursors again.
     if (threadIdx.x == 0) {
         if (__hip_atomic_fetch_add(&g.counters[NUM_XCDS], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
             == (int)gridDim.x - 1) {
