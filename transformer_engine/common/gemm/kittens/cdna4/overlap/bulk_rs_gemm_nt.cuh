@@ -473,6 +473,7 @@ namespace hk_mxfp8_rs_nt {
 
 using namespace kittens;
 using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
 
 // The MXFP8 K step, 128 rather than hk_overlap::K_STEP's bf16 64.
 constexpr int BLOCK_K = 128;
@@ -564,8 +565,8 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     int sb_batch   = n_tile;
     int sb_stride  = tiles_N;
 
-    const gl_fp8_rt   A          = g.a;
-    const gl_fp8_rt   B          = g.b;
+    const gl_fp8_rt   A_local    = g.a;
+    const gl_fp8_rt   B_local    = g.b;
     const gl_scale_rt scale_A_gl = g.sa;
     const gl_scale_rt scale_B_gl = g.sb;
 
@@ -576,33 +577,7 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     RT_C cA, cB, cC, cD;
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-    int tic = 0, toc = 1;
-    int tic_scales = 0, toc_scales = 1;
-
-    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2        }, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1    }, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
-
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2}, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
-    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
-    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
-    asm volatile("s_waitcnt vmcnt(0)");
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-
-    if (warp_m == 1) {
-        __builtin_amdgcn_s_barrier();
-    }
+#include "../mxfp8_nt_preload.inc"
 
 #include "../mxfp8_nt_mainloop.inc"
 

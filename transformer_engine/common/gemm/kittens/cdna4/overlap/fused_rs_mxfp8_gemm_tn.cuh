@@ -7,6 +7,7 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "overlap_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include <hip/hip_bfloat16.h>
 #include <algorithm>
 #include <cstdint>
@@ -17,6 +18,7 @@
 namespace hk_mxfp8_rs_tn {
 
 using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
 
 struct TileDesc {
     int chunk_id;
@@ -170,11 +172,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         int block_row = desc.tile_m;
         int block_col = desc.tile_n;
 
-        int a_half0 = block_row * 2;
-        int a_half1 = a_half0 + 1;
-        int b_half0 = block_col * 2;
-        int b_half1 = b_half0 + 1;
-
         int sa_stride = tiles_M;
         int sb_stride = tiles_N;
         int sa_batch = block_row;
@@ -185,34 +182,25 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         RT_C cA, cB, cC, cD;
         kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-        int tic = 0, toc = 1;
-        int tic_scales = 0, toc_scales = 1;
+        const TileLoad a_dma = prefill_tile_load<NUM_WARPS>(&A_local[{0, 0, block_row * BLOCK_ROW, 0}],
+                                                            HALF_ROW * a_row_stride, BLOCK_K * sizeof(T),
+                                                            HALF_ROW * a_row_stride, a_row_stride, As);
+        const TileLoad b_dma = prefill_tile_load<NUM_WARPS>(&B_local[{0, 0, block_col * BLOCK_COL, 0}],
+                                                            HALF_COL * b_row_stride, BLOCK_K * sizeof(T),
+                                                            HALF_COL * b_row_stride, b_row_stride, Bs);
+        const ScaleLoad s_dma = prefill_scale_load(scale_A_gl, scale_B_gl, sa_batch, 2 * sb_batch, sa_stride,
+                                                   2 * sb_stride, scale_smem);
 
-        G::load(Bs[tic][0], B_local, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A);
-        G::load(Bs[tic][1], B_local, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A);
+#include "../mxfp8_tn_preload.inc"
 
-        if (warp_m == 1) __builtin_amdgcn_s_barrier();
-        asm volatile("s_waitcnt vmcnt(4)"); // wait for tic[0] halves; tic[1] halves still in flight
-        __builtin_amdgcn_s_barrier();
-
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A);
-        G::load(Bs[toc][0], B_local, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
-        asm volatile("s_waitcnt vmcnt(6)"); // wait for tic[1] halves; 3 toc loads + scales in flight
-        __builtin_amdgcn_s_barrier();
-
-        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
-        asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM before first MMA
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-
-        #define MXFP8_AG_SKEW_CLOSE 1
-        #include "../mxfp8_tn_mainloop.inc"
-        #undef MXFP8_AG_SKEW_CLOSE
+        // The AG-style prologue opens a warp_m skew that the shared main loop closes under
+        // MXFP8_AG_SKEW_CLOSE; OPAQUE_PEEL keeps the peeled stages' MFMAs accumulating in place,
+        // as in the persistent grouped GEMM, so the persistent loop does not copy them and spill.
+#define MXFP8_AG_SKEW_CLOSE 1
+#define MXFP8_TN_OPAQUE_PEEL 1
+#include "../mxfp8_tn_mainloop.inc"
+#undef MXFP8_TN_OPAQUE_PEEL
+#undef MXFP8_AG_SKEW_CLOSE
 
         // The stage is [dest_rank][band][BLOCK_COL x M]; destination `chunk_id` owns a contiguous
         // run of N tiles, so chunk_id*bands + (tile_n - chunk_id*bands) == tile_n == block_col and
