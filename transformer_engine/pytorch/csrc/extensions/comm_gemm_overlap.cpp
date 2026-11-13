@@ -9,6 +9,11 @@
 #include <nccl.h>
 #endif
 
+#ifdef USE_ROCM
+// at::cuda::CUDAStream hipifies to this class; c10/hip/HIPStream.h no longer pulls it in.
+#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
+#endif
+
 #include "../extensions.h"
 #include "transformer_engine/transformer_engine.h"
 
