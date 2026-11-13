@@ -31,7 +31,6 @@
 #include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
-#include "rocm_fp4_e2m1_table.h"
 
 #ifdef USE_HIPKITTENS_GEMM
 #include "kittens/kittens_common.h"
@@ -335,9 +334,6 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
   return output;
 }
 
-// FP4 e2m1 lookup table
-__device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
-
 // Dequantize FP4 (e2m1) packed data with FP8 (E4M3 or UE5M3) block scales to BF16.
 // Only applies block scales: output = fp4_value * block_scale.
 // The per-tensor amax correction is applied separately via the GEMM alpha scalar.
@@ -348,61 +344,78 @@ __device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 // Scale layout: 2D tensor of shape {num_rows_padded, scale_stride} where
 // scale_stride = roundup(num_cols / 16, 4).  Each scale covers a block of 16
 // consecutive elements along the fast (column) dimension.
+//
+// Each thread converts one such block: 8 bytes of FP4 in, one scale decode, 32 bytes of BF16 out.
 template <typename ScaleType>
-__global__ void dequant_fp4_to_bf16_kernel(
-    const uint8_t* __restrict__ data,
+__global__ void __launch_bounds__(256) dequant_fp4_to_bf16_kernel(
+    const uint2* __restrict__ data,
     const ScaleType* __restrict__ scale_inv,
-    hip_bfloat16* __restrict__ output,
-    int64_t total_elements,
-    int64_t num_cols,
-    int64_t scale_stride)
+    uint4* __restrict__ output,
+    uint64_t num_blocks,
+    uint64_t blocks_per_row,
+    uint64_t scale_stride)
 {
-  // Process 2 elements (1 byte) per iteration for coalesced access
-  const int64_t pair_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int64_t total_pairs = total_elements / 2;
-  if (pair_idx >= total_pairs) return;
+  using fp32x2 = float __attribute__((ext_vector_type(2)));
+  using bf16x2 = __bf16 __attribute__((ext_vector_type(2)));
 
-  const uint8_t byte = data[pair_idx];
-  const uint8_t lo_nibble = byte & 0xF;
-  const uint8_t hi_nibble = byte >> 4;
+  const uint64_t block = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (block >= num_blocks) {
+    return;
+  }
+  uint64_t scale_idx = block;
+  if (scale_stride != blocks_per_row) {
+    const uint64_t row = block / blocks_per_row;
+    scale_idx = row * scale_stride + (block - row * blocks_per_row);
+  }
 
-  const int64_t elem_base = pair_idx * 2;
-  const int64_t row0 = elem_base / num_cols;
-  const int64_t col0 = elem_base % num_cols;
-  const int64_t row1 = (elem_base + 1) / num_cols;
-  const int64_t col1 = (elem_base + 1) % num_cols;
-  const float s0 = static_cast<float>(scale_inv[row0 * scale_stride + col0 / 16]);
-  const float s1 = static_cast<float>(scale_inv[row1 * scale_stride + col1 / 16]);
+  // E2M1 magnitudes are k/2 with k in {0, 1, 2, 3, 4, 6, 8, 12}, one k per nibble of 0xC8643210.
+  // k * (scale/2) rounds once, exactly like the table value times the scale.
+  const float half_scale = 0.5f * static_cast<float>(scale_inv[scale_idx]);
+  auto dequant = [half_scale](uint32_t nibble) {
+    const float mag = static_cast<float>((0xC8643210u >> ((nibble & 7u) * 4)) & 0xFu) * half_scale;
+    return __uint_as_float(__float_as_uint(mag) ^ ((nibble & 8u) << 28));
+  };
 
-  output[elem_base]     = static_cast<hip_bfloat16>(kFP4E2M1Table[lo_nibble] * s0);
-  output[elem_base + 1] = static_cast<hip_bfloat16>(kFP4E2M1Table[hi_nibble] * s1);
+  const uint2 packed = data[block];
+  uint32_t out[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const uint32_t byte = ((i < 4 ? packed.x : packed.y) >> (8 * (i % 4))) & 0xFFu;
+    const fp32x2 pair{dequant(byte & 0xFu), dequant(byte >> 4)};
+    out[i] = __builtin_bit_cast(uint32_t, __builtin_convertvector(pair, bf16x2));
+  }
+  output[2 * block]     = make_uint4(out[0], out[1], out[2], out[3]);
+  output[2 * block + 1] = make_uint4(out[4], out[5], out[6], out[7]);
 }
 
-// Launch helper for dequant kernel
+// Launch helper for dequant kernel. The output must be 16-byte aligned (see dequant_fp4_gemm_inputs).
 static void launch_dequant_fp4_to_bf16(
     const void* data, const void* scale_inv, DType scale_dtype,
     void* output, int64_t total_elements,
     int64_t num_cols, int64_t scale_stride,
     hipStream_t stream)
 {
+  NVTE_CHECK(num_cols % 16 == 0, "NVFP4 GEMM requires the FP4 row length (", num_cols,
+             ") to be a multiple of 16.");
+  NVTE_CHECK(reinterpret_cast<uintptr_t>(data) % 8 == 0, "NVFP4 GEMM requires 8-byte aligned FP4 data.");
   constexpr int kBlockSize = 256;
-  const int64_t total_pairs = total_elements / 2;
-  const int64_t num_blocks = (total_pairs + kBlockSize - 1) / kBlockSize;
+  const int64_t num_scale_blocks = total_elements / 16;
+  const int64_t num_blocks = (num_scale_blocks + kBlockSize - 1) / kBlockSize;
 
   if (scale_dtype == DType::kFloat8UE5M3) {
     dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(data),
+        reinterpret_cast<const uint2*>(data),
         reinterpret_cast<const fp8ue5m3*>(scale_inv),
-        reinterpret_cast<hip_bfloat16*>(output),
-        total_elements, num_cols, scale_stride);
+        reinterpret_cast<uint4*>(output),
+        num_scale_blocks, num_cols / 16, scale_stride);
   } else {
     NVTE_CHECK(scale_dtype == DType::kFloat8E4M3, "Unsupported NVFP4 scale dtype ",
                to_string(scale_dtype));
     dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(data),
+        reinterpret_cast<const uint2*>(data),
         reinterpret_cast<const fp8e4m3*>(scale_inv),
-        reinterpret_cast<hip_bfloat16*>(output),
-        total_elements, num_cols, scale_stride);
+        reinterpret_cast<uint4*>(output),
+        num_scale_blocks, num_cols / 16, scale_stride);
   }
 }
 
@@ -733,26 +746,31 @@ static void dequant_fp4_gemm_inputs(
       ? reinterpret_cast<const float*>(inputB.amax.dptr)
       : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
 
-  // Compute total extra bytes needed from the workspace:
+  // Compute total extra bytes needed from the workspace, each region rounded up to 16 bytes
+  // (the dequant kernel stores 16-byte vectors):
   //   alpha vector:  m * sizeof(float)
   //   dequant A:     m * k * sizeof(bf16)   (if A is FP4)
   //   dequant B:     k * n * sizeof(bf16)   (if B is FP4)
-  const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
+  constexpr size_t kRegionAlign = 16;
+  auto align_up = [](size_t bytes) { return (bytes + kRegionAlign - 1) / kRegionAlign * kRegionAlign; };
+  const size_t alpha_vec_bytes = align_up(static_cast<size_t>(m) * sizeof(float));
   const size_t a_bf16_bytes = is_fp4_dtype(param.Atype)
-      ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
+      ? align_up(static_cast<size_t>(m) * k * sizeof(hip_bfloat16)) : 0;
   const size_t b_bf16_bytes = is_fp4_dtype(param.Btype)
-      ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
+      ? align_up(static_cast<size_t>(k) * n * sizeof(hip_bfloat16)) : 0;
   const size_t fp4_total_bytes = alpha_vec_bytes + a_bf16_bytes + b_bf16_bytes;
-  NVTE_CHECK(workspaceSize >= fp4_total_bytes,
+  const uintptr_t ws_begin = reinterpret_cast<uintptr_t>(workspace);
+  const uintptr_t ws_end = (ws_begin + workspaceSize) / kRegionAlign * kRegionAlign;
+  NVTE_CHECK(ws_end >= ws_begin + fp4_total_bytes,
              "NVFP4 GEMM requires at least ", fp4_total_bytes, " bytes workspace (",
              fp4_total_bytes / (1024 * 1024), " MiB) for alpha vector + BF16 dequant buffers, "
              "but only ", workspaceSize, " bytes (", workspaceSize / (1024 * 1024),
              " MiB) available. Increase the cuBLAS workspace size.");
 
-  // Carve regions from the end of the workspace.
+  // Carve regions from the (16-byte aligned) end of the workspace.
   // Layout: [cublas workspace ... | alpha_vec | dequant_a | dequant_b]
-  workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - fp4_total_bytes;
-  uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
+  workspaceSize = ws_end - fp4_total_bytes - ws_begin;
+  uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(ws_end - fp4_total_bytes);
 
   float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
   ws_ptr += alpha_vec_bytes;
