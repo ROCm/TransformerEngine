@@ -13,7 +13,9 @@ bool kittens_fused_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args);
 bool kittens_bulk_ag_gemm_bf16_cdna4(const KittensAgGemmArgs &args);
 bool kittens_bulk_ag_gemm_mxfp8_cdna4(const KittensAgGemmArgs &args);
 bool kittens_bulk_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args);
+bool kittens_bulk_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args);
 bool kittens_fused_rs_gemm_bf16_cdna4(const KittensRsGemmArgs &args);
+bool kittens_fused_rs_gemm_mxfp8_cdna4(const KittensRsGemmArgs &args);
 bool kittens_fused_rs_gemm_shape_ok_cdna4(int tokens, int hidden, int k, int tp_size);
 size_t kittens_fused_rs_region_bytes_cdna4(size_t chunk_bytes, int tp_size);
 void kittens_persistent_plans_reset_cdna4();
@@ -90,6 +92,15 @@ bool kittens_bulk_rs_gemm_bf16(const KittensRsGemmArgs &args) {
 #endif
 }
 
+bool kittens_bulk_rs_gemm_mxfp8(const KittensRsGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_bulk_rs_gemm_mxfp8_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
+
 bool kittens_fused_rs_gemm_supported(int sm_arch) {
 #ifdef KITTENS_HAVE_CDNA4
     if (sm_arch == 95) {
@@ -125,6 +136,15 @@ bool kittens_fused_rs_gemm_shape_ok(int tokens, int hidden, int k, int tp_size) 
 bool kittens_fused_rs_gemm_bf16(const KittensRsGemmArgs &args) {
 #ifdef KITTENS_HAVE_CDNA4
     return kittens_fused_rs_gemm_bf16_cdna4(args);
+#else
+    static_cast<void>(args);
+    return false;
+#endif
+}
+
+bool kittens_fused_rs_gemm_mxfp8(const KittensRsGemmArgs &args) {
+#ifdef KITTENS_HAVE_CDNA4
+    return kittens_fused_rs_gemm_mxfp8_cdna4(args);
 #else
     static_cast<void>(args);
     return false;

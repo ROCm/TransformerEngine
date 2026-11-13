@@ -102,8 +102,16 @@ INTERLEAVE_HEAD_DIM: int = 128
 INTERLEAVE_FFN_HIDDEN: int = INTERLEAVE_NUM_HEADS * INTERLEAVE_HEAD_DIM
 
 
-def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
-    """Run the layer harness on a column-parallel LayerNormLinear with the fused backend live."""
+def _run_layer(
+    nprocs,
+    layer_type,
+    extra_args=(),
+    parallel_mode=None,
+    no_bias=False,
+    seq_length=SEQ_LENGTH,
+    quantization="none",
+):
+    """Run the layer harness on `layer_type` with the fused backend live."""
     test_cmd = (
         _fused_launch_cmd(nprocs)
         + [
@@ -113,14 +121,14 @@ def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="no
             f"--batch-size={BATCH_SIZE}",
             f"--num-heads={NUM_HEADS}",
             f"--head-dim={HEAD_DIM}",
-            f"--layer-type={te.LayerNormLinear.__name__}",
-            "--linear-parallel-mode=column",
+            f"--layer-type={layer_type.__name__}",
             "--num-layers=1",
             "--use-bf16-params",
-            # TODO: Add bias support
-            "--no-bias",
         ]
-        + extra_args
+        + ([f"--linear-parallel-mode={parallel_mode}"] if parallel_mode is not None else [])
+        # TODO: Add bias support
+        + (["--no-bias"] if no_bias else [])
+        + list(extra_args)
     )
     if quantization != "none":
         test_cmd += ["--fp8", f"--quantization={quantization}"]
@@ -128,7 +136,21 @@ def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="no
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    env["NVTE_RS_DIAG"] = "1"
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
+
+
+def _run_fused_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
+    """Run the layer harness on a column-parallel LayerNormLinear with the fused backend live."""
+    return _run_layer(
+        nprocs,
+        te.LayerNormLinear,
+        extra_args,
+        parallel_mode="column",
+        no_bias=True,
+        seq_length=seq_length,
+        quantization=quantization,
+    )
 
 
 def _reported_names(stdout, prefix):
@@ -143,6 +165,30 @@ def _output_hashes(stdout):
     """The per-rank digests the harness printed, in rank order."""
     prefix = "OUTPUT HASH: "
     return [ln.split(prefix, 1)[1].strip() for ln in stdout.decode().splitlines() if prefix in ln]
+
+
+def _assert_fused_rs_precision(result, quantization):
+    stderr = result.stderr.decode()
+    ran_mxfp8 = "[RS_DIAG] launched mxfp8" in stderr
+    ran_bf16 = "[RS_DIAG] launched bf16" in stderr
+    if quantization == "mxfp8":
+        assert ran_mxfp8, f"the fused RS MXFP8 kernel never ran\n{stderr}"
+        assert not ran_bf16, f"the fused RS fell back to the bf16 kernel\n{stderr}"
+    else:
+        assert ran_bf16, f"the fused RS bf16 kernel never ran\n{stderr}"
+        assert not ran_mxfp8, f"a bf16 call ran the MXFP8 kernel\n{stderr}"
+
+
+def _assert_bulk_rs_precision(result, quantization):
+    stderr = result.stderr.decode()
+    ran_mxfp8 = "[RS_DIAG] bulk launched mxfp8" in stderr
+    ran_bf16 = "[RS_DIAG] bulk launched bf16" in stderr
+    if quantization == "mxfp8":
+        assert ran_mxfp8, f"the bulk RS MXFP8 kernel never ran\n{stderr}"
+        assert not ran_bf16, f"the bulk RS fell back to the bf16 kernel\n{stderr}"
+    else:
+        assert ran_bf16, f"the bulk RS bf16 kernel never ran\n{stderr}"
+        assert not ran_mxfp8, f"a bf16 call ran the MXFP8 bulk RS kernel\n{stderr}"
 
 
 def _assert_numerics_passed(result):
@@ -260,37 +306,52 @@ def test_fused_layer_bulk_wgrad(nprocs, quantization):
     assert "qkv_wgrad" in fused, fused
     eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
     assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
-    if quantization == "none":
-        assert "qkv_wgrad" in eligible, eligible
-    else:
-        # The fused bulk reduce-scatter is bf16-only here: fused_bulk_rs_eligible gates on
-        # "not fp8", so MXFP8 must decline and fall back rather than run a wrong kernel.
-        assert "qkv_wgrad" not in eligible, eligible
+    assert "qkv_wgrad" in eligible, eligible
+    _assert_bulk_rs_precision(result, quantization)
 
 
-def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH):
+def _run_fused_row_parallel_layer(nprocs, extra_args, seq_length=SEQ_LENGTH, quantization="none"):
     """Run the layer harness on a row-parallel Linear: RS in proj_fprop, AG in proj_dgrad."""
-    test_cmd = (
-        _fused_launch_cmd(nprocs)
-        + [
-            str(TEST_ROOT / "run_layer_with_overlap.py"),
-            f"--seed={RNG_SEED}",
-            f"--seq-length={seq_length}",
-            f"--batch-size={BATCH_SIZE}",
-            f"--num-heads={NUM_HEADS}",
-            f"--head-dim={HEAD_DIM}",
-            f"--layer-type={te.Linear.__name__}",
-            "--linear-parallel-mode=row",
-            "--num-layers=1",
-            "--use-bf16-params",
-        ]
-        + extra_args
+    return _run_layer(
+        nprocs,
+        te.Linear,
+        extra_args,
+        parallel_mode="row",
+        seq_length=seq_length,
+        quantization=quantization,
     )
-    env = os.environ.copy()
-    env["PYTORCH_JIT"] = "0"
-    env["NVTE_TORCH_COMPILE"] = "0"
-    env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
-    return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
+
+
+def _run_fused_mlp_layer(nprocs, extra_args=(), seq_length=SEQ_LENGTH, quantization="none"):
+    """Run the layer harness on a LayerNormMLP: fused RS in fc2_fprop, bulk RS in fc1_wgrad."""
+    return _run_layer(
+        nprocs,
+        te.LayerNormMLP,
+        extra_args,
+        seq_length=seq_length,
+        quantization=quantization,
+    )
+
+
+@pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
+@pytest.mark.parametrize("quantization", FUSED_QUANTIZATIONS)
+@pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
+def test_fused_mlp_rs_overlap(nprocs, quantization):
+    """Both of an MLP's reduce-scatters: fused in fc2_fprop, bulk behind the fc1 wgrad GEMM."""
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    result = _run_fused_mlp_layer(nprocs, quantization=quantization)
+    _assert_numerics_passed(result)
+    stderr = result.stderr.decode()
+    assert "failed to launch" not in stderr, stderr
+    disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
+    assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
+    assert "fc2_fprop" not in disabled, disabled
+    eligible = _reported_names(result.stdout, "UB BULK ELIGIBLE: ")
+    assert eligible is not None, f"harness printed no eligibility set\n{result.stdout.decode()}"
+    assert "fc1_wgrad" in eligible, eligible
+    _assert_fused_rs_precision(result, quantization)
+    _assert_bulk_rs_precision(result, quantization)
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -306,6 +367,7 @@ def test_fused_rs_overlap_bf16(nprocs):
     disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
     assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
     assert "proj_fprop" not in disabled, disabled
+    _assert_fused_rs_precision(result, "none")
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
@@ -316,11 +378,8 @@ def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
         pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_row_parallel_layer(
         nprocs,
-        [
-            f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
-            "--fp8",
-            "--quantization=mxfp8",
-        ],
+        [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization="mxfp8",
     )
     _assert_numerics_passed(result)
     stderr = result.stderr.decode()
@@ -328,27 +387,27 @@ def test_fused_ag_overlap_row_parallel_mxfp8(nprocs):
     # is a stub on every backend.
     assert "Operation not supported" not in stderr, stderr
     assert "failed to launch" not in stderr, stderr
+    disabled = _reported_names(result.stdout, "UB DISABLED NAMES: ")
+    assert disabled is not None, f"harness printed no disabled name set\n{result.stdout.decode()}"
+    assert "proj_fprop" not in disabled, disabled
+    _assert_fused_rs_precision(result, "mxfp8")
 
 
 @pytest.mark.skipif(not fused_available, reason=reason_for_no_fused)
 @pytest.mark.parametrize("nprocs", FUSED_PROC_COUNTS)
-@pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "mxfp8"))
-def test_fused_rs_overlap_rejects_non_bf16(quantization, nprocs):
-    """A quantized row-parallel Linear must fall back cleanly instead of reaching the bf16 kernel."""
-    if quantization.startswith("fp8") and not fp8_available:
+def test_fused_rs_overlap_rejects_delayed_scaling(nprocs):
+    """Delayed-scaling FP8 is outside the backend -- only MXFP8 1D scaling dispatches -- so a
+    row-parallel Linear on that recipe must fall back cleanly rather than reach the kernel."""
+    if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     result = _run_fused_row_parallel_layer(
         nprocs,
-        [
-            f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}",
-            "--fp8",
-            f"--quantization={quantization}",
-        ],
+        [f"--in-features={ELIGIBLE_OUT_FEATURES_PER_RANK * nprocs}"],
+        quantization="fp8_delayed_scaling",
     )
     stderr = result.stderr.decode()
     assert "non-bf16 operand" not in stderr, f"a non-bf16 operand reached the kernel\n{stderr}"
+    assert "only supports MXFP8_1D_SCALING" not in stderr, f"the kernel was reached\n{stderr}"
     _assert_numerics_passed(result)
 
 
