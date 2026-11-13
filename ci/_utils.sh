@@ -180,6 +180,13 @@ check_supported() {
             _probe_result=$TE_CI_SUPPORTS_FLASH_ATTN
             _probe_message="Flash attention is not installed"
         ;;
+        "permute_free")
+            #The permute-free test module skips at import off gfx950 or without FlyDSL,
+            #so it collects no tests there
+            test -n "${TE_CI_SUPPORTS_PERMUTE_FREE+set}" || TE_CI_SUPPORTS_PERMUTE_FREE=$(python -c "${PYTHON_TE_IMPORT}; import importlib.util; from transformer_engine.pytorch.utils import get_device_compute_capability; print(get_device_compute_capability() == (9, 5) and importlib.util.find_spec('flydsl') is not None)" 2>/dev/null)
+            _probe_result=$TE_CI_SUPPORTS_PERMUTE_FREE
+            _probe_message="Permute-free grouped GEMM is not supported on this device, skipping permute-free tests"
+        ;;
         *)
             script_error "check_supported: unknown capability $1"
             return 1

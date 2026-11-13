@@ -87,6 +87,7 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
+    check_supported permute_free && run_default_fa 1 test_perm_free_grouped_linear.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
