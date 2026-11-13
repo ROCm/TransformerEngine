@@ -9,10 +9,6 @@
 #include <nccl.h>
 #endif
 
-#ifdef USE_ROCM
-#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
-#endif
-
 #include "../extensions.h"
 #include "transformer_engine/transformer_engine.h"
 
