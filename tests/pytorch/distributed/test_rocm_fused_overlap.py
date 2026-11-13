@@ -130,8 +130,6 @@ def _run_layer(
         + (["--no-bias"] if no_bias else [])
         + list(extra_args)
     )
-    # "none" deliberately omits --fp8: that flag is what puts the UB in FP8 quantization mode and
-    # makes recipe.mxfp8() true, so passing it unconditionally would hide the bf16 path entirely.
     if quantization != "none":
         test_cmd += ["--fp8", f"--quantization={quantization}"]
     env = os.environ.copy()
