@@ -1,0 +1,342 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+"""pytest glue for the microbenchmarks.
+
+Thin shim: the option/CSV/timing logic lives in utils.py; this file only wires
+those helpers into pytest hooks and exposes the ``microbench`` fixture.  Each
+benchmark is run canonically with ``python benchmark_gemm.py`` (the file
+forwards to pytest), e.g.::
+
+    python benchmark_gemm.py --csv                 # write benchmark_gemm.csv
+    python benchmark_gemm.py -k "bf16 and QKV"     # select by parametrize id
+    python benchmark_gemm.py -k triton             # select the triton backend
+"""
+
+import ctypes
+import os
+import random
+import sys
+
+# Snapshot GPU neighbors BEFORE importing torch: on ROCm the first CUDA call (which
+# `from utils import` can trigger via `import torch.utils.benchmark`) registers this
+# process on every visible GPU, which would otherwise look like a neighbor. Taken
+# here, the snapshot is free of our own PID.
+import gpu_neighbors
+
+_GPU_SNAPSHOT = gpu_neighbors.snapshot_gpu_neighbors()
+
+from pathlib import Path
+
+import pytest
+
+from utils import (
+    configure_interleave,
+    configure_kernel_profile,
+    configure_rotating,
+    dashboard_run_plan,
+    format_aggregate_table,
+    format_results_table,
+    merge_rounds,
+    pin_cpus,
+    print_case,
+    record_bench,
+    write_bench_outputs,
+    write_dashboard_run,
+)
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("microbench", "TE GPU microbenchmarks")
+    group.addoption(
+        "--csv", nargs="?", const=True, default=None, metavar="FILE",
+        help="Write results to CSV (one per family; default name from the module).",
+    )
+    group.addoption(
+        "--csv-samples", nargs="?", const=True, default=None, metavar="FILE",
+        help="Write per-sample timing data to a CSV.",
+    )
+    group.addoption(
+        "--kernel-profile", action="store_true", default=False,
+        help="Also measure GPU kernel (device) time alongside wall time, adding "
+             "Kernel Time / Kernel <unit> columns to the CSV.",
+    )
+    group.addoption(
+        "--rotating", nargs="?", type=int, const=0, default=None, metavar="MB",
+        help="Rotate inputs through a ring of buffers (optional MB budget). On by default.",
+    )
+    group.addoption(
+        "--no-rotating", action="store_true", default=False,
+        help="Disable input buffer rotation.",
+    )
+    group.addoption(
+        "--abort-on-gpu-interference", action="store_true", default=False,
+        help="Abort the run if another process is using the benchmark GPU(s).",
+    )
+    group.addoption(
+        "--no-gpu-interference-check", action="store_true", default=False,
+        help="Disable the shared-GPU interference check.",
+    )
+    group.addoption(
+        "--no-cpu-pin", action="store_true", default=False,
+        help="Don't pin the run to a few GPU-local cores at the performance governor "
+             "(on by default; the governor change needs root).",
+    )
+    group.addoption(
+        "--interleave", type=int, default=1, metavar="R",
+        help="Measure every benchmark in R rounds spread over the session (round 1 of all "
+             "benchmarks, then round 2, ...; shuffled within a round), each with 1/R of the "
+             "timing budget, and pool the rounds (default: 1).",
+    )
+    group.addoption(
+        "--dashboard-run", action="store_true", default=False,
+        help="Collect all families into one run dir (born-tagged CSVs + samples/ + "
+             "run_info.txt) under --dashboard-out, for the TE dashboard.",
+    )
+    group.addoption(
+        "--dashboard-out", default="results", metavar="DIR",
+        help="Base output dir for --dashboard-run; a "
+             "<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/ run dir is created under it "
+             "(default: results).",
+    )
+    group.addoption(
+        "--gpu-model", default=None, metavar="NAME",
+        help="Override the detected GPU model/arch name (e.g. MI400X) used in the "
+             "--dashboard-run dir + run_info; required when it can't be detected.",
+    )
+    group.addoption(
+        "--te-repo", default=None, metavar="DIR",
+        help="TransformerEngine git checkout whose commit tags the --dashboard-run results "
+             "(default: the checkout of an editable TE install, else this directory's).",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "benchmark: TE GPU microbenchmark")
+    if config.getoption("--interleave") < 1:
+        raise pytest.UsageError("--interleave expects a number of rounds >= 1")
+    configure_interleave(config.getoption("--interleave"))
+    configure_rotating(config.getoption("--rotating"), config.getoption("--no-rotating"))
+    configure_kernel_profile(config.getoption("--kernel-profile"))
+    config._microbench_store = {}
+    # --interleave: {(family, nodeid without round): (case, name, [records per round])}, and
+    # each case's position in the unshuffled collection, which the merged results keep.
+    config._microbench_rounds = {}
+    config._microbench_order = {}
+    if not config.getoption("--no-gpu-interference-check"):
+        status, foreign = gpu_neighbors.detect_gpu_interference(_GPU_SNAPSHOT)
+        if foreign:
+            print(gpu_neighbors.format_gpu_interference(foreign))
+            if config.getoption("--abort-on-gpu-interference"):
+                pytest.exit(
+                    "GPU interference detected; aborting (--abort-on-gpu-interference).",
+                    returncode=3,
+                )
+        elif status == "unavailable":
+            print("WARNING: GPU interference check skipped -- could not list the processes on "
+                  "the benchmark GPU via amdsmi (pip install amdsmi if missing, or pass "
+                  "--no-gpu-interference-check to silence).")
+
+    # Resolve the dashboard run dir up front so pytest_report_header can show it
+    # and write_dashboard_run can reuse the same metadata at session end.
+    plan = None
+    if config.getoption("--dashboard-run"):
+        plan = dashboard_run_plan(
+            config.getoption("--dashboard-out"), model=config.getoption("--gpu-model"),
+            te_repo=config.getoption("--te-repo"))
+        if not plan.meta["model"]:
+            raise pytest.UsageError(
+                "--dashboard-run: could not determine the GPU model from the device name; "
+                "pass --gpu-model NAME (e.g. MI355X).")
+        if config.getoption("--te-repo") and not plan.meta["sha"]:
+            raise pytest.UsageError(
+                f"--te-repo {config.getoption('--te-repo')}: not a git checkout")
+
+    config._cpu_pin = None if config.getoption("--no-cpu-pin") else pin_cpus()
+
+    if plan is not None:
+        config._dashboard_plan = plan
+        plan.meta["interleave"] = config.getoption("--interleave")
+        if config._cpu_pin is not None:
+            plan.meta["cpus"] = config._cpu_pin.description
+
+
+def pytest_report_header(config):
+    pin = getattr(config, "_cpu_pin", None)
+    lines = [f"cpus: {pin.description if pin else 'unpinned'}",
+             f"GPU_MAX_HW_QUEUES: {os.environ.get('GPU_MAX_HW_QUEUES', 'HIP default')}"]
+    if config.getoption("--interleave") > 1:
+        lines.append(f"interleave: {config.getoption('--interleave')} rounds")
+    plan = getattr(config, "_dashboard_plan", None)
+    if plan is None:
+        return lines
+    extras = [name for name, opt in (
+        ("kernel-profile", "--kernel-profile"),
+        ("samples", "--csv-samples"),
+    ) if config.getoption(opt)]
+    m = plan.meta
+    return [
+        f"dashboard-run -> {plan.run_dir}",
+        f"  {m['model']} on {m['host']} gpu{m['gpu']} "
+        f"({m['gpu_bdf'] or 'no pci'}) @ {m['short']}; "
+        f"extras: {', '.join(extras) or 'none (wall only)'}",
+        *lines,
+    ]
+
+
+def pytest_collect_file(parent, file_path):
+    # Collect benchmark_*.py like test files so `pytest .` finds them without a
+    # rename; skip init paths so an explicitly-passed file isn't double-collected.
+    if (
+        file_path.suffix == ".py"
+        and file_path.name.startswith("benchmark_")
+        and not parent.session.isinitpath(file_path)
+    ):
+        return pytest.Module.from_parent(parent, path=file_path)
+    return None
+
+
+def _round_of(item):
+    """The ``--interleave`` round of a test item, or None."""
+    callspec = getattr(item, "callspec", None)
+    return callspec.params.get("_microbench_round") if callspec else None
+
+
+def _strip_round(name, rnd):
+    """Drop the interleave round from a node id/name: ``t[case-r2]`` -> ``t[case]``."""
+    if name.endswith(f"-r{rnd}]"):
+        return name[: -len(f"-r{rnd}]")] + "]"
+    return name.removesuffix(f"[r{rnd}]")
+
+
+@pytest.fixture
+def _microbench_round(request):
+    return request.param
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_generate_tests(metafunc):
+    # trylast: after the benchmark modules' own parametrization, so the round ends the id.
+    rounds = metafunc.config.getoption("--interleave")
+    if rounds > 1 and "microbench" in metafunc.fixturenames:
+        metafunc.fixturenames.append("_microbench_round")
+        metafunc.parametrize("_microbench_round", range(1, rounds + 1), indirect=True,
+                             ids=lambda r: f"r{r}")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """With --interleave, run round 1 of all selected benchmarks, then round 2, ..."""
+    rounds = config.getoption("--interleave")
+    if rounds < 2:
+        return
+    by_round = [[] for _ in range(rounds)]
+    others = []
+    for item in items:
+        rnd = _round_of(item)
+        if rnd is None:
+            others.append(item)
+            continue
+        config._microbench_order.setdefault(_strip_round(item.nodeid, rnd),
+                                            len(config._microbench_order))
+        by_round[rnd - 1].append(item)
+    # Fixed seeds: a rerun visits the benchmarks in the same order.
+    for r, round_items in enumerate(by_round):
+        random.Random(r).shuffle(round_items)
+    items[:] = others + [item for round_items in by_round for item in round_items]
+
+
+class _MicroBench:
+    """Handed to each test as the ``microbench`` fixture."""
+
+    def __init__(self, request):
+        self._request = request
+        self._config = request.config
+
+    def run(self, case, bench_callable):
+        """Time *bench_callable* (returns metric records) and record it under *case*."""
+        records = bench_callable()
+        print_case(case, records)
+        family = Path(self._request.module.__file__).stem
+        node = self._request.node
+        rnd = _round_of(node)
+        if rnd is None:
+            record_bench(self._config._microbench_store, family, case, records, node.name)
+        else:
+            key = (family, _strip_round(node.nodeid, rnd))
+            entry = self._config._microbench_rounds.setdefault(
+                key, (case, _strip_round(node.name, rnd), []))
+            entry[2].append(records)
+        return records
+
+
+@pytest.fixture
+def microbench(request):
+    return _MicroBench(request)
+
+
+@pytest.fixture(autouse=True)
+def _reset_fp8_global_state():
+    yield
+    # Every autocast exit reduces all DelayedScaling amaxes ever registered, dead modules included.
+    FP8GlobalStateManager.reset()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    store = getattr(config, "_microbench_store", None)
+    if not store:
+        return
+    table = format_results_table(store)
+    if table:
+        terminalreporter.write_line("")
+        for row in table.splitlines():
+            terminalreporter.write_line(row)
+    aggregate = format_aggregate_table(store)
+    if aggregate:
+        terminalreporter.write_line("")
+        for row in aggregate.splitlines():
+            terminalreporter.write_line(row)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
+    if getattr(config, "_cpu_pin", None) is not None:
+        config._cpu_pin.restore()
+    store = getattr(config, "_microbench_store", None)
+    rounds = getattr(config, "_microbench_rounds", {})
+    order = getattr(config, "_microbench_order", {})
+    for (family, _nodeid), (case, name, records) in sorted(
+            rounds.items(), key=lambda kv: order.get(kv[0][1], len(order))):
+        record_bench(store, family, case, merge_rounds(records), name)
+    if not store:
+        return
+    if config.getoption("--dashboard-run"):
+        plan = getattr(config, "_dashboard_plan", None)
+        run_dir = write_dashboard_run(
+            store,
+            out_base=config.getoption("--dashboard-out"),
+            csv_samples=config.getoption("--csv-samples"),
+            meta=plan.meta if plan else None,
+        )
+        print(f"microbench: dashboard run -> {run_dir}")
+        return
+    written = write_bench_outputs(
+        store,
+        csv=config.getoption("--csv"),
+        csv_samples=config.getoption("--csv-samples"),
+    )
+    for path in written:
+        print(f"microbench: wrote {path}")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    # Armed by benchmarks that trigger ROCm 7.14's segfault in HIP's exit-time hsa_shut_down (as in
+    # tests/pytorch/triton_kernels/conftest.py). Not under rocprofv3, which writes its trace there.
+    session = getattr(config, "_skip_hip_teardown_session", None)
+    if session is None or "ROCP_TOOL_LIBRARIES" in os.environ:
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    ctypes.CDLL(None).fflush(None)
+    os._exit(int(session.exitstatus))
