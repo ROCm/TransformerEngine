@@ -77,12 +77,7 @@ def check_mxfp4_gemm_versus_reference(
     m, n, k, out_dtype, *, a_quant, b_quant, layout="TN", accumulate=False,
     fp32_accumulate=False, alpha=1.0, bias=False,
 ):
-    """MXFP4 GEMM (AITER a4w4, hipBLASLt F4F4 or FlyDSL) vs the Python MXFP4 reference.
-
-    ``fp32_accumulate`` scales the FP32 product by ``alpha`` and adds ``out`` before narrowing to
-    ``out_dtype``, as hipBLASLt and FlyDSL do, rather than adding in ``out_dtype``. ``bias`` (FP32
-    reference only) adds a random bf16 out_features vector after the alpha and out terms.
-    """
+    """MXFP4 GEMM (AITER a4w4, hipBLASLt F4F4 or FlyDSL) vs the Python MXFP4 reference."""
     from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
     device = "cuda"

@@ -1177,11 +1177,7 @@ def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
 )
 @pytest.mark.parametrize("beta", [None, -0.5], ids=["beta=default", "beta=-0.5"])
 def test_flydsl_vs_pytorch_mxfp4_accumulate(M, K, N, layout, out_dtype, beta):
-    """MXFP4 FlyDSL GEMM accumulating into ``out`` (``D = A @ B + beta * D``).
-
-    This is the wgrad GEMM accumulating into ``main_grad`` (FP32 in practice); ``beta=None``
-    is what TE passes, which resolves to 1.
-    """
+    """MXFP4 FlyDSL GEMM accumulating into ``out``: ``D = A @ B + beta * D``."""
     torch.manual_seed(42)
 
     A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
@@ -1220,8 +1216,7 @@ def test_flydsl_vs_pytorch_mxfp4_accumulate(M, K, N, layout, out_dtype, beta):
     ids=["alpha=-2.5", "alpha=-2.5,acc", "alpha=0.5,acc-beta=-0.5"],
 )
 def test_flydsl_vs_pytorch_mxfp4_alpha(M, K, N, layout, out_dtype, alpha, beta, accumulate):
-    """MXFP4 FlyDSL GEMM with ``alpha`` (``D = alpha * A @ B [+ beta * D]``), as the fused
-    ``te.ops`` linear+scale(+add) pipelines call it."""
+    """MXFP4 FlyDSL GEMM with alpha: ``D = alpha * A @ B [+ beta * D]``."""
     torch.manual_seed(42)
 
     A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
@@ -1268,11 +1263,7 @@ def test_flydsl_vs_pytorch_mxfp4_alpha(M, K, N, layout, out_dtype, alpha, beta, 
 def test_flydsl_vs_pytorch_mxfp4_bias(
     M, K, N, layout, out_dtype, alpha, beta, accumulate, bias_dtype
 ):
-    """MXFP4 FlyDSL BIAS: ``D = alpha * A @ B [+ beta * D] + bias``, bias over out_features.
-
-    Plain bias is the Linear forward GEMM; bias with accumulation is ``te.ops``
-    ``ForwardLinearBiasAdd``.
-    """
+    """MXFP4 FlyDSL GEMM with bias: ``D = alpha * A @ B [+ beta * D] + bias``."""
     torch.manual_seed(42)
 
     A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
@@ -1307,9 +1298,7 @@ def test_flydsl_vs_pytorch_mxfp4_bias(
 
 @requires_flydsl_mxfp4_backend
 def test_flydsl_mxfp4_unsupported_epilogues_raise():
-    """GELU_AUX, GELU_AUX_BIAS, DGELU and BGRADB are not fused into the MXFP4 GEMM (under
-    quantized recipes TE does them in the quantize kernels); gfx1250 has no fallback, so they
-    raise. A wrong-length bias is a caller error."""
+    """MXFP4 FlyDSL GEMM rejects GELU, DGELU and bias-gradient epilogues."""
     from transformer_engine.pytorch.flydsl_kernels.gemm import FlyDSLUnsupportedError
 
     torch.manual_seed(42)

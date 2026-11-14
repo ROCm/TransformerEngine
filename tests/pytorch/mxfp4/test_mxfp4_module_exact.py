@@ -90,8 +90,7 @@ def init_main_grad(module):
 
 
 def weight_grads(native_module, ref_module, main_grad_init):
-    """(native, reference) weight gradients. With fused wgrad accumulation, the native one is
-    what the GEMM added to main_grad, rounded like the reference gradient."""
+    """(native, reference) weight gradients; with fused wgrad accumulation, read from main_grad."""
     if main_grad_init is not None:
         ref_wgrad = ref_module.weight.grad.detach().clone()
         return (native_module.weight.main_grad - main_grad_init).to(ref_wgrad.dtype), ref_wgrad
