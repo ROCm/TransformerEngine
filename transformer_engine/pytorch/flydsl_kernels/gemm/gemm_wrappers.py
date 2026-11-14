@@ -93,11 +93,9 @@ def _validate_common_epilogue(
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
-    Fused forward BIAS is supported by all FlyDSL GEMM backends (mxfp8, fp8,
-    fp16, bf16, fp32, mxfp4) and forward GELU_AUX by all but MXFP4. BGRADB
-    (fused bias gradient) and DGELU (fused GELU gradient) are not implemented
-    anywhere yet. Accumulation and alpha != 1 are implemented only by MXFP4
-    (``supports_accumulate``, ``supports_alpha``).
+    Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
+    backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) and
+    DGELU (fused GELU gradient) are not implemented anywhere yet.
 
     Unsupported configurations raise ``FlyDSLUnsupportedError`` so
     ``general_gemm`` transparently falls back to the C++ backend rather than
