@@ -3,9 +3,9 @@
 
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
-D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) with K-contiguous packed FP4 operands and E8M0
-scales along K, optionally through a tanh GELU that saves the pre-activation to Aux, or scaled by
-the GELU derivative of a pre-activation read from Aux (DGELU). TE's MXFP4
+D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) (+ bias[N]) with K-contiguous packed FP4
+operands and E8M0 scales along K, optionally through a tanh GELU that saves the pre-activation to
+Aux, or scaled by the GELU derivative of a pre-activation read from Aux (DGELU). TE's MXFP4
 columnwise storage is a materialized transpose, so this one kernel serves TN/NN/NT. Tiles are
 staged with TDM into a 3-stage LDS pipeline and C is written back through LDS by TDM.
 """
@@ -51,6 +51,7 @@ def gemm_kernel(
     B_s: fx.Tensor,
     C: fx.Tensor,
     Aux: fx.Tensor,
+    Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
     K: fx.Int32,
@@ -65,6 +66,7 @@ def gemm_kernel(
     SCALE: fx.Constexpr[int],
     GELU: fx.Constexpr[int],
     DGELU: fx.Constexpr[int],
+    BIAS: fx.Constexpr[int],
 ):
 
     def as_words(t, rows, words_per_row):
@@ -136,6 +138,10 @@ def gemm_kernel(
         if const_expr(ACC or DGELU):
             # C or Aux half 0 is prefetched here, half 1 at offset 0; D is stored where each landed
             lds_C_half = (lds_C2, lds_C_ptr)
+    if const_expr(BIAS):
+        # the tile's BLOCK_N bias values, TDM-loaded in the prologue so no VGPRs are held across
+        # the K loop
+        lds_bias = smem.allocate(fx.Array[fx.Float32, BLOCK_N]).peek().ptr
 
     sA_base_ptr = fx.get_iter(sA)
     sB_base_ptr = fx.get_iter(sB)
@@ -263,8 +269,18 @@ def gemm_kernel(
     def frag_view_ptr(ptr, off):
         return fx.make_view(fx.add_offset(ptr, off), fx.make_layout(1, 1))
 
-    # one TDM op per wave: tiles 0 and 1 and the scales
+    if const_expr(BIAS):
+        bias_box = fx.make_layout((1, BLOCK_N), (BLOCK_N, 1))
+        gBias = fx.make_view(fx.add_offset(fx.get_iter(Bias), bid_n * BLOCK_N), bias_box)
+        tdm_bias = fx.rocdl.make_tdm_atom(
+            gBias, [None, None], strides=[fx.Int64(BLOCK_N), None], num_warps=1
+        )
+
+    # one TDM op per wave: tiles 0 and 1 and the scales (and the bias tile)
     def issue_prologue_tdm():
+        if const_expr(BIAS):
+            if wave == NUM_WAVES - 1:
+                fx.copy(tdm_bias, gBias, fx.make_view(lds_bias, bias_box))
         if wave < 4:
             if wave == 0:
                 fx.copy(tdm_A1w, tAgA1w[None, 0], tAsA1w[None, 0])
@@ -575,15 +591,36 @@ def gemm_kernel(
     gemm_step(cur)
     x = bases[0] - wm * 16 * LDS_ROW_WORDS
     lane_mod16, khalf = x // LDS_ROW_WORDS, x % LDS_ROW_WORDS // 4
+    if const_expr(BIAS):
+        if const_expr(ACC):
+            # otherwise the last WMMAs sink into the combine with their A/B fragments live, and the
+            # bias pushes that over the VGPR limit (spills)
+            fx.rocdl.sched_barrier(0)
+        copy_atom_f32 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
+
+        # bias of this thread's column j (see c_offset), read from LDS where it is used, so it
+        # holds no VGPRs between uses (hoisting the 4 reads spills with accumulate)
+        def bias_at(j):
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+            fx.copy(copy_atom_f32, frag_view_ptr(lds_bias, wn * 16 + lane_mod16 + 64 * j), reg)
+            fx.rocdl.sched_barrier(0x7FF)
+            return reg.load()[0]
 
     if const_expr(not ACC and not DGELU):
         gC_wave, tdm_C, lds_C_wave = make_c_tdm()
         if const_expr(GELU):
             gAux_wave, lds_Aux_wave = global_c_waves(Aux), lds_c_wave(lds_C2)
-        if const_expr(SCALE):
+        if const_expr(SCALE or BIAS):
+            if const_expr(BIAS):
+                bias_j = [bias_at(j) for j in range_constexpr(B_REPS)]
             for acc_row in frag_acc:
-                for acc in acc_row:
-                    acc.store(acc.load() * alpha)
+                for j in range_constexpr(B_REPS):
+                    acc_vals = acc_row[j].load()
+                    if const_expr(SCALE):
+                        acc_vals = acc_vals * alpha
+                    if const_expr(BIAS):
+                        acc_vals = acc_vals + bias_j[j]
+                    acc_row[j].store(acc_vals)
 
     if const_expr(OUT_KIND == 0):
         frag_c = frag_acc
@@ -618,7 +655,10 @@ def gemm_kernel(
                 if const_expr(SCALE):
                     acc_vals = acc_vals * alpha
                 if const_expr(ACC):
-                    acc.store(acc_vals + c_vals * beta)
+                    acc_vals = acc_vals + c_vals * beta
+                    if const_expr(BIAS):
+                        acc_vals = acc_vals + bias_at(j)
+                    acc.store(acc_vals)
                 else:
                     acc.store(acc_vals * dgelu_tanh(c_vals))
                 if const_expr(OUT_KIND != 0):
@@ -717,6 +757,7 @@ def launch_gemm(
     B_s: fx.Tensor,
     C: fx.Tensor,
     Aux: fx.Tensor,
+    Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
     K: fx.Int32,
@@ -731,6 +772,7 @@ def launch_gemm(
     SCALE: fx.Constexpr[int],
     GELU: fx.Constexpr[int],
     DGELU: fx.Constexpr[int],
+    BIAS: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_tot = (M // BLOCK_M) * (N // BLOCK_N)
@@ -741,6 +783,7 @@ def launch_gemm(
         B_s,
         C,
         Aux,
+        Bias,
         M,
         N,
         K,
@@ -755,6 +798,7 @@ def launch_gemm(
         SCALE,
         GELU,
         DGELU,
+        BIAS,
     ).launch(grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
 
@@ -811,15 +855,18 @@ def mxfp4_matmul(
     beta: float = 1.0,
     aux: torch.Tensor = None,
     gelu_in: torch.Tensor = None,
+    bias: torch.Tensor = None,
 ):
-    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``).
+    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``)
+    (+ ``bias``).
 
     a [M, K/2] and b [N, K/2] packed FP4; scales E8M0 covering [M, K/32] and [N, K/32];
     D float32, bfloat16 or float16. With ``accumulate``, D's existing values are read back
     and ``beta * D`` is added to the FP32 accumulator (scaled by ``alpha``) before narrowing.
     With ``aux`` (GELU_AUX, shaped and typed like D), the pre-activation is written to ``aux``
     and D = gelu_tanh(pre-activation). With ``gelu_in`` (DGELU, shaped and typed like D), D is
-    scaled by dgelu_tanh(gelu_in).
+    scaled by dgelu_tanh(gelu_in). ``bias`` (BIAS, contiguous float32 of length N) is added to
+    every row after the alpha and beta terms, in FP32 before narrowing.
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
@@ -855,6 +902,17 @@ def mxfp4_matmul(
             raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 requires a contiguous {name}")
         if accumulate:
             raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 {name} with accumulate is not implemented")
+    if bias is not None:
+        if bias.dtype != torch.float32 or bias.numel() != n or bias.device != D.device:
+            raise ValueError(
+                f"bias {tuple(bias.shape)} {bias.dtype} on {bias.device} must be float32 of "
+                f"length N={n} on {D.device}"
+            )
+        if not bias.is_contiguous():
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 requires a contiguous bias")
+        # TODO: GELU_AUX_BIAS; DGELU has no bias epilogue (its bias form is DGELU_BGRAD)
+        if aux is not None or gelu_in is not None:
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 bias with GELU or DGELU is not implemented")
     check_mxfp4_shape(m, n, k)
 
     if stream is None:
@@ -866,6 +924,7 @@ def mxfp4_matmul(
         b_scale,
         D,
         next((t for t in (aux, gelu_in) if t is not None), D),
+        bias.view(-1) if bias is not None else D,
         m,
         n,
         k,
@@ -880,6 +939,7 @@ def mxfp4_matmul(
         int(float(alpha) != 1.0),
         int(aux is not None),
         int(gelu_in is not None),
+        int(bias is not None),
         stream=stream,
     )
     return D
