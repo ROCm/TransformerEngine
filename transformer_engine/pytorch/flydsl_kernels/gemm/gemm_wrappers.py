@@ -1067,11 +1067,7 @@ def _run_mxfp4(
     beta=0.0,
     bias=None,
 ):
-    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT.
-
-    ``D = alpha * A @ B``, plus ``beta * D`` with ``accumulate`` (C is aliased to D, as in
-    hipBLASLt), plus ``bias`` (BIAS, length out_features) broadcast over the rows.
-    """
+    """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT."""
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
         A, transa, B, transb

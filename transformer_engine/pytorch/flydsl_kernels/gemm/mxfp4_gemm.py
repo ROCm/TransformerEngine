@@ -4,9 +4,9 @@
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
 D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) (+ bias[N]) with K-contiguous packed FP4
-operands and E8M0 scales along K. TE's MXFP4 columnwise storage is a materialized transpose, so this one kernel serves
-TN/NN/NT. Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS
-by TDM.
+operands and E8M0 scales along K. TE's MXFP4 columnwise storage is a materialized transpose, so this
+one kernel serves TN/NN/NT. Tiles are staged with TDM into a 3-stage LDS pipeline and C is written
+back through LDS by TDM.
 """
 
 import torch
@@ -776,14 +776,10 @@ def mxfp4_matmul(
     beta: float = 1.0,
     bias: torch.Tensor = None,
 ):
-    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``)
-    (+ ``bias``).
+    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D) (+ bias).
 
     a [M, K/2] and b [N, K/2] packed FP4; scales E8M0 covering [M, K/32] and [N, K/32];
-    D float32, bfloat16 or float16. With ``accumulate``, D's existing values are read back
-    and ``beta * D`` is added to the FP32 accumulator (scaled by ``alpha``) before narrowing.
-    ``bias`` (BIAS, contiguous float32 of length N) is added to every row after the alpha and beta
-    terms, in FP32 before narrowing.
+    D float32, bfloat16 or float16; bias float32 [N].
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
