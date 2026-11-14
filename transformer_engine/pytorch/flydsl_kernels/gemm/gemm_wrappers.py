@@ -90,16 +90,14 @@ def _validate_common_epilogue(
     beta,
     supports_accumulate=False,
     supports_alpha=False,
-    supports_dgelu=False,
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
-    Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
-    backends (mxfp8, fp8, fp16, bf16, fp32), MXFP4 does BIAS and GELU_AUX but
-    not both together yet. BGRADB (fused bias gradient) is not implemented
-    anywhere yet. Accumulation, alpha != 1 and DGELU (fused GELU
-    gradient) are implemented only by MXFP4 (``supports_accumulate``,
-    ``supports_alpha``, ``supports_dgelu``).
+    Fused forward BIAS is supported by all FlyDSL GEMM backends (mxfp8, fp8,
+    fp16, bf16, fp32, mxfp4) and forward GELU_AUX by all but MXFP4. BGRADB
+    (fused bias gradient) and DGELU (fused GELU gradient) are not implemented
+    anywhere yet. Accumulation and alpha != 1 are implemented only by MXFP4
+    (``supports_accumulate``, ``supports_alpha``).
 
     Unsupported configurations raise ``FlyDSLUnsupportedError`` so
     ``general_gemm`` transparently falls back to the C++ backend rather than
@@ -124,8 +122,9 @@ def _validate_common_epilogue(
     if grad and bias is not None and bias.numel() != 0:
         raise FlyDSLUnsupportedError("FlyDSL GEMM fused bias gradient (BGRADB) is not implemented")
 
-    # TODO: Add DGELU to the non-MXFP4 backends
-    if gelu and grad and not supports_dgelu:
+    # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
+    # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
+    if gelu and grad:
         raise FlyDSLUnsupportedError("FlyDSL GEMM fused GELU gradient (DGELU) is not implemented")
 
 
@@ -1068,16 +1067,12 @@ def _run_mxfp4(
     accumulate=False,
     alpha=1.0,
     beta=0.0,
-    gelu=False,
-    gelu_in=None,
     bias=None,
 ):
     """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT.
 
     ``D = alpha * A @ B``, plus ``beta * D`` with ``accumulate`` (C is aliased to D, as in
-    hipBLASLt), plus ``bias`` (BIAS, length out_features) broadcast over the rows. With ``gelu`` (GELU_AUX), D = gelu_tanh(alpha * A @ B) and the pre-activation is
-    returned as the aux output. With ``gelu_in`` (DGELU), D = alpha * A @ B * dgelu_tanh(gelu_in),
-    and ``gelu_in`` is returned in its place, as the C++ backend does.
+    hipBLASLt), plus ``bias`` (BIAS, length out_features) broadcast over the rows.
     """
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     A_data, A_scale, B_data, B_scale, B_payload = _select_mxfp4_storage_for_layout(
@@ -1120,16 +1115,6 @@ def _run_mxfp4(
         device=a_flydsl.device,
         backend_name=f"MXFP4 {layout}",
     )
-    if gelu_in is not None:
-        if gelu_in.dtype != D.dtype or not gelu_in.is_contiguous():
-            raise FlyDSLUnsupportedError(
-                f"FlyDSL MXFP4 DGELU needs a contiguous {D.dtype} gelu_in, got "
-                f"{gelu_in.dtype} with strides {gelu_in.stride()}"
-            )
-        if gelu_in.numel() != m * n:
-            raise ValueError(f"gelu_in shape {tuple(gelu_in.shape)} does not match output {(m, n)}")
-    aux = torch.empty_like(D) if gelu else None
-    # the kernel's N axis is TE's out_features (A's rows), as the operands are swapped
     _, bias_arg = _resolve_bias(bias, n)
     mxfp4_matmul(
         a_flydsl,
@@ -1140,11 +1125,9 @@ def _run_mxfp4(
         accumulate=accumulate,
         alpha=alpha,
         beta=beta,
-        aux=aux.view(m, n) if aux is not None else None,
-        gelu_in=gelu_in.view(m, n) if gelu_in is not None else None,
         bias=bias_arg,
     )
-    return D, gelu_in if gelu_in is not None else aux
+    return D
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1392,8 +1375,10 @@ def te_generic_gemm_flydsl(
       - FP32 input with FP32 output
     """
     # These are hints or unused given the epilogue/dtype guards below: bias_type
-    # is inferred, and FlyDSL has no separate workspace or split-accumulator path.
+    # is inferred, gelu_in is only for DGELU (rejected), and FlyDSL has no
+    # separate workspace or split-accumulator path.
     del bias_type
+    del gelu_in
     del workspace
     del workspaceSize
     del use_split_accumulator
@@ -1428,26 +1413,13 @@ def te_generic_gemm_flydsl(
         beta=beta,
         supports_accumulate=is_mxfp4,
         supports_alpha=is_mxfp4,
-        supports_dgelu=is_mxfp4,
     )
 
     if is_mxfp4:
         if a_kind != b_kind:
             raise ValueError("Mixed MXFP4 and non-MXFP4 FlyDSL GEMM inputs are not supported")
-        has_bias = bias is not None and bias.numel() != 0
-        # TODO: GELU_AUX_BIAS
-        if has_bias and gelu:
-            raise FlyDSLUnsupportedError(
-                "FlyDSL MXFP4 GEMM fused GELU with bias is not implemented"
-            )
-        # TODO: fused (D)GELU with accumulation; no TE caller combines them yet
-        if gelu and accumulate:
-            raise FlyDSLUnsupportedError(
-                f"FlyDSL MXFP4 GEMM fused {'DGELU' if grad else 'GELU'} with accumulation is not "
-                "implemented"
-            )
-        if gelu and grad and gelu_in is None:
-            raise ValueError("FlyDSL MXFP4 DGELU requires the pre-activation gelu_in")
+        if gelu:
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused GELU is not implemented")
 
         mxfp4_output_dtypes = {
             None: torch.bfloat16,
@@ -1460,7 +1432,7 @@ def te_generic_gemm_flydsl(
                 f"FlyDSL MXFP4 supports FP16, BF16, or FP32 output, got {output_dtype}"
             )
 
-        D, gelu_input = _run_mxfp4(
+        D = _run_mxfp4(
             A,
             transa,
             B,
@@ -1470,11 +1442,9 @@ def te_generic_gemm_flydsl(
             accumulate=accumulate,
             alpha=alpha,
             beta=beta,
-            gelu=gelu and not grad,
-            gelu_in=gelu_in if gelu and grad else None,
             bias=bias,
         )
-        return D, None, gelu_input, None
+        return D, None, None, None
 
     if a_kind == "mxfp8" or b_kind == "mxfp8":
         # Validate both are MXFP8

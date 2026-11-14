@@ -4,10 +4,9 @@
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
 D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) (+ bias[N]) with K-contiguous packed FP4
-operands and E8M0 scales along K, optionally through a tanh GELU that saves the pre-activation to
-Aux, or scaled by the GELU derivative of a pre-activation read from Aux (DGELU). TE's MXFP4
-columnwise storage is a materialized transpose, so this one kernel serves TN/NN/NT. Tiles are
-staged with TDM into a 3-stage LDS pipeline and C is written back through LDS by TDM.
+operands and E8M0 scales along K. TE's MXFP4 columnwise storage is a materialized transpose, so this one kernel serves
+TN/NN/NT. Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS
+by TDM.
 """
 
 import torch
@@ -50,7 +49,6 @@ def gemm_kernel(
     A_s: fx.Tensor,
     B_s: fx.Tensor,
     C: fx.Tensor,
-    Aux: fx.Tensor,
     Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
@@ -64,8 +62,6 @@ def gemm_kernel(
     OUT_KIND: fx.Constexpr[int],
     ACC: fx.Constexpr[int],
     SCALE: fx.Constexpr[int],
-    GELU: fx.Constexpr[int],
-    DGELU: fx.Constexpr[int],
     BIAS: fx.Constexpr[int],
 ):
 
@@ -130,17 +126,14 @@ def gemm_kernel(
     if smem.allocated_bytes < c_stage_bytes:
         smem.allocate(c_stage_bytes - smem.allocated_bytes)
     lds_C_ptr = fx.recast_iter(out_fx, smem.base_ptr)
-    lds_C_half = (lds_C_ptr, lds_C_ptr)
-    if const_expr(ACC or GELU or DGELU):
-        lds_C2 = fx.recast_iter(
-            out_fx, smem.allocate(fx.Array[fx.Int32, c_stage_bytes // 4]).peek().ptr
-        )
-        if const_expr(ACC or DGELU):
-            # C or Aux half 0 is prefetched here, half 1 at offset 0; D is stored where each landed
-            lds_C_half = (lds_C2, lds_C_ptr)
+    if const_expr(ACC):
+        # C half 0 is prefetched here, half 1 at offset 0; each half is stored from where it landed
+        lds_Cpre = smem.allocate(fx.Array[fx.Int32, c_stage_bytes // 4]).peek()
+        lds_C_half = (fx.recast_iter(out_fx, lds_Cpre.ptr), lds_C_ptr)
+    else:
+        lds_C_half = (lds_C_ptr, lds_C_ptr)
     if const_expr(BIAS):
-        # the tile's BLOCK_N bias values, TDM-loaded in the prologue so no VGPRs are held across
-        # the K loop
+        # bias goes through LDS so it holds no VGPRs across the K loop
         lds_bias = smem.allocate(fx.Array[fx.Float32, BLOCK_N]).peek().ptr
 
     sA_base_ptr = fx.get_iter(sA)
@@ -443,37 +436,31 @@ def gemm_kernel(
                 fx.rocdl.s_wait_tensorcnt(0)
 
     # C store: each wave writes C_WAVE_ROWS rows of each half
-    c_wave_box = fx.make_layout((C_WAVE_ROWS, BLOCK_N), (BLOCK_N, 1))
-
-    def global_c_waves(t):
+    def make_c_tdm():
+        c_wave_box = fx.make_layout((C_WAVE_ROWS, BLOCK_N), (BLOCK_N, 1))
         c_wave_row = bid_m * BLOCK_M + wave * C_WAVE_ROWS
-        return [
+        gC_wave = [
             fx.make_view(
                 fx.add_offset(
-                    fx.get_iter(t),
+                    fx.get_iter(C),
                     fx.Int64(c_wave_row + h * C_HALF_ROWS) * N64 + fx.Int64(bid_n * BLOCK_N),
                 ),
                 c_wave_box,
             )
             for h in range(2)
         ]
-
-    def lds_c_wave(p):
-        return fx.make_view(fx.add_offset(p, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
-
-    def make_c_tdm():
-        gC_wave = global_c_waves(C)
         tdm_C = fx.rocdl.make_tdm_atom(gC_wave[0], [None, None], strides=[N64, None], num_warps=1)
-        return gC_wave, tdm_C, [lds_c_wave(p) for p in lds_C_half]
+        lds_C_wave = [
+            fx.make_view(fx.add_offset(p, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
+            for p in lds_C_half
+        ]
+        return gC_wave, tdm_C, lds_C_wave
 
-    if const_expr(ACC or DGELU):
+    if const_expr(ACC):
         gC_wave, tdm_C, lds_C_wave = make_c_tdm()
-        gPre_wave = gC_wave
-        if const_expr(DGELU):
-            gPre_wave = global_c_waves(Aux)
 
     def load_c_half(h):
-        fx.copy(tdm_C, gPre_wave[h], lds_C_wave[h])
+        fx.copy(tdm_C, gC_wave[h], lds_C_wave[h])
 
     def k_step_rt(ks, cur, bases, issue=None, scales=False, exact=False, pending=1, c_load=False):
         fx.rocdl.sched_barrier(0)
@@ -535,7 +522,7 @@ def gemm_kernel(
     fx.rocdl.s_wait_dscnt(0)
     fx.barrier()
     fx.rocdl.sched_barrier(0)
-    if const_expr((ACC or DGELU) and K_SHORT == 2):
+    if const_expr(ACC and K_SHORT == 2):
         # no K step follows
         load_c_half(0)
     views0 = rt_views(rt_ptrs0())
@@ -581,8 +568,8 @@ def gemm_kernel(
     ks_last = R + 3 if K_SHORT == 0 else K_SHORT - 1
     for ks in range_constexpr(max(ks_last - 2, 1), ks_last):
         last = ks == ks_last - 1
-        cur = k_step_rt(ks, cur, bases, pending=int(not last), c_load=(ACC or DGELU) and last)
-    if const_expr(ACC or DGELU):
+        cur = k_step_rt(ks, cur, bases, pending=int(not last), c_load=ACC and last)
+    if const_expr(ACC):
         # the K loop is done reading A/B
         fx.rocdl.s_wait_dscnt(0)
         fx.barrier()
@@ -593,23 +580,19 @@ def gemm_kernel(
     lane_mod16, khalf = x // LDS_ROW_WORDS, x % LDS_ROW_WORDS // 4
     if const_expr(BIAS):
         if const_expr(ACC):
-            # otherwise the last WMMAs sink into the combine with their A/B fragments live, and the
-            # bias pushes that over the VGPR limit (spills)
+            # keeps the last WMMAs out of the combine, where they spill with bias
             fx.rocdl.sched_barrier(0)
         copy_atom_f32 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
 
-        # bias of this thread's column j (see c_offset), read from LDS where it is used, so it
-        # holds no VGPRs between uses (hoisting the 4 reads spills with accumulate)
+        # read at each use: holding the 4 values spills with accumulate
         def bias_at(j):
             reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
             fx.copy(copy_atom_f32, frag_view_ptr(lds_bias, wn * 16 + lane_mod16 + 64 * j), reg)
             fx.rocdl.sched_barrier(0x7FF)
             return reg.load()[0]
 
-    if const_expr(not ACC and not DGELU):
+    if const_expr(not ACC):
         gC_wave, tdm_C, lds_C_wave = make_c_tdm()
-        if const_expr(GELU):
-            gAux_wave, lds_Aux_wave = global_c_waves(Aux), lds_c_wave(lds_C2)
         if const_expr(SCALE or BIAS):
             if const_expr(BIAS):
                 bias_j = [bias_at(j) for j in range_constexpr(B_REPS)]
@@ -626,7 +609,7 @@ def gemm_kernel(
         frag_c = frag_acc
     else:
         frag_c = [[fx.make_fragment_like(acc, out_fx) for acc in acc_row] for acc_row in frag_acc]
-        if const_expr(not ACC and not GELU and not DGELU):
+        if const_expr(not ACC):
             for i in range_constexpr(A_REPS):
                 for j in range_constexpr(B_REPS):
                     frag_c[i][j].store(frag_acc[i][j].load().to(out_fx))
@@ -635,8 +618,8 @@ def gemm_kernel(
     def c_offset(ii, j, v):
         return lane_c + (32 * ii + v) * BLOCK_N + 64 * j
 
-    # each thread reads C or Aux where it scatters D, so no barrier is needed in between
-    def combine_prefetched(h):
+    # each thread reads C where it scatters D, so no barrier is needed in between
+    def add_beta_c(h):
         for ii in range_constexpr(4):
             for j in range_constexpr(4):
                 acc = frag_acc[4 * h + ii][j]
@@ -654,82 +637,28 @@ def gemm_kernel(
                 acc_vals = acc.load()
                 if const_expr(SCALE):
                     acc_vals = acc_vals * alpha
-                if const_expr(ACC):
-                    acc_vals = acc_vals + c_vals * beta
-                    if const_expr(BIAS):
-                        acc_vals = acc_vals + bias_at(j)
-                    acc.store(acc_vals)
-                else:
-                    acc.store(acc_vals * dgelu_tanh(c_vals))
+                acc_vals = acc_vals + c_vals * beta
+                if const_expr(BIAS):
+                    acc_vals = acc_vals + bias_at(j)
+                acc.store(acc_vals)
                 if const_expr(OUT_KIND != 0):
                     frag_c[4 * h + ii][j].store(acc.load().to(out_fx))
 
-    # 0.5x(1 + tanh y) = n / (1 + e), e = exp(-2|y|), n = x * e if y < 0 else x: no overflow, so a
-    # Newton-refined fast reciprocal keeps IEEE accuracy without IEEE division's I-cache cost
-    def gelu_tanh(x):
-        with fx.fastmath("contract"):
-            u = x * (x * x * fx.Float32(0.044715 * -2.3022082) + fx.Float32(-2.3022082))
-        e = fx.math.exp2(-fx.math.absf(u), fastmath="afn")
-        d = e + fx.Float32(1.0)
-        n = (u > fx.Float32(0.0)).select(x * e, x)
-        with fx.fastmath("afn,arcp"):
-            r = fx.Float32(1.0) / d
-        with fx.fastmath("contract"):
-            q = n * r
-            return q + r * (n - d * q)
-
-    # 0.5(1 + tanh y) + 0.5x sech^2(y) dy/dx, with e and a refined 1 / (1 + e) as in gelu_tanh
-    def dgelu_tanh(x):
-        x2 = x * x
-        with fx.fastmath("contract"):
-            u = x * (x2 * fx.Float32(0.044715 * -2.3022082) + fx.Float32(-2.3022082))
-        e = fx.math.exp2(-fx.math.absf(u), fastmath="afn")
-        d = e + fx.Float32(1.0)
-        with fx.fastmath("afn,arcp"):
-            r = fx.Float32(1.0) / d
-        with fx.fastmath("contract"):
-            r = r + r * (fx.Float32(1.0) - d * r)
-            dy = x2 * fx.Float32(3 * 0.044715 * 0.7978845608) + fx.Float32(0.7978845608)
-            return (u > fx.Float32(0.0)).select(e * r, r) + x * ((e + e) * r * r) * dy
-
-    # stage the pre-activation for Aux, then GELU it for D
-    def stage_aux_gelu(h):
-        for ii in range_constexpr(4):
-            for j in range_constexpr(4):
-                acc = frag_acc[4 * h + ii][j]
-                pre = acc.load()
-                aux = acc
-                if const_expr(OUT_KIND != 0):
-                    aux = fx.make_fragment_like(acc, out_fx)
-                    aux.store(pre.to(out_fx))
-                for v in range_constexpr(8):
-                    dst_aux = fx.make_view(
-                        fx.add_offset(lds_C2, c_offset(ii, j, v)), fx.make_layout(1, 1)
-                    )
-                    fx.copy(copy_atom_c, frag_view(aux, v, fx.make_layout(1, 1)), dst_aux)
-                    fx.rocdl.sched_barrier(0x7FF)
-                if const_expr(OUT_KIND != 0):
-                    frag_c[4 * h + ii][j].store(gelu_tanh(pre).to(out_fx))
-                else:
-                    acc.store(gelu_tanh(pre))
-
-    if const_expr(ACC or DGELU):
+    if const_expr(ACC):
         fx.rocdl.s_wait_tensorcnt(1)
     fx.rocdl.s_wait_dscnt(0)
     fx.barrier()
     lane_c = (wm * 16 + 8 * khalf) * BLOCK_N + wn * 16 + lane_mod16
     for h in range_constexpr(2):
         if h > 0:
-            if const_expr(ACC or DGELU):
-                # C or Aux half 1, not the half 0 store (TDM ops complete in order)
+            if const_expr(ACC):
+                # C half 1, not the half 0 store (TDM ops complete in order)
                 fx.rocdl.s_wait_tensorcnt(1)
             else:
                 fx.rocdl.s_wait_tensorcnt(0)
             fx.barrier()
-        if const_expr(ACC or DGELU):
-            combine_prefetched(h)
-        if const_expr(GELU):
-            stage_aux_gelu(h)
+        if const_expr(ACC):
+            add_beta_c(h)
         # sched_barrier(0x7FF) keeps the stores from being merged into ds_store_2addr
         for ii in range_constexpr(4):
             for j in range_constexpr(4):
@@ -743,8 +672,6 @@ def gemm_kernel(
                     fx.rocdl.sched_barrier(0x7FF)
         fx.rocdl.s_wait_dscnt(0)
         fx.barrier()
-        if const_expr(GELU):
-            fx.copy(tdm_C, lds_Aux_wave, gAux_wave[h])
         fx.copy(tdm_C, lds_C_wave[h], gC_wave[h])
     fx.rocdl.s_wait_tensorcnt(0)
 
@@ -756,7 +683,6 @@ def launch_gemm(
     A_s: fx.Tensor,
     B_s: fx.Tensor,
     C: fx.Tensor,
-    Aux: fx.Tensor,
     Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
@@ -770,8 +696,6 @@ def launch_gemm(
     OUT_KIND: fx.Constexpr[int],
     ACC: fx.Constexpr[int],
     SCALE: fx.Constexpr[int],
-    GELU: fx.Constexpr[int],
-    DGELU: fx.Constexpr[int],
     BIAS: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
@@ -782,7 +706,6 @@ def launch_gemm(
         A_s,
         B_s,
         C,
-        Aux,
         Bias,
         M,
         N,
@@ -796,8 +719,6 @@ def launch_gemm(
         OUT_KIND,
         ACC,
         SCALE,
-        GELU,
-        DGELU,
         BIAS,
     ).launch(grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
@@ -853,8 +774,6 @@ def mxfp4_matmul(
     accumulate: bool = False,
     alpha: float = 1.0,
     beta: float = 1.0,
-    aux: torch.Tensor = None,
-    gelu_in: torch.Tensor = None,
     bias: torch.Tensor = None,
 ):
     """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D if ``accumulate``)
@@ -863,10 +782,8 @@ def mxfp4_matmul(
     a [M, K/2] and b [N, K/2] packed FP4; scales E8M0 covering [M, K/32] and [N, K/32];
     D float32, bfloat16 or float16. With ``accumulate``, D's existing values are read back
     and ``beta * D`` is added to the FP32 accumulator (scaled by ``alpha``) before narrowing.
-    With ``aux`` (GELU_AUX, shaped and typed like D), the pre-activation is written to ``aux``
-    and D = gelu_tanh(pre-activation). With ``gelu_in`` (DGELU, shaped and typed like D), D is
-    scaled by dgelu_tanh(gelu_in). ``bias`` (BIAS, contiguous float32 of length N) is added to
-    every row after the alpha and beta terms, in FP32 before narrowing.
+    ``bias`` (BIAS, contiguous float32 of length N) is added to every row after the alpha and beta
+    terms, in FP32 before narrowing.
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
@@ -888,20 +805,6 @@ def mxfp4_matmul(
         raise FlyDSLUnsupportedError("FlyDSL MXFP4 requires contiguous a, b and D")
     if len({a.device, b.device, a_scale.device, b_scale.device, D.device}) != 1:
         raise ValueError("a, b, scales and D must be on the same device")
-    if aux is not None and gelu_in is not None:
-        raise ValueError("FlyDSL MXFP4 takes either aux (GELU_AUX) or gelu_in (DGELU), not both")
-    for name, t in (("aux", aux), ("gelu_in", gelu_in)):
-        if t is None:
-            continue
-        if tuple(t.shape) != (m, n) or t.dtype != D.dtype or t.device != D.device:
-            raise ValueError(
-                f"{name} {tuple(t.shape)} {t.dtype} on {t.device} must match D "
-                f"{(m, n)} {D.dtype} on {D.device}"
-            )
-        if not t.is_contiguous():
-            raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 requires a contiguous {name}")
-        if accumulate:
-            raise FlyDSLUnsupportedError(f"FlyDSL MXFP4 {name} with accumulate is not implemented")
     if bias is not None:
         if bias.dtype != torch.float32 or bias.numel() != n or bias.device != D.device:
             raise ValueError(
@@ -910,9 +813,6 @@ def mxfp4_matmul(
             )
         if not bias.is_contiguous():
             raise FlyDSLUnsupportedError("FlyDSL MXFP4 requires a contiguous bias")
-        # TODO: GELU_AUX_BIAS; DGELU has no bias epilogue (its bias form is DGELU_BGRAD)
-        if aux is not None or gelu_in is not None:
-            raise FlyDSLUnsupportedError("FlyDSL MXFP4 bias with GELU or DGELU is not implemented")
     check_mxfp4_shape(m, n, k)
 
     if stream is None:
@@ -923,7 +823,6 @@ def mxfp4_matmul(
         a_scale,
         b_scale,
         D,
-        next((t for t in (aux, gelu_in) if t is not None), D),
         bias.view(-1) if bias is not None else D,
         m,
         n,
@@ -937,8 +836,6 @@ def mxfp4_matmul(
         # beta == 0 does not read D, as in hipBLASLt
         int(accumulate and float(beta) != 0.0),
         int(float(alpha) != 1.0),
-        int(aux is not None),
-        int(gelu_in is not None),
         int(bias is not None),
         stream=stream,
     )
