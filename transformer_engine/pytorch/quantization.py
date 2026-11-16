@@ -220,9 +220,15 @@ def _compute_mxfp4_support() -> Tuple[bool, str]:
     """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5),):  # TODO: enable for gfx1250 when GEMM is available
+        if gpu_arch == (9, 5):
             return True, ""
-        return False, "Device arch gfx95x is required for MXFP4 execution."
+        if gpu_arch == (12, 5):
+            try:
+                from .flydsl_kernels.gemm import te_generic_gemm_flydsl  # noqa: F401
+            except ImportError as e:
+                return False, f"MXFP4 on gfx1250 requires the FlyDSL GEMM backend: {e}"
+            return True, ""
+        return False, "Device arch gfx950 or gfx1250 is required for MXFP4 execution."
     return False, "Only ROCm supports MXFP4"
 
 
@@ -1856,19 +1862,26 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         # scales are plain (VEC32_UE8M0) by default, but can optionally be pre-swizzled into
         # the 32x8 tile order that hipBLASLt's BLK32_UE8M0_32_8_EXT (mode 1001) reads in place
         # -- opt in via the recipe's use_swizzled_scales flag. The AITER a4w4 backend always
-        # needs the 16x16 weight shuffle and swizzled scales.
-        use_hipblaslt = bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")))
+        # needs the 16x16 weight shuffle and swizzled scales. FlyDSL (gfx1250) takes plain data
+        # and scales.
+        use_flydsl = IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5)
+        use_hipblaslt = not use_flydsl and bool(
+            int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))
+        )
         use_swizzled = use_hipblaslt and self.recipe.use_swizzled_scales
         # AITER path swizzles scales; hipBLASLt path swizzles only when the recipe opts in.
         # FP4 data shuffle stays off on the hipBLASLt path regardless
-        swizzled_scales = use_swizzled if use_hipblaslt else True
+        if use_flydsl:
+            swizzled_scales = False
+        else:
+            swizzled_scales = use_swizzled if use_hipblaslt else True
 
         if self.mode == "forward":
 
             def _make_quantizer(idx: int):
                 is_activation = idx % 3 == 0
                 is_weight = idx % 3 == 1
-                if use_hipblaslt:
+                if use_hipblaslt or use_flydsl:
                     shuffle_rowwise_data = False
                     shuffle_columnwise_data = False
                 elif is_activation:
