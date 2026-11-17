@@ -237,12 +237,28 @@ def l2normalization_backward_fused_(
     return dx_fp32.to(x.dtype)
 
 
+def _flatten_leading_dims(x: torch.Tensor) -> torch.Tensor:
+    """View ``x`` as ``[-1, x.shape[-1]]`` so all caller layouts share one specialization.
+
+    ``torch.compile`` specializes per input shape and does not promise that two
+    specializations round identically, so handing the same elementwise op ``[s, b, h]``
+    and ``[b, s, h]`` can differ by 1 ULP. Returns a free view, or ``x`` unchanged when
+    it is not contiguous.
+    """
+    if x.dim() <= 2 or not x.is_contiguous():
+        return x
+    return x.view(-1, x.shape[-1])
+
+
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
     with gpu_autocast_ctx(enabled=False):
+        flat = _flatten_leading_dims(inp)
         if bias is not None and bias.numel() != 0:
-            return bias_gelu_fused_(inp, bias)
-        return gelu_fused_(inp)
+            out = bias_gelu_fused_(flat, bias)
+        else:
+            out = gelu_fused_(flat)
+        return out.view(inp.shape) if flat is not inp else out
 
 
 def bgrad_dgelu_fused(
