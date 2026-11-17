@@ -269,7 +269,9 @@ __device__ __forceinline__ void quantize_head(const bf16 *tile, StagedOutput<D> 
       const int token = task % kBlock, block = task / kBlock;
       const uint16_t *src = tile_bits + token * kPitch + kBlock * block;
       float x[kBlock];
-      float amax = 0.0f;
+      // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+      // so per-block amax will be NaN if all values in the block are NaN.
+      float amax = __int_as_float(0x7FC00000);
 #pragma unroll
       for (int i = 0; i < kBlock; ++i) {
         x[i] = bf16_bits_to_float(src[i]);
@@ -292,7 +294,9 @@ __device__ __forceinline__ void quantize_head(const bf16 *tile, StagedOutput<D> 
     for (int pair = threadIdx.x - kRowwiseThreads; pair < D / 2; pair += kColwiseThreads) {
       // Columns 2 * pair and 2 * pair + 1 of all kBlock tokens.
       float x0[kBlock], x1[kBlock];
-      float amax0 = 0.0f, amax1 = 0.0f;
+      // NaN seeds, as above.
+      float amax0 = __int_as_float(0x7FC00000);
+      float amax1 = __int_as_float(0x7FC00000);
 #pragma unroll
       for (int r = 0; r < kBlock; ++r) {
         x0[r] = bf16_bits_to_float(tile_bits[r * kPitch + 2 * pair]);
