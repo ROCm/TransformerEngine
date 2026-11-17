@@ -113,10 +113,10 @@ jobs:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 270
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.4' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
       # DPX runners (runs-on containing "amd-dpx-linux.") use the ghcr-image-tag, regardless of branch.
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || (contains(matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.4', 'amd-dpx-linux.') && needs.select_image.outputs.ghcr-image-tag || needs.select_image.outputs.image-tag) }}
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || (contains(matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4', 'amd-dpx-linux.') && needs.select_image.outputs.ghcr-image-tag || needs.select_image.outputs.image-tag) }}
     strategy:
       fail-fast: false
       matrix:
