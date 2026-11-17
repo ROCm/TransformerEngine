@@ -94,9 +94,26 @@ else()
     if(DEFINED ENV{NVTE_HK_GFX1250_MCAST})
         list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
     endif()
+
+    # ROCm 10.3's default scheduler makes the MXFP8 kernels spill VGPRs; minreg avoids it but costs ~5% TN elsewhere.
+    # TODO: Drop this workaround when fixed.
+    set(_cdna5_source_flags "")
+    set(_rocm_version "")
+    if(EXISTS "${ROCM_PATH}/.info/version")
+        file(READ "${ROCM_PATH}/.info/version" _rocm_version)
+        string(REGEX MATCH "^[0-9]+\\.[0-9]+" _rocm_version "${_rocm_version}")
+    endif()
+    if(_rocm_version VERSION_EQUAL 10.3)
+        list(APPEND _cdna5_source_flags cdna5/mxfp8_gemm.cpp
+             "-mllvm -amdgpu-sched-strategy=iterative-minreg")
+        message(STATUS "HipKittens: ROCm ${_rocm_version}, building cdna5/mxfp8_gemm.cpp with the "
+                       "iterative-minreg scheduler")
+    endif()
+
     kittens_add_arch(TAG cdna5 GFX gfx1250 gfx1250-strict
                      SOURCES cdna5/bf16_gemm.cpp cdna5/mxfp8_gemm.cpp
-                     FLAGS ${_cdna5_flags})
+                     FLAGS ${_cdna5_flags}
+                     SOURCE_FLAGS ${_cdna5_source_flags})
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)
