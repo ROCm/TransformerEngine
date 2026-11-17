@@ -125,7 +125,7 @@ done
 case "$QUEUE" in
     sgpu) export TEST_SGPU=1 TEST_MGPU="" ;;
     mgpu) export TEST_SGPU="" TEST_MGPU=1 ;;
-    # Emulated GPUs are not probed, and the CK JIT cache would need a real one
+    # Emulated GPUs are not probed, and CK JIT compiles the few kernels emulated tests need on first use
     emu)  export TEST_SGPU=1 TEST_MGPU="" TE_CI_SKIP_CK_JIT=1 \
               TE_CI_SUPPORTS_MXFP8="" TE_CI_SUPPORTS_FLASH_ATTN="" ;;
     *)

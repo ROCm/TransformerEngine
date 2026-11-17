@@ -91,6 +91,7 @@ RULES = [
     ("tests/pytorch/attention/*with_cp*", frozenset({"torch-mgpu"}), "PyTorch mGPU tests"),
     ("tests/pytorch/conftest.py", TORCH | EMU, "PyTorch test configuration"),
     ("tests/pytorch/nvfp4/**", TORCH | EMU, "PyTorch tests, also run on emulated gfx1250"),
+    ("tests/pytorch/attention/test_attention.py", TORCH | EMU, "PyTorch tests, one also emulated"),
     ("tests/pytorch/**", TORCH, "PyTorch tests and helpers"),
     ("tests/jax/test_distributed_*.py", frozenset({"jax-mgpu"}), "JAX mGPU tests"),
     ("tests/jax/**", JAX, "JAX tests and helpers"),
