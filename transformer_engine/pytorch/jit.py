@@ -12,11 +12,8 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-=======
 from .device import te_device_type
->>>>>>> 1f251a125
 from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx

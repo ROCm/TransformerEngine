@@ -83,6 +83,7 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run 1 test_grouped_linear.py
     NVTE_ROCM_ENABLE_MXFP8=1 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 run_default_fa 1 test_module_grouped_linear_distributed_weight.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
+    run_default_fa 1 test_tied_delayed_wgrad.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py

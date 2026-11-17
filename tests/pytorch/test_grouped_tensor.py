@@ -36,24 +36,6 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
-<<<<<<< HEAD
-# The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only (SM90-SM99);
-# ``fp8_block_scaling_available`` alone stays true on SM100+, hence the arch bound.
-# Not implemented on ROCm.
-_device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
-fp8_block_scaling_grouped_available = (
-    fp8_block_scaling_available and not IS_HIP_EXTENSION and (9, 0) <= _device_cc < (10, 0)
-)
-reason_for_no_fp8_block_scaling_grouped = (
-    reason_for_no_fp8_block_scaling
-    if not fp8_block_scaling_available
-    else (
-        "Fused grouped FP8 block-scaling quantize/dequantize is not implemented on ROCm."
-        if IS_HIP_EXTENSION
-        else "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
-        " (SM90-SM99)."
-    )
-=======
 # Grouped FP8 block-scaling quantize/dequantize kernels need TMA (SM90+). On Blackwell and newer
 # the FP8 block-scaling recipe is emulated with MXFP8, which only supports power-of-2 scales.
 _device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
@@ -62,8 +44,14 @@ reason_for_no_fp8_block_scaling_grouped = (
     reason_for_no_fp8_block_scaling
     if not fp8_block_scaling_available
     else "Grouped FP8 block-scaling quantize/dequantize requires SM90 or newer."
->>>>>>> 1f251a125
 )
+if IS_HIP_EXTENSION:
+    # Fused grouped FP8 block-scaling quantize/dequantize is not implemented on ROCm.
+    fp8_block_scaling_grouped_available = False
+    if fp8_block_scaling_available:
+        reason_for_no_fp8_block_scaling_grouped = (
+            "Fused grouped FP8 block-scaling quantize/dequantize is not implemented on ROCm."
+        )
 _fp8bs_pow2_required = _device_cc >= (10, 0)
 
 # Grouped FP8 current-scaling quantize is not implemented on ROCm; plain FP8 is otherwise

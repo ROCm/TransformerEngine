@@ -132,10 +132,10 @@ def is_module_grouped_tensor_path_supported(
 
     If device is omitted, the current CUDA device is used.
     """
-<<<<<<< HEAD
     # ROCm has no cuBLASLt grouped-tensor GEMM path.
     if IS_HIP_EXTENSION:
-=======
+        return False
+
     # Recipe objects are not hashable. Resolve the device before the cached call so
     # support results from different GPUs cannot share a cache entry.
     device_index = device.index if device is not None else None
@@ -164,7 +164,6 @@ def _is_module_grouped_tensor_path_supported(
 ) -> bool:
     """Cache routing for an immutable recipe snapshot, dtype, and CUDA device."""
     if tex.get_cublasLt_build_version() < 130300:
->>>>>>> 1f251a125
         return False
 
     if dtype not in (torch.bfloat16, torch.float16):
@@ -319,18 +318,12 @@ class GroupedLinearBwdArgs:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         saved = restore_from_func_ctx(ctx)
         n = self.num_gemms
-<<<<<<< HEAD
         num_inputs = self.num_input_tensors
         self.inputmats = saved[:num_inputs]
         self.weights_fp8 = saved[num_inputs : num_inputs + n]
         self.saved_weights = saved[num_inputs + n : num_inputs + 2 * n]
-        self.biases = saved[num_inputs + 2 * n : num_inputs + 3 * n]
-=======
-        self.inputmats = saved[:n]
-        self.weights_fp8 = saved[n : 2 * n]
-        self.saved_weights = saved[2 * n : 3 * n]
-        self.biases = saved[3 * n : 3 * n + self.num_bias_args]
->>>>>>> 1f251a125
+        self.biases = saved[num_inputs + 2 * n : num_inputs + 2 * n + self.num_bias_args]
+
 
 
 def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
@@ -707,7 +700,12 @@ def _grouped_linear_backward_impl(
     # Preprocess grad output
     out_features = grad_output.shape[-1]
     grad_output_view = grad_output.contiguous().view(-1, out_features)
-<<<<<<< HEAD
+    delay_wgrad = args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()
+    # Bias gradients belong to the main backward even when weights are frozen
+    # or their GEMM is deferred. Keep fused BF16 wgrad+dbias for immediate wgrad.
+    compute_dbias = args.use_bias and (
+        args.fp8 or args.debug or not args.weights_requires_grad or delay_wgrad
+    )
     if IS_HIP_EXTENSION:
         bwd_fused_kwargs = {}
         if args.output_unpadded and args.actual_m_splits is not None:
@@ -717,38 +715,6 @@ def _grouped_linear_backward_impl(
                 if q is not None:
                     q.set_usage(rowwise=True, columnwise=True)
         grad_output = [None] * num_gemms
-=======
-    delay_wgrad = args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()
-    # Bias gradients belong to the main backward even when weights are frozen
-    # or their GEMM is deferred. Keep fused BF16 wgrad+dbias for immediate wgrad.
-    compute_dbias = args.use_bias and (
-        args.fp8 or args.debug or not args.weights_requires_grad or delay_wgrad
-    )
-    grad_output_reference = args.grad_output_quantizers[0]
-    if args.fp8 and isinstance(grad_output_reference, HybridQuantizer):
-        # Usage is a runtime decision, not part of generation validation.
-        # Apply it uniformly so dispatch can read the first parent without
-        # rescanning every expert.
-        for grad_output_quantizer in args.grad_output_quantizers:
-            grad_output_quantizer.set_usage(
-                rowwise=args.requires_dgrad,
-                columnwise=args.weights_requires_grad,
-            )
-    grad_output, grad_biases = _split_quantization._split_quantize(
-        grad_output_view,
-        m_splits,
-        args.grad_output_quantizers,
-        args.activation_dtype,
-        with_quantized_output=args.fp8 or args.debug,
-        compute_dbias=compute_dbias,
-        disable_bulk_allocation=(
-            args.cpu_offloading
-            and isinstance(grad_output_reference, HybridQuantizer)
-            and not _split_quantization._uses_identity_quantizer(grad_output_reference)
-        ),
-    )
-    if grad_biases is None:
->>>>>>> 1f251a125
         grad_biases = [None] * num_gemms
         if args.fp8 and not args.debug:
             if args.use_bias:
@@ -802,6 +768,14 @@ def _grouped_linear_backward_impl(
                 )
             else:
                 grad_output = [cast_if_needed(grad_output_view, args.activation_dtype)]
+            if compute_dbias:
+                # Frozen weights or deferred wgrad: the bias grad cannot ride on the wgrad GEMM.
+                grad_output_mats = torch.split(
+                    grad_output_view,
+                    args.actual_m_splits if args.output_unpadded else m_splits,
+                )
+                for i in range(num_gemms):
+                    grad_biases[i] = grad_output_mats[i].sum(dim=0)
     else:
         grad_output_reference = args.grad_output_quantizers[0]
         if args.fp8 and isinstance(grad_output_reference, HybridQuantizer):
@@ -819,7 +793,7 @@ def _grouped_linear_backward_impl(
             args.grad_output_quantizers,
             args.activation_dtype,
             with_quantized_output=args.fp8 or args.debug,
-            compute_dbias=(args.fp8 or args.debug) and args.use_bias,
+            compute_dbias=compute_dbias,
             disable_bulk_allocation=(
                 args.cpu_offloading
                 and isinstance(grad_output_reference, HybridQuantizer)
@@ -921,14 +895,13 @@ def _grouped_linear_backward_impl(
         if args.fuse_wgrad_accumulation:
             wgrad_list = main_grads
         else:
-<<<<<<< HEAD
             if IS_HIP_EXTENSION:
                 if not args.use_grouped_gemm_triton:
                     wgrad_packed = torch.empty(
                         num_gemms,
                         out_features,
                         in_features,
-                        dtype=args.activation_dtype,
+                        dtype=weight_grad_dtype(origin_weights, args.activation_dtype),
                         device=device,
                     )
                     wgrad_list = [wgrad_packed[i] for i in range(num_gemms)]
@@ -943,26 +916,13 @@ def _grouped_linear_backward_impl(
                     num_gemms,
                     out_features,
                     in_features,
-                    dtype=args.activation_dtype,
+                    dtype=weight_grad_dtype(origin_weights, args.activation_dtype),
                     device=device,
                 )
                 wgrad_list = [wgrad_packed[i] for i in range(num_gemms)]
                 if is_dist_weight:
                     # Gathered weights are no longer needed after dgrad GEMM.
                     del weights
-=======
-            wgrad_packed = torch.empty(
-                num_gemms,
-                out_features,
-                in_features,
-                dtype=weight_grad_dtype(origin_weights, args.activation_dtype),
-                device=device,
-            )
-            wgrad_list = [wgrad_packed[i] for i in range(num_gemms)]
-            if is_dist_weight:
-                # Gathered weights are no longer needed after dgrad GEMM.
-                del weights
->>>>>>> 1f251a125
 
         if args.save_original_input:
             inp = inputmats[0]
@@ -2373,11 +2333,14 @@ class _GroupedLinear(torch.autograd.Function):
 
             wgrad_store = getattr(ctx, "wgrad_store", None)
             if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
-                # tensor_list[2] is the wgrad buffers backward_dw assigns to .grad.
+                # tensor_list[2] is the wgrad buffers backward_dw adds to .grad.
                 wgrad_store.put(
                     [qdgrad._columnwise_data, a_operand._columnwise_data, wgrad_list],
                     grouped_gemm_wgrad,
                 )
+                if not fuse:
+                    # The buffers are unfilled until backward_dw, so autograd must not see them.
+                    wgrad_list = [None] * ctx.num_gemms
             else:
                 grouped_gemm_wgrad()
 

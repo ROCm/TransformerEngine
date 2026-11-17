@@ -1487,6 +1487,8 @@ class TestFuser:
         device: torch.device = "cuda",
     ) -> None:
         """Test op constructed on meta device"""
+        if IS_HIP_EXTENSION and op_type == "batched_linear":
+            pytest.skip("Strided batched GEMM is not supported on ROCm.")
 
         # Inputs
         in_shape = (size, size)
@@ -1548,6 +1550,8 @@ class TestFuser:
         device: torch.device = "cuda",
     ) -> None:
         """Test op with quantized params constructed on meta device"""
+        if IS_HIP_EXTENSION and op_type == "batched_linear":
+            pytest.skip("Strided batched GEMM is not supported on ROCm.")
 
         # Skip invalid configurations
         in_shape = (size, size)
@@ -3279,6 +3283,7 @@ class TestBasicOps:
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
 
+    @pytest.mark.skipif(IS_HIP_EXTENSION, reason="Strided batched GEMM is not supported on ROCm.")
     @pytest.mark.parametrize("input_batch_dim", (0, -2))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -3405,6 +3410,7 @@ class TestBasicOps:
         if bias:
             assert_close_grads(op.bias, b_ref, **tols)
 
+    @pytest.mark.skipif(IS_HIP_EXTENSION, reason="Strided batched GEMM is not supported on ROCm.")
     @pytest.mark.parametrize("input_batch_dim", (0, -2))
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize("quantization", ("mxfp8",))

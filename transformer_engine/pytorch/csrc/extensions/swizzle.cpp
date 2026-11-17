@@ -317,11 +317,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
                                                    /*check_scale_inv_shapes=*/false);
 }
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
-                                                 bool rowwise) {
-=======
 namespace {
 
 // Views of a block scaling tensor's data (columnwise data is reinterpreted as rowwise data of the
@@ -334,7 +330,6 @@ struct BlockScalingToMxfp8Views {
 };
 
 BlockScalingToMxfp8Views make_block_scaling_to_mxfp8_views(TensorWrapper &input, bool rowwise) {
->>>>>>> 1f251a125
   // Check input tensor
   const NVTEScalingMode scaling_mode = input.scaling_mode();
   NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,

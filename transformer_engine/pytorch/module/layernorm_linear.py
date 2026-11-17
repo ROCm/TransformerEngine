@@ -24,14 +24,11 @@ from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_c
 from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
-<<<<<<< HEAD
     fused_ag_gemm_eligible,
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
-=======
     get_cublasmp_all_gather_output,
->>>>>>> 1f251a125
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,

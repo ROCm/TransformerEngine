@@ -793,7 +793,7 @@ class CustomRecipe(Recipe):
             f"quantization_alignment={self.quantization_alignment}"
         )
 
-@dataclass()
+@dataclass(repr=False)
 class MXFP4BlockScaling(Recipe):
     """
     Use the MXFP4 scaling factor strategy.
@@ -840,9 +840,12 @@ class MXFP4BlockScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
-            f"fp4_format={str(self.fp4_format).split('.')[1]}"
+            f"fp4_format={str(self.fp4_format).split('.')[1]}, "
+            f"backward_override={self.backward_override}, "
+            f"use_hadamard={self.use_hadamard}, "
+            f"use_swizzled_scales={self.use_swizzled_scales}"
         )

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +21,7 @@ import warnings
 from typing import Optional, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 
 from .constants import TE_DType_To_Torch
@@ -70,6 +73,9 @@ def _validate_routing_map_format(
     """
     # NVTERoutingMapFormat is a standalone pybind11 enum, not a subclass of int.
     if isinstance(routing_map_format, RoutingMapFormat):
+        if IS_HIP_EXTENSION:
+            # Dynamo in the ROCm CI image's PyTorch recurses on int() of a pybind11 enum.
+            return routing_map_format.value
         return int(routing_map_format)
     if isinstance(routing_map_format, int):
         if routing_map_format in _VALID_ROUTING_MAP_FORMAT_INTS:

@@ -19,11 +19,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
-<<<<<<< HEAD
-from ..utils import devices_match, get_device_compute_capability, round_up_to_nearest_multiple
-=======
 from ..utils import ceil_div, devices_match, round_up_to_nearest_multiple
->>>>>>> 1f251a125
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
@@ -32,6 +28,7 @@ from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     import os
+    from ..utils import get_device_compute_capability
     from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten

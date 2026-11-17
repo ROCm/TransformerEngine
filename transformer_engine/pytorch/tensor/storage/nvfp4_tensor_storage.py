@@ -60,18 +60,13 @@ class _FromNVFP4Func(torch.autograd.Function):
         # the latter re-enters __torch_dispatch__ -> dequantize -> ``.to()`` and
         # recurses infinitely when the tensor is CPU-resident (FSDP2 DCP staging).
         src_device = tensor.device
-<<<<<<< HEAD
-        if src_device.type != "cuda":
-            cuda = torch.device("cuda")
+        if src_device.type != te_device_type():
+            cuda = torch.device(te_device_type())
             metadata = {
                 key: (value.to(device=cuda) if isinstance(value, torch.Tensor) else value)
                 for key, value in tensor.get_metadata().items()
             }
             cuda_tensor = NVFP4TensorStorage(**metadata)
-=======
-        if src_device.type != te_device_type():
-            cuda_tensor = tensor.to(device=torch.device(te_device_type()))
->>>>>>> 1f251a125
             result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
             return result.to(device=src_device)
         return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])

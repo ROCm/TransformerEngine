@@ -543,7 +543,9 @@ def _make_graphed_callables(
         params = tuple(dict.fromkeys(param for module in modules for param in module.parameters()))
         # Warmup grads belong to the ordinary allocator. Capture fresh results
         # in the graph pool so zero_grad() cannot free an accumulation target.
-        with _none_grad_context_wrapper(params), _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+        with _none_grad_context_wrapper(params), _graph_context_wrapper(
+            bwd_dw_graph, stream=stream, pool=mempool
+        ):
             for module in modules:
                 module.backward_dw()
             return tuple((param, param.grad) for param in params if param.grad is not None)
@@ -825,19 +827,9 @@ def _make_graphed_callables(
                                 "No module needs wgrad computation but get float in order"
                             )
                         bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
-<<<<<<< HEAD
-                        with _graph_context_wrapper(bwd_dw_graph, stream=stream, pool=mempool):
-                            for module in visited_te_modules[per_callable_bwd_idx]:
-                                if (
-                                    hasattr(module, "need_backward_dw")
-                                    and module.need_backward_dw()
-                                ):
-                                    module.backward_dw()
-=======
                         per_callable_static_wgrads[per_callable_bwd_idx] = _capture_backward_dw(
                             per_callable_bwd_idx, bwd_dw_graph
                         )
->>>>>>> 1f251a125
                         continue
 
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
@@ -1030,16 +1022,9 @@ def _make_graphed_callables(
                 )
 
                 if need_bwd_dw_graph[bwd_idx]:
-<<<<<<< HEAD
-                    with _graph_context_wrapper(bwd_dw_graph, stream=stream, pool=mempool):
-                        for module in visited_te_modules[bwd_idx]:
-                            if hasattr(module, "need_backward_dw") and module.need_backward_dw():
-                                module.backward_dw()
-=======
                     per_callable_static_wgrads[bwd_idx] = _capture_backward_dw(
                         bwd_idx, bwd_dw_graph
                     )
->>>>>>> 1f251a125
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.

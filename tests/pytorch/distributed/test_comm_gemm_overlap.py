@@ -22,9 +22,6 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-<<<<<<< HEAD
-bulk_available = not IS_HIP_EXTENSION
-=======
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 
@@ -43,7 +40,7 @@ def _loaded_cublasmp_version() -> int:
 # NVFP4 with cuBLASMp applies the global scales through a device-side alpha (cuBLASMp 0.11.0+)
 cublasmp_nvfp4_available = _loaded_cublasmp_version() >= 1100
 reason_for_no_cublasmp_nvfp4 = "NVFP4 with cuBLASMp requires cuBLASMp 0.11.0 or newer."
->>>>>>> 1f251a125
+bulk_available = not IS_HIP_EXTENSION
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -447,98 +444,3 @@ def test_layers_with_overlap_fp8(
         quantization,
         use_cublasmp=use_cublasmp,
     )
-<<<<<<< HEAD
-
-
-@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
-@pytest.mark.parametrize(
-    "fp8",
-    (False,),
-    ids=[
-        " BF16  ",
-    ],
-)
-@pytest.mark.parametrize(
-    "num_layers",
-    (2,),
-    ids=[
-        " 2 layers ",
-    ],
-)
-@pytest.mark.parametrize(
-    "layer_type,linear_parallel_mode,overlap_rs_dgrad",
-    list(
-        zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            [None] * 2,
-            [False, True],
-        )
-    ),
-    ids=[
-        " " + " - ".join(test_name_parts) + " "
-        for test_name_parts in zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            ["BULK DGRAD/WGRAD", "DGRAD+RS"],
-        )
-    ],
-)
-def test_multi_layer_with_overlap_bf16(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, num_layers, use_cublasmp
-):
-    """
-    Test Transformer Engine layers with comm+GEMM overlap.
-    """
-    _run_layer_with_overlap(
-        layer_type,
-        linear_parallel_mode,
-        overlap_rs_dgrad,
-        fp8,
-        None,
-        num_layers,
-        use_cublasmp=use_cublasmp,
-    )
-
-
-@pytest.mark.parametrize("use_cublasmp", (False,) if IS_HIP_EXTENSION else (False, True))
-@pytest.mark.parametrize(
-    "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
-)
-@pytest.mark.parametrize(
-    "num_layers",
-    (2,),
-)
-@pytest.mark.parametrize(
-    "layer_type,linear_parallel_mode,overlap_rs_dgrad",
-    list(
-        zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            [None] * 2,
-            [False, True],
-        )
-    ),
-    ids=[
-        "-".join(test_name_parts)
-        for test_name_parts in zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            ["BULK DGRAD/WGRAD", "DGRAD+RS"],
-        )
-    ],
-)
-def test_multi_layer_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, quantization, num_layers, use_cublasmp
-):
-    """
-    Test Transformer Engine layers with comm+GEMM overlap.
-    """
-    _run_layer_with_overlap(
-        layer_type,
-        linear_parallel_mode,
-        overlap_rs_dgrad,
-        True,
-        quantization,
-        num_layers,
-        use_cublasmp=use_cublasmp,
-    )
-=======
->>>>>>> 1f251a125

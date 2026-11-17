@@ -66,7 +66,6 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 seed = 1234
 reset_rng_states()
 
-<<<<<<< HEAD
 if IS_HIP_EXTENSION:
     from utils import EnvVarCleaner
 
@@ -77,7 +76,7 @@ if IS_HIP_EXTENSION:
         # backend into unrelated tests.
         env = EnvVarCleaner(["NVTE_USE_BLOCKWISE_GMM_TRITON", "NVTE_USE_GROUPED_GEMM_TRITON"])
         yield
-=======
+
 
 @pytest.mark.parametrize("has_skip", [False, True])
 @pytest.mark.parametrize("capturing", [False, True])
@@ -105,7 +104,6 @@ def test_grouped_linear_skip_update_capture_short_circuit(monkeypatch, has_skip,
     assert capture.call_count == int(has_skip)
     assert seen[0][0] == (not (has_skip and capturing))
     assert seen[0][1] is (skip if capturing else None)
->>>>>>> 1f251a125
 
 
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
@@ -2128,6 +2126,7 @@ def _run_fp8bs_grouped_gemm(
         (2, 256, 2880, 2944),
     ],
 )
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 @pytest.mark.parametrize("splits", ["uniform", "varying", "zero_experts"])
 @pytest.mark.parametrize("weight_block_dim", [1, 2], ids=["w1D", "w2D"])
 @pytest.mark.parametrize("accumulate", [False, True])
@@ -2159,6 +2158,7 @@ def test_grouped_gemm_grouped_tensor_fp8_block_scaling(
     _run_fp8bs_grouped_gemm(z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("quant_type", ["mxfp8", "fp8_block_scaling"])
 def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layout) -> None:
@@ -3819,6 +3819,11 @@ def test_grouped_linear_bias_gradient_accumulation(
         fp8_recipe, torch.bfloat16
     ):
         pytest.skip("Recipe is unsupported by the native grouped-tensor path")
+    if IS_HIP_EXTENSION and fp8_recipe is not None and fp8_recipe.mxfp8():
+        # 128-token groups are not 256-aligned, so they go to hipBLASLt.
+        pytest.skip("hipBLASLt MXFP8 GEMM does not support bias.")
+    if IS_HIP_EXTENSION and fp8_recipe is None and grad_storage == "main_grad" and not freeze_weight:
+        pytest.skip("hipBLASLt has no BF16 wgrad+bias GEMM accumulating into an FP32 main_grad.")
 
     FP8GlobalStateManager.reset()
     module = GroupedLinear(
@@ -3960,7 +3965,6 @@ def test_grouped_linear_delayed_wgrad_hook_ownership(device, single_weight, sing
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch, backward_override):
     """Delayed wgrad reports when a grouped-tensor request used the legacy path."""
-<<<<<<< HEAD
     if IS_HIP_EXTENSION:
         # This is a CUDA-only negative test. On ROCm the GroupedTensor path is
         # unsupported, so GroupedLinear.__init__ force-downgrades
@@ -3970,10 +3974,8 @@ def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch, backw
         # expected RuntimeError never fires. Matches the ROCm skip on the sibling
         # test_grouped_linear_fused_path_cuda_graph_safe.
         pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
-=======
     if backward_override is not None and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
->>>>>>> 1f251a125
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_module_grouped_tensor_path_supported",
         lambda *_args, **_kwargs: False,
@@ -4144,6 +4146,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="GroupedTensor grouped GEMM is not supported on ROCm.")
 def test_fp8_block_scaling_grouped_tensor_path_matches_mxfp8_support():
     """FP8 block scaling takes the grouped-tensor path wherever MXFP8 does, and on Hopper."""
     from transformer_engine.pytorch.ops.basic.grouped_linear import (

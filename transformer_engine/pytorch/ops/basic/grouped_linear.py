@@ -128,12 +128,10 @@ def is_op_fuser_grouped_tensor_path_supported(
 
     If device is omitted, the current CUDA device is used.
     """
-<<<<<<< HEAD
     # ROCm has no cuBLASLt grouped-tensor GEMM path.
     if IS_HIP_EXTENSION:
         return False
 
-=======
     # Recipe objects are not hashable. Resolve the device before the cached call so
     # support results from different GPUs cannot share a cache entry.
     device_index = device.index if device is not None else None
@@ -163,7 +161,6 @@ def _is_op_fuser_grouped_tensor_path_supported(
     device_index: int,
 ) -> bool:
     """Cache routing for a recipe snapshot, dtype, alignment, and CUDA device."""
->>>>>>> 1f251a125
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 

@@ -877,7 +877,10 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
 
 _grouped_tensor_gemm_supported = True
 _reason_for_no_grouped_tensor_gemm = ""
-if torch.cuda.get_device_capability() < (10, 0):
+if IS_HIP_EXTENSION:
+    _grouped_tensor_gemm_supported = False
+    _reason_for_no_grouped_tensor_gemm = "Grouped NVFP4 GEMM is not supported on ROCm"
+elif torch.cuda.get_device_capability() < (10, 0):
     _grouped_tensor_gemm_supported = False
     _reason_for_no_grouped_tensor_gemm = "NVFP4 grouped-tensor GEMM requires Blackwell+."
 elif tex.get_cublasLt_version() < 130400:

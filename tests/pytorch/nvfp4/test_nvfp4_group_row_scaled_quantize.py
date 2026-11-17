@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +14,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -74,6 +77,7 @@ def _assert_matches_reference(grouped, x_valid: torch.Tensor, split_sections: li
     torch.testing.assert_close(g_scale[:, : N // 16], ref_scale, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 quantization is not supported on ROCm.")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "split_sections, N",
@@ -95,6 +99,7 @@ def test_matches_per_expert_quantize(split_sections: list[int], N: int) -> None:
     _assert_matches_reference(grouped, x, split_sections)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 quantization is not supported on ROCm.")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("num_tensors, m, N", [(1, 128, 128), (4, 256, 256)])
 def test_uniform_shapes(num_tensors: int, m: int, N: int) -> None:
@@ -106,6 +111,7 @@ def test_uniform_shapes(num_tensors: int, m: int, N: int) -> None:
     _assert_matches_reference(grouped, x, [m] * num_tensors)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 quantization is not supported on ROCm.")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "split_sections, N, capacity",
@@ -126,6 +132,7 @@ def test_paged_stashing_capacity_noop(split_sections: list[int], N: int, capacit
     _assert_matches_reference(grouped, x[:sum_m].clone(), split_sections)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 quantization is not supported on ROCm.")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_capture_once_replay_changed_routing() -> None:
     N = 256
@@ -169,6 +176,7 @@ def test_capture_once_replay_changed_routing() -> None:
     _assert_matches_reference(grouped, x_b, splits_b)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped NVFP4 quantization is not supported on ROCm.")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_non_contiguous_input_matches_contiguous() -> None:
     split_sections = [128, 128]

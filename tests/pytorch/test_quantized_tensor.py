@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
@@ -1085,6 +1088,9 @@ class TestMXFP8Tensor:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    @pytest.mark.skipif(
+        IS_HIP_EXTENSION, reason="ROCm MXFP8 scales are unpadded and need full 32-element blocks."
+    )
     @pytest.mark.parametrize("shape", [(32, 16), (16, 16)])
     def test_scale_shape_partial_block(self, shape: Tuple[int, int]) -> None:
         """Partial rowwise and columnwise blocks each retain a scale."""

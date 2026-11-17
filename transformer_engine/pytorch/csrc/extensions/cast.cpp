@@ -432,12 +432,6 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       NVTE_CHECK(!last_dims.has_value(),
                  "group_quantize: varying last dim is not supported with NVFP4.");
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-<<<<<<< HEAD
-      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
-                                nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(),
-                                !nvfp4_quantizer_cpp->disable_second_level_scale);
-#endif  // USE_ROCM
-=======
       if (row_scaled_nvfp4) {
         group_quantize_nvfp4_row_scaled_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                              nvfp4_quantizer_cpp, noop_flag_cpp,
@@ -447,7 +441,7 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
                                   nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(),
                                   !nvfp4_quantizer_cpp->disable_second_level_scale);
       }
->>>>>>> 1f251a125
+#endif  // USE_ROCM
       break;
     }
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
@@ -1017,7 +1011,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     // Grouped tensors carry data and scales as flat 1D buffers.
     at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
     at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
+#ifndef USE_ROCM
     at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
+#endif
     const at::Tensor first_dims_i64 =
         first_dims.has_value()
             ? (first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong))
@@ -1039,15 +1035,22 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
 
     GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
     output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
+#ifndef USE_ROCM
     output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
                                       scale_shape);
+#endif
     output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
                                     flat_data_shape);
     output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
                                          scale_shape);
     output_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
     output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+#ifdef USE_ROCM
+    // ROCm writes compact scales only, so the input's rowwise scales are reused as they are.
+    output_nvte.set_with_gemm_swizzled_scales(false);
+#else
     output_nvte.set_with_gemm_swizzled_scales(true);
+#endif
 
     at::Tensor dequantized;
     TensorWrapper dequantized_nvte;
@@ -1063,22 +1066,17 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
                             at::cuda::getCurrentCUDAStream());
     });
 
+#ifndef USE_ROCM
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
+#endif
     grouped_x.attr("columnwise_data") = columnwise_data;
     grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
-<<<<<<< HEAD
-    // The kernel records the scale layout it wrote (compact on ROCm).
-    grouped_x.attr("_with_gemm_swizzled_scales") =
-        py::cast(output_nvte.get_with_gemm_swizzled_scales());
-
-    if (return_dequantized) {
-      return py::cast(dequantized);
-    }
-    return py::none();
-=======
+#ifdef USE_ROCM
+    grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(false);
+#else
     grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
+#endif
     return return_dequantized ? py::cast(dequantized) : py::none();
->>>>>>> 1f251a125
   }
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +21,10 @@ import transformer_engine.pytorch.ops as te_ops
 import transformer_engine.pytorch.ops.basic.batched_linear as batched_linear_op
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    pytest.skip("Strided batched GEMM is not supported on ROCm.", allow_module_level=True)
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 

@@ -180,11 +180,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the relative-error tolerance used in the numerical check. "
-<<<<<<< HEAD
-            "When unset, defaults to 0.125 for FP8/MXFP8, else 0.03 on ROCm / 0.025 on CUDA."
-=======
             "When unset, defaults to 0.125 with a quantized GEMM output and 0.02 otherwise."
->>>>>>> 1f251a125
         ),
     )
     parser.add_argument(
@@ -193,11 +189,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the absolute-error tolerance used in the numerical check. "
-<<<<<<< HEAD
-            "When unset, defaults to 0.0625 for FP8/MXFP8, else 0.01 on ROCm / 0.00125 on CUDA."
-=======
             "When unset, defaults to 0.0625 with a quantized GEMM output and 0.002 otherwise."
->>>>>>> 1f251a125
         ),
     )
     parser.add_argument(
@@ -479,7 +471,6 @@ def _main(opts):
             local_kernel_t_shape = (hidden_size, ffn_hidden_size // tp_size)
             local_inp_shape = (outer_size, ffn_hidden_size // tp_size)
 
-<<<<<<< HEAD
     if opts.bulk_overlap and opts.fused:
         gemm_layout = "NT" if opts.comm_type == tex.CommOverlapType.RS else "NN"
     elif opts.dgrad:
@@ -487,8 +478,6 @@ def _main(opts):
     else:
         gemm_layout = "TN"
 
-    # Initialize distributed input tensor and GEMM kernels
-=======
     # Initialize quantizers
     with_quantized_compute = opts.quantization != "none"
     inp_quantizer = None
@@ -527,6 +516,9 @@ def _main(opts):
         elif ub_obj2 is not None:
             inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
             ker2_quantizer = MXFP8Quantizer(fp8_dtype)
+        if IS_HIP_EXTENSION and opts.bulk_overlap and opts.comm_type != tex.CommOverlapType.RS:
+            # The ROCm fused bulk all-gather quantizes its bulk input too.
+            bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
     elif opts.quantization == "nvfp4":
         # All ranks must share the global scale of the all-gathered input. The reduce-scatter
         # inputs keep their own global scales, which each rank applies to its partial GEMM.
@@ -543,7 +535,6 @@ def _main(opts):
             raise RuntimeError("AG + atomic GEMM overlap is not supported with NVFP4.")
 
     # Initialize tensors
->>>>>>> 1f251a125
     torch.manual_seed(opts.seed + tp_rank)
     torch.cuda.manual_seed(opts.seed + tp_rank)
     inp = torch.nn.init.normal_(
@@ -665,115 +656,6 @@ def _main(opts):
             end_idx = (tp_rank + 1) * (outer_size // tp_size)
             ref2_g = ref2_global[start_idx:end_idx, :]  # (M/P, N)
 
-<<<<<<< HEAD
-    # Initialize quantizers
-    with_quantized_compute = opts.quantization != "none"
-    inp_quantizer = None
-    ker_quantizer = None
-    out_quantizer = None
-    bulk_inp_quantizer = None
-    inp2_quantizer = None
-    ker2_quantizer = None
-    out2_quantizer = None
-    if opts.quantization == "fp8":
-        # Structure to maintain amax and scale/scale_inv information for the kernel and input
-        num_gemms = 6 if ub_obj2 is not None else 3
-        fp8_dtype = te.DType.kFloat8E4M3
-        fp8_scales = torch.ones(num_gemms, dtype=torch.float, device="cuda")
-        fp8_amaxes = torch.zeros(num_gemms, dtype=torch.float, device="cuda")
-
-        # Compute initial amaxes and scales
-        inp_amax = torch.max(torch.abs(inp_g))
-        fp8_amaxes[0].copy_(inp_amax)
-        ker_amax = torch.max(torch.abs(ker_g))
-        fp8_amaxes[1].copy_(ker_amax)
-        ref_amax = torch.max(torch.abs(ref_g))
-        fp8_amaxes[2].copy_(ref_amax)
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-            bulk_amax = torch.max(torch.abs(bulk_inp))
-            fp8_amaxes[5].copy_(bulk_amax)
-        elif ub_obj2 is not None:
-            inp2_amax = torch.max(torch.abs(inp2_g))
-            fp8_amaxes[3].copy_(inp2_amax)
-            ker2_amax = torch.max(torch.abs(ker2_g))
-            fp8_amaxes[4].copy_(ker2_amax)
-            ref2_amax = torch.max(torch.abs(ref2_g))
-            fp8_amaxes[5].copy_(ref2_amax)
-
-        inp_quantizer = Float8Quantizer(fp8_scales[0].clone(), fp8_amaxes[0].clone(), fp8_dtype)
-        ker_quantizer = Float8Quantizer(fp8_scales[1].clone(), fp8_amaxes[1].clone(), fp8_dtype)
-        if opts.fp8_output:
-            out_quantizer = Float8Quantizer(fp8_scales[2].clone(), fp8_amaxes[2].clone(), fp8_dtype)
-
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-            bulk_inp_quantizer = Float8Quantizer(
-                fp8_scales[5].clone(), fp8_amaxes[5].clone(), fp8_dtype
-            )
-        elif ub_obj2 is not None:
-            inp2_quantizer = Float8Quantizer(
-                fp8_scales[3].clone(), fp8_amaxes[3].clone(), fp8_dtype
-            )
-            ker2_quantizer = Float8Quantizer(
-                fp8_scales[4].clone(), fp8_amaxes[4].clone(), fp8_dtype
-            )
-            if opts.fp8_output:
-                out2_quantizer = Float8Quantizer(
-                    fp8_scales[5].clone(), fp8_amaxes[5].clone(), fp8_dtype
-                )
-    elif opts.quantization == "mxfp8":
-        fp8_dtype = te.DType.kFloat8E4M3
-        inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
-        ker_quantizer = MXFP8Quantizer(fp8_dtype)
-        if opts.bulk_overlap and (IS_HIP_EXTENSION or opts.comm_type == tex.CommOverlapType.RS):
-            bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
-        elif ub_obj2 is not None:
-            inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
-            ker2_quantizer = MXFP8Quantizer(fp8_dtype)
-
-    # Quantize tensors
-    if with_quantized_compute:
-
-        # Quantize input tensor
-        inp_fp8 = inp_quantizer(inp)
-
-        # Quantize kernel tensor
-        kernel_t_fp8 = ker_quantizer(kernel_t)
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-            bulk_inp_fp8 = bulk_inp_quantizer(bulk_inp)
-        elif ub_obj2 is not None:
-            kernel2_t_fp8 = ker2_quantizer(kernel2_t)
-
-        # Make sure the inputs are cast correctly
-        if opts.check_numerics:
-            torch.allclose(
-                inp.to(dtype=torch.float32),
-                inp_fp8.dequantize(dtype=torch.float32),
-                rtol=0.125,
-                atol=0.0675,
-            )
-            torch.allclose(
-                kernel_t.to(dtype=torch.float32),
-                kernel_t_fp8.dequantize(dtype=torch.float32),
-                rtol=0.125,
-                atol=0.0675,
-            )
-            if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-                torch.allclose(
-                    bulk_inp.to(dtype=torch.float32),
-                    bulk_inp_fp8.dequantize(dtype=torch.float32),
-                    rtol=0.125,
-                    atol=0.0675,
-                )
-            elif ub_obj2 is not None:
-                torch.allclose(
-                    kernel2_t.to(dtype=torch.float32),
-                    kernel2_t_fp8.dequantize(dtype=torch.float32),
-                    rtol=0.125,
-                    atol=0.0675,
-                )
-
-=======
->>>>>>> 1f251a125
     # Set up comm/compute buffers
     ag_out = None
     rs_out = None
@@ -1068,26 +950,14 @@ def _main(opts):
         m = torch.argmax(diff)
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
-<<<<<<< HEAD
-        bf16_rtol = 0.03 if IS_HIP_EXTENSION else 0.025
-        bf16_atol = 0.01 if IS_HIP_EXTENSION else 0.00125
-        rtol = (
-            opts.rtol
-            if opts.rtol is not None
-            else (bf16_rtol if opts.quantization == "none" else 0.125)
-        )
-        atol = (
-            opts.atol
-            if opts.atol is not None
-            else (bf16_atol if opts.quantization == "none" else 0.0625)
-        )
-=======
         # The reference uses the quantized GEMM inputs, but it does not quantize GEMM outputs (FP8
         # output, or the input of the second GEMM in an AG+RS pair).
         quantized_output = with_quantized_compute and (opts.fp8_output or ub_obj2 is not None)
         rtol = opts.rtol if opts.rtol is not None else (0.125 if quantized_output else 0.02)
         atol = opts.atol if opts.atol is not None else (0.0625 if quantized_output else 0.002)
->>>>>>> 1f251a125
+        if IS_HIP_EXTENSION and not quantized_output:
+            rtol = opts.rtol if opts.rtol is not None else 0.03
+            atol = opts.atol if opts.atol is not None else 0.01
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
             numerics_info = (

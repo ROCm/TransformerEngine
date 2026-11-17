@@ -713,23 +713,6 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor) -> None:
-    """Check contracting dimensions at trace time for ``torch.compile``.
-
-<<<<<<< HEAD
-
-def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
-    """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
-
-    for tensor in tensors:
-        if math.prod(tensor.shape[:-1]) % 8 != 0 or tensor.shape[-1] % 16 != 0:
-            raise ValueError(
-                "FP8 execution requires the product of all dimensions except the last to be"
-                " divisible by 8 and the last dimension to be divisible by 16, but got tensor"
-                f" with dims={list(tensor.size())} (product of leading dims ="
-                f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
-            )
-
 if IS_HIP_EXTENSION:
     @functools.lru_cache(maxsize=None)
     def is_mi200():
@@ -750,13 +733,11 @@ def is_fp8_fnuz():
 get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
-def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
-    """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
-    guards at trace time. torch.compile path only; eager validation lives in
-    the op impl. Messages are constant: Dynamo forbids tensor closures here.
-=======
+
+def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor) -> None:
+    """Check contracting dimensions at trace time for ``torch.compile``.
+
     Recipe-specific alignment requirements are checked by the runtime implementation.
->>>>>>> 1f251a125
     """
     # pylint: disable=protected-access
     torch._check(

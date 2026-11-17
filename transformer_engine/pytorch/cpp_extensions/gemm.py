@@ -17,12 +17,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
-<<<<<<< HEAD
-from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor, get_gemm_backend
-if IS_HIP_EXTENSION:
-    from ..utils import get_device_compute_capability
-    from ..utils import cast_if_needed
-=======
 from ..utils import (
     ceil_div,
     get_cached_ones_tensor,
@@ -30,7 +24,9 @@ from ..utils import (
     get_sm_count,
     _empty_tensor,
 )
->>>>>>> 1f251a125
+from ..utils import get_gemm_backend
+if IS_HIP_EXTENSION:
+    from ..utils import cast_if_needed
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -1404,6 +1400,8 @@ def strided_batched_gemm(
     ``batch_dim=0``, so pass ``batch_dim=0`` or a 3D tensor in that case.
     Other input formats fall back to a high-precision GEMM.
     """
+    if IS_HIP_EXTENSION:
+        raise NotImplementedError("Strided batched GEMM is not supported on ROCm.")
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
 
     # Output dtype
