@@ -4,43 +4,19 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import use_cuda_graph_autotune
 
 
-def get_autotune_config():
-    return [triton.Config({'waves_per_eu': 0}, num_warps=nw) for nw in (1, 4, 8, 16)]
+# Not autotuned: num_warps sets the reduction order, so a timed pick would vary per process.
+def _rmsnorm_fwd_num_warps(n_cols):
+    if n_cols <= 1024:
+        return 1
+    return 4 if n_cols <= 8192 else 16
 
 
-def _prune_rms_configs(configs, named_args, **kwargs):
-    """Prune autotune configs whose ``num_warps`` is a poor fit for ``n_cols``.
-
-    Bounds threads-per-row to ``[n_cols/16, n_cols*2]`` so the autotuner never
-    wastes a measurement on a config that is obviously too serial (too few
-    lanes) or mostly idle (too many lanes). Shared by the fwd and bwd kernels.
-    """
-    n_cols = named_args.get('n_cols')
-    if n_cols is None:
-        n_cols = kwargs.get('n_cols')
-    if n_cols is None:
-        return configs
-    out = []
-    for cfg in configs:
-        threads = cfg.num_warps * 64  # AMD wavefront = 64
-        if threads < n_cols / 16:  # too serial
-            continue
-        if threads > n_cols * 2:  # too many idle lanes
-            continue
-        out.append(cfg)
-    if out:
-        return out
-
-    # Nothing fits (very wide or narrow rows): keep only the closest config(s).
-    def miss(cfg):
-        threads = cfg.num_warps * 64
-        return max(n_cols / 16 / threads, threads / (n_cols * 2))
-
-    best = min(miss(cfg) for cfg in configs)
-    return [cfg for cfg in configs if miss(cfg) == best]
+def _rmsnorm_bwd_num_warps(n_cols):
+    if n_cols <= 1024:
+        return 1
+    return 4 if n_cols <= 2048 else 16
 
 
 # TODO(micky774) Implement fused MXFP8 quantization within the kernel
@@ -215,14 +191,6 @@ def _rmsnorm_fwd_triton_impl(
             scale_inv = tl.fdiv(1.0, scale)
             tl.store(scale_inv_ptr, scale_inv)
 
-autotune_dec = triton.autotune(
-    configs=get_autotune_config(),
-    key=['n_rows', 'n_cols'],
-    prune_configs_by={'early_config_prune': _prune_rms_configs},
-    use_cuda_graph=use_cuda_graph_autotune(),
-)
-_rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
-
 @triton.jit
 def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
                         n_rows, n_cols, ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr,
@@ -388,16 +356,6 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
         tl.store(dg_ptr + row_start * n_cols + col_offsets, dg_col_redux, mask=mask)
 
 
-# Autotune wrapper. Mirrors the fwd autotune layout (same config set + prune)
-# so callers can toggle autotune via the same flag.
-_rmsnorm_bwd_triton = triton.autotune(
-    configs=get_autotune_config(),
-    key=['n_rows', 'n_cols'],
-    prune_configs_by={'early_config_prune': _prune_rms_configs},
-    use_cuda_graph=use_cuda_graph_autotune(),
-)(_rmsnorm_bwd_triton_impl)
-
-
 @triton.jit
 def _rmsnorm_bwd_dg_reduce_triton_impl(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
                                   BLOCK_SIZE_N: tl.constexpr):
@@ -417,22 +375,7 @@ def _rmsnorm_bwd_dg_reduce_triton_impl(dg_in_ptr, dg_out_ptr, dg_in_stride, n_ro
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
 
 
-def _get_dg_reduce_configs():
-    # n_rows is NUM_PRGMS so the M dimension is small.
-    # The reduce kernel is <1% of bwd cost, so a tight 6-config sweep is plenty;
-    # bigger sweeps just pay first-call compile tax for marginal gain.
-    return [
-        triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 64},  num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64},  num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64},  num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64},  num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128}, num_warps=8),
-    ]
-
-
-_rmsnorm_bwd_dg_reduce_triton = triton.autotune(
-    configs=_get_dg_reduce_configs(),
-    key=['n_rows', 'n_cols'],
-    use_cuda_graph=use_cuda_graph_autotune(),
-)(_rmsnorm_bwd_dg_reduce_triton_impl)
+# One fixed config: block shape and num_warps both set the dgamma summation order.
+_DG_REDUCE_BLOCK_SIZE_M = 128
+_DG_REDUCE_BLOCK_SIZE_N = 64
+_DG_REDUCE_NUM_WARPS = 8
