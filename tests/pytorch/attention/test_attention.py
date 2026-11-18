@@ -478,6 +478,39 @@ def test_dot_product_mem_calc(monkeypatch):
     torch.cuda.synchronize()
 
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.skipif(device_compute_capability != (12, 5),
+                    reason="For gfx1250 emulated by rocjitsu.")
+def test_dpa_ck_rocjitsu_smoke_test(monkeypatch):
+    """One small CK fwd+bwd with the V3 assembly kernels off, so CK JIT compiles its kernels."""
+    dtype = torch.bfloat16
+    config = ModelConfig(1, 128, 2, 64, attn_mask_type="causal")
+    qkv_layout = "bshd_bshd_bshd"
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config, qkv_dtype=dtype, qkv_layout=qkv_layout
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    for key, value in {
+        "NVTE_FUSED_ATTN_CK": "1",
+        "NVTE_FUSED_ATTN_AOTRITON": "0",
+        "NVTE_CK_USES_FWD_V3": "0",
+        "NVTE_CK_USES_BWD_V3": "0",
+    }.items():
+        monkeypatch.setenv(key, value)
+    fused_fwd, _, fused_bwd = run_dot_product_attention(
+        dtype, config, "FusedAttention", False, qkv_layout, False, True
+    )
+    unfused_fwd, _, unfused_bwd = run_dot_product_attention(
+        dtype, config, "UnfusedDotProductAttention", False, qkv_layout, False, True
+    )
+    tols = dict(atol=1.5e-2, rtol=1.5e-2)
+    torch.testing.assert_close(fused_fwd, unfused_fwd, **tols)
+    for fused, unfused in zip(fused_bwd, unfused_bwd):
+        torch.testing.assert_close(fused, unfused, **tols)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())

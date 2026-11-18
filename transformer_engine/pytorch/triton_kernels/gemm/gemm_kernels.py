@@ -364,7 +364,10 @@ def matmul_kernel(
             a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b)
+        # "ieee" keeps fp32 operands at full mantissa. The default resolves to "tf32",
+        # which Triton's AMD backend allows on gfx942 only, so fp32 would run as XF32
+        # there and as IEEE on gfx950. Ignored for fp16/bf16/fp8.
+        accumulator += tl.dot(a, b, input_precision="ieee")
 
         if EPILOGUE == 'BGRADB' and not INPUT_FP8:
             if pid_n == 0:

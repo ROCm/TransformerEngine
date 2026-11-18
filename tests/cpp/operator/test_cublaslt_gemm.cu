@@ -755,6 +755,15 @@ void performTest(const TestParams& params) {
       }
     }
   }
+  else if (prop.major == 12 && prop.minor == 5) //gfx1250 specific hipblasLt limitations
+  {
+    if (isFp8Type(dtype)) {
+      GTEST_SKIP() << "GEMM with float8 output is not supported";
+    }
+    if (params.use_gelu && (dtype == DType::kFloat32 || dtype == DType::kBFloat16)) {
+      GTEST_SKIP() << "FP32 and BF16 GEMM with GELU is not supported in current config";
+    }
+  }
 #endif
 
   // FP8 GEMM path needs columnwise data for A/B tensor with non TN layout
