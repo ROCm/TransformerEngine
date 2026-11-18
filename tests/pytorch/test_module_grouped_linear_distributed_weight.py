@@ -239,7 +239,7 @@ def test_unfused_wgrad_returns_grads_through_finalize(use_grouped_tensor):
         assert torch.count_nonzero(w.main_grad) == 0, "main_grad was written without fusion"
 
 
-def test_single_grouped_weight_dispatches(monkeypatch):
+def test_single_grouped_weight_dispatches():
     """A distributed weight must also work when the group is one packed GroupedTensor.
 
     single_grouped_weight requires use_grouped_tensor, and makes the group a single ``weight``
@@ -253,7 +253,6 @@ def test_single_grouped_weight_dispatches(monkeypatch):
             " is disabled on ROCm"
         )
 
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     torch.manual_seed(0)
     num_gemms = 2
     module = te.GroupedLinear(

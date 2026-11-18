@@ -323,6 +323,13 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
+        # Data-free repr for fake/meta data, as in Float8Tensor: dequantizing it under tracing
+        # would specialize its symbolic shape.
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None and (data.__class__ is not torch.Tensor or data.is_meta):
+            return safe_quantized_repr(
+                self, "Float8BlockwiseQTensor", extras={"is_2D_scaled": self._is_2D_scaled}
+            )
         try:
             return (
                 f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
