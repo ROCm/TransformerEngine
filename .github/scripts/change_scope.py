@@ -89,7 +89,9 @@ RULES = [
     # mGPU-only.
     ("tests/pytorch/distributed/**", frozenset({"torch-mgpu"}), "PyTorch mGPU tests"),
     ("tests/pytorch/attention/*with_cp*", frozenset({"torch-mgpu"}), "PyTorch mGPU tests"),
+    # The PyTorch tests ci/rocjitsu.sh runs, and the files they load from tests/pytorch
     ("tests/pytorch/conftest.py", TORCH | EMU, "PyTorch test configuration"),
+    ("tests/pytorch/utils.py", TORCH | EMU, "PyTorch test helpers, used by an emulated test"),
     ("tests/pytorch/nvfp4/**", TORCH | EMU, "PyTorch tests, also run on emulated gfx1250"),
     ("tests/pytorch/attention/test_attention.py", TORCH | EMU, "PyTorch tests, one also emulated"),
     ("tests/pytorch/**", TORCH, "PyTorch tests and helpers"),
