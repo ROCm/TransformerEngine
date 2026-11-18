@@ -27,7 +27,7 @@ __device__ __forceinline__ T cvt_from_float(const float x) {
   }
 }
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 typedef float f32x8 __attribute__((ext_vector_type(8)));
 
 // x / scale for 8 values as FP4, rounded to nearest even, the first in the low nibble.
@@ -71,7 +71,7 @@ __device__ __forceinline__ void hadamard16(float *x) {
     x[i] *= 0.25f;
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 }  // namespace common
 }  // namespace dispatch

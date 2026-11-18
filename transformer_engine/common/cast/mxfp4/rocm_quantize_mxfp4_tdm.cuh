@@ -51,7 +51,7 @@ struct ScaleLayout {
   bool shuffle;
 };
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 using common::cvt_8x_to_fp4;
 using common::hadamard16;
 
@@ -82,7 +82,7 @@ __device__ __forceinline__ uint8_t block_scale(const float *x, const int n, floa
 __device__ __forceinline__ float bf16_bits_to_float(const uint32_t bits) {
   return __uint_as_float(bits << 16);
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // Quantizes chunk (blockIdx.y, blockIdx.x) of the rows x cols BF16 input to the rowwise FP4 data,
 // rows x cols / 2 bytes, and the columnwise FP4 data of its transpose, cols x rows / 2 bytes.
@@ -92,7 +92,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                               const ScaleLayout rowwise_scales, const ScaleLayout colwise_scales,
                               const uint32_t rows, const uint32_t cols, const bool shuffle_rowwise,
                               const bool shuffle_colwise) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   __shared__ alignas(128) uint16_t in_sh[WAVES][BAND_Y][CHUNK_DIM_X];
   __shared__ alignas(128) uint8_t rowwise_sh[ROWWISE ? WAVES : 1][BAND_BYTES];
   __shared__ alignas(4) uint8_t rowwise_scale_sh[ROWWISE ? WAVES : 1][BAND_Y][SCALES_PER_ROW];
@@ -252,7 +252,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace tdm_kernel

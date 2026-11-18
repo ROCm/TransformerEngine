@@ -42,7 +42,7 @@ static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
 template <typename T>
 using band_t = T[BAND_Y][CHUNK_DIM_X];
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 using common::cvt_from_float;
 
 // Like the generic kernels, plain casts saturate as rocm_pack_4xfloat8 does, Inf included, and
@@ -92,7 +92,7 @@ __device__ __forceinline__ void store_transposed_quad(OType (&t)[N][BAND_Y][CHUN
         column[j];
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // Quantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor into output and, with TRANSPOSE, into
 // its cols x rows transpose output_t. The input holds the first in_rows rows; the rest are zero.
@@ -106,7 +106,7 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
                                                float *dbias_workspace, const size_t in_rows,
                                                const size_t rows, const size_t cols,
                                                const size_t chunk_Y, const size_t chunk_X) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr bool FUSED = IS_DBIAS || IS_DACT || IS_ACT;
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
   __shared__ alignas(128)
@@ -232,7 +232,7 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -308,7 +308,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                   OType *output_t, const float *scale_ptr, float *amax_ptr,
                                   float *amax_slots, float *scale_inv_ptr, const size_t rows,
                                   const size_t cols, const ParamOP p) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   // The act and gate gradient halves of each output row, or the activation alone
   constexpr int HALVES = IS_DGATED ? 2 : 1;
   // With TRANSPOSE, the packed outputs stay in registers until the consumed input bands can take
@@ -481,7 +481,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     *scale_inv_ptr = __frcp_rn(scale);
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // FP8 tensor-scaling dequantize of chunk (blockIdx.y, blockIdx.x): per step, 8 lanes cover a row of
@@ -490,7 +490,7 @@ template <typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_fp8_tdm_kernel(const IType *input, OType *output, const float *scale_inv_ptr,
                               const size_t rows, const size_t cols) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr int ELEMS         = 16;
   constexpr int LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
   constexpr int ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
@@ -522,7 +522,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
   tdm::store_2d(output, out_sh[wave], rows, cols, cols, band_offset_Y, chunk_offset_X);
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // FP8 2D block scaling of chunk (blockIdx.y, blockIdx.x) with the scale from the chunk's amax into
@@ -534,7 +534,7 @@ __device__ __forceinline__ void quantize_block2d_chunk(
     const size_t rows, const size_t cols, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     const bool pow_2_scaling) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
   __shared__ alignas(128) band_t<OType> out_sh[WAVES];
   __shared__ alignas(128) OType t_sh[TRANSPOSE ? WAVES : 1][BAND_Y][CHUNK_DIM_Y];
@@ -626,7 +626,7 @@ __device__ __forceinline__ void quantize_block2d_chunk(
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // FP8 1D block scaling of chunk (blockIdx.y, blockIdx.x): each chunk row with its own scale into
@@ -638,7 +638,7 @@ __device__ __forceinline__ void quantize_block1d_chunk(
     const size_t rows, const size_t cols, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     const bool pow_2_scaling) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr int ELEMS         = 16;
   constexpr int LANES_PER_ROW = CHUNK_DIM_X / ELEMS;        // 8
   constexpr int ROWS_PER_STEP = WAVE_SIZE / LANES_PER_ROW;  // 4
@@ -768,7 +768,7 @@ __device__ __forceinline__ void quantize_block1d_chunk(
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // FP8 block scaling of chunk (blockIdx.y, blockIdx.x) with BLOCK_DIM 1 (1x128 and 128x1 tiles) or 2

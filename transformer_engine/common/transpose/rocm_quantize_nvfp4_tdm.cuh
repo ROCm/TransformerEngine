@@ -28,7 +28,7 @@ static_assert(kThreads == kChunkDim, "A thread per chunk column writes the colum
 using Philox =
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 // cvt_8x_to_fp4, rounding stochastically with a random byte of rbits per value. The conversion
 // rounds its first value up when bits 15:0 of its random operand plus the 16-bit fraction to the
 // next FP4 value carry, its second likewise with bits 31:16, and the other 6 with shifts of the
@@ -81,7 +81,7 @@ __device__ __forceinline__ uint2 encode_block(const float *x, const float encode
                       dispatch::common::cvt_8x_to_fp4(y + 8, 1.0f));
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // The tensor-level scales of an encoding, as block_scaled_1d_cast_transpose_kernel derives them.
 struct GlobalScales {
@@ -152,7 +152,7 @@ __device__ __forceinline__ void quantize_chunk(
     uint8_t *scales_t, const uint32_t rows, const uint32_t cols, const size_t scale_stride,
     const size_t scale_t_stride, const bool row_scaled, const size_t *rng_state,
     const float e4m3_max, const bool use_mse, const uint32_t chunk_Y, const uint32_t chunk_X) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   // 4over6 scales 2D blocks by their error, summed per row (rowwise) or column (colwise) first.
   constexpr bool k2DErr = k4Over6 && k2D;
   __shared__ alignas(128) IType in_sh[kWaves][kBandY][kChunkDim];
@@ -418,7 +418,7 @@ __device__ __forceinline__ void quantize_chunk(
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <bool kRowwise, bool kColwise, bool k2D, bool kSR, bool kRHT, bool k4Over6,
@@ -430,7 +430,7 @@ __global__ void __launch_bounds__(kThreads)
                     const size_t scale_stride, const size_t scale_t_stride, const bool row_scaled,
                     const size_t *rng_state, const float *noop, const float e4m3_max,
                     const bool use_mse) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -445,7 +445,7 @@ __global__ void __launch_bounds__(kThreads)
       input, global_amax, global_amax_t, sign_mask, output_c, output_t, scales_c, scales_t, rows,
       cols, scale_stride, scale_t_stride, row_scaled, rng_state, e4m3_max, use_mse, blockIdx.y,
       blockIdx.x);
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 constexpr int kGroupMaxTensors = 256;

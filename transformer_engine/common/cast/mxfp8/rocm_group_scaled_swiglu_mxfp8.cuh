@@ -130,7 +130,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                               const int64_t *const offsets,
                                               const size_t num_tensors, const size_t rows,
                                               const size_t cols, const ParamOP p) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   using namespace rocm_colwise_mxfp8;
   constexpr int kStages = CHUNK_DIM_Y / kTileRows;
 
@@ -202,7 +202,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __builtin_amdgcn_wave_barrier();
     store_wave_tile(out_sh[wave], output, row_base, col_base, rows, cols);
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &), typename IType, typename OType>

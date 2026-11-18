@@ -40,7 +40,7 @@ static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
 template <typename T>
 using band_t = T[BAND_Y][CHUNK_DIM_X];
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 using common::cvt_from_float;
 
 // The e8m0 scale rounds up, so scaled finite values stay within the FP8 range and need no clamp:
@@ -177,7 +177,7 @@ __device__ __forceinline__ float quantize_band_colwise(const band_t<IType> &in, 
   }
   return amax;
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // Quantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor and writes its dbias partials to row
 // dbias_row of dbias_workspace. IS_2D scales TILE_2D x TILE_2D tiles instead of rows and columns.
@@ -190,7 +190,7 @@ __device__ __forceinline__ void quantize_chunk(
     float *dbias_workspace, float *amax_ptr, const size_t rows, const size_t cols,
     const size_t scale_stride_rowwise, const size_t scale_stride_colwise, const size_t chunk_Y,
     const size_t chunk_X, const size_t dbias_row) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
   constexpr bool COMPUTE_ACTIVATIONS = IS_ACT || IS_DACT;
@@ -335,7 +335,7 @@ __device__ __forceinline__ void quantize_chunk(
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,

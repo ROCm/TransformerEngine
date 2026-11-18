@@ -229,7 +229,7 @@ __device__ __forceinline__ void load_store_n(T *dst, const T *src,
 // gfx1250 Tensor Data Mover (TDM): asynchronous 2D tile copies between global memory and LDS.
 // Descriptors are packed here rather than with hip/amd_detail/amd_gfx1250_TDM.h, whose stride
 // setters truncate (ROCm/rocm-systems#13274). The 6-operand TDM builtins need clang 23 or newer.
-#ifdef __gfx1250__
+#ifdef __GFX12__
 namespace transformer_engine {
 namespace tdm {
 namespace detail {
@@ -323,4 +323,4 @@ __device__ __forceinline__ void wait() {
 
 }  // namespace tdm
 }  // namespace transformer_engine
-#endif  // __gfx1250__
+#endif  // __GFX12__

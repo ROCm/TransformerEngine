@@ -23,7 +23,7 @@ __device__ __forceinline__ void dequantize_chunk(const IType *input_ptr, OType *
                                                  const size_t cols, const size_t scales_stride,
                                                  const size_t mx_swizzle_padded_dim,
                                                  const size_t chunk_Y, const size_t chunk_X) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
   __shared__ alignas(128) IType in_sh[TDM_WAVES][TDM_BAND_Y][CHUNK_DIM_X];
@@ -112,7 +112,7 @@ __device__ __forceinline__ void dequantize_chunk(const IType *input_ptr, OType *
 
   tdm::store_2d(output_ptr, out_sh[wave], rows, cols, cols, band_offset_Y, chunk_offset_X);
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,

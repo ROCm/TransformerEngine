@@ -69,7 +69,7 @@ Pull requests run only the suites their changed paths can affect, by the rules i
 
 `rocjitsu.sh` runs tests on gfx1250 (MI455X) emulated on the CPU by [rocjitsu](https://github.com/ROCm/rocm-systems/tree/develop/emulation/rocjitsu), so it needs no GPU. Its setup builds rocjitsu from the `ROCm/rocm-systems` commit `ROCJITSU_REF` into `ROCJITSU_HOME` (default `build/rocjitsu`, reused while the commit matches), installs the gfx1250 device wheels matching the installed ROCm SDK and PyTorch, and builds tests/cpp for gfx1250 into `ROCJITSU_CPP_BUILD_DIR` (default `build/rocjitsu_cpp_tests`).
 Emulation is three to five orders of magnitude slower than hardware, so test cases with large shapes are excluded (`LARGE_SHAPES` in the script), as are known gfx1250 bugs (`KNOWN_FAILURES`). It cannot reveal timing-dependent hazards or hardware errata and says nothing about performance.
-* Each work item runs one emulator process: a shard of a C++ test group (`ROCJITSU_SHARDS` per group, default 4) or a pytest file. Tags are `cpp_<group>.b0.<shard>` and `<test_name>.b0`, after the emulated B0 stepping. All items are level 1, so every `TEST_LEVEL` runs them.
+* Each work item runs one emulator process: a shard of a C++ test group (`ROCJITSU_SHARDS` per group, default 4; the TDM smoke test `cpp_tdm` is one item) or a pytest file. Tags are `cpp_<group>.b0.<shard>` and `<test_name>.b0`, after the emulated B0 stepping. All items are level 1, so every `TEST_LEVEL` runs them.
 * `ROCJITSU_CPU_BUDGET` sets the emulator threads per process (default 4), and `OMP_NUM_THREADS` unless that is set; `ROCJITSU_TIMEOUT` sets the timeout per process in seconds (default 3600). A process can take up to about 4 GB of memory.
 
 ```sh

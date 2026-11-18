@@ -21,7 +21,7 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
       OType *output_gate_colwise, e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
       const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
       const size_t scale_stride_colwise, const ParamOP p) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   // These hide the chunk constants of the generic gated kernel.
   using tdm_kernel::BAND_Y;
   using tdm_kernel::band_t;
@@ -122,7 +122,7 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
                   aux_sh[wave] + HALF_OUT_BYTES);
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // Returns false, leaving the work to the generic kernel, where TDM does not apply.

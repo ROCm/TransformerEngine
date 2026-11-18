@@ -95,7 +95,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     reduce_dbias_tdm_kernel(OType *const dbias, const float *const partial, const size_t cols,
                             const size_t partial_rows, const int64_t *const offsets_ptr,
                             const int64_t *const first_dims_ptr, const int waves_per_slab) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   __shared__ alignas(128) float band_sh[WAVES][BAND_Y][SLAB_DIM_X];
 
   const size_t tensor_id = blockIdx.y;
@@ -144,7 +144,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
       dbias[tensor_id * cols + col] = static_cast<OType>(dbias_sum);
     }
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace tdm_dbias_kernel
@@ -181,7 +181,7 @@ constexpr size_t WAVES      = 8;
 template <typename IType>
 __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     amax_tdm_kernel(const IType *input, float *amax_ptr, const size_t n, const float *noop) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr size_t TILE = TILE_BYTES / sizeof(IType);
   constexpr size_t VEC  = 16 / sizeof(IType);
   if (noop != nullptr && noop[0] == 1.0f) {
@@ -224,7 +224,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     }
     rocm_atomicMaxFloat(amax_ptr, block_amax);
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace tdm_amax_kernel
@@ -270,7 +270,7 @@ template <bool kRHT, int kMaxSplits>
 __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     split_amax_tdm_kernel(const SplitAmaxArgs<kMaxSplits> args, const uint32_t cols,
                           const uint32_t sign_mask) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   __shared__ alignas(128) uint16_t tile_sh[WAVES][RHT_TILE_Y][RHT_TILE_X];
   __shared__ float amax_sh[2][WAVES];
 
@@ -342,7 +342,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
       rocm_atomicMaxFloat(ptr, block_amax);
     }
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <int kMaxSplits>
@@ -414,7 +414,7 @@ template <typename IType>
 __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
     rowwise_amax_tdm_kernel(const IType *input, float *amax_ptr, const uint32_t rows,
                             const uint32_t cols, const float *noop) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr uint32_t TILE = TILE_BYTES / sizeof(IType);
   constexpr uint32_t VEC  = 16 / sizeof(IType);
   if (noop != nullptr && noop[0] == 1.0f) {
@@ -446,7 +446,7 @@ __global__ void __launch_bounds__(WAVES * ROCM_CT_WARP_SIZE)
       amax_ptr[row] = amax;
     }
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace tdm_amax_kernel

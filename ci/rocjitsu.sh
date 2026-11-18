@@ -28,6 +28,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 ROCJITSU=$ROCJITSU_HOME/build/tools/rocjitsu/rocjitsu
 B0_CONFIG=$ROCJITSU_HOME/gfx1250_mi455x.json
 TEST_OPERATOR=$ROCJITSU_CPP_BUILD_DIR/operator/test_operator
+TEST_UTIL=$ROCJITSU_CPP_BUILD_DIR/util/test_util
 
 # Shapes that take minutes per test case under emulation, as they appear in gtest names.
 LARGE_SHAPES="*8192X7168*:*2048X12288*:*256X65536*:*65536X*:*4096X13312*:*1024X16384*:*X768X6144X*"
@@ -113,9 +114,9 @@ write_failure_junitxml() {
 EOF
 }
 
-# Run one shard of a C++ test group on the emulated GPU. args: tag shard gtest_filter
+# Run one shard of a C++ test group on the emulated GPU. args: tag shard shards test_binary gtest_filter
 gtest_run() {
-    local tag=$1 junitxml="" out rc start_ts
+    local tag=$1 test_name=`basename $4` junitxml="" out rc start_ts
     start_ts=`date +%s`
     echo "Run [$tag] at `time_elapsed $TEST_START_TS`"
     if [ -n "$JUNITXML_PREFIX$JUNITXML_SUFFIX" ]; then
@@ -123,17 +124,17 @@ gtest_run() {
         rm -f "${JUNITXML_PREFIX}${tag}"*"${JUNITXML_SUFFIX}"
     fi
     out=`mktemp`
-    GTEST_SHARD_INDEX=$2 GTEST_TOTAL_SHARDS=$ROCJITSU_SHARDS \
+    GTEST_SHARD_INDEX=$2 GTEST_TOTAL_SHARDS=$3 \
         timeout -k 60 $ROCJITSU_TIMEOUT "$ROCJITSU" --config "$B0_CONFIG" --cpu-thread-budget $ROCJITSU_CPU_BUDGET -- \
-        "$TEST_OPERATOR" --gtest_filter="$3" --gtest_brief=1 --gtest_color=no $junitxml 2>&1 | tee "$out"
+        "$4" --gtest_filter="$5" --gtest_brief=1 --gtest_color=no $junitxml 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
     if [ $rc -ne 0 ]; then
         test_run_error "[$tag]"
         if [ -n "$junitxml" -a ! -s "${JUNITXML_PREFIX}${tag}${JUNITXML_SUFFIX}" ]; then
             if [ $rc -eq 124 -o $rc -eq 137 ]; then
-                write_failure_junitxml $tag "(no JUnit XML written)" "test_operator timed out after ${ROCJITSU_TIMEOUT}s"
+                write_failure_junitxml $tag "(no JUnit XML written)" "$test_name timed out after ${ROCJITSU_TIMEOUT}s"
             else
-                write_failure_junitxml $tag "(no JUnit XML written)" "test_operator exited $rc without writing JUnit XML"
+                write_failure_junitxml $tag "(no JUnit XML written)" "$test_name exited $rc without writing JUnit XML"
             fi
         fi
     fi
@@ -143,17 +144,18 @@ gtest_run() {
     echo "Done [$tag] in `time_elapsed $start_ts`"
 }
 
-# A C++ test group, split into ROCJITSU_SHARDS items. args: level name gtest_filter
+# A C++ test group of test_binary (default test_operator), run as `shards` items (default
+# ROCJITSU_SHARDS). args: level name gtest_filter [shards [test_binary]]
 cpp() {
     check_level $1 || return
-    local shard tag
-    for shard in `seq 0 $((ROCJITSU_SHARDS - 1))`; do
+    local shards=${4:-$ROCJITSU_SHARDS} test_binary=${5:-$TEST_OPERATOR} shard tag
+    for shard in `seq 0 $((shards - 1))`; do
         tag=cpp_$2.b0.$shard
         check_test_filter $tag || continue
         if [ -n "$TE_CI_LIST_ITEMS" ]; then
             echo "TE_CI_ITEM $tag"
         else
-            gtest_run $tag $shard "$3-$LARGE_SHAPES:$KNOWN_FAILURES"
+            gtest_run $tag $shard $shards "$test_binary" "$3-$LARGE_SHAPES:$KNOWN_FAILURES"
         fi
     done
 }
@@ -171,6 +173,8 @@ run_test_config() {
     FP8="OperatorTest/CTTestSuite.*:OperatorTest/CastTestSuite.*:OperatorTest/CTDBias*:OperatorTest/CastDBias*"
     FP8="$FP8:OperatorTest/CTCSTestSuite.*:OperatorTest/CastCSTestSuite.*:OperatorTest/MultiCastTranspose*"
 
+    # TDM load/store smoke test; the operator groups run the TDM kernels
+    cpp 1 tdm "RocmTdmTest/*" 1 "$TEST_UTIL"
     cpp 1 mxfp8 "$MXFP8"
     cpp 1 nvfp4 "*NVFP4*"
     cpp 1 mxfp4 "*MXFP4*"
