@@ -69,6 +69,9 @@ run_test_config() {
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_misc.py
+    # mHC: full numerical matrix without autotuning, autotuning isolated to its own cases
+    NVTE_DISABLE_TRITON_AUTOTUNING=1 run_default_fa_lbl "mhc" 1 test_mhc.py -k 'not test_autotuning'
+    NVTE_DISABLE_TRITON_AUTOTUNING=0 run_default_fa_lbl "mhc_autotuning" 1 test_mhc.py -k 'test_autotuning'
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe_characteristics.py # renamed upstream from test_helper.py
     run_default_fa 1 test_sanity_import.py
@@ -96,6 +99,7 @@ run_test_config_mgpu() {
     RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
     run_default_fa 1 test_distributed_helper.py
     NVTE_JAX_UNITTEST_LEVEL=L0 run_default_fa 1 test_distributed_router.py
+    run_default_fa 1 test_distributed_mhc.py
     run_default_fa 3 test_distributed_layernorm.py
     # JAX 0.10+ on ROCm lowers sharded FP8 dot_general (with_jax_gemm=True,
     # Float8CurrentScaling) to __triton_nested_gemm_fusion with f16 accumulation,
