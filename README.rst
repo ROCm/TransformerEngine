@@ -241,6 +241,23 @@ The backend is off by default and enabled via an environment variable:
 If ``NVTE_GEMM_BACKEND=FLYDSL`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
 
 
+Permute-Free Grouped GEMM for MoE on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+For Mixture of Experts (MoE) workloads, ROCm TE provides an optional **permute-free** grouped GEMM path that folds the token gather directly into the grouped GEMM instead of physically permuting activations into expert-contiguous order (and un-permuting afterwards). A boolean ``routing_map`` drives an expert-sorted, block-padded gather-in-GEMM, so the permute/un-permute activation copies are eliminated and SwiGLU is recomputed in the backward rather than checkpointed. This implements the approach described in the MoEBlaze paper (`MoEBlaze: Breaking the Memory Wall for Efficient MoE Training on Modern GPUs <https://proceedings.mlsys.org/paper_files/paper/2026/file/9032e5c9ec394ce768a2fa9bdc56af6c-Paper-Conference.pdf>`_, MLSys 2026); the underlying GEMM kernels are ported from the MegaMOE reference kernel.
+
+Support matrix:
+
+* **Architecture** -- gfx950 (CDNA4) only. The kernels emit CDNA4-specific instructions, so the path stays off on any other architecture even when the env var is set.
+* **FlyDSL package** -- requires ``flydsl >= 0.3.0`` (see the FlyDSL section above); install it with ``pip install flydsl``.
+* **Dtype / config** -- bf16 only, ``bias=False``, and no FP8. Providing ``permute_free_metadata`` on an unsupported config raises rather than silently falling back.
+
+The path is off by default and controlled by the following environment variables:
+
+* ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1`` -- master opt-in. Enables the permute-free path in ``GroupedLinear`` (pass a ``permute_free_metadata`` built from the routing map; see the ``GroupedLinear`` docstring). Default ``0``.
+* ``NVTE_PERMUTE_FREE_EXACT_ROUTES=1`` -- size the block-padded route buffers from the exact route count (``sum(m_splits)``) instead of the static ``num_recv_tokens * min(topk, num_experts)`` bound. This removes the over-allocation, but the buffer shapes become data-dependent, so CUDA graph capture is no longer supported. Intended for measuring padding overhead. Default ``0``.
+* ``NVTE_PERMUTE_FREE_VALIDATE_ROUTES=1`` -- validate the route count against the routing map on every align build, at the cost of a device sync. Useful when supplying an exact route count. Default ``0``.
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
