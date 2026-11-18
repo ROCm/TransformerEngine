@@ -38,6 +38,8 @@ TEST_DIR=${TE_PATH}tests/
 
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
+#Command prefix for pytest, e.g. a GPU emulator (see ci/rocjitsu.sh)
+: ${TEST_LAUNCHER:=}
 
 #Scheduler inputs (see ci/run_queue.sh); all empty by default
 : ${TEST_FILTER:=}
@@ -441,7 +443,7 @@ pytest_run() {
     TE_RESULT_SINK="$_result_sink" TE_CI_FAILED_TESTS="$_failed_tests" \
         TE_CI_NARROWED_MARK="$_narrowed_mark" \
         PYTHONPATH="$_pytest_pythonpath" \
-        python3 -m pytest -v -rfEs \
+        $TEST_LAUNCHER python3 -m pytest -v -rfEs \
         --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
         $_sink_plugin $_junitxml_arg $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     _pytest_rc=$?
