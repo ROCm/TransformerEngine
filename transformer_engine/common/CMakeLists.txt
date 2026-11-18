@@ -15,11 +15,6 @@ set(USE_CUDA OFF)
 
 if (USE_ROCM)
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
-  # AOTriton does not support gfx1250-strict
-  if(USE_FUSED_ATTN_AOTRITON AND "gfx1250-strict" IN_LIST CMAKE_HIP_ARCHITECTURES)
-    message(STATUS "Disabling AOTriton: gfx1250-strict is in the target architectures")
-    set(USE_FUSED_ATTN_AOTRITON OFF)
-  endif()
 else()
   #Check if CUDA exists
   if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
