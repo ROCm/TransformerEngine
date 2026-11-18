@@ -516,6 +516,20 @@ struct Numeric_Traits<fp8e5m2> {
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
 };
 
+#ifdef USE_ROCM
+template <>
+struct Numeric_Traits<fp8ue5m3> {
+    static constexpr double minSubnorm = 1.0   / static_cast<double>(1 << 17);  // std::pow(2.0, -17.0);
+    static constexpr double maxSubnorm = 0.875 / static_cast<double>(1 << 14);  // std::pow(2.0, -14.0);
+    static constexpr double minNorm    = 1.0   / static_cast<double>(1 << 14);  // std::pow(2.0, -14.0);
+    static constexpr double maxNorm    = 114688.0;
+    static constexpr double artifInf   = 10.0 * maxNorm;                        // artificial Infinity
+    static constexpr int maxBiasedExponentAsFP32 = 16 + FP32_EXPONENT_BIAS;
+    static constexpr int maxUnbiasedExponentAsFP32 = 16;
+    static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
+};
+#endif  // USE_ROCM
+
 template <>
 struct Numeric_Traits<fp32> {
     static constexpr double minSubnorm = std::numeric_limits<fp32>::denorm_min();   // std::pow(2.0, -149.0);

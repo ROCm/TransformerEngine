@@ -38,23 +38,21 @@ constexpr size_t kFP4BlockSize1D = 16;
 
 // Generates random FP8 (E4M3 or UE5M3) scale values by sampling raw 8-bit patterns.
 // Only finite, non-negative scales are allowed.
-// Values are written using memcpy to preserve exact
+// Values are written as raw bytes to preserve exact
 // bit patterns rather than relying on numeric conversion.
-template <typename ScaleType>
-void generate_1d_scales(ScaleType* scale_buffer,
+void generate_1d_scales(uint8_t* scale_buffer,
                         const size_t unpadded_blocks_Y,
                         const size_t unpadded_blocks_X,
                         const size_t scales_stride,
                         std::mt19937& gen,
                         std::uniform_int_distribution<int>& finite_nonneg_scale_dis) {
     const size_t total_elems = unpadded_blocks_Y * scales_stride;
-    std::memset(scale_buffer, 0, total_elems * sizeof(ScaleType));
+    std::memset(scale_buffer, 0, total_elems);
 
     for (size_t row = 0; row < unpadded_blocks_Y; ++row) {
         for (size_t block = 0; block < unpadded_blocks_X; ++block) {
             const size_t scale_idx = row * scales_stride + block;
-            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_scale_dis(gen));
-            std::memcpy(&scale_buffer[scale_idx], &scale, sizeof(scale));
+            scale_buffer[scale_idx] = static_cast<uint8_t>(finite_nonneg_scale_dis(gen));
         }
     }
 }
@@ -117,8 +115,7 @@ void compute_ref(const fp4e2m1* input,
                  const size_t cols,
                  const size_t scale_stride) {
 #ifdef __HIP_PLATFORM_AMD__
-    const float fp8_max = std::is_same_v<ScaleType, fp8ue5m3> ? 114688.0f
-                                                              : Numeric_Traits<fp8e4m3>::maxNorm;
+    const float fp8_max = Numeric_Traits<ScaleType>::maxNorm;
     const float factor_inv = 1.0f / (6.0f * fp8_max);
 #else
     constexpr float factor_inv = 1.0f / (6.0f * 448.0f);
@@ -211,7 +208,7 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                   e2m1_dis);
 
     // Row-wise 1D scales on [rows, cols]
-    generate_1d_scales(input.rowwise_cpu_scale_inv_ptr<ScaleType>(),
+    generate_1d_scales(input.rowwise_cpu_scale_inv_ptr<uint8_t>(),
                        unpadded_blocks_Y,
                        unpadded_blocks_X,
                        scales_stride,
@@ -222,7 +219,7 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
     // dequant kernel uses a unit global scale (amax = fp4_max * scale_max), matching the
     // reference below.
     input.set_tensor_amax_nullptr();
-    const float amax = 6.0f * (is_ue5m3 ? 114688.0f : 448.0f);
+    const float amax = 6.0f * Numeric_Traits<ScaleType>::maxNorm;
 
     run_single_case<OutputType, ScaleType>("rowwise_1d_dequant",
                                            input,

@@ -1882,10 +1882,8 @@ INSTANTIATE_TEST_SUITE_P(
         return test_name(info.param);
     });
 
+#ifndef __HIP_PLATFORM_AMD__  // Grouped NVFP4 quantization is not supported on ROCm
 TEST(NVFP4UE5M3ReferenceTest, Grouped) {
-#ifdef __HIP_PLATFORM_AMD__
-  GTEST_SKIP() << "Grouped NVFP4 quantization is not supported on ROCm";
-#endif
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
     GTEST_SKIP();
   }
@@ -1973,6 +1971,7 @@ TEST(NVFP4UE5M3ReferenceTest, Grouped) {
         scale_dims[0], scale_dims[1], scales_stride);
   }
 }
+#endif  // #ifndef __HIP_PLATFORM_AMD__
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm

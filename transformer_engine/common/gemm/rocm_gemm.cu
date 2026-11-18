@@ -637,15 +637,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
-// Block-scale bound of an NVFP4 operand. gfx942 stores E4M3 as FNUZ (max 240); UE5M3 has no FNUZ form.
-static float nvfp4_scale_max(const transformer_engine::Tensor& t) {
-  const DType scale_dtype = t.scale_inv.has_data() ? t.scale_inv.dtype : t.columnwise_scale_inv.dtype;
-  if (te_fp8_fnuz() && scale_dtype != DType::kFloat8UE5M3) {
-    return 240.0f;
-  }
-  return static_cast<float>(t.get_nvfp4_scale_max());
-}
-
 // Prepare a native (gfx1250) NVFP4 hipBLASLt GEMM: swizzle the block scales and fold the per-tensor
 // amax correction into a HOST scalar alpha.
 //
@@ -671,8 +662,8 @@ static void setup_nvfp4_gemm_native(
 
   const float fp4_max = 6.0f;
   // Read the bound per operand: 4over6 tensors carry 256, not 448.
-  const float fp8_max_A = nvfp4_scale_max(inputA);
-  const float fp8_max_B = nvfp4_scale_max(inputB);
+  const float fp8_max_A = static_cast<float>(inputA.get_nvfp4_scale_max());
+  const float fp8_max_B = static_cast<float>(inputB.get_nvfp4_scale_max());
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
@@ -744,8 +735,8 @@ static void dequant_fp4_gemm_inputs(
 
   const float fp4_max = 6.0f;
   // Read the bound per operand as upstream does: 4over6 tensors carry 256, not 448.
-  const float fp8_max_A = nvfp4_scale_max(inputA);
-  const float fp8_max_B = nvfp4_scale_max(inputB);
+  const float fp8_max_A = static_cast<float>(inputA.get_nvfp4_scale_max());
+  const float fp8_max_B = static_cast<float>(inputB.get_nvfp4_scale_max());
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
@@ -821,10 +812,11 @@ static void dequant_fp4_gemm_inputs(
 }
 
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
-// Whether hipBLASLt has native NVFP4 kernels with UE5M3 block-16 scales for this output type. Older
-// libraries (e.g. ROCm 10.1) have none, and the E5M3 logic only covers BF16 output. Its GridBased
-// logic covers all sizes, so one small TN problem per (device, output type) answers it. Only kernels
-// that need no workspace count, so the cached answer holds for whatever workspace a GEMM gets.
+// Whether hipBLASLt has native NVFP4 kernels with UE5M3 block-16 scales for this output type. The
+// version guard only ensures the scale mode is declared; a library can declare it and still ship no
+// E5M3 kernels (ROCm 10.1). Its GridBased logic covers
+// all sizes, so one small TN problem per (device, output type) answers it. Only kernels that need no
+// workspace count, so the cached answer holds for whatever workspace a GEMM gets.
 static bool nvfp4_ue5m3_native_available(hipblasLtHandle_t handle, int device_id,
                                          hipDataType d_type) {
   static std::mutex mutex;
@@ -1616,8 +1608,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   // Native NVFP4 GEMM on gfx1250: hipBLASLt consumes the FP8 (E4M3 or UE5M3) block scales directly,
   // but it reads them in a K-tiled layout (setup_nvfp4_gemm_native re-lays TE's row-major scales
   // into it). Every other architecture, hipBLASLt versions without the VEC16_UE4M3 scale mode, and
-  // UE5M3 GEMMs hipBLASLt has no kernels for (older libraries, non-BF16 output, mixed E4M3 x
-  // UE5M3 operands), use the BF16 dequant fallback instead.
+  // UE5M3 GEMMs hipBLASLt has no kernels for (libraries without E5M3 kernels such as ROCm 10.1's,
+  // non-BF16 output, mixed E4M3 x UE5M3 operands), use the BF16 dequant fallback instead.
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
   bool use_nvfp4_native = use_nvfp4 && cuda::sm_arch() == 125;
   if (use_nvfp4_native && (nvfp4_a_scale_dtype == DType::kFloat8UE5M3 ||
