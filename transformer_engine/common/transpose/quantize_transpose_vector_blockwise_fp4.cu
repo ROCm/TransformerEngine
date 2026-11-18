@@ -1377,7 +1377,7 @@ void quantize_with_hadamard_transform(const Tensor& input, Tensor& output,
                           ? reinterpret_cast<const float*>(
                                 convertNVTETensorCheck(config.noop_tensor)->data.dptr)
                           : nullptr;
-  const float e4m3_max = te_fp8_fnuz() ? 240.0f : static_cast<float>(output.nvfp4_e4m3_max);
+  const float e4m3_max = static_cast<float>(output.get_nvfp4_scale_max());
   nvfp4_tdm::quantize_rht(input.data, output.amax, output.columnwise_amax, hadamard_matrix.data,
                           output.scale_inv, output.columnwise_scale_inv, output.data,
                           output.columnwise_data, num_rows, row_length, config.stochastic_rounding,

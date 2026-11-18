@@ -660,8 +660,7 @@ inline bool group_quantize(const Tensor &input, const std::vector<Tensor *> &out
       continue;
     }
     NVTE_CHECK(output.scaling_mode == NVTE_NVFP4_1D_SCALING, "Expected NVFP4 outputs.");
-    const float output_e4m3_max =
-        te_fp8_fnuz() ? 240.0f : static_cast<float>(output.nvfp4_e4m3_max);
+    const float output_e4m3_max = static_cast<float>(output.get_nvfp4_scale_max());
     if (e4m3_max == 0) {
       rowwise = output.has_data();
       colwise = output.has_columnwise_data();
