@@ -1206,6 +1206,11 @@ def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
 
 
 def test_transformer_layer():
+    params_dtype_16bit = torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16
+    if IS_HIP_EXTENSION and QUANTIZATION == "fp8_block_scaling":
+        # The mean MSE loss over these large outputs puts nearly all attention Q/K gradients
+        # below fp16's smallest subnormal (2^-24), so comparing them in fp16 is degenerate.
+        params_dtype_16bit = torch.bfloat16
     kwargs_list = [
         {},
         {"num_gqa_groups": 4},
@@ -1222,7 +1227,7 @@ def test_transformer_layer():
         {"fuse_qkv_params": True, "fuse_wgrad_accumulation": True},
         {"qkv_weight_interleaved": False},
         {"bias": False},
-        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
+        {"params_dtype": params_dtype_16bit},
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]
