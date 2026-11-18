@@ -1640,6 +1640,11 @@ INSTANTIATE_TEST_SUITE_P(
                         DType::kFloat16},
         BlockwiseParams{256, 512, 256, false, true,  1e-4f, false, 0.0f, true,  false, false,
                         DType::kFloat32},
+        // fp16 output with pow2 scales, which gfx942 (no fp32-scale kernel) also runs.
+        BlockwiseParams{256, 512, 256, false, false, 1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat16},
+        BlockwiseParams{256, 512, 256, true,  false, 1e-4f, false, 0.0f, false, false, false,
+                        DType::kFloat16},
 
         // ---- e5m2 operands, which select the MFMA's cbsz/blgp codes ---------------------
         //
