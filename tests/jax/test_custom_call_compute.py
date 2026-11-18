@@ -2556,6 +2556,9 @@ class TestGroupedGemmGluFallback:
 
     @pytest.mark.parametrize("name", ["cudnn", "cutlass.jax"])
     def test_missing_dependency(self, monkeypatch, name):
+        if is_hip_extension() and name == "cudnn":
+            # cutlass.jax is checked first and is never installed on ROCm.
+            pytest.skip("The cuDNN Frontend check is unreachable without CuTeDSL (cutlass.jax).")
         original = importlib.import_module
 
         def import_module(module, package=None):

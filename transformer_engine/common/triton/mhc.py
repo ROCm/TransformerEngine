@@ -10,10 +10,10 @@
 import itertools
 import os
 
-import torch
 import triton
 import triton.language as tl
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+from transformer_engine.common import te_rocm_build
 
 MAX_GRID_DIM_Y = 65535  # Maximum grid dimension in Y direction for current CUDA architectures
 
@@ -55,10 +55,10 @@ def projection_prune_fwd(configs, named_args, **kwargs):
         step_k = [256]
         stages = [2, 3, 4]
 
-        if IS_HIP_EXTENSION:
+        if te_rocm_build:
             # Higher STEP_SIZE_K values exceed the LDS budget on GPUs with a smaller
             # shared-memory-per-block allowance (e.g. 64 KB on gfx942).
-            lds_bytes = torch.cuda.get_device_properties(0).shared_memory_per_block
+            lds_bytes = _max_shared_mem()
             if lds_bytes <= 64 * 1024:
                 step_k = [64]
 

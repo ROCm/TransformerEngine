@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -17,6 +19,7 @@ import triton
 from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 from transformer_engine.jax.cpp_extensions.misc import get_padded_spec, NamedSharding
+from transformer_engine.jax.util import is_hip_extension
 from transformer_engine.common.triton.mhc import (
     _mhc_projection_fwd_fused,
     _mhc_projection_bwd_fused_dx,
@@ -70,6 +73,13 @@ def check_deterministic(operator: str, use_split_k: bool = False):
             f"[{operator}]: use_split_k=True uses atomic add which violates determinism. Either set"
             " use_split_k=False or unset NVTE_ALLOW_NONDETERMINISTIC_ALGO=0."
         )
+
+
+def _dot_precision(precision):
+    """Map NVIDIA TF32 tl.dot precisions to the closest gfx-supported equivalents."""
+    if not is_hip_extension():
+        return precision
+    return {"tf32": "ieee", "tf32x3": "bf16x3"}.get(precision, precision)
 
 
 def _projection_precision(x_dtype, phi_dtype, has_norm_weight, use_tf32):
@@ -315,7 +325,7 @@ class MHCProjectionFwdPrimitive(_MHCPrimitive):
                 "stride_ms": 1,
                 "stride_norm_weight": 1,
                 "BLOCK_SIZE_N": H_PADDED_DIM,
-                "precision": precision,
+                "precision": _dot_precision(precision),
                 "USE_SPLIT_K": use_split_k,
                 # Device-side TMA descriptors (host-side ones need real pointers, which aren't
                 # available while lowering). They live in global scratch that the Triton launcher
@@ -458,7 +468,7 @@ class MHCProjectionBwdDxPrimitive(_MHCPrimitive):
                 "stride_grad_hn": 1,
                 "stride_grad_ms": 1,
                 "BLOCK_SIZE_N": H_PADDED_DIM,
-                "precision": precision,
+                "precision": _dot_precision(precision),
                 "FUSE_GRAD_X_ACC": fuse_grad_x_acc,
                 "HAS_NORM_WEIGHT": has_norm_weight,
             },
@@ -578,7 +588,7 @@ class MHCProjectionBwdDphiPrimitive(_MHCPrimitive):
                 "stride_grad_phik": 1,
                 "stride_grad_norm_weight": 1,
                 "BLOCK_SIZE_N": H_PADDED_DIM,
-                "precision": precision,
+                "precision": _dot_precision(precision),
                 "USE_SPLIT_M": use_split_m,
             },
         )
@@ -1147,7 +1157,7 @@ class MHCAggregateBwdPrimitive(_MHCPrimitive):
                 "stride_xCn": 1,
                 "stride_grad_xm": n * C,
                 "stride_grad_xCn": 1,
-                "precision": precision,
+                "precision": _dot_precision(precision),
                 "FUSE_GRAD_X_ACC": fuse_grad_x_acc,
             },
         )
@@ -1430,7 +1440,7 @@ class MHCExpandCombineBwdPrimitive(_MHCPrimitive):
                 "stride_grad_bias_ws_c": 1,
                 "stride_grad_xm": n * C,
                 "stride_grad_xCn": 1,
-                "precision": precision,
+                "precision": _dot_precision(precision),
                 "HAS_BIAS": has_bias,
                 "FUSE_GRAD_X_ACC": fuse_grad_x_acc,
                 "DETERMINISTIC": deterministic,

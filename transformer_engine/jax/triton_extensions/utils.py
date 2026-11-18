@@ -35,18 +35,15 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
-<<<<<<< HEAD
-    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not load each kernel from
-        a single device before returning from lowering. The load works around a race
-        in the ROCm plugin, which unlinks the HSACO it was handed before locking its
-        module cache. Default is "1" (runs when more than one local device is visible).
-=======
     NVTE_JAX_TRITON_ASSUME_ALIGNED: If "1" (default), pointer arguments of JAX Triton kernels are
         compiled with ``tt.divisibility=16`` (16-byte aligned), matching the alignment declared to
         the launcher via ``create_array_parameter(0, 16)`` and what a PyTorch launch specializes
         on. Without the hint Triton cannot vectorize global loads, which can cause large register
         spills and slowdowns for some configs. Set to "0" to compile without the hint.
->>>>>>> 1f251a125
+    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not load each kernel from
+        a single device before returning from lowering. The load works around a race
+        in the ROCm plugin, which unlinks the HSACO it was handed before locking its
+        module cache. Default is "1" (runs when more than one local device is visible).
 """
 
 import hashlib
@@ -225,7 +222,22 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
-<<<<<<< HEAD
+# Alignment (bytes) assumed for every array argument, as declared to the launcher by
+# gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES).
+_ARRAY_ALIGNMENT_BYTES = 16
+
+
+def _assume_aligned_pointers() -> bool:
+    """Whether to mark pointer arguments as 16-byte aligned (NVTE_JAX_TRITON_ASSUME_ALIGNED)."""
+    val = os.environ.get("NVTE_JAX_TRITON_ASSUME_ALIGNED", "1")
+    try:
+        return bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_JAX_TRITON_ASSUME_ALIGNED must be an integer (0 or 1), got: {val!r}"
+        ) from e
+
+
 # Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
 _HSACO_TMPDIR = None
 _HSACO_TMPDIR_LOCK = threading.Lock()
@@ -313,22 +325,6 @@ def _prewarm_launch(ctx, rule):
     except Exception as e:  # pylint: disable=broad-except
         # Prewarming is an optimization; a failure here must not break the real compile.
         warnings.warn(f"Triton kernel prewarm failed ({type(e).__name__}: {e})", RuntimeWarning)
-=======
-# Alignment (bytes) assumed for every array argument, as declared to the launcher by
-# gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES).
-_ARRAY_ALIGNMENT_BYTES = 16
-
-
-def _assume_aligned_pointers() -> bool:
-    """Whether to mark pointer arguments as 16-byte aligned (NVTE_JAX_TRITON_ASSUME_ALIGNED)."""
-    val = os.environ.get("NVTE_JAX_TRITON_ASSUME_ALIGNED", "1")
-    try:
-        return bool(int(val))
-    except ValueError as e:
-        raise ValueError(
-            f"NVTE_JAX_TRITON_ASSUME_ALIGNED must be an integer (0 or 1), got: {val!r}"
-        ) from e
->>>>>>> 1f251a125
 
 
 def get_triton_info():
@@ -442,12 +438,9 @@ def compile_triton(
                 num_ctas,
                 enable_fp_fusion,
                 compute_capability,
-<<<<<<< HEAD
+                _assume_aligned_pointers(),
                 is_hip,
                 is_gluon,
-=======
-                _assume_aligned_pointers(),
->>>>>>> 1f251a125
             )
         ).encode()
     ).hexdigest()
@@ -461,12 +454,6 @@ def compile_triton(
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
-<<<<<<< HEAD
-    if is_hip:
-        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
-        import triton
-        from triton.compiler import make_backend
-=======
     # Array (pointer) arguments are aligned to _ARRAY_ALIGNMENT_BYTES (see create_array_parameter
     # in triton_call_lowering). Tell Triton so it can emit vectorized loads/stores, as it does for
     # aligned pointers in a PyTorch launch. The buffers are abstract at lowering time, so this is an
@@ -477,13 +464,10 @@ def compile_triton(
             if str(signature_with_constexpr.get(name, "")).startswith("*"):
                 attrs[(idx,)] = [["tt.divisibility", _ARRAY_ALIGNMENT_BYTES]]
 
-    src = tc.ASTSource(
-        fn=kernel_fn,
-        constexprs=constants,
-        signature=signature_with_constexpr,
-        attrs=attrs,
-    )
->>>>>>> 1f251a125
+    if is_hip:
+        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
+        import triton
+        from triton.compiler import make_backend
 
         target = triton.runtime.driver.active.get_current_target()
         backend = make_backend(target)
@@ -540,6 +524,7 @@ def compile_triton(
             fn=kernel_fn,
             constexprs=constants,
             signature=signature_with_constexpr,
+            attrs=attrs,
         )
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
@@ -563,7 +548,7 @@ def compile_triton(
             num_warps,
             num_ctas,
             compiled.metadata.shared,
-            compiled.asm["ptx"],
+            binary,
             "",  # ttir
             compute_capability,
             global_scratch_size=compiled.metadata.global_scratch_size,
@@ -641,13 +626,11 @@ def triton_call_lowering(
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
-<<<<<<< HEAD
+                    Autotuned config kwargs need not be included.
         num_warps: Warps per block for non-autotuned kernels (required for Gluon
                     layouts; default 4). Ignored when autotuned.
         num_stages: Pipeline stages for non-autotuned kernels (default 3). Ignored
                     when autotuned.
-=======
-                    Autotuned config kwargs need not be included.
 
     For autotuned kernels, ``prune_configs_by={"early_config_prune": ...}`` is
     applied before compiling the configs. The pruner receives ``constexprs`` and,
@@ -655,7 +638,6 @@ def triton_call_lowering(
     ``element_size()``. ``perf_model``, ``top_k``, ``reset_to_zero`` and
     ``restore_value`` are not supported; use ``input_output_aliases`` on
     pre-initialized buffers instead of ``reset_to_zero``/``restore_value``.
->>>>>>> 1f251a125
 
     Returns:
         MLIR lowering result
