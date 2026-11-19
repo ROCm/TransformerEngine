@@ -158,9 +158,11 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 #ifdef __HIP_PLATFORM_AMD__
       // TypeInfo<fp8e4m3>::max_finite_value is not constexpr on the ROCm host (runtime FNUZ
       // detection); NVFP4 E4M3 block scales use the OCP E4M3 max.
-      static_assert(std::is_same_v<ScaleType, fp8e4m3>,
-                    "Only E4M3 NVFP4 scales are supported on ROCm.");
-      constexpr int SCALE_TYPE_MAX = 448;
+      static_assert(std::is_same_v<ScaleType, fp8e4m3> || std::is_same_v<ScaleType, fp8ue5m3>,
+                    "Unsupported NVFP4 scale type on ROCm.");
+      constexpr int SCALE_TYPE_MAX = std::is_same_v<ScaleType, fp8e4m3>
+                                         ? 448
+                                         : static_cast<int>(detail::TypeExtrema<fp8ue5m3>::max);
 #else
       constexpr int SCALE_TYPE_MAX = static_cast<int>(TypeInfo<ScaleType>::max_finite_value);
 #endif
