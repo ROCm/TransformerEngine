@@ -83,7 +83,9 @@ def count_collected(xml_path):
     The re-run is sized against this, so ``None`` means do not narrow.
     """
     try:
-        root = ET.parse(xml_path).getroot()
+        # xml_path is this CI run's own pytest --junitxml output, not
+        # externally sourced or untrusted input.
+        root = ET.parse(xml_path).getroot()  # nosec B314
     except (ET.ParseError, OSError):
         return None
     total = 0

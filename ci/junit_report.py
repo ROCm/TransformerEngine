@@ -220,7 +220,9 @@ def main():
         suite_time = 0.0
 
         try:
-            root = ET.parse(xf).getroot()
+            # xf is this CI run's own pytest --junitxml output, not externally
+            # sourced or untrusted input.
+            root = ET.parse(xf).getroot()  # nosec B314
         except (ET.ParseError, OSError) as exc:
             # Truncated/unreadable XML => the pytest process was killed while
             # writing it (hard timeout, segfault, or job cancellation).

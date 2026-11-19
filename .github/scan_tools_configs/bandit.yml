@@ -21,6 +21,9 @@ exclude_dirs:
   # Sample code (top-level `examples/` and `docs/examples/`), not shipped
   # with the library.
   - /examples/
+  # Upstream test and benchmark scripts; not used by ROCm CI
+  - /benchmarks/attention/benchmark_attention.py
+  - /tests/pytorch/test_onnx_export.py
 
 # Plugin settings. B101 (assert_used) only matters for code that may run
 # under `python -O`; pytest-style tests and benchmarks rely on assert by
@@ -29,3 +32,12 @@ assert_used:
   skips:
     - '*/tests/*'
     - '*/benchmarks/*'
+
+# B614 (pytorch_load, unsafe torch.load/weights_only) and B301 (pickle.loads)
+# have no per-path config option like assert_used above; the only choices
+# bandit offers are a `# nosec` on every call site or disabling the rules
+# everywhere. Both disabled globally:
+#   - B614: almost every instance is test code loading its own fixtures.
+#   - B614/B301: the only production-code instances are reached disabled by 
+#     default, enabling requires setting NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1
+skips: ['B614', 'B301']

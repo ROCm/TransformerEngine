@@ -36,6 +36,7 @@ import functools
 import os
 import shutil
 import sys
+import tempfile
 import pytest
 
 import torch
@@ -67,6 +68,10 @@ NUM_LAYERS = 2
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 3
+
+# Resolved once; every rank calls tempfile.gettempdir() under the same
+# environment, so this is deterministic across ranks without coordination.
+TMP_DIR = tempfile.gettempdir()
 
 
 def _build_model(
@@ -880,7 +885,7 @@ def test_safetensors_fp32_export(recipe_name):
     full_opt_state = get_optimizer_state_dict(model, optimizer, options=full_opts)
 
     rank = int(os.environ.get("RANK", "0"))
-    save_path = f"/tmp/te_test_fsdp2_model_fp32_{recipe_name}.safetensors"
+    save_path = f"{TMP_DIR}/te_test_fsdp2_model_fp32_{recipe_name}.safetensors"
 
     if rank == 0:
         if os.path.exists(save_path):
@@ -939,7 +944,7 @@ def test_dcp_output_parity(recipe_name, async_save):
     world_size, device = _get_dist_info()
     rank = int(os.environ.get("RANK", "0"))
     save_mode = "async" if async_save else "sync"
-    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_parity_{recipe_name}_{save_mode}"
+    checkpoint_dir = f"{TMP_DIR}/te_test_fsdp2_dcp_parity_{recipe_name}_{save_mode}"
 
     if rank == 0:
         shutil.rmtree(checkpoint_dir, ignore_errors=True)
@@ -1160,8 +1165,8 @@ def test_dcp_resharding_save(recipe_name):
 
     world_size, device = _get_dist_info()
     rank = int(os.environ.get("RANK", "0"))
-    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}"
-    ref_output_path = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
+    checkpoint_dir = f"{TMP_DIR}/te_test_fsdp2_dcp_resharding_{recipe_name}"
+    ref_output_path = f"{TMP_DIR}/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
 
     if rank == 0:
         shutil.rmtree(checkpoint_dir, ignore_errors=True)
@@ -1234,8 +1239,8 @@ def test_dcp_resharding_load(recipe_name):
 
     world_size, device = _get_dist_info()
     rank = int(os.environ.get("RANK", "0"))
-    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}"
-    ref_output_path = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
+    checkpoint_dir = f"{TMP_DIR}/te_test_fsdp2_dcp_resharding_{recipe_name}"
+    ref_output_path = f"{TMP_DIR}/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
 
     try:
         model2 = _build_model(fp8_init=True, recipe=recipe)
@@ -2199,7 +2204,7 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     rank = int(os.environ.get("RANK", "0"))
     # Deterministic, rank-agnostic checkpoint dir so all ranks read/write
     # the same DCP path. ``os.getpid()`` differs per rank under torchrun.
-    checkpoint_dir = f"/tmp/te_test_fsdp2_hybrid_dcp_parity_{hybrid_recipe_name}"
+    checkpoint_dir = f"{TMP_DIR}/te_test_fsdp2_hybrid_dcp_parity_{hybrid_recipe_name}"
 
     if rank == 0:
         shutil.rmtree(checkpoint_dir, ignore_errors=True)
