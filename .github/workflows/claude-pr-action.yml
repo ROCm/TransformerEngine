@@ -24,6 +24,19 @@ name: Claude PR Action
 #   Prompt injection through PR content remains possible; the requester
 #   should skim the PR before asking for a run.
 #
+#   CodeQL (actions/untrusted-checkout) flags the checkout below as
+#   untrusted code in a privileged context (issue_comment is privileged —
+#   full GITHUB_TOKEN and secrets, same bucket as pull_request_target —
+#   regardless of anything this workflow does). Dismissed as "Mitigated",
+#   not a false positive: the pattern is real, but the compensating
+#   controls above narrow it from "any commenter on any fork PR" to "a
+#   maintainer already vouched for this exact commit", which is the actual
+#   risk being addressed. GitHub's own recommended fix for this query — an
+#   unprivileged pull_request job that stages results as an artifact, plus
+#   a separate privileged workflow_run job that posts them — was considered
+#   and rejected: it would remove live PR commenting and inline-comment
+#   posting during the run, which is core to how this workflow is used.
+#
 # Auth model:
 #   - Anthropic: subscription via CLAUDE_CODE_OAUTH_TOKEN.
 #   - GitHub:    workflow's GITHUB_TOKEN passed as `github_token` to
