@@ -220,7 +220,6 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
           USE_LOCAL_VERSION: ${{ inputs.use_local_version }}
-          USE_PREBUILT_AITER: ${{ inputs.use_prebuilt_aiter }}
         run: |
           extra_env=()
           if [[ "${USE_LOCAL_VERSION}" == "true" ]]; then

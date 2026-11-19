@@ -25,7 +25,7 @@ import argparse
 import json
 import os
 import sys
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 -- parses only this CI run's own JUnit XML
 
 # Narrow only if at most this fraction of the item needs re-running; beyond it,
 # running it whole costs little more. Half, so that a timeout part-way through a

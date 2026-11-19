@@ -27,7 +27,7 @@ import glob
 import json
 import os
 import sys
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 -- parses only this CI run's own JUnit XML
 from collections import defaultdict
 
 # UI shows at most ~10 annotations of each level; cap to keep the log readable.
