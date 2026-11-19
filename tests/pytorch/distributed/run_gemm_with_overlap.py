@@ -203,7 +203,9 @@ def _parse_args(argv=None, namespace=None):
     if opts.dgrad:
         assert not opts.bulk_overlap, "--dgrad is for the non-bulk overlap"
         assert opts.comm_type == tex.CommOverlapType.AG, "--dgrad requires --comm-type=AG."
-        assert opts.quantization == "none", "--dgrad is bf16 only."
+        assert (
+            opts.quantization == "none" or IS_HIP_EXTENSION
+        ), "--dgrad is bf16 only."
         assert not opts.atomic, "--dgrad does not cover the atomic GEMM path."
 
     if opts.bulk_overlap:
@@ -216,7 +218,7 @@ def _parse_args(argv=None, namespace=None):
         if opts.atomic:
             warnings.warn("Atomic GEMM is not supported with bulk overlap.")
             opts.atomic = False
-        if opts.quantization != "none":
+        if opts.quantization != "none" and not IS_HIP_EXTENSION:
             warnings.warn("Bulk overlap is supported in FP8 but only tested in BF16.")
             opts.quantization = "none"
     elif opts.comm_type == tex.CommOverlapType.AG:
@@ -372,7 +374,7 @@ def _main(opts):
     buffer_dtype = torch.bfloat16
     if (
         opts.quantization != "none"
-        and not opts.bulk_overlap
+        and (IS_HIP_EXTENSION or not opts.bulk_overlap)
         and opts.comm_type == tex.CommOverlapType.AG
     ):
         buffer_dtype = torch.uint8
@@ -636,7 +638,7 @@ def _main(opts):
         fp8_dtype = te.DType.kFloat8E4M3
         inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         ker_quantizer = MXFP8Quantizer(fp8_dtype)
-        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
+        if opts.bulk_overlap and (IS_HIP_EXTENSION or opts.comm_type == tex.CommOverlapType.RS):
             bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         elif ub_obj2 is not None:
             inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
@@ -696,7 +698,7 @@ def _main(opts):
                 bulk_inp_quantizer,
                 tp_group,
             )
-            gemm_inp = inp
+            gemm_inp = inp_fp8 if with_quantized_compute else inp
         elif not opts.use_cublasmp:
             ag_out, _ = fill_userbuffers_buffer_for_all_gather(
                 ub_obj,
@@ -739,6 +741,7 @@ def _main(opts):
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
+            layout=gemm_layout,
         )
 
     def _fp8_gemm2(gemm1_out):
@@ -838,6 +841,35 @@ def _main(opts):
 
     # Compare against standard GEMM
     numerics_failed = False
+
+    # The peers' rows of the scale region base.py hands out are kernel output that no GEMM reads
+    # back, so only this check catches a stale one.
+    check_ub_scales = (
+        opts.check_numerics
+        and ag_out is not None
+        and not opts.bulk_overlap
+        and isinstance(ub_obj, tex.CommOverlapP2P)
+        and ub_obj.has_scale_buffer()
+    )
+    if check_ub_scales:
+        torch.cuda.synchronize()
+        dist.barrier(tp_group)
+        local_scales = inp_fp8._rowwise_scale_inv.contiguous()
+        ref_scales = torch.empty(
+            [tp_size * local_scales.size(0)] + list(local_scales.shape[1:]),
+            dtype=local_scales.dtype,
+            device=local_scales.device,
+        )
+        dist.all_gather_into_tensor(ref_scales, local_scales, group=tp_group)
+        ub_scales = ag_out._rowwise_scale_inv
+        mismatched = int((ub_scales != ref_scales).sum().item())
+        numerics_failed = numerics_failed or mismatched != 0
+        scales_info = (
+            f"UB SCALE CHECK PASSED: {ref_scales.numel()} scale bytes match the all-gather"
+            if mismatched == 0
+            else f"UB SCALE CHECK FAILED: {mismatched}/{ref_scales.numel()} scale bytes differ"
+        )
+        dist_print(scales_info, section=True, info=True, error=mismatched != 0, group=tp_group)
     if opts.check_numerics:
         torch.cuda.synchronize()
         dist.barrier(tp_group)
@@ -849,6 +881,8 @@ def _main(opts):
 
                 if bulk_inp_quantizer is None:
                     test_out = ub_obj.get_buffer(False)
+                elif isinstance(bulk_inp_quantizer, MXFP8Quantizer):
+                    test_out = ag_out.dequantize(dtype=torch.bfloat16)
                 else:
                     test_out = Float8Tensor(
                         shape=test_out.shape,

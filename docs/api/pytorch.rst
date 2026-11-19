@@ -28,6 +28,12 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 
+.. autoapiclass:: transformer_engine.pytorch.GatedDeltaNet2Attention(num_attention_heads, kv_channels, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.GatedDeltaProductAttention(num_attention_heads, kv_channels, num_householder=1, **kwargs)
+  :members: forward
+
 .. autoapiclass:: transformer_engine.pytorch.MultiheadAttention(hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
@@ -107,7 +113,6 @@ Communication-computation overlap
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
-.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
 
 .. autoapiclass:: transformer_engine.pytorch.UserBufferQuantizationMode
   :members: FP8, NONE

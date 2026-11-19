@@ -106,14 +106,18 @@ std::ostream* get_ck_log_stream() {
   return log_stream;
 }
 
+// Return AITER's data_type kernel-selection tag. The tag may encode a
+// combination of input and output types rather than the input dtype alone.
 std::string get_data_type_str(DType dtype){
   std::string data_type_str;
   if(dtype==DType::kFloat16){
     data_type_str = "fp16";
   }else if(dtype==DType::kBFloat16){
     data_type_str = "bf16";
+  }else if(dtype==DType::kFloat8){
+    data_type_str = "fp8bf16";
+    // "fp8bf16" selects FP8 input with BF16 output; "fp8" selects FP8 output.
   }else{
-    //TODO: better error out system
     throw std::runtime_error("Invalid dtype in ck_fused_attn.");
   }
   return data_type_str;

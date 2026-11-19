@@ -38,17 +38,6 @@ run_default_fa_lbl() {
     fi
 }
 
-check_mxfp8_supported() {
-    #Guard MXFP8-only test filters, which collect no tests on unsupported archs
-    _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "MXFP8 is not supported on this device, skipping MXFP8-only tests" >&2
-        return 1
-    fi
-}
-
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -56,10 +45,19 @@ run_test_config(){
     export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        mkdir -p ${TEST_DIR}/checkpoint
-        python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
-        NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
-        rm -rf ${TEST_DIR}/checkpoint
+        #The checkpoint artifact is made outside pytest_run, so gate it on the
+        #test's own tag; otherwise every filtered run would regenerate it.
+        _ckpt_variant=`get_test_variant_tag $_fus_attn ""`
+        _ckpt_tag=`get_test_name_tag test_checkpoint.py $_ckpt_variant`
+        if [ -n "$TE_CI_LIST_ITEMS" ]; then
+            #List mode: report the item without making the artifact
+            run 1 test_checkpoint.py
+        elif check_test_filter "$_ckpt_tag"; then
+            mkdir -p ${TEST_DIR}/checkpoint
+            python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
+            NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
+            rm -rf ${TEST_DIR}/checkpoint
+        fi
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
@@ -69,10 +67,12 @@ run_test_config(){
     run_default_fa 1 test_quantized_tensor.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
+    run_default_fa 1 test_fused_optimizer.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
+    run_default_fa 1 test_gemm_sm_count.py
     # test_gemm_backends.py self-gates on backend availability and flips
     # NVTE_GEMM_BACKEND per call, so a single invocation runs every supported
     # backend (Triton where pytorch-triton-rocm is installed, FlyDSL on gfx950).
@@ -80,17 +80,19 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "gemm-backends" 1 test_gemm_backends.py
     NVTE_GEMM_BACKEND=TRITON run_default_fa_lbl "triton" 1 triton_kernels/test_gemm_kernel.py
     run 1 test_gqa.py
-    run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 run_default_fa 1 test_module_grouped_linear_distributed_weight.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
+    check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
+    run_default_fa 1 test_optional_flash_attn_import.py
     run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
@@ -98,11 +100,19 @@ run_test_config(){
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 attention/test_cu_seqlens_cache.py
     run_default_fa 1 attention/test_mixed_thd_attention.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 attention/test_fused_mla.py
     run_default_fa 1 triton_kernels/test_blockwise_fp8.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
-    run_default_fa 1 triton_kernels/test_grouped_gemm.py
+    # Triton 3.8.0 enables direct global->LDS async copy by default on gfx950, which
+    # stages every operand tile in LDS per pipeline stage instead of going through
+    # registers -- roughly doubling shared memory for num_stages=2. The k_heavy and
+    # k_heavy_bwd GMM configs (the only BLOCK_SIZE_K=128 ones) then need 272304 B
+    # against a 163840 B limit and fail to compile on the REAL_SHAPES. 
+    # Disabling async copy restores the 3.7.1 allocation exactly (131072 B). 
+    # Remove this once the gfx950 configs are retuned for the new default.
+    TRITON_HIP_USE_ASYNC_COPY=0 run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_grouped_gemm_mxfp4.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
@@ -133,19 +143,15 @@ run_test_config(){
     run_default_fa 1 layernorm_mlp/test_selective_activation_checkpoint.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_custom_recipe.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 mxfp8/
-    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
+    check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
 }
 
 run_test_config_mgpu(){
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
-    run_default_fa 1 test_fused_optimizer.py
-    #this test is not really mGPU but time sensitive so run it here because sGPU tests
-    #run in parallel on CI and it affects timing
-    run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
-    run_default_fa 3 distributed/test_rocm_fused_overlap.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 3 distributed/test_rocm_fused_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 2 distributed/test_sanity.py
@@ -162,6 +168,10 @@ run_test_config_mgpu(){
 
 run_benchmark() {
     check_test_filter benchmark || return
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
+        echo "TE_CI_ITEM benchmark"
+        return
+    fi
     echo "\n============= Running benchmarks attention script ============="
     BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
     
@@ -185,22 +195,17 @@ if [ -n "$SINGLE_CONFIG" ]; then
     exit $?
 fi
 
-check_flash_attn_installed() {
-    _result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "Flash attention is not installed" >&2
-        return 1
-    fi
-}
-
 #Master script mode: prepare testing prerequisites first
 start_message
-install_prerequisites
-pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
-#check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
-ck_jit_prebuild build || exit $?
+#A scheduler runs this setup once with TE_CI_SETUP_ONLY, then skips it for each
+#item it dispatches (TE_CI_SKIP_SETUP; TE_CI_SKIP_CK_JIT if it built the cache)
+if check_setup_needed; then
+    install_prerequisites
+    pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
+    #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
@@ -224,7 +229,7 @@ for _fus_attn in auto flash ck aotriton unfused; do
     fi
 
     if [ $_fus_attn = flash ]; then
-        check_flash_attn_installed || continue
+        check_supported flash_attn || continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then

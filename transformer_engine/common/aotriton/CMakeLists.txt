@@ -18,6 +18,7 @@ set(__AOTRITON_SUFFIX "_TEprivate")
 if(NOT DEFINED AOTRITON_PATH)
 
     set(__AOTRITON_VER "0.11.2b")
+    set(__AOTRITON_ARCH_LIST "gfx942" "gfx950")
     set(__AOTRITON_IMAGE_LIST
         "amd-gfx942"
         "amd-gfx950"
@@ -27,11 +28,28 @@ if(NOT DEFINED AOTRITON_PATH)
         "c1ba3bfe84217fd67df3dd1f8b67c80a7f7b33d0ad4d74b41d6567036e032ace" # amd-gfx950
     )
     set(__AOTRITON_BASE_URL "https://github.com/ROCm/aotriton/releases/download/")  # @lint-ignore
+
+    set(__AOTRITON_BUILD_ARCH "")
+    foreach(arch ${CMAKE_HIP_ARCHITECTURES})
+        if(arch IN_LIST __AOTRITON_ARCH_LIST)
+            list(APPEND __AOTRITON_BUILD_ARCH "${arch}")
+        else()
+            message(WARNING "AOTriton: architecture ${arch} is not supported and will be skipped.")
+        endif()
+    endforeach()
+
+    if(NOT __AOTRITON_BUILD_ARCH)
+        message(FATAL_ERROR "AOTriton: none of the requested build architectures "
+                            "(${CMAKE_HIP_ARCHITECTURES}) are supported by AOTriton. "
+                            "Supported architectures: ${__AOTRITON_ARCH_LIST}.")
+    endif()
+
     include(ExternalProject)
 
     # Download GPU kernels for a specific target
-    function(aotriton_download_image image project)
-        list(FIND __AOTRITON_IMAGE_LIST ${image} index)
+    function(aotriton_download_image arch project)
+        list(FIND __AOTRITON_ARCH_LIST ${arch} index)
+        list(GET __AOTRITON_IMAGE_LIST ${index} image)
         list(GET __AOTRITON_IMAGE_SHA256_LIST ${index} __AOTRITON_IMAGE_SHA256)
 
         string(CONCAT __AOTRITON_FILE
@@ -68,10 +86,15 @@ if(NOT DEFINED AOTRITON_PATH)
     function(aotriton_build_from_source)
         set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
         get_git_commit(${TE}/3rdparty/aotriton AOTRITON_SHA)
+        
+        te_rocm_rpath(__AOTRITON_RPATH)
+        list(INSERT __AOTRITON_RPATH 0 "$ORIGIN")
+        string(REPLACE ";" "," __AOTRITON_RPATH "${__AOTRITON_RPATH}")
         ExternalProject_Add(aotriton_external
             LIST_SEPARATOR ","
             SOURCE_DIR ${TE}/3rdparty/aotriton
             CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${__AOTRITON_INSTALL_DIR}
+            -DCMAKE_INSTALL_RPATH=${__AOTRITON_RPATH}
             -DCMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake
             -DAOTRITON_TARGET_ARCH=${ARCH_LIST_COMMA_STR}
             -DGPU_TARGETS=${ARCH_LIST_COMMA_STR}
@@ -98,26 +121,17 @@ if(NOT DEFINED AOTRITON_PATH)
 
     add_library(aotriton INTERFACE)
     message(STATUS "Building AOTriton from source.")
-    string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${CMAKE_HIP_ARCHITECTURES}")
+    string(REPLACE ";" "," ARCH_LIST_COMMA_STR "${__AOTRITON_BUILD_ARCH}")
     aotriton_build_from_source()
 
     # Download GPU kernels if needed
     if(NOT USE_FUSED_ATTN_AOTRITON_BUILD_GPU_KERNELS)
-    message(STATUS "Downloading AOTriton GPU Kernels.")
-    foreach(image ${__AOTRITON_IMAGE_LIST})
-        string(SUBSTRING ${image} 7 -1 gfx_pattern)
-        string(REPLACE "x" "." gfx_regex ${gfx_pattern})
-        foreach(target ${ARCH_LIST_COMMA_STR})
-        if(target MATCHES ${gfx_regex})
-            message(STATUS "Downloading AOTriton image ${image}.")
-            set(__AOTRITON_DOWNLOAD_TARGET aotriton_image_${gfx_pattern})
-            aotriton_download_image(${image} ${__AOTRITON_DOWNLOAD_TARGET})
+        foreach(arch ${__AOTRITON_BUILD_ARCH})
+            message(STATUS "Downloading AOTriton GPU kernels for ${arch}.")
+            set(__AOTRITON_DOWNLOAD_TARGET aotriton_image_${arch})
+            aotriton_download_image(${arch} ${__AOTRITON_DOWNLOAD_TARGET})
             add_dependencies(aotriton_external ${__AOTRITON_DOWNLOAD_TARGET})
-            break()
-        endif()
         endforeach()
-    endforeach()
-    else()
     endif()
 
 else()

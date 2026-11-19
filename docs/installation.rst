@@ -76,10 +76,10 @@ Execute the following commands to install Transformer Engine from source:
   git clone --recursive https://github.com/ROCm/TransformerEngine.git
 
   cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax     # Optionally set framework(s)
-  export NVTE_ROCM_ARCH="gfx942;gfx950" # Optionally set target GPU architectures; gfx942 for MI300/MI325, and gfx950 for MI350
-  export NVTE_USE_ROCM=1                # Optionally force building for ROCm, useful when both ROCm and CUDA build environments are installed. If set to 0, it will force building for CUDA.
-  pip3 install --no-build-isolation .   # Build and install
+  export NVTE_FRAMEWORK=pytorch,jax            # Optionally set framework(s)
+  export NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250  # Optionally set target GPU architecture(s);
+  export NVTE_USE_ROCM=1                       # Optionally force building for ROCm, useful when both ROCm and CUDA build environments are installed. If set to 0, it will force building for CUDA.
+  pip3 install --no-build-isolation .          # Build and install
 
 Or instead of immediate installation, create wheel file to install it later:
 
@@ -125,7 +125,7 @@ Prerequisites
 1. Linux x86_64
 2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 12.1 or later.
-4. `cuDNN 9.3 <https://developer.nvidia.com/cudnn>`__ or later.
+4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
@@ -233,6 +233,4 @@ To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
   NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
 
-.. include:: ../README.rst
-   :start-after: troubleshooting-begin-marker-do-not-remove
-   :end-before: troubleshooting-end-marker-do-not-remove
+.. include:: troubleshooting.rst

@@ -8,8 +8,6 @@
 
 from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 import warnings
 import weakref
 
@@ -26,6 +24,7 @@ from .base import (
     fused_rs_gemm_eligible,
     fused_bulk_ag_eligible,
     fused_bulk_rs_eligible,
+    fused_wgrad_ag_eligible,
     _ub_is_fused,
     ub_overlap_disabled,
     get_dummy_wgrad,
@@ -41,6 +40,7 @@ from .base import (
 )
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
+    check_fp8_reduce_and_update,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -97,7 +97,7 @@ from ..quantized_tensor import (
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
-    register_custom_op,
+    register_custom_op_with_autograd,
     is_value_opaque_quantizer,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
@@ -336,16 +336,6 @@ class LinearBwdArgs:
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
-
-
-def _check_fp8_reduce_and_update():
-    """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    qstate = FP8GlobalStateManager.quantization_state
-    _first_fp8_module = qstate.is_first_fp8_module
-    result = FP8GlobalStateManager.is_first_fp8_module()
-    if in_fp8_activation_recompute_phase():
-        qstate.is_first_fp8_module = _first_fp8_module
-    return result
 
 
 def _out_leading_from_inp(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
@@ -715,12 +705,6 @@ def _linear_forward_impl(
     else:
         out = gemm_out
 
-    # Restore the input's logical rank (e.g., (seq, batch, hidden)) on the output.
-    # This is mainly to correct for cuBLASMp comm+GEMM operators that unconditionally
-    # return a 2D output buffer that ends up incompatible with downstream consumers
-    # (e.g. ``bias_dropout_add`` residual connections inside ``TransformerLayer``).
-    out = out.view(-1, *inp.shape[1:-1], out_features)
-
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -967,11 +951,14 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # Output tensor: y = x @ w^T (quantized iff an output quantizer is set).
     # ------------------------------------------------------
-    # A rank-1 input is viewed to (1, in_features), so the output leads with 1.
     inp_leading = inp.shape[0] if len(inp.shape) > 1 else 1
     out_leading = _out_leading_from_inp(inp_leading, args)
     out = TensorSpec(
-        shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
+        shape=(
+            (out_features,)
+            if len(inp.shape) == 1
+            else (out_leading, *tuple(inp.shape[1:-1]), out_features)
+        ),
         dtype=activation_dtype,
         quantizer=output_quantizer,
         requires_grad=is_grad_enabled
@@ -1266,7 +1253,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
             inp_leading = _inp_leading_from_out(grad_output.shape[0], bwd_args)
-            bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+            bwd_args.inp_shape = (
+                torch.Size([in_features])
+                if grad_output.ndim == 1
+                else torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+            )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         bwd_args.ub_obj_gradout = None
@@ -1274,10 +1265,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = [
-            reduce(multiply_op, bwd_args.inp_shape[:-1]),
-            bwd_args.inp_shape[-1],
-        ]
+        dgrad_shape = bwd_args.inp_shape
         if bwd_args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             bwd_args.ub_obj_gradout = get_ub(bwd_args.ub_name + "_dgrad", bwd_args.fp8)
@@ -1417,6 +1405,23 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # Compute grad input tensor
         # --------------------------------------------------
 
+        # ROCm fused backend: the dgrad kernel can carry a second all-gather for the column-scaled
+        # grad output, so upstream's external AG on borrowed dgrad streams is not needed. It rides
+        # inside the dgrad GEMM, so the region has to be staged before that GEMM launches.
+        ub_obj_overlap_wgrad = None
+        grad_output_wgrad = None
+        ub_fused_wgrad_ag = (
+            bwd_args.requires_dgrad
+            and bwd_args.requires_wgrad
+            and bwd_args.ub_overlap_ag
+            # The bulk path routes to fused_overlap_bulk_ag, which carries no second region.
+            and not bwd_args.ub_bulk_dgrad
+            # The debug overrides dequantize the dgrad operand, leaving no MXFP8 GEMM to ride in.
+            and bwd_args.backward_override is None
+            and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            and fused_wgrad_ag_eligible(bwd_args.ub_name)
+        )
+
         dgrad = None
         dgrad_work = None
 
@@ -1477,10 +1482,26 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     device=grad_output_arg.device,
                 )
             elif bwd_args.ub_bulk_wgrad:
-                gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
+                gemm_out = ub_obj_wgrad.get_buffer(
+                    local_chunk=False, shape=(*grad_output.shape[:-1], dgrad_shape[-1])
+                )
 
             # dgrad GEMM
             # Note: dx = dy * w
+
+            if ub_fused_wgrad_ag:
+                ub_obj_overlap_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
+                grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                grad_output_wgrad, _ = fill_userbuffers_buffer_for_all_gather(
+                    ub_obj_overlap_wgrad,
+                    grad_output_arg,
+                    grad_output_quantizer,
+                    bwd_args.tp_group,
+                )
+                # The dgrad kernel carries this region's gather in its own grid. Armed here and
+                # consumed by the GEMM immediately below, so nothing that can raise may come
+                # between the two; see CommOverlapP2PBase::arm_aux_ag_region.
+                ub_obj_dgrad.arm_aux_ag_region(ub_obj_overlap_wgrad)
 
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight_fp8
@@ -1530,7 +1551,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     else reduce_scatter_out
                 )
             elif bwd_args.ub_bulk_wgrad:
-                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape)
             elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
                 dgrad = gemm_out
@@ -1597,7 +1618,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             # Prepare grad output tensor
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
-            if (
+            if ub_fused_wgrad_ag:
+                # The dgrad kernel carried the column-scaled gather into the _wgrad region, so the
+                # view staged above that GEMM is complete. No streams to borrow, no external AG.
+                grad_output = grad_output_wgrad
+            elif (
                 bwd_args.ub_overlap_ag
                 and isinstance(grad_output_quantizer, MXFP8Quantizer)
                 and not ub_obj_dgrad.with_cublasmp()
@@ -1752,7 +1777,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 if ub_obj_wgrad.is_fp8_ubuf():
                     dgrad = reduce_scatter_out
                 else:
-                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
+                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape).clone()
 
         # --------------------------------------------------
         # Grad weight has been computed...
@@ -1790,6 +1815,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 wgrad = get_dummy_wgrad(
                     wgrad_shape,
                     origin_weight_python_object.dtype,
+                    zero_tensor=getattr(
+                        origin_weight_python_object, "zero_tensor_dummy_wgrad", False
+                    ),
                 )
         elif bwd_args.fuse_wgrad_accumulation:
             wgrad = None
@@ -1801,7 +1829,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         _fsdp_scatter_tensors(bwd_args.fsdp_group, weight_fp8)
     return (
         wgrad,
-        dgrad.view(bwd_args.inp_shape) if bwd_args.requires_dgrad else None,
+        dgrad if bwd_args.requires_dgrad else None,
         grad_bias,
     )
 
@@ -1839,7 +1867,11 @@ def _linear_backward_fake(
             None if (args.ub_overlap_rs_dgrad or args.ub_bulk_wgrad) else args.grad_input_quantizer
         )
         dgrad = TensorSpec(
-            shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
+            shape=(
+                (in_features,)
+                if len(args.grad_output.shape) == 1
+                else (dgrad_leading, *args.grad_output.shape[1:-1], in_features)
+            ),
             dtype=out_dtype,
             quantizer=dgrad_quantizer,
             device=args.grad_output.device,
@@ -1869,7 +1901,7 @@ def _linear_backward_fake(
 
 
 # Custom op used under ``torch.compile``.
-_linear_op = register_custom_op(
+_linear_op = register_custom_op_with_autograd(
     op_name="linear",
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
@@ -1934,7 +1966,7 @@ class _Linear(torch.autograd.Function):
                 or fwd_args.weight_requires_grad
                 or fwd_args.bias_requires_grad
             ):
-                bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
+                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
                 bwd_args.autocast_fp8_reduction_skipped = (
                     FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
                 )
@@ -2604,12 +2636,12 @@ class Linear(TransformerEngineBaseModule):
 
             if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
                 self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_fprop = False
             if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor, None,
-                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_overlap_ag_dgrad = False
             if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
@@ -2625,6 +2657,7 @@ class Linear(TransformerEngineBaseModule):
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
                 self.ub_name + "_dgrad", inp, weight_tensor,
                 self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=self.fp8 and self.fp8_meta["recipe"].mxfp8(),
             ):
                 ub_bulk_dgrad = False
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(

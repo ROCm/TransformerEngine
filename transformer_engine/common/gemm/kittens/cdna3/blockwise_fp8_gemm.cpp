@@ -157,8 +157,10 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         float sa_reg1[REG_M / 16 * 4];
 
         // Cluster 0
-        if (!is_last_n && !is_next_k_partial)
-            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+        if (!is_last_n && !is_next_k_partial) {
+            load_tile_to_register_buffer<!IS_PARTIAL_K, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b,
+                                                                     {0, 0, col, k_step + 1}, Bs);
+        }
         float sb_next;
         float sb_reg[REG_N / 16]; // Unused in the 1d2d path; declared here for 1d1d
         kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
@@ -196,8 +198,10 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4
-        if (!is_last_m && !is_next_k_partial)
-            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
+        if (!is_last_m && !is_next_k_partial) {
+            load_tile_to_register_buffer<!IS_PARTIAL_K, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a,
+                                                                     {0, 0, row, k_step + 1}, As);
+        }
         kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + WARPS_ROW, 2}));
         kittens::load(bt[2], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
         kittens::load(at[4], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
@@ -420,7 +424,10 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
         const bool has_bias  = (args.bias != nullptr);
         const bool has_gelu  = (args.gelu_aux != nullptr);
         const bool has_beta  = (args.c_in != nullptr);
-        const bool has_partial_k = (K % BLOCK_K != 0);
+        // IS_PARTIAL_K kernels also handle K % BLOCK_K == 0 and do not set the cache-swizzle bit in their register
+        // prefetch: use them whenever operand rows do not all start on a 128-B cache line.
+        const bool has_partial_k = (K % BLOCK_K != 0) ||
+                                   (reinterpret_cast<uintptr_t>(kA) | reinterpret_cast<uintptr_t>(kB)) % 128 != 0;
         const int  k_blocks  = (K + BLOCK_K - 1) / BLOCK_K;
 
         auto run = [&]<bool A_E4M3, bool B_E4M3, typename OType>() {

@@ -337,6 +337,46 @@ def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, 
     assert overflow_buf.item() == 0
 
 
+@pytest.mark.parametrize("unscale", [False, True])
+def test_multi_tensor_l2norm_tensor_over_2_31_elements(unscale):
+    # One tensor with more than 2^31 elements, between two small ones: element counts
+    # and chunk offsets must not be truncated to 32 bits.
+    big_numel = 2**31 + 3
+    small_numels = [555, 2048 * 32 + 1]
+    needed_bytes = (big_numel + sum(small_numels)) * 2 + (1 << 30)
+    if torch.cuda.mem_get_info()[0] < needed_bytes:
+        pytest.skip(f"needs {needed_bytes / 2**30:.1f} GiB of free GPU memory")
+
+    device = torch.device("cuda")
+    applier = MultiTensorApply(2048 * 32)
+    overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
+    in_list = [
+        torch.ones(small_numels[0], dtype=torch.bfloat16, device=device),
+        torch.ones(big_numel, dtype=torch.bfloat16, device=device),
+        torch.ones(small_numels[1], dtype=torch.bfloat16, device=device),
+    ]
+    total = big_numel + sum(small_numels)
+
+    if unscale:
+        inv_scale = 0.5
+        inv_scale_cuda = torch.tensor([inv_scale], dtype=torch.float32, device=device)
+        norm, _ = applier(
+            tex.multi_tensor_unscale_l2norm, overflow_buf, [in_list], inv_scale_cuda, False
+        )
+        expected = inv_scale * total**0.5
+    else:
+        norm, _ = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], False)
+        expected = total**0.5
+
+    torch.testing.assert_close(
+        norm.cpu().double().reshape(()),
+        torch.tensor(expected, dtype=torch.float64),
+        rtol=1e-6,
+        atol=0.0,
+    )
+    assert overflow_buf.item() == 0
+
+
 @pytest.mark.parametrize("input_size_pair", input_size_pairs + [(1, 1)])
 @pytest.mark.parametrize("applier", appliers)
 @pytest.mark.parametrize("repeat", [1, 55])

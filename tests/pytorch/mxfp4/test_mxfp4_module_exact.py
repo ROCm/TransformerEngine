@@ -19,6 +19,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import (
 )
 from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 
 recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=True)
@@ -29,6 +30,16 @@ try:
     _aiter_available = True
 except ImportError:
     _aiter_available = False
+
+_is_gfx1250 = recipe_available and get_device_compute_capability() == (12, 5)
+requires_mxfp4_gemm_backend = pytest.mark.skipif(
+    not (_is_gfx1250 or _aiter_available), reason="aiter package not available"
+)
+
+
+def skip_if_unsupported_shape(in_features: int, out_features: int):
+    if _is_gfx1250 and (in_features % 256 or out_features % 256):
+        pytest.skip("FlyDSL MXFP4 GEMM needs in_features and out_features divisible by 256")
 
 
 class GetRecipes:
@@ -244,7 +255,7 @@ def check_mxfp4_module_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
+@requires_mxfp4_gemm_backend
 @pytest.mark.parametrize(
     "in_features, out_features",
     [
@@ -270,6 +281,7 @@ def test_mxfp4_linear_versus_reference(
     """Test MXFP4 Linear module against reference implementation."""
     if x_dtype != torch.bfloat16:
         pytest.skip("MXFP4 quantization is only supported for bfloat16 input")
+    skip_if_unsupported_shape(in_features, out_features)
 
     check_mxfp4_module_versus_reference(
         module_class=te.Linear,
@@ -412,12 +424,13 @@ def check_mxfp4_layernorm_linear_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
+@requires_mxfp4_gemm_backend
 @pytest.mark.parametrize(
     "in_features, out_features",
     [
         (128, 256),
         (256, 128),
+        (512, 512),
     ],
 )
 @pytest.mark.parametrize("bias", [False], ids=["no_bias"])
@@ -434,6 +447,7 @@ def test_mxfp4_layernorm_linear_versus_reference(
     num_steps: int,
     use_hadamard: bool,
 ):
+    skip_if_unsupported_shape(in_features, out_features)
     check_mxfp4_layernorm_linear_versus_reference(
         in_features=in_features,
         out_features=out_features,

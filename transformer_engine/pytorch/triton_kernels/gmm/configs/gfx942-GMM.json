@@ -102,11 +102,11 @@
         "balanced_large_n_bwd": {
             "BLOCK_SIZE_M": 256,
             "BLOCK_SIZE_K": 64,
-            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_N": 128,
             "GROUP_SIZE": 8,
             "GRID_DIM": 304,
-            "num_warps": 4,
-            "num_stages": 1
+            "num_warps": 8,
+            "num_stages": 2
         },
         "n_very_heavy_bwd": {
             "BLOCK_SIZE_M": 128,
@@ -131,11 +131,11 @@
     "ptgmm": {
         "default": {
             "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_K": 128,
             "BLOCK_SIZE_N": 256,
             "GROUP_SIZE": 4,
             "GRID_DIM": 304,
-            "num_warps": 4,
+            "num_warps": 8,
             "num_stages": 1
         },
         "high_group_count": {

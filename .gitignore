@@ -64,3 +64,4 @@ transformer_engine/common/util/hip_nvml.*
 .codex/
 .cline_storage/
 .claude/
+ci-data/

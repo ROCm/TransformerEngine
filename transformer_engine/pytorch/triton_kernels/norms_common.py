@@ -233,10 +233,13 @@ def _te_norm_fwd_triton(
         raise ValueError(f"Expected `kernel` in ('rms', 'layer') but got {kernel=} instead.")
     if eps < 0:
         raise ValueError(f"`eps` must be non-negative, but a value of {eps} was passed")
-    if len(input_tensor.shape) != 2:
-        raise ValueError(
-            f"The input must be a 2-dimensional matrix, but an input with {input_tensor.ndim} was passed.")
+    if input_tensor.ndim < 1:
+        raise ValueError("The input must have at least one dimension.")
 
+    # Like the C++ norm, accept N-D input: normalize over the last dim and return outputs with
+    # the input's shape. The kernels work on 2-D (rows, H) views.
+    input_shape = input_tensor.shape
+    input_tensor = input_tensor.reshape(-1, input_shape[-1])
     device = input_tensor.device
     N, H = input_tensor.shape
     if weight.shape[0] != H:
@@ -284,14 +287,15 @@ def _te_norm_fwd_triton(
     out = make_ln_out(
         ln_out,
         quantizer=quantizer,
-        input_shape=input_tensor.shape,
+        input_shape=input_shape,
         out_dtype=torch_out_dtype
     )
     amax = None
     tl_dtype = None
     scale_inv_ptr = None
     q_scale = None
-    out_ptr = out
+    # FP8 output is handled below through its raw data buffer
+    out_ptr = out if IS_FP8 else out.view(N, H)
     out_transpose_ptr = None
     out_transpose_stride = None
     FP8_MAX = None
@@ -305,12 +309,12 @@ def _te_norm_fwd_triton(
         tl_dtype = te_dtype_to_triton_dtype(quantizer.dtype)
         scale_inv_ptr = out._scale_inv
         q_scale = quantizer.scale
-        out_ptr = triton.reinterpret(out._data, tl_dtype)
+        out_ptr = triton.reinterpret(out._data.view(N, H), tl_dtype)
         FP8_MAX = get_fp8_max(quantizer.dtype)
         if MAKE_TRANSPOSE:
             if out._transpose_invalid:
                 out._transpose = torch.empty(
-                    (out._data.shape[1], out._data.shape[0]),
+                    (H, *input_shape[:-1]),
                     dtype=out._data.dtype, device=device
                 )
                 out._transpose_invalid = False
@@ -319,8 +323,8 @@ def _te_norm_fwd_triton(
                 use_external_transpose = True
             else:
                 # LayerNorm emits the transpose via in-kernel strided stores.
-                out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
-                out_transpose_stride = out._transpose.stride(0)
+                out_transpose_ptr = triton.reinterpret(out._transpose.view(H, N), tl_dtype)
+                out_transpose_stride = out_transpose_ptr.stride(0)
 
     grid_fwd = lambda meta: (NUM_PRGMS,)
     kernel_func = _norm_kernels[kernel][autotune]
@@ -379,17 +383,17 @@ def _te_norm_fwd_triton(
                 triton.cdiv(H, meta['BLOCK_N']),
             )
             transpose_kernel[grid_t](
-                out._data, out._transpose,
+                out._data.view(N, H), out._transpose.view(H, N),
                 N, H,
-                out._data.stride(0), out._transpose.stride(0),
+                H, N,
             )
         else:
             BLOCK_M, BLOCK_N = 64, 64
             grid_t = (triton.cdiv(N, BLOCK_M), triton.cdiv(H, BLOCK_N))
             transpose_kernel[grid_t](
-                out._data, out._transpose,
+                out._data.view(N, H), out._transpose.view(H, N),
                 N, H,
-                out._data.stride(0), out._transpose.stride(0),
+                H, N,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
             )
 
@@ -405,7 +409,7 @@ def _te_norm_fwd_triton(
             _out = ln_out
         else:
             _out = quantizer.make_empty(
-                input_tensor.shape,
+                input_shape,
                 dtype=te_dtype_to_torch_dtype(otype),
                 device=input_tensor.device
             )
@@ -421,8 +425,9 @@ def _te_norm_fwd_triton(
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
 def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, autotune: bool = True):
     # may take non-contiguous inputs
-    dz_ = dz.contiguous()
-    x_ = x.contiguous()
+    x_shape = x.shape
+    dz_ = dz.contiguous().view(-1, x_shape[-1])
+    x_ = x.contiguous().view(-1, x_shape[-1])
     rsigma_ = rsigma.contiguous()
     gamma_ = gamma.contiguous()
 
@@ -496,7 +501,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
                 BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
             )
 
-    return dx, dgamma
+    return dx.view(x_shape), dgamma
 
 # drop in replacement for transformer_engine::pytorch::layernorm_bwd
 # TODO: Add support for `sm_margin > 0`.
@@ -515,8 +520,9 @@ def te_layernorm_bwd_triton(
             + f"sm_margin={sm_margin} will be ignored."
         )
 
-    dz = dz.contiguous()
-    x = x.contiguous()
+    x_shape = x.shape
+    dz = dz.contiguous().view(-1, x_shape[-1])
+    x = x.contiguous().view(-1, x_shape[-1])
     mu = mu.contiguous()
     rsigma = rsigma.contiguous()
     gamma = gamma.contiguous()
@@ -604,4 +610,4 @@ def te_layernorm_bwd_triton(
             BLOCK_SIZE_N=dwdb_block_n,
         )
 
-    return dx, dgamma, dbeta
+    return dx.view(x_shape), dgamma, dbeta

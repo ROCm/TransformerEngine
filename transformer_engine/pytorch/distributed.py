@@ -634,6 +634,7 @@ def get_te_classes():
         DotProductAttention,
     )
     from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.linear_attention.base import LinearAttentionBase
     from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
@@ -641,6 +642,7 @@ def get_te_classes():
         LayerNorm,
         RMSNorm,
         TransformerEngineBaseModule,
+        LinearAttentionBase,
         UnfusedDotProductAttention,
         DotProductAttention,
         MultiheadAttention,

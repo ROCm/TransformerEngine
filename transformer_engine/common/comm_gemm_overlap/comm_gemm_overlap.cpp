@@ -481,9 +481,15 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
     if (_ubuf.element_size() == 1) {
       assert(_ubuf_scale_inv_initialized);
       comm_elements *= 2;
-      assert(rs_output.numel() == _ubuf.numel() / _tp_size);
-      assert(rs_output.size(0) == _ubuf.size(0) / _tp_size);
-      assert(rs_output.element_size() == 2);
+      NVTE_CHECK(rs_output.numel() == _ubuf.numel() / _tp_size,
+                 "Reduce-scatter output has an invalid element count (expected ",
+                 _ubuf.numel() / _tp_size, ", got ", rs_output.numel(), ")");
+      NVTE_CHECK(convertNVTETensor(rs_output.data())->flat_first_dim() == _ubuf.size(0) / _tp_size,
+                 "Reduce-scatter output has an invalid flattened first dimension (expected ",
+                 _ubuf.size(0) / _tp_size, ", got ",
+                 convertNVTETensor(rs_output.data())->flat_first_dim(), ")");
+      NVTE_CHECK(rs_output.element_size() == 2,
+                 "FP8 reduce-scatter output must have 2-byte elements");
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, _ubuf.scale_inv(), _ub_reg, 0,
                                                  comm_elements, _ub_comm, _stream_comm,
@@ -845,6 +851,14 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       num_ubuf_view_chunks = _num_ubuf_chunks;
     }
   }
+
+#ifdef USE_HIPKITTENS_GEMM
+  if (_fused && buffer_dtype == DType::kByte && comm_type == CommOverlapType::AG) {
+    _scale_chunk_bytes = buffer_chunk_bytes / 32;
+    _scale_base_offset = buffer_bytes;
+    buffer_bytes += _scale_chunk_bytes * _tp_size;
+  }
+#endif
 
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);

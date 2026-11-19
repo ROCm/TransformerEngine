@@ -7,6 +7,7 @@
 from __future__ import annotations
 from enum import Enum
 from functools import partial
+import math
 from typing import Any, Callable, Mapping, Optional, Tuple, Union
 import warnings
 
@@ -716,6 +717,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     attn_mask_type,
     window_size,
     max_segments_per_seq,
+    allow_fast_causal_path=True,
 ):
     """Compute per-segment seqlens and start offsets(currently only used for THD)
     Given segment-id and segment-position tensors for Q and KV,
@@ -737,17 +739,20 @@ def _segment_ids_pos_to_seqlens_offsets(
                         Used here only as a fast-path eligibility hint
         max_segments_per_seq: maximum number of segments expected per row
                               Used to size the bincount / argwhere outputs
+        allow_fast_causal_path: whether the caller permits the boundary-only fast path.
+                                Ring attention disables it because rotated Q and KV subsets can
+                                have inter-segment padding at different local boundaries.
 
     Routing (only invoked for THD qkv_layout):
         1. Fast path -- ``_segment_ids_pos_to_seqlens_offsets_fast_causal_path``.
            O(T) per row. Counts all segment tokens via bincount on
            segment_ids and trims at most one token per segment at the
-           boundary. Used for:
+           boundary. Used only when Q and KV have identical segment metadata,
+           and ``allow_fast_causal_path`` is true for:
              - top-left CAUSAL / PADDING_CAUSAL with ``window_size is None``
              - SWA with ``window_size == (-1, -1)`` and not bottom-right
-           Bottom-right causal cross-attention is excluded: the boundary
-           trim leaves kv_seqlen short by one per active segment, which
-           shifts the BRCM bottom-right alignment by one KV per Q row.
+           Independent Q and KV metadata is routed through the general path,
+           even when the maximum sequence lengths happen to be equal.
 
         2. Slow path -- ``_get_seqlens_offsets_thd``.
            O(T * max_segments_per_seq) per row. Per-segment min/max
@@ -780,11 +785,41 @@ def _segment_ids_pos_to_seqlens_offsets(
     # must route bottom-right masks to the slow path.
 
     # Fast path: O(T) per row.
-    if (
-        attn_mask_type.is_causal() and not attn_mask_type.is_bottom_right() and window_size is None
-    ) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
-        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+    fast_path_requested = allow_fast_causal_path and (
+        (
+            attn_mask_type.is_causal()
+            and not attn_mask_type.is_bottom_right()
+            and window_size is None
+        )
+        or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right())
+    )
+    if fast_path_requested and (
+        segment_ids_q.shape == segment_ids_kv.shape and segment_pos_q.shape == segment_pos_kv.shape
+    ):
+        # The boundary-only algorithm is correct when Q and KV describe the same
+        # tokens. Cross-attention can have independent metadata even when its static
+        # shapes match, so select the fast path using the runtime metadata values.
+        metadata_matches = jnp.logical_and(
+            jnp.array_equal(segment_ids_q, segment_ids_kv),
+            jnp.array_equal(segment_pos_q, segment_pos_kv),
+        )
+        return jax.lax.cond(
+            metadata_matches,
+            lambda: _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+                segment_ids_q,
+                segment_ids_kv,
+                segment_pos_q,
+                segment_pos_kv,
+                max_segments_per_seq,
+            ),
+            lambda: _get_seqlens_offsets_thd(
+                segment_ids_q,
+                segment_ids_kv,
+                segment_pos_q,
+                segment_pos_kv,
+                attn_mask_type,
+                max_segments_per_seq,
+            ),
         )
     # Slow path: O(T * max_segments_per_seq) per row.
     return _get_seqlens_offsets_thd(
@@ -850,10 +885,39 @@ class SequenceDescriptor:
         return cls(*children)
 
     def get_seqlens_and_offsets(
-        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+        self,
+        attn_mask_type,
+        qkv_layout,
+        window_size,
+        max_segments_per_seq,
     ):
         """
         Acquire the seqlens/offsets for cuDNN backend.
+
+        The implementation automatically selects the fastest correct metadata path.
+        """
+        return self._get_seqlens_and_offsets(
+            attn_mask_type,
+            qkv_layout,
+            window_size,
+            max_segments_per_seq,
+            allow_fast_causal_path=True,
+        )
+
+    def _get_seqlens_and_offsets(
+        self,
+        attn_mask_type,
+        qkv_layout,
+        window_size,
+        max_segments_per_seq,
+        *,
+        allow_fast_causal_path,
+    ):
+        """Internal variant that lets CP primitives disable the causal fast path.
+
+        Rotated THD ring steps may have different local Q and KV boundaries even
+        when their metadata matched before rotation. Only those internal callers
+        should override automatic fast-path selection.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
@@ -894,8 +958,8 @@ class SequenceDescriptor:
                 n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
                 extra_batch_shape_q = q_segment_ids.shape[:n_extra_batch_dims_q]
                 extra_batch_shape_kv = kv_segment_ids.shape[:n_extra_batch_dims_kv]
-                extra_flat_batch_size_q = jnp.prod(extra_batch_shape_q)
-                extra_flat_batch_size_kv = jnp.prod(extra_batch_shape_kv)
+                extra_flat_batch_size_q = math.prod(extra_batch_shape_q)
+                extra_flat_batch_size_kv = math.prod(extra_batch_shape_kv)
                 # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
                 q_flat = q_segment_ids.reshape(
                     extra_flat_batch_size_q, *q_segment_ids.shape[n_extra_batch_dims_q:]
@@ -909,6 +973,7 @@ class SequenceDescriptor:
                     attn_mask_type=attn_mask_type,
                     window_size=window_size,
                     max_segments_per_seq=max_segments_per_seq,
+                    allow_fast_causal_path=allow_fast_causal_path,
                 )
 
                 q_sl, kv_sl, q_off, kv_off = jax.vmap(
@@ -928,6 +993,7 @@ class SequenceDescriptor:
                     attn_mask_type,
                     window_size,
                     max_segments_per_seq,
+                    allow_fast_causal_path,
                 )
         # BSHD: compute seqlens/offsets.
         else:
@@ -1158,6 +1224,9 @@ def _legacy_fused_attn(
         qkv,
         bias,
         softmax_offset,
+        None,
+        None,
+        None,
         SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
@@ -1237,6 +1306,9 @@ def fused_attn_thd(
         qkv,
         bias,
         softmax_offset,
+        None,
+        None,
+        None,
         SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
@@ -1261,12 +1333,18 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    # Scale inverses sit with the other primal inputs so jit can trace them.
+    # Their cotangents are None: this path does not differentiate the scales.
+    # Indexes are positions in this signature: 0-7 are differentiable, 8-22 are not.
+    nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     softmax_offset: Optional[jnp.ndarray],
+    q_scale_inv: Optional[jnp.ndarray],
+    k_scale_inv: Optional[jnp.ndarray],
+    v_scale_inv: Optional[jnp.ndarray],
     sequence_descriptor: SequenceDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
@@ -1289,6 +1367,9 @@ def _fused_attn(
         qkv,
         bias,
         softmax_offset,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         sequence_descriptor,
         seed,
         attn_bias_type,
@@ -1303,9 +1384,9 @@ def _fused_attn(
         context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
-        context_checkpoint_name=context_checkpoint_name,
-        stripe_size=stripe_size,
-        return_max_logit=return_max_logit,
+        context_checkpoint_name,
+        stripe_size,
+        return_max_logit,
     )
     return output
 
@@ -1314,6 +1395,9 @@ def _fused_attn_fwd_rule(
     qkv,
     bias,
     softmax_offset,
+    q_scale_inv,
+    k_scale_inv,
+    v_scale_inv,
     sequence_descriptor,
     seed,
     attn_bias_type,
@@ -1351,6 +1435,9 @@ def _fused_attn_fwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
         return_max_logit=return_max_logit,
     )
     output = checkpoint_name(output, context_checkpoint_name)
@@ -1427,10 +1514,16 @@ def _fused_attn_bwd_rule(
         grad_bias = None
     if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
         grad_softmax_offset = None
+    # Cotangents follow the differentiable inputs, in signature order:
+    # qkv, bias, softmax_offset, q_scale_inv, k_scale_inv, v_scale_inv,
+    # sequence_descriptor, seed.
     return (
         grad_qkv,
         grad_bias,
         grad_softmax_offset,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -1516,6 +1609,9 @@ def fused_attn(
     score_mod_bprop: Optional[Callable] = None,
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+    q_scale_inv: Optional[jnp.ndarray] = None,
+    k_scale_inv: Optional[jnp.ndarray] = None,
+    v_scale_inv: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
 ):
     """
@@ -1705,6 +1801,9 @@ def fused_attn(
         qkv,
         bias,
         softmax_offset,
+        q_scale_inv,
+        k_scale_inv,
+        v_scale_inv,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,

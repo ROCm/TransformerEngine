@@ -24,7 +24,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
-from ._common import _ParameterInitMeta, noop_cat
+from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
     is_stateless_recipe,
@@ -59,6 +59,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
+from ..tensor.utils import is_custom
 if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
     from ..triton_kernels.cast import te_quantize_triton
@@ -144,16 +145,29 @@ class UserBufferQuantizationMode(Enum):
     FP8 = "fp8"
 
 
-def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
-    """Returns a dummy tensor of given shape."""
+def get_dummy_wgrad(
+    shape: list, dtype: torch.dtype, zero: bool = False, zero_tensor: bool = False
+) -> torch.Tensor:
+    """Returns a dummy tensor of given shape.
 
-    key = (*shape, dtype)
+    With ``zero=True`` the cached dummy is filled with zeros. Otherwise, with
+    ``zero_tensor=True`` the dummy is a ZeroTensor: it has no storage and adding it costs
+    nothing, e.g. when autograd sums the dummy weight gradients of a weight used more than
+    once in one backward pass.
+    """
+
+    # The dummy goes on the current device (the one the backward pass runs on), and the cache
+    # is keyed by it so that a dummy is never returned for a weight on another device.
+    device = torch.device("cuda", torch.cuda.current_device())
+    if zero_tensor and not zero:
+        return torch._efficientzerotensor(shape, dtype=dtype, device=device)
+    key = (*shape, dtype, device)
     global _dummy_wgrads
     if key not in _dummy_wgrads:
         _dummy_wgrads[key] = torch.empty(
             shape,
             dtype=dtype,
-            device="cuda",
+            device=device,
             requires_grad=False,
         )
     if zero:
@@ -191,12 +205,12 @@ def initialize_ub(
               falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when ``use_fp8 = False``
-    ub_cfgs : dict = None
+    ub_cfgs : dict or List[dict] = None
              Configuration dictionary with the structure::
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange", "pipeline", or "fused" (ROCm only)>,
+                        "method": <"ring_exchange", "pipeline", "bulk", "external", or "fused" (ROCm only)>,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -212,7 +226,51 @@ def initialize_ub(
              for ``te.TransformerLayer`` GEMM layers in ``["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]``.
-             a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
+
+             With ``with_cublasmp=False``, the following defaults apply. Entries in
+             ``ub_cfgs`` are merged with the per-GEMM defaults. Omitted GEMMs use the
+             defaults below; changing a method can also affect a paired GEMM.
+
+             .. csv-table:: Default Userbuffers overlap configurations
+                :header: "GEMM", "Communication", "Method", "num_sm", "num_splits"
+
+                "qkv_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "qkv_dgrad", "AllGather", "bulk", 16, 4
+                "qkv_wgrad", "ReduceScatter", "bulk", 16, 4
+                "proj_fprop", "ReduceScatter", "pipeline", 16, 4
+                "proj_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "proj_wgrad", "AllGather", "external", 16, 4
+                "fc1_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "fc1_dgrad", "AllGather", "bulk", 16, 4
+                "fc1_wgrad", "ReduceScatter", "bulk", 16, 4
+                "fc2_fprop", "ReduceScatter", "pipeline", 16, 4
+                "fc2_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "fc2_wgrad", "AllGather", "external", 16, 4
+
+             ``num_splits`` is a default configuration value; ``ring_exchange``
+             does not use it. Changing ``qkv_dgrad`` or ``fc1_dgrad`` to a non-``bulk``
+             method configures its communicator for ReduceScatter and disables the
+             corresponding ``*_wgrad`` overlap communicator. To use DGRAD+ReduceScatter
+             overlap, also set ``sequence_parallel=True`` and ``ub_overlap_rs_dgrad=True``
+             on the layer. ``te.TransformerLayer`` additionally requires
+             ``ub_tp_comm_overlap=True``; ``te.Linear`` and ``te.LayerNormLinear``
+             require ``parallel_mode="column"``. The ``external`` overlaps for
+             ``proj_wgrad`` and ``fc2_wgrad`` require ``ring_exchange`` on
+             ``proj_dgrad`` and ``fc2_dgrad``, respectively.
+
+             With ``with_cublasmp=True``, ``qkv_dgrad`` and ``fc1_dgrad`` default to
+             ReduceScatter with ``ring_exchange``, ``num_sm=1``, and
+             ``num_splits=tp_size`` in their configurations. The ``qkv_wgrad``,
+             ``fc1_wgrad``, ``proj_wgrad``, and ``fc2_wgrad`` overlap communicators
+             are not created. cuBLASMp does not support ``bulk`` or ``external``
+             overlap methods. With cuBLASMp, a layer requesting ``ub_bulk_dgrad=True``
+             instead uses DGRAD+ReduceScatter overlap, even if
+             ``ub_overlap_rs_dgrad=False``, when sequence parallelism is active (and
+             ``ub_tp_comm_overlap=True`` for ``te.TransformerLayer``). The column-parallel
+             requirement still applies to ``te.Linear`` and ``te.LayerNormLinear``.
+
+             A list may be provided to specify a separate configuration for each
+             quantization mode in ``quantization_modes``.
     bootstrap_backend : str = None
                         ``torch.distributed`` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -709,12 +767,16 @@ def fused_ag_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether the fused AG+GEMM backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
+    if gelu or bias is not None:
+        return False
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    if fp8 and not mxfp8:
         return False
     if dtype != torch.bfloat16:
         return False
@@ -763,11 +825,13 @@ def fused_bulk_ag_eligible(
     dtype: torch.dtype,
     tp_size: int,
     fp8: bool,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether this call may use the bulk all-gather overlap."""
     if not IS_HIP_EXTENSION:
         return True
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16
+    # The kernel implements MXFP8 1D block scaling only; other FP8 recipes fall back.
+    eligible = _ub_is_fused(name) and (not fp8 or mxfp8) and dtype == torch.bfloat16
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
@@ -794,6 +858,17 @@ def fused_bulk_rs_eligible(
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
     _ub_fused_bulk_decisions[name] = eligible
     return eligible
+
+
+def fused_wgrad_ag_eligible(name: Optional[str]) -> bool:
+    """Whether the fused AG+GEMM kernel can carry the wgrad grad-output all-gather.
+
+    The gather rides inside the dgrad GEMM's own kernel, so both regions must be fused-backed.
+    False off ROCm, where there is no fused backend and upstream's external-AG path is unchanged.
+    """
+    if not IS_HIP_EXTENSION or name is None:
+        return False
+    return _ub_is_fused(name + "_dgrad") and _ub_is_fused(name + "_wgrad")
 
 
 def _ub_is_fused(name: str) -> bool:
@@ -940,16 +1015,28 @@ def fill_userbuffers_buffer_for_all_gather(
             else local_tensor._columnwise_scale_inv
         )
         local_scale_inv_size = list(local_scale_inv.size())
-        global_scale_inv = torch.empty(
-            [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
-            dtype=local_scale_inv.dtype,
-            device=local_scale_inv.device,
-        )
-        torch.distributed.all_gather_into_tensor(
-            global_scale_inv,
-            local_scale_inv,
-            group=process_group,
-        )
+        if (
+            IS_HIP_EXTENSION
+            and isinstance(comm, tex.CommOverlapP2P)
+            and comm.has_scale_buffer()
+        ):
+            # Scales live in the Userbuffers allocation; the fused kernel gathers them
+            # alongside the data, so no separate collective is needed here.
+            comm.copy_scales_into_buffer(local_scale_inv, local_chunk=True)
+            global_scale_inv = comm.get_scale_buffer(
+                shape=[process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
+            )
+        else:
+            global_scale_inv = torch.empty(
+                [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
+                dtype=local_scale_inv.dtype,
+                device=local_scale_inv.device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                global_scale_inv,
+                local_scale_inv,
+                group=process_group,
+            )
 
         # Construct MXFP8 tensor with Userbuffers buffer
         rowwise_data, rowwise_scale_inv = None, None
@@ -1932,7 +2019,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R2: bias gradient on R1.
 
         """
-        grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
         use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
@@ -1956,7 +2042,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if gather_grad_output:
             grad_bias = None
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
@@ -1990,7 +2076,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             else:
                 grad_bias = None
             grad_output = grad_output_
@@ -2008,15 +2094,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     Float8BlockwiseQTensorStorage,
                 ),
             ):
-                grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output.dequantize())
             else:
                 if isinstance(
                     quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
-                ):
+                ) or is_custom(quantizer):
                     # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
                     # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
-                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                    # Custom recipes may provide quantizers unknown to the C++ extension.
+                    grad_bias = sum_bias_grad(grad_output)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):
@@ -2442,6 +2529,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
+        if recipe.custom():
+            # Custom quantization recipes are compatible with all quantizers
+            return
+
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
             if isinstance(tensor, QuantizedTensorStorage):

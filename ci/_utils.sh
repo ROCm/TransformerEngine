@@ -38,6 +38,20 @@ TEST_DIR=${TE_PATH}tests/
 
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
+#Command prefix for pytest, e.g. a GPU emulator (see ci/rocjitsu.sh)
+: ${TEST_LAUNCHER:=}
+
+#Scheduler inputs (see ci/run_queue.sh); all empty by default
+: ${TEST_FILTER:=}
+: ${TE_CI_LIST_ITEMS:=}
+: ${TE_CI_SKIP_CHECK_SUPPORTED:=}
+: ${TE_CI_SETUP_ONLY:=}
+: ${TE_CI_SKIP_SETUP:=}
+#Set when the caller already built the CK JIT cache for this run
+: ${TE_CI_SKIP_CK_JIT:=}
+#File that carries the cache snapshot from `ck_jit_prebuild build` to a
+#`ck_jit_prebuild list` run in another process
+: ${TE_CI_CK_JIT_SNAPSHOT:=}
 
 if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_SGPU=1
@@ -67,13 +81,13 @@ export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeou
 # package: `python -m pytest` prepends cwd to sys.path, and `python <script>` prepends
 # the script's directory. The checkout has no compiled libraries and none of the files
 # generated at build time, while the .so lookup falls back to site-packages -- so an
-# import landing there runs source-tree Python against installed native libraries, with
-# mismatched halves. On ROCm wheels it also skips the rocm-sdk preload, which segfaults
-# during test collection. PYTHONSAFEPATH drops both implicit sys.path entries, so the
-# installed package always wins; being an env var, it applies to torchrun/mpirun children
-# and subprocesses too. Editable installs are unaffected: they resolve through a finder
-# in site-packages, not through cwd. Note that any non-empty value enables it -- unset
-# it, rather than setting 0, to opt out.
+# import landing there runs source-tree Python against installed native libraries,
+# with mismatched halves. On ROCm wheels it also skips the ROCM_PATH setup in
+# _rocm_init.py. PYTHONSAFEPATH drops both implicit sys.path entries, 
+# so the installed package always wins; being an env var, it applies to
+# torchrun/mpirun children and subprocesses too. Editable installs are unaffected:
+# they resolve through a finder in site-packages, not through cwd. Note that any
+# non-empty value enables it -- unset it, rather than setting 0, to opt out.
 export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 
 _script_error_count=0
@@ -137,6 +151,45 @@ configure_fused_attn_env() {
 
 check_level() {
     test $TEST_LEVEL -ge $1
+}
+
+#When listing with TE_CI_SKIP_CHECK_SUPPORTED, list every test at this level,
+#not just the ones this host supports
+skip_check_supported() {
+    test -n "$TE_CI_LIST_ITEMS" -a -n "$TE_CI_SKIP_CHECK_SUPPORTED"
+}
+
+#No setup when listing, or for an item the scheduler has already set up for
+check_setup_needed() {
+    test -z "$TE_CI_SKIP_SETUP" -a -z "$TE_CI_LIST_ITEMS"
+}
+
+#Each probe starts Python and imports TE, so it runs once per script and the
+#answer is reused: a queued item would otherwise repeat it in every config.
+#ci/run_queue.sh probes once for the whole run and exports the answers
+#(TE_CI_SUPPORTS_*), so its items do not probe at all.
+check_supported() {
+    skip_check_supported && return 0
+    case "$1" in
+        "mxfp8")
+            #MXFP8-only test filters collect no tests on unsupported archs
+            test -n "${TE_CI_SUPPORTS_MXFP8+set}" || TE_CI_SUPPORTS_MXFP8=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+            _probe_result=$TE_CI_SUPPORTS_MXFP8
+            _probe_message="MXFP8 is not supported on this device, skipping MXFP8-only tests"
+        ;;
+        "flash_attn")
+            test -n "${TE_CI_SUPPORTS_FLASH_ATTN+set}" || TE_CI_SUPPORTS_FLASH_ATTN=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+            _probe_result=$TE_CI_SUPPORTS_FLASH_ATTN
+            _probe_message="Flash attention is not installed"
+        ;;
+        *)
+            script_error "check_supported: unknown capability $1"
+            return 1
+        ;;
+    esac
+    test "$_probe_result" = "True" && return 0
+    echo "$_probe_message" >&2
+    return 1
 }
 
 check_test_jobs_requested() {
@@ -352,6 +405,12 @@ pytest_run() {
     shift 3
     _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
+    # List mode: print the item's tag instead of running it. Running the script
+    # again with TEST_FILTER=<tag> replays this exact call line.
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
+        echo "TE_CI_ITEM $_test_name_tag"
+        return
+    fi
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
     # A per-test timeout is applied to every item. Callers may still append their
@@ -366,15 +425,25 @@ pytest_run() {
     _junitxml_arg=`get_pytest_junitxml $_test_name_tag`
     _sink_plugin=""
     _result_sink=""
+    _failed_tests=""
+    _narrowed_mark=""
     _pytest_pythonpath="$PYTHONPATH"
     if [ -n "$_junitxml_arg" ]; then
         _result_sink="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.partial"
         rm -f "$_result_sink" 2>/dev/null
+        # Unlike the sidecar, these two are kept after a clean run, so clear any
+        # left over from a previous run of this item.
+        _failed_tests="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.failed"
+        rm -f "$_failed_tests" 2>/dev/null
+        _narrowed_mark="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.narrowed"
+        rm -f "$_narrowed_mark" 2>/dev/null
         _sink_plugin="-p te_ci_result_sink"
         _pytest_pythonpath="${TE_PATH}ci${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    TE_RESULT_SINK="$_result_sink" PYTHONPATH="$_pytest_pythonpath" \
-        python3 -m pytest -v -rfEs \
+    TE_RESULT_SINK="$_result_sink" TE_CI_FAILED_TESTS="$_failed_tests" \
+        TE_CI_NARROWED_MARK="$_narrowed_mark" \
+        PYTHONPATH="$_pytest_pythonpath" \
+        $TEST_LAUNCHER python3 -m pytest -v -rfEs \
         --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
         $_sink_plugin $_junitxml_arg $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     _pytest_rc=$?
@@ -387,6 +456,8 @@ pytest_run() {
 
 PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
 ck_jit_prebuild() {
+    check_setup_needed || return 0
+    test -n "$TE_CI_SKIP_CK_JIT" && return 0
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
     if [ ! -f "$_prebuild_list" ]; then
         script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
@@ -417,8 +488,13 @@ ck_jit_prebuild() {
         echo "Building CK JIT cache for arch=${_gpu_arch:-<not detected>}..."
         python "$_prebuild_py" build --blob-list "$_prebuild_list" $_arch_arg $_jobs_arg > /dev/null
         _CK_JIT_CACHE_SNAPSHOT=$(python "$_prebuild_py" cache)
+        test -n "$TE_CI_CK_JIT_SNAPSHOT" && echo "$_CK_JIT_CACHE_SNAPSHOT" > "$TE_CI_CK_JIT_SNAPSHOT"
         echo "$_CK_JIT_CACHE_SNAPSHOT" | grep Cache
     else
+        #The snapshot is in the variable if built in this shell, else in the file
+        if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" -a -s "$TE_CI_CK_JIT_SNAPSHOT" ]; then
+            _CK_JIT_CACHE_SNAPSHOT=$(cat "$TE_CI_CK_JIT_SNAPSHOT")
+        fi
         if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" ]; then
             python "$_prebuild_py" cache | grep Cache
         else

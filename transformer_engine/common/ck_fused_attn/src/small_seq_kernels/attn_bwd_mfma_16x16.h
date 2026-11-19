@@ -60,6 +60,7 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
     const int* cu_seqlens_kv,
     const int* cu_seqlens_kv_padded)
 {
+#ifndef __GFX12__ //__builtin_amdgcn_mfma_f32_16x16x16bf16_1k is for gfx90a-insts
     constexpr int head_dim    = Config::head_dim;
     constexpr int head_num    = Config::head_num;
     constexpr int max_seq_kv  = Config::max_seq_kv;
@@ -83,9 +84,15 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
     if(actual_q == 0)
         return;
 
-    const int seq_kv    = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    // Without keys dV has no rows
+    const int seq_kv = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    if(seq_kv == 0)
+        return;
+
     const int q_offset  = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_q_padded);
     const int kv_offset = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_kv_padded);
+    // 64-bit base of this sequence and head; indices within it fit in 32 bits
+    T* grad_V_seq = grad_V + ((size_t)kv_offset * head_num + head_idx) * head_dim;
 
     __shared__ __attribute__((aligned(128))) float attn_lds[lds_q_rows * attn_pad];
     __shared__ __attribute__((aligned(128))) bhalf_t Q_lds_bwd[lds_q_rows * hd_pad];
@@ -163,8 +170,9 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
                         masked = true;
                 }
                 float S = acc[i] * scale;
+                // Rows past actual_q are masked; clamp them to a row that has an LSE entry
                 float lse =
-                    softmax_lse[((size_t)(q_offset + q_row) * head_num + head_idx)];
+                    softmax_lse[((size_t)(q_offset + min(q_row, actual_q - 1)) * head_num + head_idx)];
                 float pr = masked ? 0.0f : expf(S - lse);
                 P_reg[reg_base + i] = pr;
             }
@@ -268,13 +276,14 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
                 int kv_pos = kv_tile * 16 + lane_row * 4 + i;
                 if(kv_pos < seq_kv)
                 {
-                    int gv_idx = (kv_offset + kv_pos) * head_num * head_dim +
-                                 head_idx * head_dim + dim_idx + lane_col;
-                    grad_V[gv_idx] = static_cast<T>(acc[i]);
+                    grad_V_seq[kv_pos * head_num * head_dim + dim_idx + lane_col] = static_cast<T>(acc[i]);
                 }
             }
         }
     }
+#else
+    assert(false && "Kernel not implemented for this GPU architecture");
+#endif //__GFX12__
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +308,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
     const int* cu_seqlens_kv,
     const int* cu_seqlens_kv_padded)
 {
+#ifndef __GFX12__ //__builtin_amdgcn_mfma_f32_16x16x16bf16_1k is for gfx90a-insts
     constexpr int head_dim      = Config::head_dim;
     constexpr int head_num      = Config::head_num;
     constexpr int max_seq_kv    = Config::max_seq_kv;
@@ -322,9 +332,16 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
     if(actual_q == 0)
         return;
 
-    const int seq_kv    = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    // Without keys there is nothing to compute: dQ is zeroed by the caller and dK has no rows
+    const int seq_kv = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    if(seq_kv == 0)
+        return;
+
     const int q_offset  = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_q_padded);
     const int kv_offset = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_kv_padded);
+    // 64-bit bases of this sequence and head; indices within them fit in 32 bits
+    T* grad_Q_seq = grad_Q + ((size_t)q_offset * head_num + head_idx) * head_dim;
+    T* grad_K_seq = grad_K + ((size_t)kv_offset * head_num + head_idx) * head_dim;
 
     __shared__ __attribute__((aligned(128))) bhalf_t Q_lds[lds_q_rows * hd_pad];
     __shared__ __attribute__((aligned(128))) bhalf_t dO_lds[lds_q_rows * hd_pad];
@@ -469,8 +486,9 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                         masked = true;
                 }
                 float S = acc_s[i] * scale;
+                // Rows past actual_q are masked; clamp them to a row that has an LSE entry
                 float lse =
-                    softmax_lse[((size_t)(q_offset + q_row) * head_num + head_idx)];
+                    softmax_lse[((size_t)(q_offset + min(q_row, actual_q - 1)) * head_num + head_idx)];
                 attn_reg[reg_base + i] = masked ? 0.0f : expf(S - lse);
             }
         }
@@ -587,9 +605,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                 int q_row = qt * 16 + lane_row * 4 + i;
                 if(q_row < actual_q)
                 {
-                    int gq_idx = ((size_t)(q_offset + q_row) * head_num + head_idx) * head_dim +
-                                 dim_idx + lane_col;
-                    grad_Q[gq_idx] = static_cast<T>(acc[i] * scale);
+                    grad_Q_seq[q_row * head_num * head_dim + dim_idx + lane_col] = static_cast<T>(acc[i] * scale);
                 }
             }
         }
@@ -640,13 +656,14 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                 int kv_pos = kvt * 16 + lane_row * 4 + i;
                 if(kv_pos < seq_kv)
                 {
-                    int gk_idx = (kv_offset + kv_pos) * head_num * head_dim +
-                                 head_idx * head_dim + dim_idx + lane_col;
-                    grad_K[gk_idx] = static_cast<T>(acc[i] * scale);
+                    grad_K_seq[kv_pos * head_num * head_dim + dim_idx + lane_col] = static_cast<T>(acc[i] * scale);
                 }
             }
         }
     }
+#else
+    assert(false && "Kernel not implemented for this GPU architecture");
+#endif //__GFX12__
 }
 
 // ---------------------------------------------------------------------------

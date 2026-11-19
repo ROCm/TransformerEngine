@@ -20,16 +20,14 @@ on:
         type: boolean
         required: false
         default: true
-      use_prebuilt_aiter:
-        description: 'Use precompiled aiter instead of building from source.'
-        type: boolean
-        required: false
-        default: true
       rocm_repo_url:
-        description: 'ROCm TheRock repository URL used inside the Docker image.'
+        description: 'ROCm TheRock repository URL used inside the Docker image. Empty: the Dockerfile default.'
         type: string
-        required: true
-        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+        required: false
+      rocm_devel_package:
+        description: 'ROCm devel package installed in the Docker image. Empty: the Dockerfile default.'
+        type: string
+        required: false
       force_build_image:
         description: 'Force building of ROCm Docker image, skip checking intermediate storage.'
         type: boolean
@@ -50,12 +48,12 @@ on:
       use_local_version:
         type: boolean
         default: true
-      use_prebuilt_aiter:
-        type: boolean
-        default: true
       rocm_repo_url:
         type: string
-        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+        required: false
+      rocm_devel_package:
+        type: string
+        required: false
       force_build_image:
         type: boolean
         default: true
@@ -67,8 +65,8 @@ on:
         default: ''
 
 env:
+  ROCM_DOCKERFILE: build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
-  MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
 permissions:
   contents: read
@@ -106,7 +104,11 @@ jobs:
             # Get current year-month
             YEAR_MONTH=$(date +"%Y%m")
             
-            # Try to detect ROCm revision from repomd.xml
+            # Try to detect ROCm revision from repomd.xml (of the Dockerfile default repo if rocm_repo_url is empty)
+            if [ -z "${ROCM_URL}" ]; then
+              ROCM_URL=$(grep -oP '^ARG\s+ROCM_REPO_URL=\K\S+' "${ROCM_DOCKERFILE}" | head -n1 || echo "")
+              echo "rocm_repo_url is empty, using the Dockerfile default: ${ROCM_URL}"
+            fi
             ROCM_REVISION=$(curl -s "${ROCM_URL}/repodata/repomd.xml" 2>/dev/null | grep -oP '(?<=<revision>)[^<]+' | head -n1 || echo "")
             
             if [ -n "$ROCM_REVISION" ]; then
@@ -152,18 +154,30 @@ jobs:
 
       # The build context is build_tools/wheel_utils/ because the Dockerfile
       # COPYs build_wheels.sh from that directory.
+      # ROCm build args are passed only when set: an empty value would override the Dockerfile default.
       - name: Build Docker image
         if: ${{ inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true' }}
         env:
           IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
           ROCM_URL: ${{ inputs.rocm_repo_url }}
+          ROCM_PACKAGE: ${{ inputs.rocm_devel_package }}
         run: |
+          BUILD_ARGS=()
+          if [ -n "${ROCM_URL}" ]; then
+            BUILD_ARGS+=(--build-arg "ROCM_REPO_URL=${ROCM_URL}")
+          fi
+          if [ -n "${ROCM_PACKAGE}" ]; then
+            BUILD_ARGS+=(--build-arg "ROCM_DEVEL_PACKAGE=${ROCM_PACKAGE}")
+          fi
+          echo "ROCm defaults in ${ROCM_DOCKERFILE}:"
+          grep -E '^ARG ROCM_(REPO_URL|DEVEL_PACKAGE)=' "${ROCM_DOCKERFILE}" || true
+          echo "ROCm build-arg overrides: ${BUILD_ARGS[*]:-none}"
           echo "Building Docker image: ${IMAGE_TAG}"
           docker build \
             --no-cache \
-            --build-arg ROCM_REPO_URL="${ROCM_URL}" \
+            "${BUILD_ARGS[@]}" \
             --tag "${IMAGE_TAG}" \
-            --file build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86 \
+            --file "${ROCM_DOCKERFILE}" \
             build_tools/wheel_utils/
 
       - name: Upload Docker image to Harbor
@@ -199,18 +213,15 @@ jobs:
           USE_LOCAL_VERSION: ${{ inputs.use_local_version }}
           USE_PREBUILT_AITER: ${{ inputs.use_prebuilt_aiter }}
         run: |
-          NVTE_AITER_PREBUILT_BASE_URL="https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts"
           extra_env=()
           if [[ "${USE_LOCAL_VERSION}" == "true" ]]; then
             extra_env+=(--env NVTE_USE_LOCAL_VERSION=1)
-          fi
-          if [[ "${USE_PREBUILT_AITER}" == "true" ]]; then
-            extra_env+=(--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}")
           fi
           docker run --rm \
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
             --env TARGET_BRANCH="${GITHUB_REF_NAME}" \
+            --env NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250 \
             "${extra_env[@]}" \
             --volume "${GITHUB_WORKSPACE}:/TransformerEngine" \
             --volume "${RUNNER_TEMP}/wheelhouse:/wheelhouse" \

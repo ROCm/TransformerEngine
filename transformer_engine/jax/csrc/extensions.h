@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -138,16 +138,22 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler);
 
 // Attention
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);

@@ -43,7 +43,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     ReorderStrategy,
 )
-from transformer_engine.jax.cpp_extensions import FusedAttnHelper
+from transformer_engine.jax.cpp_extensions import FusedAttnHelper, fused_attn_fwd
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
@@ -51,13 +51,19 @@ from transformer_engine_jax import (
 )
 
 from distributed_test_base import assert_equal_collectives
-from utils import assert_allclose, get_test_level, print_debug_tensor_stats
+from utils import assert_allclose, dtype_tols, get_test_level, print_debug_tensor_stats
 
 # Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 # CI test level
 _TEST_LEVEL = get_test_level()
+
+# AITER FP8 fused attention is inference-only and ships only for gfx950.
+rocm_fp8_attention_support = pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) != 95,
+    reason="AITER FP8 ASM fused attention requires gfx950",
+)
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -68,6 +74,191 @@ def init():
     # Calling customcalls before jax may cause CUDA uninitialize error
     _ = jnp.zeros(0)
     yield
+
+
+@rocm_fp8_attention_support
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_backend_selection(head_dim):
+    """gfx950 fp8bf16 inference selects CK/AITER.
+
+    Training stays unsupported. NVTE_CK_USES_FWD_V3=0 also selects no backend
+    until a CK tile FP8 path exists.
+    """
+    kwargs = dict(
+        batch_size=1,
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=512,
+        kv_max_seqlen=512,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    )
+    inference_backend, _ = FusedAttnHelper(is_training=False, **kwargs).get_fused_attn_backend()
+    training_backend, _ = FusedAttnHelper(is_training=True, **kwargs).get_fused_attn_backend()
+    sliding_window_backend, _ = FusedAttnHelper(
+        is_training=False, **(kwargs | {"window_size": (64, 64)})
+    ).get_fused_attn_backend()
+    assert inference_backend in (
+        NVTE_Fused_Attn_Backend.NVTE_CK,
+        NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+    )
+    assert training_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert sliding_window_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+
+
+@rocm_fp8_attention_support
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_asm(head_dim):
+    """Small dense smoke: load the fp8bf16 ASM kernel and check vs a float32 JAX reference.
+
+    Broader HD128/HD256 accuracy (masks, THD padding, GQA, vs BF16 ASM) lives in
+    TestFusedAttnFP8ASM.
+    """
+    backend, _ = FusedAttnHelper(
+        is_training=False,
+        batch_size=1,
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    ).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK
+
+    shape = (1, 128, 8, head_dim)
+    key = jax.random.PRNGKey(7)
+    # Distinct inverse scales, so a missing or unit descale cannot match the reference.
+    q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+    k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+    v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+    q = (jax.random.normal(key, shape) * 0.2 / q_scale_inv).astype(jnp.float8_e4m3fn)
+    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2 / k_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2 / v_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    q_dq = q.astype(jnp.float32) * q_scale_inv
+    k_dq = k.astype(jnp.float32) * k_scale_inv
+    v_dq = v.astype(jnp.float32) * v_scale_inv
+    sequence_descriptor = SequenceDescriptor.from_seqlens(jnp.array([128], dtype=jnp.int32))
+    scale = head_dim**-0.5
+
+    output, _, _, _ = fused_attn_fwd(
+        (q, k, v),
+        None,
+        None,
+        sequence_descriptor,
+        None,
+        AttnBiasType.NO_BIAS,
+        AttnMaskType.NO_MASK,
+        AttnSoftmaxType.VANILLA_SOFTMAX,
+        QKVLayout.BSHD_BSHD_BSHD,
+        scale,
+        0.0,
+        False,
+        1,
+        q_scale_inv=q_scale_inv,
+        k_scale_inv=k_scale_inv,
+        v_scale_inv=v_scale_inv,
+    )
+    scores = jnp.einsum("bqhd,bkhd->bhqk", q_dq, k_dq) * scale
+    reference = jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v_dq)
+
+    assert output.dtype == jnp.bfloat16
+    assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
+
+
+@rocm_fp8_attention_support
+@pytest.mark.parametrize("head_dim", [128, 256])
+def test_aiter_fp8_fwd_asm_jit_scales(head_dim):
+    """Inference jit must accept scale inverses as traced arguments.
+
+    Binding them with partial outside jit hides the custom_vjp nondiff check.
+    """
+    backend, _ = FusedAttnHelper(
+        is_training=False,
+        batch_size=1,
+        q_dtype=jnp.float8_e4m3fn,
+        kv_dtype=jnp.float8_e4m3fn,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        window_size=(-1, -1),
+    ).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK
+
+    shape = (1, 128, 8, head_dim)
+    key = jax.random.PRNGKey(7)
+    q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+    k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+    v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+    q = (jax.random.normal(key, shape) * 0.2 / q_scale_inv).astype(jnp.float8_e4m3fn)
+    k = (jax.random.normal(jax.random.fold_in(key, 1), shape) * 0.2 / k_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    v = (jax.random.normal(jax.random.fold_in(key, 2), shape) * 0.2 / v_scale_inv).astype(
+        jnp.float8_e4m3fn
+    )
+    sequence_descriptor = SequenceDescriptor.from_seqlens(jnp.array([128], dtype=jnp.int32))
+    scale = head_dim**-0.5
+
+    @jax.jit
+    def run(q, k, v, q_scale_inv, k_scale_inv, v_scale_inv):
+        return fused_attn(
+            (q, k, v),
+            None,
+            sequence_descriptor,
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.NO_MASK,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=scale,
+            dropout_probability=0.0,
+            is_training=False,
+            q_scale_inv=q_scale_inv,
+            k_scale_inv=k_scale_inv,
+            v_scale_inv=v_scale_inv,
+        )
+
+    output = run(q, k, v, q_scale_inv, k_scale_inv, v_scale_inv)
+    q_dq = q.astype(jnp.float32) * q_scale_inv
+    k_dq = k.astype(jnp.float32) * k_scale_inv
+    v_dq = v.astype(jnp.float32) * v_scale_inv
+    scores = jnp.einsum("bqhd,bkhd->bhqk", q_dq, k_dq) * scale
+    reference = jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), v_dq)
+    assert output.dtype == jnp.bfloat16
+    assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
 
 
 @partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12, 13))
@@ -521,6 +712,7 @@ class FusedAttnRunner:
     score_mod_reference: Optional[Callable[[Array], Array]] = None
     input_scale: float = 1.0
     doutput_seed: Optional[int] = None
+    is_self_attention: Optional[bool] = None
     doutput: Optional[Array] = field(init=False, default=None)
     rtol: Optional[float] = None
     atol: Optional[float] = None
@@ -543,13 +735,9 @@ class FusedAttnRunner:
                 jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
             )
 
-    # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
-    # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if 90400 <= get_cudnn_version() < 90500:
-                return self.num_segments_per_seq
-            elif is_hip_extension() and self.use_thd_smallseq_segments:
+            if is_hip_extension() and self.use_thd_smallseq_segments:
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
@@ -663,12 +851,10 @@ class FusedAttnRunner:
 
         if not is_hip_extension() and compute_capability >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
-                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
-                or cudnn_version < 90700
+                self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS
             ):
                 pytest.skip(
-                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
-                    " dropout"
+                    "For sm100+, non-deterministic bprop does not support bias with dropout"
                 )
             if not FusedAttnHelper.is_non_deterministic_allowed() and (
                 self.dropout_prob != 0.0
@@ -739,18 +925,6 @@ class FusedAttnRunner:
         if is_hip_extension():
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
                 pytest.skip(message)
-            # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
-            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
-            # produces different attention patterns than the top-left aligned reference.
-            if (
-                self.window_size is not None
-                and self.max_seqlen_q != self.max_seqlen_kv
-                and not self.attn_mask_type.is_causal()
-            ):
-                pytest.skip(
-                    "CK backend uses bottom-right mask alignment for non-causal SWA,"
-                    " which diverges from the top-left reference for cross-attention"
-                )
         else:
             if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 pytest.skip(message)
@@ -845,7 +1019,16 @@ class FusedAttnRunner:
         # Create a mesh for distributed tests
         self.devices = np.asarray(jax.devices()[: self.number_of_devices]).reshape(*self.mesh_shape)
         self.mesh = Mesh(self.devices, self.mesh_axes)
-        self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
+        data_axes = tuple(
+            axis
+            for axis in (
+                self.mesh_resource.dp_resource,
+                self.mesh_resource.fsdp_resource,
+            )
+            if axis is not None
+        )
+        self.data_axis = data_axes[0] if len(data_axes) == 1 else data_axes or None
+        self.data_parallel_size = np.prod([self.mesh.shape[axis] for axis in data_axes], dtype=int)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
@@ -979,6 +1162,8 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
+            if self.qkv_layout.is_qkvpacked() and self.is_self_attention is False:
+                raise ValueError("QKV-packed layouts only support self-attention metadata")
             if is_hip_extension() and self.use_thd_smallseq_segments:
                 (
                     self.num_segments_per_seq,
@@ -995,13 +1180,17 @@ class FusedAttnRunner:
                 ) = self._setup_segments_ck_smallseq(generate_random_segment_ids_and_pos)
             else:
                 self.segment_ids_q, self.segment_pos_q, self.pad_q = (
-                generate_random_segment_ids_and_pos(
+                    generate_random_segment_ids_and_pos(
                         self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
                     )
-            )
+                )
                 self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-                # TODO(rewang): record only self attention and find the reason of cross attention
-                if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
+                is_self_attention = self.is_self_attention
+                if is_self_attention is None:
+                    is_self_attention = (
+                        self.qkv_layout.is_qkvpacked() or self.max_seqlen_q == self.max_seqlen_kv
+                    )
+                if is_self_attention:
                     self.segment_ids_kv = self.segment_ids_q
                     self.segment_pos_kv = self.segment_pos_q
                     self.pad_kv = self.pad_q
@@ -1013,16 +1202,14 @@ class FusedAttnRunner:
                     ):  # SWA or BRCM requires kv_len >= q_len
                         min_segment_len = self.seqlens_q
                     self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
-                        (
-                    generate_random_segment_ids_and_pos(
-                                self.batch_size,
-                                self.max_seqlen_kv,
-                                self.num_segments_per_seq,
-                                seed=2024,
-                                min_segment_len=min_segment_len,
+                        generate_random_segment_ids_and_pos(
+                            self.batch_size,
+                            self.max_seqlen_kv,
+                            self.num_segments_per_seq,
+                            seed=2024,
+                            min_segment_len=min_segment_len,
                         )
-                        )
-                )
+                    )
                 self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_valid_segment_ids_and_pos(
@@ -1127,16 +1314,14 @@ class FusedAttnRunner:
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
         self.qkvo_psec = PartitionSpec(
-            self.mesh_resource.dp_resource,
+            self.data_axis,
             self.mesh_resource.cp_resource,
             self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
 
-        mask_pspec = PartitionSpec(
-            self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
-        )
+        mask_pspec = PartitionSpec(self.data_axis, None, self.mesh_resource.cp_resource, None)
         self.mask_sharding = NamedSharding(self.mesh, mask_pspec)
 
         match self.seq_desc_format:
@@ -1146,11 +1331,9 @@ class FusedAttnRunner:
 
                 def to_dp_shardings(x):
                     if x.ndim == 1:
-                        pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                        pspec = PartitionSpec(self.data_axis)
                     else:
-                        pspec = PartitionSpec(
-                            self.mesh_resource.dp_resource, self.mesh_resource.cp_resource
-                        )
+                        pspec = PartitionSpec(self.data_axis, self.mesh_resource.cp_resource)
                     return NamedSharding(self.mesh, pspec)
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
@@ -1161,7 +1344,7 @@ class FusedAttnRunner:
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
-                self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
+                self.data_axis, None, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._11SS:
             self.bias_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -1197,7 +1380,7 @@ class FusedAttnRunner:
 
         # [batch][max_segments_per_batch]
         # TODO(mgoldfarb-nvidia): Will need to handle CP cases of replicated or distributed length/offset.
-        self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
+        self.seq_length_offset_pspec = PartitionSpec(self.data_axis, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
     def test_forward(self, return_max_logit=False, check_output=True):
@@ -1316,6 +1499,9 @@ class FusedAttnRunner:
         HLO will be examined for the expected comms.
         """
 
+        if self.doutput is None:
+            raise ValueError("FusedAttnRunner.test_backward requires a random doutput_seed")
+
         self.return_max_logit = return_max_logit
         self._setup_inputs()
 
@@ -1385,8 +1571,15 @@ class FusedAttnRunner:
         ]
         if self.doutput is not None:
             args.append(self.doutput)
-            customcall_args.append(jax.device_put(self.doutput, self.qkvo_sharding))
-            input_shardings.append(self.qkvo_sharding)
+            # Keep CP doutput in logical token order, as it would be when inferred by
+            # JAX through the inverse reorder. TE must align it inside the backward rule.
+            doutput_sharding = (
+                NamedSharding(self.mesh, PartitionSpec())
+                if self.cp_size > 1 and self.cp_load_balanced
+                else self.qkvo_sharding
+            )
+            customcall_args.append(jax.device_put(self.doutput, doutput_sharding))
+            input_shardings.append(doutput_sharding)
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
@@ -1472,17 +1665,6 @@ class FusedAttnRunner:
                 assert not jnp.any(jnp.isnan(out)), f"{name} attention output contains NaN"
                 assert not jnp.any(jnp.isinf(out)), f"{name} attention output contains Inf"
 
-        print_debug_tensor_stats(f"primitive_out", primitive_out)
-        print_debug_tensor_stats(f"reference_grad_valid", reference_out)
-        print_debug_tensor_stats(f"diff_grad", jnp.abs(primitive_out - reference_out))
-        assert_allclose(
-            primitive_out,
-            reference_out,
-            rtol=self.rtol,
-            atol=self.atol,
-            dtype=self.dtype,
-        )
-
         def check_dqkv(primitive, reference, pad, idx):
             primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
                 _split_valid_and_invalid(primitive, reference, pad)
@@ -1547,12 +1729,33 @@ class FusedAttnRunner:
             # Assume all batch has the same actual_seqlen, probably needs to extend the tests
             bias_mask = self.mask[0, 0]
 
+            # Distributed dBias is the result of a BF16 reduction across DP/FSDP ranks,
+            # whose summation order differs from the unsharded reference. Scale only the
+            # default dBias tolerance with the expected reduction-error growth.
+            dbias_rtol = self.rtol
+            dbias_atol = self.atol
+            reduction_terms = self.data_parallel_size
+            if is_hip_extension():
+                # [ROCm] The bias is shared across the batch, so dBias sums every batch entry's
+                # contribution. CK writes each contribution in the input dtype and then sums
+                # them over the local batch, the same reduced-precision partial sums as across
+                # DP/FSDP ranks. Strongly cancelling elements (|terms| adding up to ~50 for a
+                # result of ~0.03) otherwise exceed the unscaled tolerance by rounding alone.
+                reduction_terms *= self.batch_size // self.data_parallel_size
+            if reduction_terms > 1:
+                default_tols = dtype_tols(self.dtype)
+                reduction_scale = sqrt(reduction_terms)
+                if dbias_rtol is None:
+                    dbias_rtol = default_tols["rtol"] * reduction_scale
+                if dbias_atol is None:
+                    dbias_atol = default_tols["atol"] * reduction_scale
+
             # Assert all masked dbias are 0s
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.zeros_like(primitive_dbias),
-                rtol=self.rtol,
-                atol=self.atol,
+                rtol=dbias_rtol,
+                atol=dbias_atol,
                 dtype=self.dtype,
             )
 
@@ -1560,8 +1763,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.where(bias_mask, reference_dbias, 0),
-                rtol=self.rtol,
-                atol=self.atol,
+                rtol=dbias_rtol,
+                atol=dbias_atol,
                 dtype=self.dtype,
             )
 
@@ -1569,8 +1772,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, 0, primitive_dbias),
                 jnp.where(bias_mask, 0, reference_dbias),
-                rtol=self.rtol,
-                atol=self.atol,
+                rtol=dbias_rtol,
+                atol=dbias_atol,
                 dtype=self.dtype,
             )
 
@@ -1720,27 +1923,23 @@ class TestFusedAttnMaxLogit:
             bias_shape=None,
             window_size=None,
             seq_desc_format=SeqDescFormat.Seqlens,
+            doutput_seed=2026,
         )
         runner.test_backward(return_max_logit=True)
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
-    """Pick a sliding-window size for SWA tests, gated on cuDNN version.
+    """Pick a sliding-window size for SWA tests.
 
-    cuDNN < 9.2: skip (no SWA support).
-    cuDNN >= 9.2: left-only window (s_kv // 10, 0).
-    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
-                  bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
-                  Other mask types keep the left-only window: causal-family masks would
-                  collapse (W, W) -> (W, 0), hence not tested here.
+    Bidirectional window (s_kv // 10, s_kv // 10 + 5) is used for the mask types whose
+    bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK). Other mask
+    types keep a left-only window (s_kv // 10, 0): causal-family masks would collapse
+    (W, W) -> (W, 0), hence not tested here.
     """
-    cudnn_version = get_cudnn_version()
-    if cudnn_version < 90200:
-        pytest.skip("Sliding window attention requires cuDNN >= 9.2")
     left_window_size = s_kv // 10
     # choose asymmetric window size for testing
     right_window_size = left_window_size + 5
-    if cudnn_version >= 90600 and attn_mask_type in (
+    if attn_mask_type in (
         AttnMaskType.NO_MASK,
         AttnMaskType.PADDING_MASK,
     ):
@@ -1769,7 +1968,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
     ],
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout, is_self_attention",
     [
         # large data size + bf16 + qkv packed
         pytest.param(
@@ -1782,6 +1981,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.BS3HD,
+            True,
             id="2-2048-2048-12-12-64-64-BF16-SELF-QKV_PACKED",
         ),
         pytest.param(
@@ -1794,6 +1994,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.T3HD,
+            True,
             id="2-2048-2048-12-12-64-64-BF16-SELF-RAGGED_QKV_PACKED",
         ),
         # mid data size + bf16 + cross attn + kv packed
@@ -1807,6 +2008,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.BSHD_BS2HD,
+            False,
             id="2-512-1024-12-12-64-64-BF16-CROSS-KV_PACKED",
         ),
         pytest.param(
@@ -1819,6 +2021,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.THD_T2HD,
+            False,
             id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
         ),
         # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
@@ -1832,6 +2035,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             32,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            False,
             id="2-2048-1024-12-12-64-32-BF16-CROSS-SEPARATE",
         ),
         pytest.param(
@@ -1844,6 +2048,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             32,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            False,
             id="2-2048-1024-12-12-64-32-BF16-CROSS-RAGGED_SEPARATE",
         ),
         # large data size + bf16 + gqa + kv packed
@@ -1857,6 +2062,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.BSHD_BS2HD,
+            True,
             id="2-2048-2048-12-6-64-64-BF16-GQA-KV_PACKED",
         ),
         pytest.param(
@@ -1869,6 +2075,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.bfloat16,
             QKVLayout.THD_T2HD,
+            True,
             id="2-2048-2048-12-6-64-64-BF16-GQA-RAGGED_KV_PACKED",
         ),
         # small data size + fp16 + diff hidden v dim + qkv packed
@@ -1882,6 +2089,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             32,
             jnp.float16,
             QKVLayout.BS3HD,
+            True,
             id="4-128-128-16-16-64-32-FP16-SELF-QKV_PACKED",
         ),
         pytest.param(
@@ -1894,6 +2102,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             32,
             jnp.float16,
             QKVLayout.T3HD,
+            True,
             id="4-128-128-16-16-64-32-FP16-SELF-RAGGED_QKV_PACKED",
         ),
         # small data size + fp16 + kv packed
@@ -1907,6 +2116,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.float16,
             QKVLayout.BSHD_BS2HD,
+            True,
             id="4-128-128-16-16-64-64-FP16-SELF-KV_PACKED",
         ),
         pytest.param(
@@ -1919,6 +2129,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.float16,
             QKVLayout.THD_T2HD,
+            True,
             id="4-128-128-16-16-64-64-FP16-SELF-RAGGED_KV_PACKED",
         ),
         # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
@@ -1932,19 +2143,23 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             64,
             jnp.float16,
             QKVLayout.BSHD_BSHD_BSHD,
+            False,
             id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-SEPARATE",
         ),
+        # Equal maximum sequence lengths do not make this self-attention: Q and KV
+        # intentionally use independent segment boundaries, positions, and padding.
         pytest.param(
             2,
             1024,
-            2048,
+            1024,
             12,
             6,
             128,
             64,
             jnp.float16,
             QKVLayout.THD_THD_THD,
-            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
+            False,
+            id="2-1024-1024-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
         # equal head_dim 128 + bf16 + gqa + self-attn (llama3-like). Previously there was no
         # equal-dim-128 self-attn coverage; the THD/RAGGED case exercises the group-mode dq_acc
@@ -1960,6 +2175,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-SELF",
         ),
         pytest.param(
@@ -1972,6 +2188,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2048-2048-12-6-128-128-BF16-GQA-RAGGED_SELF",
         ),
         # non-16-multiple seqlen: exercises the atomic16 dq_acc seqlen padding (pad16(s_q)) on the bf16
@@ -1987,6 +2204,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
+            True,
             id="2-2044-2044-12-6-128-128-BF16-GQA-RAGGED_SELF-UNALIGNED",
         ),
         pytest.param(
@@ -1999,6 +2217,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.float16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-FP16-MLA",
         ),
         pytest.param(
@@ -2011,6 +2230,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             128,
             jnp.bfloat16,
             QKVLayout.BSHD_BSHD_BSHD,
+            True,
             id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
@@ -2079,6 +2299,7 @@ class TestFusedAttn:
         bias_shape,
         swa,
         seq_desc_format,
+        is_self_attention,
     ):
         """
         Test forward with parameterized configs
@@ -2104,6 +2325,7 @@ class TestFusedAttn:
             bias_shape,
             window_size,
             seq_desc_format,
+            is_self_attention=is_self_attention,
         )
         runner.test_forward()
 
@@ -2132,6 +2354,7 @@ class TestFusedAttn:
         bias_shape,
         swa,
         seq_desc_format,
+        is_self_attention,
     ):
         """
         Test backward with parameterized configs
@@ -2155,6 +2378,8 @@ class TestFusedAttn:
             bias_shape,
             window_size,
             seq_desc_format,
+            doutput_seed=2026,
+            is_self_attention=is_self_attention,
         )
         runner.test_backward()
 
@@ -2313,6 +2538,7 @@ class TestFusedAttnWithDeterminism:
             bias_shape,
             swa,
             seq_desc_format,
+            is_self_attention=None,
         )
 
     @staticmethod
@@ -2361,6 +2587,7 @@ class TestFusedAttnWithDeterminism:
             bias_shape,
             swa,
             seq_desc_format,
+            is_self_attention=None,
         )
 
 @pytest.mark.skipif(
@@ -2411,6 +2638,7 @@ def test_backward_bias_all_neg_inf(
         bias_shape=bias_shape,
         window_size=None,
         seq_desc_format=SeqDescFormat.Mask,
+        doutput_seed=2026,
     )
     runner._setup_inputs()
 
@@ -2675,6 +2903,269 @@ class TestFusedAttnCkSmallseq:
             window_size=None,
             seq_desc_format=SeqDescFormat.Seqlens,
             use_thd_smallseq_segments=True,
+            doutput_seed=2026,
         )
         runner.test_forward()
         runner.test_backward()
+
+def _pack_qkv_args(query, key, value, qkv_layout):
+    """Pack Q/K/V the same way as customcall_fused_dpa, without recasting the output dtype."""
+    match qkv_layout:
+        case QKVLayout.BS3HD | QKVLayout.T3HD:
+            query, key, value = map(partial(jnp.expand_dims, axis=-3), [query, key, value])
+            return (jnp.concatenate((query, key, value), axis=-3),)
+        case QKVLayout.BSHD_BS2HD | QKVLayout.THD_T2HD:
+            key, value = map(partial(jnp.expand_dims, axis=-3), [key, value])
+            return (query, jnp.concatenate((key, value), axis=-3))
+        case QKVLayout.BSHD_BSHD_BSHD | QKVLayout.THD_THD_THD:
+            return (query, key, value)
+        case _:
+            raise ValueError(f"Unsupported {qkv_layout=}")
+
+
+def _fused_attn_keep_output_dtype(
+    query, key, value, sequence_descriptor, **kwargs
+):
+    """Call fused_attn without recasting O back to the Q dtype (FP8 in, BF16 out)."""
+    return fused_attn(
+        _pack_qkv_args(query, key, value, kwargs["qkv_layout"]),
+        None,
+        sequence_descriptor,
+        None,
+        softmax_offset=None,
+        **kwargs,
+    )
+
+
+@rocm_fp8_attention_support
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d, qkv_layout",
+    [
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            128,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-128-BSHD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            128,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-4-128-BSHD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            256,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-256-BSHD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            256,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-4-256-BSHD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            128,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-128-THD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            128,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-4-128-THD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            256,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-256-THD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            256,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-4-256-THD-GQA",
+        ),
+    ],
+)
+class TestFusedAttnFP8ASM:
+    """gfx950 fp8bf16 ASM fused-attn accuracy vs JAX softmax and vs BF16 ASM.
+
+    Coverage mirrors the BF16 HD128/HD256 runner tests: dense BSHD (no/causal)
+    and varlen THD (padding / padding-causal), MHA and GQA, hd128 and hd256.
+    Inference only — FP8 ASM has no training path.
+    """
+
+    @staticmethod
+    def test_forward(attn_mask_type, b, s_q, s_kv, h_q, h_kv, d, qkv_layout):
+        if qkv_layout.is_thd() and not attn_mask_type.is_padding():
+            pytest.skip("THD format requires padding masks.")
+        if attn_mask_type.is_padding() and not qkv_layout.is_thd():
+            pytest.skip("FP8 ASM requires THD layout for padding masks.")
+
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d,
+            d,
+            AttnBiasType.NO_BIAS,
+            attn_mask_type,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            jnp.bfloat16,
+            False,
+            qkv_layout,
+            None,
+            None,
+            SeqDescFormat.Seqlens,
+        )
+        runner._setup_inputs()
+
+        # Distinct inverse scales, so a missing or unit descale cannot match the reference.
+        q_scale_inv = jnp.asarray([0.5], dtype=jnp.float32)
+        k_scale_inv = jnp.asarray([1.5], dtype=jnp.float32)
+        v_scale_inv = jnp.asarray([0.75], dtype=jnp.float32)
+        q_fp8 = (runner.q.astype(jnp.float32) / q_scale_inv).astype(jnp.float8_e4m3fn)
+        k_fp8 = (runner.k.astype(jnp.float32) / k_scale_inv).astype(jnp.float8_e4m3fn)
+        v_fp8 = (runner.v.astype(jnp.float32) / v_scale_inv).astype(jnp.float8_e4m3fn)
+        q_dq = q_fp8.astype(jnp.float32) * q_scale_inv
+        k_dq = k_fp8.astype(jnp.float32) * k_scale_inv
+        v_dq = v_fp8.astype(jnp.float32) * v_scale_inv
+        q_bf16 = q_dq.astype(jnp.bfloat16)
+        k_bf16 = k_dq.astype(jnp.bfloat16)
+        v_bf16 = v_dq.astype(jnp.bfloat16)
+
+        fp8_backend, _ = FusedAttnHelper(
+            is_training=False,
+            batch_size=b,
+            q_dtype=jnp.float8_e4m3fn,
+            kv_dtype=jnp.float8_e4m3fn,
+            qkv_layout=qkv_layout,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            dropout_probability=0.0,
+            q_num_heads=h_q,
+            kv_num_heads=h_kv,
+            q_max_seqlen=s_q,
+            kv_max_seqlen=s_kv,
+            head_dim_qk=d,
+            head_dim_v=d,
+            window_size=(-1, -1),
+        ).get_fused_attn_backend()
+        if fp8_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+        assert fp8_backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
+            f"FP8 ASM was not selected: backend={fp8_backend}"
+        )
+
+        kwargs = dict(
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=runner.scaling_factor,
+            dropout_probability=0.0,
+            is_training=False,
+            qkv_layout=qkv_layout,
+            max_segments_per_seq=runner._get_max_segments_per_sequence(),
+            window_size=None,
+        )
+
+        fp8_kwargs = dict(
+            kwargs,
+            q_scale_inv=q_scale_inv,
+            k_scale_inv=k_scale_inv,
+            v_scale_inv=v_scale_inv,
+        )
+        fp8_out = jit(
+            partial(_fused_attn_keep_output_dtype, **fp8_kwargs),
+            static_argnames=kwargs.keys(),
+        )(q_fp8, k_fp8, v_fp8, runner.sequence_desciptor)
+        bf16_out = jit(
+            partial(customcall_fused_dpa, **kwargs),
+            static_argnames=kwargs.keys(),
+        )(q_bf16, k_bf16, v_bf16, None, None, runner.sequence_desciptor, None)
+        reference_out = jax_dpa(
+            q_dq, k_dq, v_dq, None, None, runner.mask, None, **kwargs
+        )
+
+        assert fp8_out.dtype == jnp.bfloat16
+        assert bf16_out.dtype == jnp.bfloat16
+
+        fp8_valid, fp8_invalid, ref_valid, _ = _split_valid_and_invalid(
+            fp8_out, reference_out, runner.pad_q
+        )
+        bf16_valid, _, _, _ = _split_valid_and_invalid(
+            bf16_out, reference_out, runner.pad_q
+        )
+
+        assert_allclose(
+            fp8_invalid,
+            jnp.zeros_like(fp8_invalid),
+            dtype=jnp.bfloat16,
+            err_msg="FP8 ASM wrote non-zero values into padded tokens",
+        )
+        # JAX softmax reference on the same dequantized FP8 inputs.
+        assert_allclose(
+            fp8_valid,
+            ref_valid,
+            dtype=jnp.float8_e4m3fn,
+            err_msg="FP8 ASM vs JAX softmax reference",
+        )
+        # Same inputs through the BF16 ASM/CK path; residual should stay in e4m3 range.
+        assert_allclose(
+            fp8_valid,
+            bf16_valid,
+            dtype=jnp.float8_e4m3fn,
+            err_msg="FP8 ASM vs BF16 ASM on identical dequantized QKV",
+        )
+        print_debug_tensor_stats("fp8_asm", fp8_valid)
+        print_debug_tensor_stats("bf16_asm", bf16_valid)
+        print_debug_tensor_stats("jax_ref", ref_valid)
