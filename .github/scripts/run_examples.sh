@@ -14,8 +14,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
 
-JAX_CONSTRAINTS=/tmp/jax-constraints.txt
-pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
+# With one venv per framework (ci/install_deps.sh), each framework's examples run in it
+BASE_PATH="$PATH"
+use_venv() {
+    if [[ -n "$1" && -x "$1/bin/python" ]]; then
+        export VIRTUAL_ENV="$1" PATH="$1/bin:$BASE_PATH"
+        unset ROCM_PATH
+    fi
+}
 
 # Every step runs through run_example.py, which records it as one JUnit test case
 # so the examples get a section of their own in the job summary. A failing step is
@@ -26,10 +32,15 @@ run_example() {
     python "${SCRIPT_DIR}/run_example.py" "$@" || EXAMPLES_RC=1
 }
 
+use_venv "${TE_CI_TORCH_VENV:-}"
 cd "${REPO_ROOT}/examples/pytorch/mnist"
 run_example pytorch.mnist python main.py
 run_example pytorch.mnist.use-te python main.py --use-te
 run_example pytorch.mnist.use-fp8 python main.py --use-fp8
+
+use_venv "${TE_CI_JAX_VENV:-}"
+JAX_CONSTRAINTS=/tmp/jax-constraints.txt
+pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
 
 cd "${REPO_ROOT}/examples/jax/mnist"
 run_example jax.mnist.requirements pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt

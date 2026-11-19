@@ -1,0 +1,14 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# The PyTorch venv. aiter and Flash Attention are installed apart (config.env); their
+# requirements are here.
+-r common.in
+torch[device-${GPU_ARCH}]==2.13.0+rocm10.1.0
+torchvision[device-${GPU_ARCH}]==0.28.0+rocm10.1.0
+flydsl==0.4.0
+einops
+onnxscript
+safetensors
+psutil
+packaging

@@ -211,7 +211,7 @@ except ImportError as e:
     ) from e
 
 
-__all__ = ["triton_call_lowering", "get_triton_info"]
+__all__ = ["triton_call_lowering", "get_triton_info", "get_triton_target"]
 
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
@@ -371,6 +371,18 @@ def get_triton_dtype(aval):
     return f"*{dtype_map[aval.dtype]}"
 
 
+def get_triton_target():
+    """Triton compile target of device 0, read through jaxlib.
+
+    Triton's runtime driver reports the same but needs PyTorch. On ROCm the warp size
+    follows the gfx arch, as in Triton's HIPOptions.
+    """
+    if is_hip_extension():
+        arch = gpu_triton.get_arch_details(0).split(":")[0]
+        return tc.GPUTarget("hip", arch, 32 if int(arch[3:-2]) >= 10 else 64)
+    return tc.GPUTarget("cuda", gpu_triton.get_compute_capability(0), 32)
+
+
 def compile_triton(
     kernel_fn: Callable,
     signature: Mapping[str, str],
@@ -392,8 +404,8 @@ def compile_triton(
         num_warps: Number of warps per block
         num_stages: Number of pipeline stages
         num_ctas: Number of CTAs (cooperative thread arrays)
-        compute_capability: CUDA compute capability (CUDA only; ignored on ROCm, whose
-            target is auto-detected from the active GPU)
+        compute_capability: CUDA compute capability (CUDA only; on ROCm the target is
+            device 0's gfx arch)
         enable_fp_fusion: Enable FP fusion optimizations (default False for accuracy)
 
     Returns:
@@ -432,11 +444,10 @@ def compile_triton(
             signature_with_constexpr[const_name] = "constexpr"
 
     if is_hip:
-        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
-        import triton
+        # ROCm: device 0's gfx arch and its warp size; HSACO binary.
         from triton.compiler import make_backend
 
-        target = triton.runtime.driver.active.get_current_target()
+        target = get_triton_target()
         backend = make_backend(target)
         options = backend.parse_options(
             {

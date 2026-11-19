@@ -1,0 +1,22 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# In every framework venv. update_locks.sh fills in ${GPU_ARCH} per lock.
+rocm[libraries,devel,device-${GPU_ARCH}]==10.1.0
+# Also used by TE's JAX package (transformer_engine.jax.triton_extensions)
+triton==3.8.0+git669b31ac.rocm10.1.0
+pip
+setuptools
+wheel
+ninja
+pybind11[global]
+numpy
+pandas
+pyyaml
+pydantic
+fire
+ipython
+pytest
+pytest-timeout
+hypothesis
+expecttest

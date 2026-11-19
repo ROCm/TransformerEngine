@@ -17,29 +17,12 @@ on:
         required: false
         default: '1'
         type: string
-      docker_image_override:
-        description: 'Manual Docker Image (Leave empty to use config file value)'
-        required: false
-        type: string
-      test_config_from_source:
-        description: 'DEBUG: Use config.json from current source branch instead of dev'
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
         description: 'Test Level (1-3)'
         required: true
         default: '1'
-      docker_image_override:
-        description: 'Manual Docker Image (Leave empty to use config file value)'
-        required: false
-        type: string
-      test_config_from_source:
-        description: 'DEBUG: Use config.json from current source branch instead of dev'
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,55 +35,6 @@ env:
   TE_CI_DATA_DIR: ci-data
 
 jobs:
-  select_image:
-    name: Select Docker Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      image-tag: ${{ steps.select-image.outputs.image-tag }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
-          sparse-checkout: ci/ci_config.json
-          sparse-checkout-cone-mode: false
-
-      - name: Select Docker Image Tag
-        id: select-image
-        run: |
-          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
-          else
-             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
-          fi
-
-          if [[ ! -f "ci/ci_config.json" ]]; then
-             echo "::error::Config file not found in checkout."
-             exit 1
-          fi
-
-          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
-          echo "Determining image for branch: $BRANCH_NAME"
-          VERSION_KEY="$BRANCH_NAME"
-
-          if jq -e --arg key "$VERSION_KEY" '.docker_images[$key]' ci/ci_config.json > /dev/null; then
-            JSON_KEY="$VERSION_KEY"
-          else
-            JSON_KEY="default"
-          fi
-
-          echo "Selected config key: $JSON_KEY"
-          IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
-
-          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
-          if [[ -n "$MANUAL_OVERRIDE" ]]; then
-            echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-          fi
-
-          echo "Selected base image tag: $IMAGE_BASE"
-          echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
-
   # Which suites this run needs. A PR runs only the suites its changed paths affect
   # (.github/scripts/change_scope.py, the PR's own copy); pushes, manual runs and
   # PRs labelled ci-skip-scope run every suite.
@@ -167,12 +101,13 @@ jobs:
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
-    needs: [scope, select_image, build]
+    needs: [scope, build]
     if: needs.scope.outputs.sgpu_suites != ''
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      SUITES: ${{ needs.scope.outputs.sgpu_suites }}
+      GPU_ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
     strategy:
       fail-fast: false
       matrix:
@@ -197,7 +132,7 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      # Download artifacts and pull the Docker image concurrently
+      # Download artifacts and set up the test container concurrently
       - parallel:
           - name: Download build artifacts
             uses: actions/download-artifact@v8
@@ -205,30 +140,59 @@ jobs:
               name: te-rocm-wheels
               path: dist/
 
-          - name: Pull Docker Image
+          - &start_container
+            name: Start container
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
+              test -n "$DEVICE_FLAG"
+              echo "Using device flag: $DEVICE_FLAG"
+              # A plain OS image: install_deps.sh installs each framework the job's suites
+              # use into its own venv, for this runner's GPU arch; each suite runs in its own.
+              FRAMEWORKS=""
+              for suite in $SUITES; do
+                case "$suite" in
+                  torch|torch-mgpu|core) FRAMEWORKS="$FRAMEWORKS torch" ;;
+                  jax|jax-mgpu) FRAMEWORKS="$FRAMEWORKS jax" ;;
+                  *) FRAMEWORKS="$FRAMEWORKS torch jax" ;;
+                esac
+              done
+              FRAMEWORKS=$(printf '%s\n' $FRAMEWORKS | sort -ur | xargs)
+              VENV_ENV=()
+              for fw in $FRAMEWORKS; do
+                VENV_ENV+=(-e "TE_CI_${fw^^}_VENV=/opt/venv-$fw")
+              done
+              # The queue's own Python (GPU probes, CK JIT prebuild) runs in the first venv:
+              # torch when the job has it
+              DEFAULT_VENV=/opt/venv-${FRAMEWORKS%% *}
+              . ci/deps/requirements/config.env
+              SECONDS=0
+              docker pull "$TE_CI_BASE_IMAGE"
+              docker run -dt \
+                --rm \
+                --name te-runner \
+                --network=host \
+                --device=/dev/kfd $DEVICE_FLAG \
+                --shm-size=16G \
+                --pid=host \
+                --group-add $(getent group render | cut -d: -f3) \
+                --group-add $(getent group video | cut -d: -f3) \
+                "${VENV_ENV[@]}" \
+                -e VIRTUAL_ENV=$DEFAULT_VENV \
+                -e PATH=$DEFAULT_VENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                -v "${{ github.workspace }}:/workspace" \
+                -w /workspace \
+                "$TE_CI_BASE_IMAGE"
+              for fw in $FRAMEWORKS; do
+                docker exec -e TE_CI_DEPS_SUMMARY=/workspace/deps-summary-$fw.md te-runner \
+                  bash ci/install_deps.sh "$GPU_ARCH" --frameworks "$fw"
+              done
+              echo "Test environment ready in ${SECONDS} s"
+              for fw in $FRAMEWORKS; do
+                cat "deps-summary-$fw.md"
+              done >> "$GITHUB_STEP_SUMMARY"
 
-      - &run_container
-        name: Run Container
-        run: |
-          DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
-          test -n "$DEVICE_FLAG"
-          echo "Using device flag: $DEVICE_FLAG"
-          docker run -dt \
-            --rm \
-            --name te-runner \
-            --network=host \
-            --device=/dev/kfd $DEVICE_FLAG \
-            --shm-size=16G \
-            --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
-
-      - name: Install packages
+      - &install_packages
+        name: Install packages
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
@@ -240,11 +204,18 @@ jobs:
           TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
           test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
-          pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
-          pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
-          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
+          # Each framework venv the job has gets the core wheel and its own package,
+          # built with only that venv on PATH. The build tools are in the locks.
+          if [ -n "${TE_CI_TORCH_VENV:-}" ]; then
+            ( export VIRTUAL_ENV="$TE_CI_TORCH_VENV" PATH="$TE_CI_TORCH_VENV/bin:$PATH"
+              pip install --no-deps "$TE_CORE_PKG"
+              pip install --no-build-isolation --no-deps "$TE_TORCH_PKG" )
+          fi
+          if [ -n "${TE_CI_JAX_VENV:-}" ]; then
+            ( export VIRTUAL_ENV="$TE_CI_JAX_VENV" PATH="$TE_CI_JAX_VENV/bin:$PATH"
+              pip install --no-deps "$TE_CORE_PKG"
+              pip install --no-build-isolation --no-deps "$TE_JAX_PKG" )
+          fi
           EOF
           )"
 
@@ -390,12 +361,13 @@ jobs:
   # Each item runs on the whole box, one after another -- see ci/run_queue.sh.
   mgpu_tests:
     name: mGPU Tests (${{ matrix.arch_label }})
-    needs: [scope, select_image, build]
+    needs: [scope, build]
     if: needs.scope.outputs.mgpu_suites != ''
     timeout-minutes: 240
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      SUITES: ${{ needs.scope.outputs.mgpu_suites }}
+      GPU_ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
     strategy:
       fail-fast: false
       matrix:
@@ -413,7 +385,7 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      # Download artifacts and pull the Docker image concurrently
+      # Download artifacts and set up the test container concurrently
       - parallel:
           - name: Download build artifacts
             uses: actions/download-artifact@v8
@@ -421,29 +393,9 @@ jobs:
               name: te-rocm-wheels
               path: dist/
 
-          - name: Pull Docker Image
-            run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+          - *start_container
 
-      - *run_container
-
-      - name: Install packages
-        run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
-          set -ex
-
-          TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
-
-          pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
-          pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
-          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
-          EOF
-          )"
+      - *install_packages
 
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items

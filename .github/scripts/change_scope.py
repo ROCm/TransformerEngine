@@ -69,10 +69,7 @@ RULES = [
     # A PR is gated by its own copy of these rules, so one that edits them runs
     # every suite rather than trusting the rules it is changing.
     (".github/scripts/change_scope.py", EVERYTHING, "the gating rules"),
-    # Scripts of manually triggered workflows. The CI image in particular is
-    # published by hand and named in ci/ci_config.json, so a PR editing its
-    # recipe still runs on the published image.
-    (".github/scripts/Dockerfile.ci.deps", NOTHING, "CI image recipe; ci-deps-docker-publish.yml"),
+    # Scripts of manually triggered workflows
     (".github/scripts/aiter_prebuild_upload.sh", NOTHING, "aiter-prebuilt-upload.yml"),
     (".github/scripts/check_for_ngc_images.sh", NOTHING, "attach-wheels-to-release.yml"),
     (".github/scripts/**", EVERYTHING, "CI scripts"),
@@ -105,8 +102,13 @@ RULES = [
     # Queue configs: each is read only by its own queue
     ("ci/ci_sgpu_queue.conf", frozenset(SGPU_SUITES), "sGPU queue config"),
     ("ci/ci_mgpu_queue.conf", frozenset(MGPU_SUITES), "mGPU queue config"),
-    # The CI docker images: a new image runs every suite
-    ("ci/ci_config.json", EVERYTHING, "names the CI docker images"),
+    # The release branches' CI reads its docker images from dev's copy; dev's CI
+    # installs its test environment at runtime instead
+    ("ci/ci_config.json", NOTHING, "docker images of the release branches' CI"),
+    # The test environment's requirements, locks and install script fall to the
+    # catch-all below, which runs every suite; the lock generator affects no run
+    ("ci/deps/update_locks.sh", NOTHING, "regenerates the checked-in locks"),
+    ("ci/deps/build_fa_wheel.sh", NOTHING, "builds a Flash Attention wheel; fa-wheel-publish.yml"),
     # Everything else every suite shares: the C++ library all frameworks link,
     # the build, the submodules and the rest of the CI scripts. The catch-all
     # is spelled out so the table reads as complete.

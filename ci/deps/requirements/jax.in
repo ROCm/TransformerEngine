@@ -1,0 +1,11 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# The JAX venv.
+-r common.in
+jax==0.11.1
+jax-rocm10-pjrt==0.11.1+rocm10.1.0
+jax-rocm10-plugin==0.11.1+rocm10.1.0
+flax
+etils
+typing_extensions

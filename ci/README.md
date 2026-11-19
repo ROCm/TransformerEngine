@@ -1,11 +1,12 @@
 # Transformer Engine ROCm CI #
 
 This directory contains scripts to prepare and run TE unit tests on ROCm dockers manually or from CI automation.
-There are 4 executable scripts here:
+There are 5 executable scripts here:
 * `core.sh` - build and run tests/cpp unit tests
 * `jax.sh` - install prerequisites and run tests/jax framework integration tests
 * `pytorch.sh` - install prerequisites and run tests/pytorch framework integration tests
 * `run_queue.sh` - run the scripts above as one work queue spread across the GPUs of the box; this is what CI runs
+* `install_deps.sh` - install the packages the tests need into a plain Ubuntu 24.04 container; see [CI test environment](#ci-test-environment)
 
 The scripts return 0 in case of test success, and other values for testing errors. Logging is performed on standard output and error streams.
 
@@ -34,7 +35,7 @@ CI keeps `weights/` and `rerun/` across runs with `actions/cache`, so "Re-run fa
 
 ### Running locally
 
-Run from the repo root inside a TE CI docker with Transformer Engine installed. `run_queue.sh` needs bash 5.1 or newer, `rocminfo`, and `python3` with pandas.
+Run from the repo root in the [CI test environment](#ci-test-environment), with Transformer Engine installed. The suites run in the active venv; with one venv per framework, as in CI, export `TE_CI_TORCH_VENV=/opt/venv-torch` and `TE_CI_JAX_VENV=/opt/venv-jax` and each suite runs in its own. `run_queue.sh` needs bash 5.1 or newer, `rocminfo`, and `python3` with pandas.
 
 ```sh
 # Single-GPU tests on every visible GPU
@@ -62,8 +63,51 @@ Pull requests run only the suites their changed paths can affect, by the rules i
 * The `ci-skip-scope` label runs every suite at the PR's `ci-level`, from the next run (adding a `ci-level` label or pushing a commit).
 * To see what a branch would run: `git diff --name-status --no-renames dev...HEAD | python3 .github/scripts/change_scope.py`
 
-## CI Docker images
+## CI test environment
 
-Default and release-specific TE CI images are listed in [`ci_config.json`](ci_config.json) under `docker_images`.
+The tests run in a plain Ubuntu 24.04 container set up by [`install_deps.sh`](install_deps.sh), with every package pinned by version and sha256 in [`deps/`](deps). By default it installs PyTorch and JAX into one venv, `/opt/venv`. `--frameworks torch` or `--frameworks jax` installs one framework into its own venv, `/opt/venv-torch` or `/opt/venv-jax`; CI does that for each framework a job needs, so each suite runs without the other framework installed.
 
-The default image is built from [`.github/scripts/Dockerfile.ci.deps`](../.github/scripts/Dockerfile.ci.deps). It pins [ROCm/aiter](https://github.com/ROCm/aiter) at commit [`77455e3ecf4f0d28756afc452e914940c45b944b`](https://github.com/ROCm/aiter/commit/77455e3ecf4f0d28756afc452e914940c45b944b). That revision was validated in CI for **MXFP4 FP4 GEMM** kernel coverage.
+| File | What it is |
+|---|---|
+| `deps/requirements/common.in` | Packages for both frameworks: ROCm SDK, Triton, test and build tools |
+| `deps/requirements/torch.in` | PyTorch: torch, torchvision, FlyDSL, aiter's and Flash Attention's needs |
+| `deps/requirements/jax.in` | JAX: jax, the JAX ROCm plugin, flax |
+| `deps/requirements/config.env` | GPU archs, base image, uv and Python versions, aiter and Flash Attention versions, package sources |
+| `deps/locks/` | Generated: exact versions and hashes per GPU arch, `<arch>-all.txt` for both frameworks and `<arch>-{torch,jax}.txt` for one |
+| `deps/update_locks.sh` | Regenerates `deps/locks/` from `deps/requirements/` |
+| `deps/build_fa_wheel.sh` | Builds the Flash Attention wheel for the venv's torch; `--upload` publishes it |
+
+[`ci_config.json`](ci_config.json) names the docker images of the release branches' CI, whose workflows read it from `dev`.
+
+### Set it up locally
+
+1. Start Ubuntu 24.04 with the GPUs and this repo:
+   ```sh
+   docker run -it --network=host --device=/dev/kfd --device=/dev/dri --shm-size=16G \
+     --group-add $(getent group video | cut -d: -f3) --group-add $(getent group render | cut -d: -f3) \
+     -v "$PWD:/workspace" -w /workspace ubuntu:24.04
+   ```
+2. Inside it, install PyTorch and JAX for this machine's GPU, and activate the venv:
+   ```sh
+   ci/install_deps.sh
+   source /opt/venv/bin/activate
+   ```
+
+### Update it
+
+1. Edit `deps/requirements/`.
+2. Regenerate the locks and install from them:
+   ```sh
+   ci/install_deps.sh --update-locks
+   ```
+3. Commit `deps/requirements/` and `deps/locks/` together; CI installs the committed locks.
+
+### Flash Attention
+
+Flash Attention is built for the exact torch, ROCm and Python, so it isn't in the locks: `install_deps.sh` installs the wheel of `FLASH_ATTN_VERSION` (in `config.env`) built for the venv's. After a change to any of them it stops with a message until that wheel exists. Build it either way:
+- On GitHub: run the "Publish Flash Attention wheel" workflow on your branch. It builds the wheel and publishes it.
+- Locally, in the container: build it and install it, then publish it for CI:
+  ```sh
+  ci/deps/build_fa_wheel.sh
+  ARTIFACTORY_TOKEN=<token> ci/deps/build_fa_wheel.sh --upload
+  ```

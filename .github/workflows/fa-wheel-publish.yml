@@ -1,0 +1,49 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# Build the Flash Attention wheel ci/install_deps.sh looks for on this branch and publish
+# it to the te-ci folder on Artifactory: FLASH_ATTN_VERSION from
+# ci/deps/requirements/config.env, built against the branch's locked torch, ROCm and
+# Python for all GPU_ARCHS. Run it when install_deps.sh reports the wheel missing;
+# ci/deps/build_fa_wheel.sh --upload does the same locally.
+#
+# Required repository secret:
+#   ARTIFACTORY_TE_CI_TOKEN — can deploy to rocm-generic-local/te-ci/fa-wheels/
+
+name: Publish Flash Attention wheel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: build-only-te
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build and publish the wheel
+        env:
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TE_CI_TOKEN }}
+        run: |
+          set -o pipefail
+          test -n "$ARTIFACTORY_TOKEN" || { echo "::error::Set the ARTIFACTORY_TE_CI_TOKEN secret"; exit 1; }
+          . ci/deps/requirements/config.env
+          # The builder has no GPU: set up the torch venv for one of the archs, unchecked
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e ARTIFACTORY_TOKEN \
+            "$TE_CI_BASE_IMAGE" bash -c '
+              set -e
+              . ci/deps/requirements/config.env
+              ci/install_deps.sh "${GPU_ARCHS%% *}" --frameworks torch --no-gpu-check --no-flash-attn
+              ci/deps/build_fa_wheel.sh --upload
+              mkdir -p fa-dist
+              cp "$FLASH_ATTN_LOCAL_WHEELS"/*.whl fa-dist/ 2> /dev/null || true' 2>&1 | tee fa-build.log
+          grep -E "^Published|published already" fa-build.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Keep the wheel as a run artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: flash-attn-wheel
+          path: fa-dist/*.whl
+          if-no-files-found: ignore
