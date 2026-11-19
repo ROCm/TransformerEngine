@@ -153,10 +153,20 @@ jobs:
           # gave one) so the worker diffs against it, and record the head
           # commit the run was requested for so the worker can refuse to
           # review anything pushed after the request.
-          read -r pr_base head < <(gh pr view "$pr" \
-                                     --repo "$GITHUB_REPOSITORY" \
-                                     --json baseRefName,headRefOid \
-                                     -q '"\(.baseRefName) \(.headRefOid)"')
+          #
+          # Capture gh's output with `$(...)` rather than feeding `read`
+          # through `<(...)`: a process substitution's exit status is not
+          # visible to the command reading from it, so a failing `gh pr view`
+          # would otherwise surface only as `read` hitting EOF — fail-closed
+          # under `set -e`, but without the ::error:: message below.
+          if ! pr_fields=$(gh pr view "$pr" \
+                             --repo "$GITHUB_REPOSITORY" \
+                             --json baseRefName,headRefOid \
+                             -q '"\(.baseRefName) \(.headRefOid)"'); then
+            echo "::error::Could not look up PR #$pr" >&2
+            exit 1
+          fi
+          read -r pr_base head <<<"$pr_fields"
           if [[ -z "${head:-}" ]]; then
             echo "::error::Could not look up PR #$pr" >&2
             exit 1
