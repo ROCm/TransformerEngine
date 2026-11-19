@@ -126,8 +126,9 @@ jobs:
       ran_in_attempt: ${{ github.run_attempt }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
+          persist-credentials: false
           # A PR is diffed against its base branch, which needs the history
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
@@ -259,7 +260,7 @@ jobs:
           )"
 
       - name: Restore learned test weights
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -270,7 +271,7 @@ jobs:
       # "Re-run all jobs" run the whole queue.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -283,6 +284,7 @@ jobs:
         timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.sgpu_suites }}
         run: |
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
@@ -309,13 +311,13 @@ jobs:
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.sgpu_suites }}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue sgpu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
       - name: Save learned test weights
         if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -353,7 +355,7 @@ jobs:
       # attempt's list rather than an older one.
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -460,7 +462,7 @@ jobs:
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -473,6 +475,7 @@ jobs:
         timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.mgpu_suites }}
         run: |
           rm -rf "$TE_CI_DATA_DIR/test-results"
 
@@ -489,52 +492,9 @@ jobs:
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
-
-      - name: Restore learned test weights
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.TE_CI_DATA_DIR }}/weights
-          key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: te-emu-weights-l${{ env.TEST_LEVEL }}-
-
-      # What failed on an earlier attempt of this run; see the sGPU job.
-      - name: Restore the previous attempt's failed items
-        if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.TE_CI_DATA_DIR }}/rerun
-          key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-
-
-      - name: Run emulated tests as one queue
-        id: run-tests
-        # Below the job's timeout-minutes so an overrun kills only this step;
-        # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 210
-        run: |
-          rm -rf "$TE_CI_DATA_DIR/test-results"
-          mkdir -p "$TE_CI_DATA_DIR/weights" "$TE_CI_DATA_DIR/rerun"
-
-          docker exec \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e TE_CI_DATA_DIR \
-            -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
-            -e JUNITXML_SUFFIX=.xml \
-            -e GITHUB_ACTIONS \
-            -e TE_CI_EMU_SLOTS="${{ vars.TE_CI_EMU_SLOTS || '8' }}" \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.emu_suites }}" \
-            "$CONTAINER" bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue emu \
-              --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
-
-      - name: Save learned test weights
-        if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ env.TE_CI_DATA_DIR }}/weights
-          key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate test report
         if: always()
@@ -561,7 +521,7 @@ jobs:
 
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -620,7 +580,9 @@ jobs:
       CONTAINER: te-emu-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Initialize required submodules
         run: |
@@ -634,9 +596,23 @@ jobs:
         run: |
           echo "ref=$(sed -n 's/^: \${ROCJITSU_REF:=\([0-9a-f]*\)}$/\1/p' ci/rocjitsu.sh)" >> "$GITHUB_OUTPUT"
 
-      # ci/rocjitsu.sh reuses a build of the same rocm-systems commit
-      - name: Cache rocjitsu build
-        uses: actions/cache@v6
+      # ci/rocjitsu.sh reuses a build of the same rocm-systems commit, cached
+      # here across runs. Restore and save (below) are separate steps, rather
+      # than one combined actions/cache, for two reasons:
+      #   - zizmor's cache-poisoning audit flags any combined read+write
+      #     cache action on a workflow reachable from pull_request, as this
+      #     one is (via rocm-ci-dispatch.yml). GitHub's own merge-ref cache
+      #     scoping already keeps a PR run's cache writes from reaching
+      #     trusted push-to-dev runs, so the split doesn't add that
+      #     protection; it satisfies the audit for a protection GitHub
+      #     already provides here.
+      #   - It lets the save step check build/rocjitsu/ref (below) before
+      #     saving. The combined action only skips saving when the whole
+      #     path is missing, not when a failed build has left partial
+      #     content under it, so a broken build could still get cached.
+      - name: Restore rocjitsu build
+        id: restore-rocjitsu
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: build/rocjitsu
           key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
@@ -644,14 +620,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - name: Run Container
         run: |
@@ -662,9 +638,9 @@ jobs:
             --name "$CONTAINER" \
             --network=host \
             --shm-size=16G \
-            -v "${{ github.workspace }}:/workspace" \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
+            "${DOCKER_IMAGE}"
 
       - name: Install packages
         run: |
@@ -685,7 +661,7 @@ jobs:
           )"
 
       - name: Restore learned test weights
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -694,7 +670,7 @@ jobs:
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -705,24 +681,39 @@ jobs:
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
         timeout-minutes: 210
+        env:
+          TE_CI_EMU_SLOTS: ${{ vars.TE_CI_EMU_SLOTS || '8' }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.emu_suites }}
         run: |
           rm -rf "$TE_CI_DATA_DIR/test-results"
           mkdir -p "$TE_CI_DATA_DIR/weights" "$TE_CI_DATA_DIR/rerun"
 
           docker exec \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e TE_CI_DATA_DIR \
             -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e GITHUB_ACTIONS \
-            -e TE_CI_EMU_SLOTS="${{ vars.TE_CI_EMU_SLOTS || '8' }}" \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.emu_suites }}" \
+            -e TE_CI_EMU_SLOTS="${TE_CI_EMU_SLOTS}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             "$CONTAINER" bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue emu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
+      # build_rocjitsu() (ci/rocjitsu.sh) writes build/rocjitsu/ref only after
+      # a build completes and matches $ROCJITSU_REF; it deletes that file
+      # before every rebuild attempt, so its presence means a complete,
+      # correctly-pinned build, not a build that failed partway through and
+      # left partial content under build/rocjitsu/build/.
+      - name: Save rocjitsu build
+        if: always() && steps.restore-rocjitsu.outputs.cache-hit != 'true' && hashFiles('build/rocjitsu/ref') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: build/rocjitsu
+          key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
+
       - name: Save learned test weights
         if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -743,7 +734,7 @@ jobs:
 
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
