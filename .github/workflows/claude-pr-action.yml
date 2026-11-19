@@ -1,8 +1,15 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 name: Claude PR Action
 
-# Single workflow: PR review or summary, triggered by comment or manually.
+# Single workflow: PR review or summary, triggered by label, comment, or
+# manually.
 #
 # Triggers:
+#   - Label `claude-review` / `claude-summary` on a PR, added by a user with
+#     write access to this repository
 #   - Comment `/claude review` / `/claude summary` on a PR from a user with
 #     write access to this repository
 #   - Manual workflow_dispatch (re-runs)
@@ -11,9 +18,13 @@ name: Claude PR Action
 #   These triggers run with CLAUDE_CODE_OAUTH_TOKEN and a write-scoped
 #   GITHUB_TOKEN, while the job checks out PR code that may come from an
 #   untrusted fork. The trust decision is the requester's: a maintainer
-#   asks for one run on the PR as it is at that moment.
-#     - Only users with write/maintain/admin permission (checked via the
-#       API, not `author_association`) can trigger a run.
+#   asks for one run on the PR as it is at that moment, regardless of who
+#   authored it.
+#     - Only users with write/maintain/admin permission can trigger a run
+#       whether by commenting or by adding a label. The label path checks the
+#       permission of whoever added the label (`github.event.sender.login`),
+#       the same check and the same identity class as the comment path's
+#       commenter check, not the PR author's.
 #     - Each request runs once; later pushes are not reviewed until someone
 #       asks again. The job fails if the PR head moved between the request
 #       and the checkout.
@@ -24,25 +35,46 @@ name: Claude PR Action
 #   Prompt injection through PR content remains possible; the requester
 #   should skim the PR before asking for a run.
 #
-#   CodeQL (actions/untrusted-checkout) flags the checkout below as
-#   untrusted code in a privileged context (issue_comment is privileged —
-#   full GITHUB_TOKEN and secrets, same bucket as pull_request_target —
-#   regardless of anything this workflow does). Dismissed as "Mitigated",
-#   not a false positive: the pattern is real, but the compensating
-#   controls above narrow it from "any commenter on any fork PR" to "a
-#   maintainer already vouched for this exact commit", which is the actual
-#   risk being addressed. GitHub's own recommended fix for this query — an
-#   unprivileged pull_request job that stages results as an artifact, plus
-#   a separate privileged workflow_run job that posts them — was considered
-#   and rejected: it would remove live PR commenting and inline-comment
-#   posting during the run, which is core to how this workflow is used.
+#   The label path matches on `github.event.label.name` -- the label added by
+#   *this* event -- not "does the PR currently have label X". So if the
+#   trigger label is not auto-removed after a run (see "Remove trigger
+#   label" below; its `gh api DELETE` can fail), a later unrelated label
+#   added to the same PR does not re-trigger a review: that event's
+#   `label.name` won't match `claude-review`/`claude-summary`, `action`
+#   stays unset, and the job no-ops. This is the original matching logic,
+#   preserved as-is -- it already covers that failure mode with no extra code.
+#
+#   CodeQL (actions/untrusted-checkout) and, as of zizmor 1.31.0,
+#   zizmor's dangerous-triggers both flag issue_comment itself as a
+#   privileged trigger (full GITHUB_TOKEN and secrets, same bucket as
+#   pull_request_target — regardless of anything this workflow does).
+#   Both are dismissed/suppressed as "Mitigated", not a false positive: the
+#   pattern is real, but the compensating controls above narrow it from
+#   "any commenter on any fork PR" to "a maintainer already vouched for
+#   this exact commit", which is the actual risk being addressed. GitHub's
+#   own recommended fix for the CodeQL query — an unprivileged pull_request
+#   job that stages results as an artifact, plus a separate privileged
+#   workflow_run job that posts them — was considered and rejected: it
+#   would remove live PR commenting and inline-comment posting during the
+#   run, which is core to how this workflow is used. The same reasoning
+#   covers pull_request_target below: it is not a lesser-trusted trigger
+#   than issue_comment here, since both resolve to the identical
+#   labeler/commenter-permission gate before anything untrusted is checked
+#   out.
+#
+#   The `# zizmor: ignore[dangerous-triggers]` below covers the whole `on:`
+#   block, including pull_request_target, not just issue_comment (no
+#   per-trigger scoping exists yet, as of zizmor 1.32.0 -- confirmed
+#   empirically, since zizmor/zizmor#2524 asking for it is still open).
+#   Verified empirically that adding pull_request_target here produces no
+#   additional finding under the existing ignore comment.
 #
 # Auth model:
 #   - Anthropic: subscription via CLAUDE_CODE_OAUTH_TOKEN.
 #   - GitHub:    workflow's GITHUB_TOKEN passed as `github_token` to
 #                claude-code-action. This skips the Anthropic OIDC App-token
-#                exchange (which rejects issue_comment subjects), so this
-#                workflow can run directly on that event
+#                exchange (which rejects pull_request_target / issue_comment
+#                subjects), so this workflow can run directly on those events
 #                with no repository_dispatch indirection and no PAT. Cost:
 #                comments post as `github-actions[bot]` instead of
 #                `claude[bot]`. Dedup across runs uses an HTML marker
@@ -58,6 +90,8 @@ name: Claude PR Action
 # from upstream changes.
 
 on:
+  pull_request_target:  # zizmor: ignore[dangerous-triggers] -- see "Security model" above
+    types: [labeled]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -86,6 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request_target' ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
     permissions:
       contents: read
@@ -103,6 +138,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          LABELER: ${{ github.event.sender.login }}
+          PR_FROM_LABEL: ${{ github.event.pull_request.number }}
+          BASE_FROM_LABEL: ${{ github.event.pull_request.base.ref }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENTER: ${{ github.event.comment.user.login }}
           PR_FROM_COMMENT: ${{ github.event.issue.number }}
@@ -114,6 +153,28 @@ jobs:
           action=""; pr=""; base=""
 
           case "$EVENT_NAME" in
+            pull_request_target)
+              # Only writers can trigger -- same permission check as the
+              # comment path below, applied to whoever added the label
+              # rather than the PR author (who may be an untrusted fork
+              # contributor; the label path's trust model is "a writer
+              # vouches for this commit", same as the comment path).
+              perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${LABELER}/permission" \
+                       --jq .permission 2>/dev/null || echo none)
+              case "$perm" in
+                admin|maintain|write) ;;
+                *) echo "Ignoring label from $LABELER (permission: $perm)"; exit 0 ;;
+              esac
+              # Match on the label added by *this* event, not on whether the
+              # PR currently carries the label -- see the "Security model"
+              # header comment for why this matters if auto-removal fails.
+              case "$LABEL_NAME" in
+                claude-review)  action="review"  ;;
+                claude-summary) action="summary" ;;
+              esac
+              pr="$PR_FROM_LABEL"
+              base="$BASE_FROM_LABEL"
+              ;;
             issue_comment)
               # Look at the first whitespace-separated token. If it's not
               # `/claude`, this isn't addressed to us — stay silent.
@@ -223,9 +284,11 @@ jobs:
           - `/claude review` — request a code review of this PR
           - `/claude summary` — generate (or update) a walkthrough comment
 
-          Commands are accepted from users with write access. Each command runs
-          once against the PR as it is now; push more commits and ask again for
-          a new run.
+          You can also add a label to the PR: `claude-review` or `claude-summary`.
+
+          Commands and labels are accepted from users with write access. Each
+          request runs once against the PR as it is now; push more commits
+          and ask again for a new run.
           <!-- by:claude -->
           EOF
 
@@ -574,3 +637,30 @@ jobs:
         with:
           name: claude-${{ env.ACTION }}-pr${{ env.PR_NUMBER }}-log
           path: ${{ steps.review.outputs.execution_file || steps.summary.outputs.execution_file }}
+
+      # Unconditional (any trigger, not just pull_request_target): the
+      # delete is scoped to this run's own resolved action
+      # (claude-${ACTION}) and a missing label 404s harmlessly via `|| true`,
+      # so running it regardless of trigger is always safe, and it is the
+      # only way to reliably clear the label in two cases that a
+      # pull_request_target-only guard misses:
+      #   - A label-add and a `/claude` comment for the same action race;
+      #     they share one concurrency group, so cancel-in-progress leaves
+      #     only one run to finish -- it may be the comment-triggered one,
+      #     which would otherwise never remove the label at all.
+      #   - A previous label-triggered run's removal itself failed (API
+      #     hiccup, permissions); the label stays stuck until some other
+      #     run for the same PR+action happens to clean it up.
+      # The resolve job matches on the label added by each individual event,
+      # not on whether the PR still carries it, so a label that outlives its
+      # own run (either case above) cannot cause a spurious re-trigger --
+      # see the "Security model" header.
+      - name: Remove trigger label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          label="claude-${ACTION}"
+          gh api --method DELETE \
+            "/repos/${{ github.repository }}/issues/${PR_NUMBER}/labels/$label" \
+            || true
