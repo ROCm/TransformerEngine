@@ -39,8 +39,16 @@ constexpr size_t MULTI_MAX_TENSORS = 256;
 static_assert(CHUNK_DIM_Y == common::tdm_dbias_kernel::CHUNK_DIM_Y,
               "A dbias partial row covers a chunk");
 
-template <typename T>
-using band_t = T[BAND_Y][CHUNK_DIM_X];
+// Waves per chunk of the gated kernels. The gradient without a transpose holds three input and two
+// output bands per wave, so it splits a chunk over twice the waves to keep more of them resident;
+// elsewhere that measured slower.
+template <bool IS_DGATED, bool TRANSPOSE>
+constexpr size_t gated_waves() {
+  return IS_DGATED && !TRANSPOSE ? 2 * WAVES : WAVES;
+}
+
+template <typename T, size_t BAND_ROWS = BAND_Y>
+using band_t = T[BAND_ROWS][CHUNK_DIM_X];
 
 #ifdef __GFX12__
 using common::cvt_from_float;
@@ -69,10 +77,10 @@ __device__ __forceinline__ uint32_t cvt_4x_to_fp8(const float x0, const float x1
   }
 }
 
-// Writes the lane's COLS_PER_LANE columns of a quad of packed rows of wave's band, transposed, into
-// the chunk's transpose t.
-template <typename OType, size_t N>
-__device__ __forceinline__ void store_transposed_quad(OType (&t)[N][BAND_Y][CHUNK_DIM_Y],
+// Writes the lane's COLS_PER_LANE columns of a quad of packed rows of wave's BAND_ROWS-row band,
+// transposed, into the chunk's transpose t.
+template <typename OType, size_t N, size_t BAND_ROWS>
+__device__ __forceinline__ void store_transposed_quad(OType (&t)[N][BAND_ROWS][CHUNK_DIM_Y],
                                                       const uint32_t (&packed)[4],
                                                       const int lane_offset_X, const int wave,
                                                       const int quad) {
@@ -88,7 +96,7 @@ __device__ __forceinline__ void store_transposed_quad(OType (&t)[N][BAND_Y][CHUN
 #pragma unroll
   for (int j = 0; j < COLS_PER_LANE; j++) {
     const int x = lane_offset_X + j;
-    *reinterpret_cast<uint32_t *>(&t[x / BAND_Y][x % BAND_Y][wave * BAND_Y + quad * 4]) =
+    *reinterpret_cast<uint32_t *>(&t[x / BAND_ROWS][x % BAND_ROWS][wave * BAND_ROWS + quad * 4]) =
         column[j];
   }
 }
@@ -303,32 +311,36 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 // gradients for grad. The element math is that of gated_act_kernel and dgated_act_kernel.
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), bool TRANSPOSE, typename IType, typename OType>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK)
+__global__ void __launch_bounds__((gated_waves<IS_DGATED, TRANSPOSE>() * WAVE_SIZE))
     quantize_gated_fp8_tdm_kernel(const IType *grad, const IType *input, OType *output,
                                   OType *output_t, const float *scale_ptr, float *amax_ptr,
                                   float *amax_slots, float *scale_inv_ptr, const size_t rows,
                                   const size_t cols, const ParamOP p) {
 #ifdef __GFX12__
+  constexpr size_t WAVES  = gated_waves<IS_DGATED, TRANSPOSE>();
+  constexpr size_t BAND_Y = CHUNK_DIM_Y / WAVES;
+  constexpr size_t QUADS  = BAND_Y / 4;
+  using in_band_t  = band_t<IType, BAND_Y>;
+  using out_band_t = band_t<OType, BAND_Y>;
   // The act and gate gradient halves of each output row, or the activation alone
   constexpr int HALVES = IS_DGATED ? 2 : 1;
   // With TRANSPOSE, the packed outputs stay in registers until the consumed input bands can take
   // them: a wave's output bands go into its act band, and the transposed chunk into the gate bands.
   // Without it, a wave writes its rows into its own output bands as it computes them.
-  static_assert(HALVES * sizeof(band_t<OType>) <= sizeof(band_t<IType>));
-  static_assert(HALVES * WAVES * BAND_Y * CHUNK_DIM_Y * sizeof(OType) <=
-                WAVES * sizeof(band_t<IType>));
+  static_assert(HALVES * sizeof(out_band_t) <= sizeof(in_band_t));
+  static_assert(HALVES * WAVES * BAND_Y * CHUNK_DIM_Y * sizeof(OType) <= WAVES * sizeof(in_band_t));
   // The act, gate and, with IS_DGATED, grad bands of the waves
-  __shared__ alignas(128) band_t<IType> in_sh[IS_DGATED ? 3 : 2][WAVES];
-  __shared__ alignas(128) band_t<OType> out_sh[TRANSPOSE ? 1 : WAVES][TRANSPOSE ? 1 : HALVES];
+  __shared__ alignas(128) in_band_t in_sh[IS_DGATED ? 3 : 2][WAVES];
+  __shared__ alignas(128) out_band_t out_sh[TRANSPOSE ? 1 : WAVES][TRANSPOSE ? 1 : HALVES];
   auto &act_sh  = in_sh[0];
   auto &gate_sh = in_sh[1];
   auto &grad_sh = in_sh[IS_DGATED ? 2 : 0];
   // Wave w's amax goes to wave_amax[w * AMAX_STRIDE]: after its output bands in its act band, or
   // into its grad band if those fill the act band.
-  constexpr bool AMAX_IN_ACT = HALVES * sizeof(band_t<OType>) < sizeof(band_t<IType>);
-  constexpr size_t AMAX_STRIDE = sizeof(band_t<IType>) / sizeof(float);
+  constexpr bool AMAX_IN_ACT = HALVES * sizeof(out_band_t) < sizeof(in_band_t);
+  constexpr size_t AMAX_STRIDE = sizeof(in_band_t) / sizeof(float);
   float *const wave_amax = reinterpret_cast<float *>(
-      AMAX_IN_ACT ? reinterpret_cast<char *>(act_sh) + HALVES * sizeof(band_t<OType>)
+      AMAX_IN_ACT ? reinterpret_cast<char *>(act_sh) + HALVES * sizeof(out_band_t)
                   : reinterpret_cast<char *>(grad_sh));
 
   const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
@@ -340,8 +352,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const bool has_band = band_offset_Y < rows;
   const float scale = scale_ptr != nullptr ? *scale_ptr : 1.0f;
   // The wave's HALVES output bands: in its act band with TRANSPOSE, else in out_sh
-  band_t<OType> *const out_bands =
-      TRANSPOSE ? reinterpret_cast<band_t<OType> *>(act_sh[wave]) : out_sh[wave];
+  out_band_t *const out_bands =
+      TRANSPOSE ? reinterpret_cast<out_band_t *>(act_sh[wave]) : out_sh[wave];
   // Out-of-bounds elements are zero and every gated activation and gradient keeps them zero.
   float amax = 0;
   // As in quantize_chunk, the lanes start at different quads to spread the transposed writes. The
@@ -984,7 +996,7 @@ bool quantize_gated_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *o
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               transpose, TRANSPOSE,
               quantize_gated_fp8_tdm_kernel<IS_BWD, ParamOP, ActOP, DActOP, TRANSPOSE, IType, OType>
-              <<<grid, THREADS_PER_CHUNK, 0, stream>>>(
+              <<<grid, (gated_waves<IS_BWD, TRANSPOSE>() * WAVE_SIZE), 0, stream>>>(
                   IS_BWD ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr,
                   reinterpret_cast<const IType *>(gated_input.data.dptr),
                   reinterpret_cast<OType *>(output->data.dptr),

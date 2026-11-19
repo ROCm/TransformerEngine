@@ -35,14 +35,15 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
   constexpr size_t HALVES         = IS_DGATED ? 2 : 1;
   constexpr size_t OUT_BAND_BYTES = sizeof(band_t<OType>);
   constexpr size_t HALF_OUT_BYTES = (USE_ROWWISE_SCALING + USE_COLWISE_SCALING) * OUT_BAND_BYTES;
-  constexpr size_t AUX_BYTES      = std::max(sizeof(band_t<IType>), HALVES * HALF_OUT_BYTES);
+  static_assert(HALF_OUT_BYTES <= sizeof(band_t<IType>), "A half's outputs fit in an input band");
   static_assert(!USE_COLWISE_SCALING || SCALE_DIM_Y == BAND_Y,
                 "A band must be one colwise scale block");
 
   // act (and for dgated gate) bands, which hold the activations after the first pass
   __shared__ alignas(128) band_t<IType> in_sh[WAVES][HALVES];
-  // The band only the first pass reads (gate, or grad for dgated), then the outputs
-  __shared__ alignas(128) unsigned char aux_sh[WAVES][AUX_BYTES];
+  // The band only the first pass reads (gate, or grad for dgated), then the act outputs. The gate
+  // outputs go into the act band once it is quantized.
+  __shared__ alignas(128) band_t<IType> aux_sh[WAVES];
 
   const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
   const int lane_offset_X = (threadIdx.x % WAVE_SIZE) * COLS_PER_LANE;
@@ -52,7 +53,7 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
     return;
   }
   auto &act    = in_sh[wave][0];
-  auto &aux_in = *reinterpret_cast<band_t<IType> *>(aux_sh[wave]);
+  auto &aux_in = aux_sh[wave];
   auto &gate   = IS_DGATED ? in_sh[wave][HALVES - 1] : aux_in;
 
   tdm::load_2d(act, input_act, rows, cols, 2 * cols, band_offset_Y, chunk_offset_X);
@@ -116,10 +117,12 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
       tdm::store_2d(out_colwise, out, rows, cols, out_ld, band_offset_Y, chunk_offset_X);
     }
   };
-  quantize_half(act, output_act_rowwise, output_act_colwise, 0, 0, aux_sh[wave]);
+  quantize_half(act, output_act_rowwise, output_act_colwise, 0, 0,
+                reinterpret_cast<unsigned char *>(aux_sh[wave]));
   if constexpr (IS_DGATED) {
+    asm volatile("" ::: "memory");  // the gate outputs overwrite the act band through another type
     quantize_half(gate, output_gate_rowwise, output_gate_colwise, scale_cols, cols,
-                  aux_sh[wave] + HALF_OUT_BYTES);
+                  reinterpret_cast<unsigned char *>(act));
   }
   tdm::wait<0>();
 #endif  // __GFX12__
