@@ -2,9 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""Pytest hooks for the Triton GEMM backend CI sweep.
+"""Pytest hooks for the PyTorch tests.
 
-Two things live here:
+Three things live here:
 
 1. A ``pytest_runtest_call`` wrapper that converts intentional backend
    refusals (HYBRID / mixed FP8 / NVFP4) raised as ``ValueError`` from
@@ -18,9 +18,16 @@ Two things live here:
    ``torch.matmul``; mi35x/gfx950 runs the same tests cleanly. When the
    kernel is fixed, remove the ``_KNOWN_BAD_FP32_ON_GFX942`` set and
    this hook becomes a no-op.
+
+3. ``pytest_runtest_makereport`` and ``pytest_runtest_protocol`` wrappers
+   that free the memory a test that raised (failed or xfailed) leaves
+   behind, so it cannot make later tests in the same file run out of
+   GPU memory. Tests that pass or skip are untouched.
 """
 
+import gc
 import os
+import sys
 
 import pytest
 
@@ -130,3 +137,48 @@ def pytest_runtest_call(item):
         outcome.force_exception(
             pytest.skip.Exception(f"Triton GEMM backend gate: {msg}")
         )
+
+
+# Set on items whose setup or call raised: failed or xfailed, not skipped.
+_RAISED = pytest.StashKey[bool]()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Mark tests whose setup or call raised, other than by skipping."""
+    yield
+    if call.when in ("setup", "call") and call.excinfo is not None:
+        if not call.excinfo.errisinstance(pytest.skip.Exception):
+            item.stash[_RAISED] = True
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Free the GPU memory a test that raised leaves behind.
+
+    The exception keeps the test's frames, and with them its tensors, alive.
+    pytest holds it in ``sys.last_*`` until the next test's call phase, and the
+    exception, its traceback and the frames form reference cycles that only
+    Python's garbage collector frees. The collector runs on Python object
+    counts, not GPU memory, so a large failed test can pin tens of GiB and make
+    later tests in the same file run out of memory. Both steps are needed:
+    neither clearing ``sys.last_*`` nor ``gc.collect()`` frees it alone.
+    """
+    yield
+    if not item.stash.get(_RAISED, False):
+        return
+    # No test runs after this one (end of the run, or -x / --maxfail stopping
+    # it), so there is nothing to protect: keep its failure in ``sys.last_*``
+    # so post-mortem debugging (pdb.pm(), %debug) works as before.
+    if nextitem is None or item.session.shouldstop or item.session.shouldfail:
+        return
+    for name in ("last_type", "last_value", "last_traceback", "last_exc"):
+        if hasattr(sys, name):
+            delattr(sys, name)
+    gc.collect()
+
+    import torch  # local import so conftest import stays cheap
+
+    # Return the freed blocks to the driver; a no-op if this process never
+    # initialized the GPU (e.g. a pytest process that only launches torchrun).
+    torch.cuda.empty_cache()
