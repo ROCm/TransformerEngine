@@ -250,13 +250,15 @@ jobs:
       # refs/pull/<n>/merge is GitHub's synthetic merge commit (base tip
       # merged with PR head). Checking it out gives us both parents in one
       # shot: HEAD^1 = base tip, HEAD^2 = PR head — no separate base fetch
-      # needed. Caveat: the merge ref only exists when the PR is mergeable;
+      # needed. Set fetch-depth: 2 to resolve both parents as real commits.
+      # Caveat: the merge ref only exists when the PR is mergeable;
       # if it's missing/stale, the workflow will fail fast on checkout, which
       # is the right behavior for an unreviewable PR.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
           persist-credentials: false
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
+          fetch-depth: 2
 
       # SECURITY: run only on the PR head the requester asked about. If the
       # author pushed after the /claude comment, the merge ref now contains
@@ -492,8 +494,9 @@ jobs:
           #     either `gh api -F body=@-` or `gh pr comment --body-file`);
           #   - `cat *` for `cat > /tmp/walkthrough.md <<EOF` heredocs the
           #     model uses to stage the body before posting;
-          #   - `git fetch *` / `git merge-base *` for shallow-clone deepening
-          #     when the synthetic merge commit's parents aren't reachable.
+          #   - `git fetch *` / `git merge-base *` as a general escape hatch
+          #     for history questions beyond the prompt's own `git diff
+          #     HEAD^1 HEAD`.
           # Review intentionally does NOT allow POST/PATCH against the issues
           # comments endpoint; it posts inline via the MCP tool instead.
           claude_args: |
@@ -527,7 +530,9 @@ jobs:
             PR. Otherwise, post a new one.
 
             ## 2. Build the walkthrough
-            Read the PR title/description and `git diff HEAD^1...HEAD^2`.
+            Read the PR title/description and `git diff HEAD^1 HEAD` - it gives
+            exactly the PR's own changes. (not using `HEAD^1...HEAD^2` which
+            would require fetching deeper history)
             Use `Grep`/`Read` to ground claims in the actual code.
 
             Format the comment exactly as:

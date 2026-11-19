@@ -129,15 +129,19 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
           persist-credentials: false
-          # A PR is diffed against its base branch, which needs the history
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # A PR run checks out GitHub's merge commit (refs/pull/N/merge). Its two
+          # parents, the base tip and the PR head, are all the diff needs. Other
+          # events never diff, but one extra commit is negligible when blobless.
+          fetch-depth: 2
+          # The diff reads only commits and trees; only the gating script is needed on disk.
+          filter: blob:none
+          sparse-checkout: .github/scripts
 
       - name: Select suites
         id: scope
         env:
           EVENT: ${{ github.event_name }}
           SKIP_SCOPE: ${{ contains(github.event.pull_request.labels.*.name, 'ci-skip-scope') }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           everything() {
@@ -154,9 +158,12 @@ jobs:
             exit 0
           fi
 
-          # The whole PR against its merge base, not just the latest push.
+          # The whole PR as it would merge into its base, not just the latest push:
+          # the merge commit against its first parent. HEAD^2 must be the PR head,
+          # or HEAD is not the merge commit this diff assumes.
           # --no-renames lists a moved file at both its old and its new path.
-          if ! git diff --name-status --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed.txt; then
+          if [[ "$(git rev-parse -q --verify 'HEAD^2' 2>/dev/null)" != "$HEAD_SHA" ]] \
+             || ! git diff --name-status --no-renames HEAD^1 HEAD > /tmp/changed.txt; then
             echo "::warning::could not list the PR's changes; running every suite"
             everything "the PR's changes could not be listed"
             exit 0
