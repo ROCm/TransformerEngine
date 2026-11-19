@@ -1843,6 +1843,7 @@ INSTANTIATE_TEST_SUITE_P(
         return name;
     });
 
+#ifndef __HIP_PLATFORM_AMD__  // Row-scaled NVFP4 columnwise output is not supported on ROCm
 class CastNVFP4RowScaledTransposeTestSuite : public ::testing::TestWithParam<std::vector<size_t>> {};
 
 TEST_P(CastNVFP4RowScaledTransposeTestSuite, MatchesRowScaledReference) {
@@ -1864,6 +1865,7 @@ INSTANTIATE_TEST_SUITE_P(
         }
         return name;
     });
+#endif  // #ifndef __HIP_PLATFORM_AMD__
 
 #if (CUDA_VERSION >= 13040 || defined(__HIP_PLATFORM_AMD__)) && FP4_TYPE_SUPPORTED
 INSTANTIATE_TEST_SUITE_P(
