@@ -2,10 +2,10 @@
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
-        tile_load_m0(b_dma, s0, 0, 0);
-        tile_load_m0(a_dma, s0, 0, 0);
-        tile_load_m0(b_dma, s0, 1, 0);
-        tile_load_m0(a_dma, s0, 1, 0);
+        tile_load_m0(b_k0, s0, 0, 0);
+        tile_load_m0(a_k0, s0, 0, 0);
+        tile_load_m0(b_k0, s0, 1, 0);
+        tile_load_m0(a_k0, s0, 1, 0);
 
         if (warp_m == 1) {
             __builtin_amdgcn_s_barrier();

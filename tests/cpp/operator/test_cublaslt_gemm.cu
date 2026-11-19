@@ -629,7 +629,8 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
   }
 
 #ifdef __HIP_PLATFORM_AMD__
-  const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  const bool is_gfx1250 = prop.major == 12 && prop.minor == 5;
+  const size_t required_k_multiple = is_gfx1250 || !params.force_hipblaslt ? 32 : 128;
 #else
   const size_t required_k_multiple = 128;
 #endif
@@ -643,9 +644,6 @@ std::optional<std::string> checkMxFP8Support(const TestParams& params, const cud
 #ifdef __HIP_PLATFORM_AMD__
   if (!(prop.major == 9 && (prop.minor == 4 || prop.minor == 5))) {
     return "HipKittens requires gfx942 or gfx950";
-  }
-  if (params.m % 256 || params.n % 256 || params.k < 256) {
-    return "HipKittens requires M and N 256-aligned, K >= 256";
   }
   return std::nullopt;
 #else

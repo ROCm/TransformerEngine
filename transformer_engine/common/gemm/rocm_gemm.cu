@@ -2244,10 +2244,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              ")");
   // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    const bool is_gfx1250 = cuda::sm_arch() == 125;
-    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with
-    // swizzled scales on that architecture.
-    const int required_k_multiple = is_gfx1250 ? 32 : 128;
+    const auto gfx_version = cuda::sm_arch();
+#ifdef USE_HIPKITTENS_GEMM
+    const int required_k_multiple = gfx_version >= 95 ? 32 : 128;
+#else
+    const int required_k_multiple = gfx_version == 125 ? 32 : 128;
+#endif
     NVTE_CHECK((k % required_k_multiple) == 0,
                "GEMM K dimension must be multiple of ", required_k_multiple,
                " for MXFP8 scaling (got K=", k, ")");
@@ -2412,6 +2414,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     if (is_mxfp8) {
       NVTE_CHECK(inputBias->data.dptr == nullptr,
                  "hipBLASLt MXFP8 GEMM does not support bias");
+      NVTE_CHECK(cuda::sm_arch() == 125 || k % 128 == 0,
+                 "hipBLASLt MXFP8 GEMM requires K multiple of 128 (got K=", k, ")");
     }
 #endif
     // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT

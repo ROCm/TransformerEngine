@@ -50,13 +50,127 @@ __device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg)
     return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
 }
 
-__device__ inline float read_bias(const void *bias, int bias_dtype, int idx) {
+template <bool EDGE>
+__device__ inline float read_bias(const void *bias, int bias_dtype, int idx, int len) {
+    if constexpr (EDGE) {
+        idx = min(idx, len - 1);
+    }
     if (bias_dtype == 1) {
         return __bfloat162float(reinterpret_cast<const __hip_bfloat16 *>(bias)[idx]);
     } else if (bias_dtype == 2) {
         return __half2float(reinterpret_cast<const __half *>(bias)[idx]);
     }
     return reinterpret_cast<const float *>(bias)[idx];
+}
+
+__device__ uint16_t llvm_amdgcn_raw_buffer_load_b16(kittens::i32x4 srsrc, uint32_t voffset, uint32_t soffset,
+                                                    uint32_t coherency) __asm("llvm.amdgcn.raw.buffer.load.i16");
+
+// Reads/writes C/aux for tiles on matrix edge with elements outside the matrix skipped. Relies on buffer range check.
+template <bool STORE, bool EDGE, typename GL, typename RT>
+__device__ __forceinline__ void access_c(const GL &gl, RT &tile, const kittens::coord<RT> &idx) {
+    using U  = typename GL::dtype;
+    using U2 = typename kittens::base_types::packing<U>::packed_type;
+    static_assert(RT::base_tile_stride == 4 && RT::base_tile_num_strides == 1);
+    if constexpr (!EDGE) {
+        if constexpr (STORE) {
+            kittens::store(gl, tile, idx);
+        } else {
+            kittens::load(tile, gl, idx);
+        }
+        return;
+    }
+    const int rows = gl.rows();
+    const int cols = gl.cols();
+    const int lane = kittens::laneid();
+    const int row0 = __builtin_amdgcn_readfirstlane(idx.r * RT::rows);
+    const int col0 = __builtin_amdgcn_readfirstlane(idx.c * RT::cols);
+    U *org = gl.raw_ptr + (size_t)row0 * cols + col0;
+    const int left = max(min(rows - row0, RT::rows) * cols - col0, 0);
+    const kittens::i32x4 srd = std::bit_cast<kittens::i32x4>(kittens::make_buffer_resource(
+        reinterpret_cast<uintptr_t>(org), (uint32_t)(left * sizeof(U)), 0x00020000));
+    if constexpr (kittens::ducks::rt::row_layout<RT>) {
+#pragma unroll
+        for (int i = 0; i < RT::height; i++) {
+#pragma unroll
+            for (int j = 0; j < RT::width; j++) {
+                const int r = i * RT::base_tile_rows + lane % RT::base_tile_rows;
+                const int c = j * RT::base_tile_cols + 4 * (lane / RT::base_tile_rows);
+                const uint32_t off = row0 + r < rows && col0 + c < cols ? (r * cols + c) * sizeof(U) : 0x80000000u;
+                U2 tmp[2];
+                if constexpr (STORE) {
+                    tmp[0] = kittens::base_types::convertor<U2, float2>::convert(tile.tiles[i][j].data[0]);
+                    tmp[1] = kittens::base_types::convertor<U2, float2>::convert(tile.tiles[i][j].data[1]);
+                    if constexpr (sizeof(U) == 4) {
+                        kittens::llvm_amdgcn_raw_buffer_store_b128(*reinterpret_cast<__uint128_t *>(tmp),
+                                                                   srd, off, 0, 0);
+                    } else {
+                        kittens::llvm_amdgcn_raw_buffer_store_b64(*reinterpret_cast<uint64_t *>(tmp), srd, off, 0, 0);
+                    }
+                } else {
+                    if constexpr (sizeof(U) == 4) {
+                        *reinterpret_cast<__uint128_t *>(tmp) =
+                            kittens::llvm_amdgcn_raw_buffer_load_b128(srd, off, 0, 0);
+                    } else {
+                        *reinterpret_cast<uint64_t *>(tmp) = kittens::llvm_amdgcn_raw_buffer_load_b64(srd, off, 0, 0);
+                    }
+                    tile.tiles[i][j].data[0] = kittens::base_types::convertor<float2, U2>::convert(tmp[0]);
+                    tile.tiles[i][j].data[1] = kittens::base_types::convertor<float2, U2>::convert(tmp[1]);
+                }
+            }
+        }
+    } else {
+#pragma unroll
+        for (int i = 0; i < RT::height; i++) {
+#pragma unroll
+            for (int j = 0; j < RT::width; j++) {
+                const int r = 4 * (lane / RT::base_tile_cols);
+                const int c = j * RT::base_tile_cols + lane % RT::base_tile_cols;
+                // Rows past gl already fall outside the SRD range; only the column needs the explicit drop.
+                const uint32_t off = col0 + c < cols ? (r * cols + c) * sizeof(U) : 0x80000000u;
+#pragma unroll
+                for (int l = 0; l < 4; l++) {
+                    const uint32_t row_off = (i * RT::base_tile_rows + l) * cols * sizeof(U);
+                    float &v = l & 1 ? tile.tiles[i][j].data[l / 2].y : tile.tiles[i][j].data[l / 2].x;
+                    if constexpr (STORE) {
+                        const U u = kittens::base_types::convertor<U, float>::convert(v);
+                        if constexpr (sizeof(U) == 4) {
+                            kittens::llvm_amdgcn_raw_buffer_store_b32(std::bit_cast<uint32_t>(u), srd, off, row_off, 0);
+                        } else {
+                            kittens::llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(u), srd, off, row_off, 0);
+                        }
+                    } else {
+                        U u;
+                        if constexpr (sizeof(U) == 4) {
+                            u = std::bit_cast<U>(kittens::llvm_amdgcn_raw_buffer_load_b32(srd, off, row_off, 0));
+                        } else {
+                            u = std::bit_cast<U>(llvm_amdgcn_raw_buffer_load_b16(srd, off, row_off, 0));
+                        }
+                        v = kittens::base_types::convertor<float, U>::convert(u);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Like G::prefill_swizzled_offsets, but lanes with K index below skip load zeros.
+template <bool K_ROWS, typename ST, int COPIES>
+__device__ __forceinline__ void prefill_k_offsets(uint32_t (&sw)[COPIES], int row_stride, int skip) {
+    static_assert(ST::underlying_subtiles_per_row == 1 && sizeof(typename ST::dtype) == 1);
+    const int lane = kittens::laneid();
+    const int warp = kittens::warpid() % NUM_WARPS;
+#pragma unroll
+    for (int i = 0; i < COPIES; i++) {
+        const int byte        = lane * LANE_LOAD_BYTES + (warp + i * NUM_WARPS) * WAVE_LOAD_BYTES;
+        const int subtile     = byte / ST::underlying_subtile_bytes;
+        const int subtile_off = byte % ST::underlying_subtile_bytes;
+        const uint32_t swizzled = ST::swizzle({subtile_off / ST::underlying_subtile_row_bytes,
+                                               subtile_off % ST::underlying_subtile_row_bytes});
+        const int row = swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows;
+        const int col = swizzled % ST::underlying_subtile_row_bytes;
+        sw[i] = (K_ROWS ? row : col) < skip ? 0x80000000u : row * row_stride + col;
+    }
 }
 
 enum struct GemmEpilogue {
@@ -87,7 +201,7 @@ __device__ __forceinline__ int hk_upper_bound(const T *arr, int n, T val) {
 // already carries C's orientation and stores straight through. BLAS bias has length m, which is
 // the accumulator's row axis when transposing and its column axis when not, so the two gathers
 // differ in which register index the bias is constant across.
-template<GemmEpilogue EPILOGUE, bool ACCUMULATE, bool TRANSPOSE_OUT, typename RT_C, typename RT_C_T,
+template<GemmEpilogue EPILOGUE, bool ACCUMULATE, bool TRANSPOSE_OUT, bool EDGE, typename RT_C, typename RT_C_T,
          typename OutGL, typename AuxGLType>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -128,10 +242,10 @@ __device__ __forceinline__ void gemm_epilogue(
                             int idx    = l + kk * cA.base_tile_stride / 2;
                             int m_lo_x = m_base_lo + i * 16 + row_off + l * 2;
                             int m_hi_x = m_base_hi + i * 16 + row_off + l * 2;
-                            float b_lo_x = read_bias(bias, bias_dtype, m_lo_x);
-                            float b_lo_y = read_bias(bias, bias_dtype, m_lo_x + 1);
-                            float b_hi_x = read_bias(bias, bias_dtype, m_hi_x);
-                            float b_hi_y = read_bias(bias, bias_dtype, m_hi_x + 1);
+                            float b_lo_x = read_bias<EDGE>(bias, bias_dtype, m_lo_x, C.cols());
+                            float b_lo_y = read_bias<EDGE>(bias, bias_dtype, m_lo_x + 1, C.cols());
+                            float b_hi_x = read_bias<EDGE>(bias, bias_dtype, m_hi_x, C.cols());
+                            float b_hi_y = read_bias<EDGE>(bias, bias_dtype, m_hi_x + 1, C.cols());
                             cA.tiles[i][j].data[idx].x += b_lo_x; cA.tiles[i][j].data[idx].y += b_lo_y;
                             cB.tiles[i][j].data[idx].x += b_lo_x; cB.tiles[i][j].data[idx].y += b_lo_y;
                             cC.tiles[i][j].data[idx].x += b_hi_x; cC.tiles[i][j].data[idx].y += b_hi_y;
@@ -149,8 +263,8 @@ __device__ __forceinline__ void gemm_epilogue(
     #pragma unroll
             for (int j = 0; j < cA.width; j++) {
                 int    n_x   = j * cA.base_tile_cols + col_off;
-                float  b_lo  = read_bias(bias, bias_dtype, n_base_lo + n_x);
-                float  b_hi  = read_bias(bias, bias_dtype, n_base_hi + n_x);
+                float  b_lo  = read_bias<EDGE>(bias, bias_dtype, n_base_lo + n_x, C.cols());
+                float  b_hi  = read_bias<EDGE>(bias, bias_dtype, n_base_hi + n_x, C.cols());
     #pragma unroll
                 for (int i = 0; i < cA.height; i++) {
     #pragma unroll
@@ -173,11 +287,11 @@ __device__ __forceinline__ void gemm_epilogue(
         if constexpr (TRANSPOSE_OUT) {
             RT_C_T tA, tB, tC, tD;
             kittens::transpose(tA, cA); kittens::transpose(tB, cB); kittens::transpose(tC, cC); kittens::transpose(tD, cD);
-            kittens::store(AuxGL, tA, out_coord_A); kittens::store(AuxGL, tB, out_coord_B);
-            kittens::store(AuxGL, tC, out_coord_C); kittens::store(AuxGL, tD, out_coord_D);
+            access_c<true, EDGE>(AuxGL, tA, out_coord_A); access_c<true, EDGE>(AuxGL, tB, out_coord_B);
+            access_c<true, EDGE>(AuxGL, tC, out_coord_C); access_c<true, EDGE>(AuxGL, tD, out_coord_D);
         } else {
-            kittens::store(AuxGL, cA, out_coord_A); kittens::store(AuxGL, cB, out_coord_B);
-            kittens::store(AuxGL, cC, out_coord_C); kittens::store(AuxGL, cD, out_coord_D);
+            access_c<true, EDGE>(AuxGL, cA, out_coord_A); access_c<true, EDGE>(AuxGL, cB, out_coord_B);
+            access_c<true, EDGE>(AuxGL, cC, out_coord_C); access_c<true, EDGE>(AuxGL, cD, out_coord_D);
         }
         kittens::gelu(cA, cA); kittens::gelu(cB, cB); kittens::gelu(cC, cC); kittens::gelu(cD, cD);
     }
@@ -188,36 +302,42 @@ __device__ __forceinline__ void gemm_epilogue(
 
         if constexpr (ACCUMULATE) {
             RT_C_T eA, eB, eC, eD;
-            kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
-            kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
+            access_c<false, EDGE>(C, eA, out_coord_A); access_c<false, EDGE>(C, eB, out_coord_B);
+            access_c<false, EDGE>(C, eC, out_coord_C); access_c<false, EDGE>(C, eD, out_coord_D);
             kittens::add(oA, oA, eA); kittens::add(oB, oB, eB);
             kittens::add(oC, oC, eC); kittens::add(oD, oD, eD);
         }
 
-        kittens::store(C, oA, out_coord_A); kittens::store(C, oB, out_coord_B);
-        kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
+        access_c<true, EDGE>(C, oA, out_coord_A); access_c<true, EDGE>(C, oB, out_coord_B);
+        access_c<true, EDGE>(C, oC, out_coord_C); access_c<true, EDGE>(C, oD, out_coord_D);
     } else {
         if constexpr (ACCUMULATE) {
             RT_C eA, eB, eC, eD;
-            kittens::load(eA, C, out_coord_A); kittens::load(eB, C, out_coord_B);
-            kittens::load(eC, C, out_coord_C); kittens::load(eD, C, out_coord_D);
+            access_c<false, EDGE>(C, eA, out_coord_A); access_c<false, EDGE>(C, eB, out_coord_B);
+            access_c<false, EDGE>(C, eC, out_coord_C); access_c<false, EDGE>(C, eD, out_coord_D);
             kittens::add(cA, cA, eA); kittens::add(cB, cB, eB);
             kittens::add(cC, cC, eC); kittens::add(cD, cD, eD);
         }
 
-        kittens::store(C, cA, out_coord_A); kittens::store(C, cB, out_coord_B);
-        kittens::store(C, cC, out_coord_C); kittens::store(C, cD, out_coord_D);
+        access_c<true, EDGE>(C, cA, out_coord_A); access_c<true, EDGE>(C, cB, out_coord_B);
+        access_c<true, EDGE>(C, cC, out_coord_C); access_c<true, EDGE>(C, cD, out_coord_D);
     }
 }
 
-template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL, typename AuxGLType>
+template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, bool EDGE = false, bool SPLIT_K = false,
+          typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, const AuxGLType AuxGL,
     const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
     [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
-    int N, int K, int total_m_tiles, int tiles_N) {
+    int N, int K, int total_m_tiles, int tiles_N, int splits) {
 
-    int k_iters = K / BLOCK_K;
+    static_assert(!SPLIT_K || (EPILOGUE == GemmEpilogue::DEFAULT && !ACCUMULATE),
+                  "Split-K only supports the DEFAULT epilogue without accumulation");
+
+    // EDGE takes the K remainder at the head: operands start shift columns early and block 0 masks them.
+    int k_iters   = EDGE && !SPLIT_K ? max(kittens::ceil_div(K, BLOCK_K), 2) : K / BLOCK_K / (SPLIT_K ? splits : 1);
+    int shift     = EDGE && !SPLIT_K ? k_iters * BLOCK_K - K : 0;
     int sa_stride = total_m_tiles;
 
     using ST_A     = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
@@ -241,18 +361,24 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
     const int NUM_XCDS = 8;
     const int WGM      = 8;
     int wgid           = kittens::chiplet_transform_chunked(blockIdx.x, gridDim.x, NUM_XCDS, WGM * WGM);
-    int num_wgid_in_group = WGM * tiles_N;
+    int num_wgid_in_group = WGM * tiles_N * (SPLIT_K ? splits : 1);
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
     int group_size_m = min(total_m_tiles - first_pid_m, WGM);
     int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
     int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
 
+    int split_id = 0;
+    if constexpr (SPLIT_K) {
+        split_id = n_tile / tiles_N;
+        n_tile -= split_id * tiles_N;
+    }
+
     int block_m      = m_tile * BLOCK_ROW;
     int block_row    = m_tile;
     int block_col    = n_tile;
-    [[maybe_unused]] int sa_batch = m_tile;
-    [[maybe_unused]] int sb_batch = n_tile;
+    [[maybe_unused]] int sa_batch = split_id * k_iters * total_m_tiles + m_tile;
+    [[maybe_unused]] int sb_batch = split_id * k_iters * tiles_N + n_tile;
     [[maybe_unused]] int sb_stride = tiles_N;
 
     int warp_m = kittens::warpid() / WARPS_COL;
@@ -262,14 +388,29 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
 
     gl_fp8_rt A_local(A);
     gl_fp8_rt B_local(B);
+    if constexpr (SPLIT_K) {
+        A_local.raw_ptr += split_id * k_iters * BLOCK_K;
+        B_local.raw_ptr += split_id * k_iters * BLOCK_K;
+    }
 
     const uint32_t a_row_stride = A_local.template stride<2>() * sizeof(T);
     const uint32_t b_row_stride = B_local.template stride<2>() * sizeof(T);
-    const TileLoad a_dma = prefill_tile_load<NUM_WARPS>(&A_local[{0, 0, block_m, 0}], HALF_ROW * a_row_stride,
-                                                        BLOCK_K * sizeof(T), HALF_ROW * a_row_stride, a_row_stride, As);
-    const TileLoad b_dma = prefill_tile_load<NUM_WARPS>(&B_local[{0, 0, n_tile * BLOCK_COL, 0}],
-                                                        HALF_COL * b_row_stride, BLOCK_K * sizeof(T),
-                                                        HALF_COL * b_row_stride, b_row_stride, Bs);
+    const T *a_org = &A_local[{0, 0, block_m, 0}] - shift;
+    const T *b_org = &B_local[{0, 0, n_tile * BLOCK_COL, 0}] - shift;
+    const int a_rows   = EDGE ? A_local.rows() - block_m : BLOCK_ROW;
+    const int b_rows   = EDGE ? B_local.rows() - n_tile * BLOCK_COL : BLOCK_COL;
+    const int a_range0 = min(a_rows, HALF_ROW) * a_row_stride + shift;
+    const int a_range1 = max(min(a_rows - HALF_ROW, HALF_ROW), 0) * a_row_stride + shift;
+    const int b_range0 = min(b_rows, HALF_COL) * b_row_stride + shift;
+    const int b_range1 = max(min(b_rows - HALF_COL, HALF_COL), 0) * b_row_stride + shift;
+    const TileLoad a_dma = prefill_tile_load<NUM_WARPS>(a_org, HALF_ROW * a_row_stride, BLOCK_K * sizeof(T), a_range0,
+                                                        a_row_stride, As, shift - BLOCK_K, a_range1);
+    const TileLoad b_dma = prefill_tile_load<NUM_WARPS>(b_org, HALF_COL * b_row_stride, BLOCK_K * sizeof(T), b_range0,
+                                                        b_row_stride, Bs, shift - BLOCK_K, b_range1);
+    const TileLoad a_k0  = prefill_tile_load<NUM_WARPS>(a_org, HALF_ROW * a_row_stride, BLOCK_K * sizeof(T), a_range0,
+                                                        a_row_stride, As, shift, a_range1);
+    const TileLoad b_k0  = prefill_tile_load<NUM_WARPS>(b_org, HALF_COL * b_row_stride, BLOCK_K * sizeof(T), b_range0,
+                                                        b_row_stride, Bs, shift, b_range1);
     const ScaleLoad s_dma = prefill_scale_load(scale_A_gl, scale_B_gl, sa_batch, 2 * sb_batch, sa_stride,
                                                2 * sb_stride, scale_smem);
 
@@ -286,18 +427,26 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
 #include "mxfp8_tn_mainloop.inc"
 
     OutGL C_local(C);
+    if constexpr (SPLIT_K) {
+        C_local.raw_ptr += (size_t)split_id * N * C_local.template stride<2>();
+    }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, true, EDGE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL, typename AuxGLType>
+template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, bool EDGE = false, bool SPLIT_K = false,
+          typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
     const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
     [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
-    int N, int K, int total_m_tiles, int tiles_N) {
+    int N, int K, int total_m_tiles, int tiles_N, int splits) {
 
-    int k_iters = K / BLOCK_K;
+    static_assert(!SPLIT_K || (EPILOGUE == GemmEpilogue::DEFAULT && !ACCUMULATE),
+                  "Split-K only supports the DEFAULT epilogue without accumulation");
+
+    int k_iters = EDGE && !SPLIT_K ? max(kittens::ceil_div(K, BLOCK_K), 2) : K / BLOCK_K / (SPLIT_K ? splits : 1);
+    int shift   = EDGE && !SPLIT_K ? k_iters * BLOCK_K - K : 0;
 
     // FLIPPED operand slots: the A slot holds the activation (K-contiguous [M,K], plain reads),
     // the B slot the weight (K-major [K,N], ds_read_*_tr via b_frag). The transposing operand
@@ -322,12 +471,18 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     const int NUM_XCDS = 8;
     const int WGM      = 8;
     int wgid           = kittens::chiplet_transform_chunked(blockIdx.x, gridDim.x, NUM_XCDS, WGM * WGM);
-    int num_wgid_in_group = WGM * tiles_N;
+    int num_wgid_in_group = WGM * tiles_N * (SPLIT_K ? splits : 1);
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
     int group_size_m = min(total_m_tiles - first_pid_m, WGM);
     int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
     int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+
+    int split_id = 0;
+    if constexpr (SPLIT_K) {
+        split_id = n_tile / tiles_N;
+        n_tile -= split_id * tiles_N;
+    }
 
     // m_tile indexes the weight (BLAS M), n_tile the activation (BLAS N). The activation feeds
     // the A slot, so the accumulator's M axis is n_tile and its N axis m_tile -- C's memory order.
@@ -340,9 +495,9 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     int block_col    = m_tile;
     // Scale slots follow the operands: scale_A_gl is the activation's <64,4> buffer keyed by
     // n_tile, scale_B_gl the weight's <32,8> hi/lo pair keyed by m_tile.
-    [[maybe_unused]] int sa_batch  = n_tile;
+    [[maybe_unused]] int sa_batch  = split_id * k_iters * tiles_N + n_tile;
     [[maybe_unused]] int sa_stride = tiles_N;
-    [[maybe_unused]] int sb_batch  = m_tile;
+    [[maybe_unused]] int sb_batch  = split_id * k_iters * total_m_tiles + m_tile;
     [[maybe_unused]] int sb_stride = total_m_tiles;
 
     int warp_m = kittens::warpid() / WARPS_COL;
@@ -352,21 +507,30 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 
     gl_fp8_rt A_local(A);
     gl_fp8_rt B_local(B);
+    if constexpr (SPLIT_K) {
+        A_local.raw_ptr += split_id * k_iters * BLOCK_K;
+        B_local.raw_ptr += (size_t)split_id * k_iters * BLOCK_K * B_local.template stride<2>();
+    }
+    A_local.raw_ptr -= shift;
+    B_local.raw_ptr -= (size_t)shift * B_local.template stride<2>();
 
+    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
+    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
     constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
     constexpr int bpm = bpt * NUM_THREADS;
     constexpr int copies_A = HALF_ROW * BLOCK_K * sizeof(T) / bpm;
     constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
-    uint32_t sw_A[copies_A], sw_B[copies_B];
-    G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
-    G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
+    uint32_t sw_A[copies_A], sw_B[copies_B], sw_A0[copies_A], sw_B0[copies_B];
+    prefill_k_offsets<false, ST_A>(sw_A, a_row_stride, shift - BLOCK_K);
+    prefill_k_offsets<true, ST_B>(sw_B, b_row_stride, shift - BLOCK_K);
+    prefill_k_offsets<false, ST_A>(sw_A0, a_row_stride, shift);
+    prefill_k_offsets<true, ST_B>(sw_B0, b_row_stride, shift);
 
     const T *a_base = (const T *)&A_local[{0, 0, 0, 0}];
     const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
-    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
-    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride + shift, EDGE ? 0 : a_row_stride);
+    const int k_rows = B_local.rows() + shift - split_id * k_iters * BLOCK_K;
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, k_rows * b_row_stride, EDGE ? 0 : b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
@@ -391,13 +555,16 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 #include "mxfp8_nn_mainloop.inc"
 
     OutGL C_local(C);
+    if constexpr (SPLIT_K) {
+        C_local.raw_ptr += (size_t)split_id * N * C_local.template stride<2>();
+    }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, false, RT_C, RT_C>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, false, EDGE, RT_C, RT_C>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-template <bool SPLIT_K, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, typename OutGL,
-          typename AuxGLType>
+template <bool SPLIT_K, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE = false, bool EDGE = false,
+          typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_fp8_rt A, const gl_fp8_rt B,
     const OutGL C, const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
     [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
@@ -406,7 +573,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     static_assert(!SPLIT_K || (EPILOGUE == GemmEpilogue::DEFAULT && !ACCUMULATE),
                   "Split-K only supports the DEFAULT epilogue without accumulation");
 
-    int k_iters = K / BLOCK_K / (SPLIT_K ? splits : 1);
+    int k_iters   = EDGE && !SPLIT_K ? max(kittens::ceil_div(K, BLOCK_K), 2) : K / BLOCK_K / (SPLIT_K ? splits : 1);
+    int shift     = EDGE && !SPLIT_K ? k_iters * BLOCK_K - K : 0;
     int sa_stride = total_m_tiles;
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
@@ -461,22 +629,28 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         A_local.raw_ptr += (size_t)split_id * k_iters * BLOCK_K * A_local.template stride<2>();
         B_local.raw_ptr += (size_t)split_id * k_iters * BLOCK_K * B_local.template stride<2>();
     }
+    A_local.raw_ptr -= (size_t)shift * A_local.template stride<2>();
+    B_local.raw_ptr -= (size_t)shift * B_local.template stride<2>();
 
+    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
+    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
     constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
     constexpr int bpm = bpt * NUM_THREADS;
     constexpr int copies_A = BLOCK_K * HALF_ROW * sizeof(T) / bpm;
     constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
-    uint32_t sw_A[copies_A], sw_B[copies_B];
-    G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
-    G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
+    uint32_t sw_A[copies_A], sw_B[copies_B], sw_A0[copies_A], sw_B0[copies_B];
+    prefill_k_offsets<true, ST_A>(sw_A, a_row_stride, shift - BLOCK_K);
+    prefill_k_offsets<true, ST_B>(sw_B, b_row_stride, shift - BLOCK_K);
+    prefill_k_offsets<true, ST_A>(sw_A0, a_row_stride, shift);
+    prefill_k_offsets<true, ST_B>(sw_B0, b_row_stride, shift);
 
-    // SRDs come from the *_local views so the split-K path picks up per-split base pointers.
+    // SRDs come from the *_local views so the split-K path picks up per-split base pointers. EDGE drops
+    // the stride, which would otherwise let the soffset tile displacement skip the range check.
+    const int k_rows = K + shift - split_id * k_iters * BLOCK_K;
     const T *a_base = (const T *)&A_local[{0, 0, 0, 0}];
     const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
-    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
-    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, k_rows * a_row_stride, EDGE ? 0 : a_row_stride);
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, k_rows * b_row_stride, EDGE ? 0 : b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
@@ -496,10 +670,10 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     const int n_iters = k_iters - 2;
     const bool s0 = n_iters & 1;
 
-    load_srd(Bs[s0][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[s0][0]);
-    load_srd(As[s0][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[s0][0]);
-    load_srd(Bs[s0][1], B_local, {0, 0, 0, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[s0][1]);
-    load_srd(As[s0][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[s0][1]);
+    load_srd(Bs[s0][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B0, b_srd, b_base, b_lds[s0][0]);
+    load_srd(As[s0][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A0, a_srd, a_base, a_lds[s0][0]);
+    load_srd(Bs[s0][1], B_local, {0, 0, 0, n_tile * 2 + 1}, sw_B0, b_srd, b_base, b_lds[s0][1]);
+    load_srd(As[s0][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A0, a_srd, a_base, a_lds[s0][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -797,7 +971,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         C_local.raw_ptr += (size_t)split_id * N * C_local.template stride<2>();
     }
 
-    gemm_epilogue<EPILOGUE, ACCUMULATE, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
+    gemm_epilogue<EPILOGUE, ACCUMULATE, true, EDGE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, AuxGL, bias, bias_dtype,
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
@@ -808,10 +982,11 @@ static void launch_gemm_typed(
     const void *bias, int bias_dtype, AuxGLType aux_gl,
     int M, int N, int K, OutDtype out_dtype, hipStream_t stream) {
 
-    int tiles_M = M / BLOCK_ROW;
-    int tiles_N = N / BLOCK_COL;
+    int tiles_M = kittens::ceil_div(M, BLOCK_ROW);
+    int tiles_N = kittens::ceil_div(N, BLOCK_COL);
     int grid    = tiles_M * tiles_N;
-    int k_iters = K / BLOCK_K;
+    int k_iters = std::max(kittens::ceil_div(K, BLOCK_K), 2);
+    bool edge = M % BLOCK_ROW || N % BLOCK_COL || K % BLOCK_K || K < 2 * BLOCK_K;
 
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)A, nullptr, nullptr,
                    TRANSA ? (size_t)M : (size_t)K, TRANSA ? (size_t)K : (size_t)M);
@@ -824,27 +999,27 @@ static void launch_gemm_typed(
                       2 * k_iters * tiles_N, nullptr, nullptr, nullptr);
 
     auto launch = [&](auto gl_C) {
-        if constexpr (TRANSA && !TRANSB) {
-            mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
-                N, K, tiles_M, tiles_N);
-        } else if constexpr (!TRANSA && !TRANSB) {
-            // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N,K]) and
-            // the B slot takes A's tensor (the weight, K-major [K,M]); the scale buffers follow.
-            // gl_C and aux_gl are unchanged -- the accumulator lands in C's existing [N,M] memory.
-            gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)N, (size_t)K);
-            gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
-            gl_scale_rt gl_SA_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
-                                 k_iters * tiles_N, nullptr, nullptr, nullptr);
-            gl_scale_rt gl_SB_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
-                                 2 * k_iters * tiles_M, nullptr, nullptr, nullptr);
-            mxfp8_gemm_nn_kernel<EPILOGUE, CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A_nn, gl_B_nn, gl_C, aux_gl, gl_SA_nn, gl_SB_nn, bias, bias_dtype,
-                N, K, tiles_M, tiles_N);
-        } else {
-            mxfp8_gemm_nt_kernel<false, EPILOGUE, CBSZ, BLGP, ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, N, K, tiles_M, tiles_N, 1);
-        }
+        KITTENS_BOOL_SWITCH(edge, EDGE,
+            if constexpr (TRANSA && !TRANSB) {
+                mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP, ACCUMULATE, EDGE><<<grid, NUM_THREADS, 0, stream>>>(
+                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, N, K, tiles_M, tiles_N, 1);
+            } else if constexpr (!TRANSA && !TRANSB) {
+                // FLIPPED slots: the A slot takes B's tensor (the activation, K-contiguous [N,K]) and
+                // the B slot takes A's tensor (the weight, K-major [K,M]); the scale buffers follow.
+                // gl_C and aux_gl are unchanged -- the accumulator lands in C's existing [N,M] memory.
+                gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)N, (size_t)K);
+                gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
+                gl_scale_rt gl_SA_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
+                                     k_iters * tiles_N, nullptr, nullptr, nullptr);
+                gl_scale_rt gl_SB_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
+                                     2 * k_iters * tiles_M, nullptr, nullptr, nullptr);
+                mxfp8_gemm_nn_kernel<EPILOGUE, CBSZ, BLGP, ACCUMULATE, EDGE><<<grid, NUM_THREADS, 0, stream>>>(
+                    gl_A_nn, gl_B_nn, gl_C, aux_gl, gl_SA_nn, gl_SB_nn, bias, bias_dtype, N, K, tiles_M, tiles_N, 1);
+            } else {
+                mxfp8_gemm_nt_kernel<false, EPILOGUE, CBSZ, BLGP, ACCUMULATE, EDGE><<<grid, NUM_THREADS, 0, stream>>>(
+                    gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, N, K, tiles_M, tiles_N, 1);
+            }
+        ) // NOLINT(*)
     };
     if (out_dtype == OutDtype::BF16) {
         launch(gl_bf16_rt((kittens::bf16 *)C, nullptr, nullptr, (size_t)N, (size_t)M));
@@ -918,8 +1093,9 @@ static void dispatch_gemm(
 }
 
 constexpr int SPLITK_MAX_SPLITS     = 8;
-constexpr int SPLITK_MAX_CTAS       = 256;
-constexpr int SPLITK_MIN_K          = 1024;
+constexpr int SPLITK_MIN_K          = 512;
+constexpr int SPLITK_WAVE_CTAS      = 256;
+constexpr int SPLITK_ITER_WEIGHT    = 16;
 constexpr int SPLITK_REDUCE_THREADS = 256;
 constexpr size_t SPLITK_MAX_PARTIAL_BYTES = (size_t)64 << 20;
 
@@ -948,33 +1124,43 @@ static size_t splitk_workspace_bytes(int M, int N, int splits) {
     return (size_t)splits * M * N * sizeof(float);
 }
 
-static int select_splitk_nt(int M, int N, int K) {
-    int tiles = (M / BLOCK_ROW) * (N / BLOCK_COL);
-    int min_k = tiles > SPLITK_MAX_CTAS / 4 ? 2 * SPLITK_MIN_K : SPLITK_MIN_K;
-    for (int splits = SPLITK_MAX_SPLITS; splits >= 2; splits /= 2) {
-        if (tiles * splits <= SPLITK_MAX_CTAS && K % (splits * BLOCK_K) == 0 && K / splits >= min_k &&
-            splitk_workspace_bytes(M, N, splits) <= SPLITK_MAX_PARTIAL_BYTES) {
-            return splits;
+// Split count minimizing ITER_WEIGHT * waves * K iterations per split + splits * tiles (the partials' traffic).
+static int select_splitk(int M, int N, int K) {
+    const size_t tiles = (size_t)kittens::ceil_div(M, BLOCK_ROW) * kittens::ceil_div(N, BLOCK_COL);
+    size_t best_cost = 0;
+    int best_splits = 1;
+    for (int splits = 1; splits <= SPLITK_MAX_SPLITS; splits++) {
+        if (splits > 1 && (K % (splits * BLOCK_K) != 0 || K / splits < SPLITK_MIN_K ||
+                           splitk_workspace_bytes(M, N, splits) > SPLITK_MAX_PARTIAL_BYTES)) {
+            continue;
+        }
+        const size_t waves = (tiles * splits + SPLITK_WAVE_CTAS - 1) / SPLITK_WAVE_CTAS;
+        const size_t cost  = SPLITK_ITER_WEIGHT * waves * (K / (splits * BLOCK_K)) + (splits > 1 ? splits * tiles : 0);
+        if (splits == 1 || cost < best_cost) {
+            best_cost = cost;
+            best_splits = splits;
         }
     }
-    return 1;
+    return best_splits;
 }
 
-template<int CBSZ, int BLGP>
-static void launch_splitk_nt(
+template<bool TRANSA, bool TRANSB, int CBSZ, int BLGP>
+static void launch_splitk(
     const void *A, const void *B, void *C,
     const uint32_t *packed_sa, const uint32_t *packed_sb,
     int M, int N, int K, int splits, OutDtype out_dtype, uint8_t *ws, hipStream_t stream) {
 
-    const int tiles_M = M / BLOCK_ROW;
-    const int tiles_N = N / BLOCK_COL;
+    const int tiles_M = kittens::ceil_div(M, BLOCK_ROW);
+    const int tiles_N = kittens::ceil_div(N, BLOCK_COL);
     const int k_iters = K / BLOCK_K;
     const int grid    = tiles_M * tiles_N * splits;
 
     float *partials = (float *)ws;
 
-    gl_fp8_rt gl_A((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
-    gl_fp8_rt gl_B((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)K, (size_t)N);
+    gl_fp8_rt gl_A((kittens::fp8e4m3 *)A, nullptr, nullptr,
+                   TRANSA ? (size_t)M : (size_t)K, TRANSA ? (size_t)K : (size_t)M);
+    gl_fp8_rt gl_B((kittens::fp8e4m3 *)B, nullptr, nullptr,
+                   TRANSB ? (size_t)K : (size_t)N, TRANSB ? (size_t)N : (size_t)K);
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
                       k_iters * tiles_M, nullptr, nullptr, nullptr);
     gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
@@ -983,8 +1169,27 @@ static void launch_splitk_nt(
     static float dummy_aux = 0.f;
     gl_f32_rt aux_gl(&dummy_aux, nullptr, nullptr, 1, 1);
 
-    mxfp8_gemm_nt_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
-        gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0, N, K, tiles_M, tiles_N, splits);
+    KITTENS_BOOL_SWITCH(M % BLOCK_ROW || N % BLOCK_COL, EDGE,
+        if constexpr (TRANSA && !TRANSB) {
+            mxfp8_gemm_tn_kernel<GemmEpilogue::DEFAULT, CBSZ, BLGP, false, EDGE, true>
+                <<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0, N, K, tiles_M, tiles_N, splits);
+        } else if constexpr (!TRANSA && !TRANSB) {
+            gl_fp8_rt gl_A_nn((kittens::fp8e4m3 *)B, nullptr, nullptr, (size_t)N, (size_t)K);
+            gl_fp8_rt gl_B_nn((kittens::fp8e4m3 *)A, nullptr, nullptr, (size_t)K, (size_t)M);
+            gl_scale_rt gl_SA_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
+                                 k_iters * tiles_N, nullptr, nullptr, nullptr);
+            gl_scale_rt gl_SB_nn(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
+                                 2 * k_iters * tiles_M, nullptr, nullptr, nullptr);
+            mxfp8_gemm_nn_kernel<GemmEpilogue::DEFAULT, CBSZ, BLGP, false, EDGE, true>
+                <<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A_nn, gl_B_nn, gl_C, aux_gl, gl_SA_nn, gl_SB_nn, nullptr, 0, N, K, tiles_M, tiles_N, splits);
+        } else {
+            mxfp8_gemm_nt_kernel<true, GemmEpilogue::DEFAULT, CBSZ, BLGP, false, EDGE>
+                <<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0, N, K, tiles_M, tiles_N, splits);
+        }
+    ) // NOLINT(*)
 
     const size_t n4 = (size_t)M * N * sizeof(float) / sizeof(float4);
     const int reduce_grid = kittens::ceil_div((int)n4, SPLITK_REDUCE_THREADS);
@@ -1002,7 +1207,7 @@ static void launch_splitk_nt(
 }
 
 static bool check_tn_constraints(int M, int N, int K) {
-    return M % BLOCK_ROW == 0 && N % BLOCK_COL == 0 && K % BLOCK_K == 0 && K >= 256;
+    return M > 0 && N > 0 && K > 0 && M % 16 == 0 && N % 16 == 0 && K % 32 == 0;
 }
 
 static GemmEpilogue select_epilogue(const void *bias, void *aux_gelu) {
@@ -1025,10 +1230,15 @@ static bool mxfp8_gemm_impl(
 
     if (!check_tn_constraints(M, N, K)) return false;
 
-    int k_iters = K / BLOCK_K;
-    int scale_K = K / 32;
-    int tiles_M = M / BLOCK_ROW;
-    int tiles_N = N / BLOCK_COL;
+    int k_iters  = std::max(kittens::ceil_div(K, BLOCK_K), 2);
+    int kb_shift = (k_iters * BLOCK_K - K) / 32;
+    int scale_K  = K / 32;
+    int tiles_M  = kittens::ceil_div(M, BLOCK_ROW);
+    int tiles_N  = kittens::ceil_div(N, BLOCK_COL);
+    if (!(TRANSA && !TRANSB) && (K % BLOCK_K || K < 2 * BLOCK_K) &&
+        (size_t)std::max(M, N) * k_iters * BLOCK_K > 0x80000000ull) {
+        return false;
+    }
 
     // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair). NN's
     // slots are flipped, so the activation (dim N) feeds the A slot; every other layout is A->A.
@@ -1045,20 +1255,20 @@ static bool mxfp8_gemm_impl(
     // COLWISE describes the raw scale buffer's own layout and stays welded to its tensor
     // (scale_A -> !TRANSA, scale_B -> TRANSB); only the <STEP,NG> geometry follows the slot.
     if constexpr (NN_FLIP) {
-        launch_pack_scales<TRANSB, 64, 4>((const uint8_t *)scale_B, packed_sa, N, scale_K, k_iters, stream);
-        launch_pack_scales<!TRANSA, 32, 8>((const uint8_t *)scale_A, packed_sb, M, scale_K, k_iters, stream);
+        launch_pack_scales<TRANSB, 64, 4>((const uint8_t *)scale_B, packed_sa, N, scale_K, k_iters, stream, kb_shift);
+        launch_pack_scales<!TRANSA, 32, 8>((const uint8_t *)scale_A, packed_sb, M, scale_K, k_iters, stream, kb_shift);
     } else {
-        launch_pack_scales<!TRANSA, 64, 4>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream);
-        launch_pack_scales<TRANSB, 32, 8>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream);
+        launch_pack_scales<!TRANSA, 64, 4>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream, kb_shift);
+        launch_pack_scales<TRANSB, 32, 8>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream, kb_shift);
     }
 
     GemmEpilogue ep = select_epilogue(bias, aux_gelu);
-    if constexpr (!TRANSA && TRANSB && !ACCUMULATE) {
-        int splits = ep == GemmEpilogue::DEFAULT ? select_splitk_nt(M, N, K) : 1;
+    if constexpr (!ACCUMULATE) {
+        int splits = ep == GemmEpilogue::DEFAULT ? select_splitk(M, N, K) : 1;
         if (splits > 1 && workspace_size >= sa_bytes + sb_bytes + splitk_workspace_bytes(M, N, splits)) {
-            KITTENS_BOOL_SWITCH(a_fp8_code, CBSZ,
-                KITTENS_BOOL_SWITCH(b_fp8_code, BLGP,
-                    launch_splitk_nt<CBSZ, BLGP>(A, B, C, packed_sa, packed_sb, M, N, K, splits,
+            KITTENS_BOOL_SWITCH(NN_FLIP ? b_fp8_code : a_fp8_code, CBSZ,
+                KITTENS_BOOL_SWITCH(NN_FLIP ? a_fp8_code : b_fp8_code, BLGP,
+                    launch_splitk<TRANSA, TRANSB, CBSZ, BLGP>(A, B, C, packed_sa, packed_sb, M, N, K, splits,
                         static_cast<OutDtype>(out_dtype_code), (uint8_t *)workspace + sa_bytes + sb_bytes, stream);
             )) // NOLINT(*)
             return true;
@@ -1268,6 +1478,8 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         const TileLoad b_dma = prefill_tile_load<NUM_WARPS>(&B_local[{0, 0, n_tile * BLOCK_COL, 0}],
                                                             HALF_COL * b_row_stride, BLOCK_K * sizeof(T),
                                                             HALF_COL * b_row_stride, b_row_stride, Bs);
+        const TileLoad &a_k0 = a_dma;
+        const TileLoad &b_k0 = b_dma;
         const ScaleLoad s_dma = prefill_scale_load(scale_A_gl, scale_B_gl, sa_batch, 2 * sb_batch, sa_stride,
                                                    2 * sb_stride, scale_smem);
 
@@ -1287,8 +1499,8 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         OutGL C_local(C);
         C_local.raw_ptr = (typename OutGL::dtype *)tab.c[expert_id];
 
-        gemm_epilogue<GemmEpilogue::DEFAULT, false, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local, GroupedNoAux{},
-            nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
+        gemm_epilogue<GemmEpilogue::DEFAULT, false, true, false, RT_C, RT_C_T>(cA, cB, cC, cD, C_local,
+            GroupedNoAux{}, nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
     }
 }
 
@@ -1324,6 +1536,8 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
     uint32_t sw_A[copies_A], sw_B[copies_B];
     G::prefill_swizzled_offsets(As_s[0][0], A, sw_A);
     G::prefill_swizzled_offsets(Bs_s[0][0], B, sw_B);
+    uint32_t (&sw_A0)[copies_A] = sw_A;
+    uint32_t (&sw_B0)[copies_B] = sw_B;
 
 #include "xcd_sched.inc"
         uint32_t lds_zero;
@@ -1408,8 +1622,8 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         OutGL C_local(C);
         C_local.raw_ptr = (typename OutGL::dtype *)tab.c[expert_id];
 
-        gemm_epilogue<GemmEpilogue::DEFAULT, false, false, RT_C, RT_C>(cA, cB, cC, cD, C_local, GroupedNoAux{},
-            nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
+        gemm_epilogue<GemmEpilogue::DEFAULT, false, false, false, RT_C, RT_C>(cA, cB, cC, cD, C_local,
+            GroupedNoAux{}, nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
     }
 }
 
@@ -2149,7 +2363,7 @@ void mxfp8_wgrad_nt_kernel(
         OutGL C_local(C);
         C_local.raw_ptr = (typename OutGL::dtype *)info.d_ptr;
 
-        gemm_epilogue<GemmEpilogue::DEFAULT, ACCUMULATE, true, RT_C, RT_C_T>(cA, cB, cC, cD, C_local,
+        gemm_epilogue<GemmEpilogue::DEFAULT, ACCUMULATE, true, false, RT_C, RT_C_T>(cA, cB, cC, cD, C_local,
             GroupedNoAux{}, nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
     }
 }
