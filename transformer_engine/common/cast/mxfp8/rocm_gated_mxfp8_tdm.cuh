@@ -21,7 +21,7 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
       OType *output_gate_colwise, e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
       const size_t rows, const size_t cols, const tdm_kernel::ScaleLayout rowwise_scales,
       const tdm_kernel::ScaleLayout colwise_scales, const ParamOP p) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   // These hide the chunk constants of the generic gated kernel.
   using tdm_kernel::BAND_Y;
   using tdm_kernel::band_t;
@@ -32,28 +32,29 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
   using tdm_kernel::WAVES;
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
-  constexpr size_t HALVES = IS_DGATED ? 2 : 1;
+  constexpr size_t HALVES         = IS_DGATED ? 2 : 1;
   constexpr size_t OUT_BAND_BYTES = sizeof(band_t<OType>);
   constexpr size_t HALF_OUT_BYTES = (USE_ROWWISE_SCALING + USE_COLWISE_SCALING) * OUT_BAND_BYTES;
-  constexpr size_t AUX_BYTES = std::max(sizeof(band_t<IType>), HALVES * HALF_OUT_BYTES);
+  static_assert(HALF_OUT_BYTES <= sizeof(band_t<IType>), "A half's outputs fit in an input band");
   static_assert(!USE_COLWISE_SCALING || SCALE_DIM_Y == BAND_Y,
                 "A band must be one colwise scale block");
 
   // act (and for dgated gate) bands, which hold the activations after the first pass
   __shared__ alignas(128) band_t<IType> in_sh[WAVES][HALVES];
-  // The band only the first pass reads (gate, or grad for dgated), then the outputs
-  __shared__ alignas(128) unsigned char aux_sh[WAVES][AUX_BYTES];
+  // The band only the first pass reads (gate, or grad for dgated), then the act outputs. The gate
+  // outputs go into the act band once it is quantized.
+  __shared__ alignas(128) band_t<IType> aux_sh[WAVES];
 
-  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int wave          = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
   const int lane_offset_X = (threadIdx.x % WAVE_SIZE) * COLS_PER_LANE;
-  const size_t band_offset_Y = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
+  const size_t band_offset_Y  = blockIdx.y * CHUNK_DIM_Y + wave * BAND_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
   if (band_offset_Y >= rows) {
     return;
   }
-  auto &act = in_sh[wave][0];
-  auto &aux_in = *reinterpret_cast<band_t<IType> *>(aux_sh[wave]);
-  auto &gate = IS_DGATED ? in_sh[wave][HALVES - 1] : aux_in;
+  auto &act    = in_sh[wave][0];
+  auto &aux_in = aux_sh[wave];
+  auto &gate   = IS_DGATED ? in_sh[wave][HALVES - 1] : aux_in;
 
   tdm::load_2d(act, input_act, rows, cols, 2 * cols, band_offset_Y, chunk_offset_X);
   tdm::load_2d(gate, input_gate, rows, cols, 2 * cols, band_offset_Y, chunk_offset_X);
@@ -91,7 +92,7 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
   }
   asm volatile("" ::: "memory");  // the outputs overwrite aux_in through another type
 
-  const size_t out_ld = HALVES * cols;
+  const size_t out_ld     = HALVES * cols;
   const size_t scale_cols = DIVUP(cols, SCALE_DIM_X);
   // Gate scales follow the act scales of each row (rowwise) or block row (colwise).
   auto quantize_half = [&](const band_t<IType> &in, OType *out_rowwise, OType *out_colwise,
@@ -116,13 +117,15 @@ __global__ void __launch_bounds__(tdm_kernel::THREADS_PER_CHUNK)
       tdm::store_2d(out_colwise, out, rows, cols, out_ld, band_offset_Y, chunk_offset_X);
     }
   };
-  quantize_half(act, output_act_rowwise, output_act_colwise, 0, 0, aux_sh[wave]);
+  quantize_half(act, output_act_rowwise, output_act_colwise, 0, 0,
+                reinterpret_cast<unsigned char *>(aux_sh[wave]));
   if constexpr (IS_DGATED) {
+    asm volatile("" ::: "memory");  // the gate outputs overwrite the act band through another type
     quantize_half(gate, output_gate_rowwise, output_gate_colwise, scale_cols, cols,
-                  aux_sh[wave] + HALF_OUT_BYTES);
+                  reinterpret_cast<unsigned char *>(act));
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // Returns false, leaving the work to the generic kernel, where TDM does not apply.

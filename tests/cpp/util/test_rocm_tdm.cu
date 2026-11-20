@@ -10,12 +10,13 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include "util/rocm_tdm.cuh"
+#include "common.h"
+#include "util/rocm_device_utils.cuh"
 #include "../test_common.h"
 
 namespace {
 
-constexpr uint32_t kWaves = 4;
+constexpr uint32_t kWaves    = 4;
 constexpr uint32_t kTileRows = 8;
 constexpr uint32_t kTileCols = 64;
 
@@ -24,11 +25,11 @@ template <typename T>
 __global__ void __launch_bounds__(kWaves * 32)
     tdm_roundtrip_kernel(const T *in, T *out, T *lds_dump, uint32_t rows, uint32_t cols,
                          uint32_t ld_in, uint32_t ld_out) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   __shared__ alignas(128) T tile[kWaves][kTileRows][kTileCols];
   const uint32_t wave = threadIdx.x / 32;
-  const uint32_t row = (blockIdx.y * kWaves + wave) * kTileRows;
-  const uint32_t col = blockIdx.x * kTileCols;
+  const uint32_t row  = (blockIdx.y * kWaves + wave) * kTileRows;
+  const uint32_t col  = blockIdx.x * kTileCols;
   transformer_engine::tdm::load_2d(tile[wave], in, rows, cols, ld_in, row, col);
   transformer_engine::tdm::wait<0>();
   T *dump = lds_dump + ((blockIdx.y * gridDim.x + blockIdx.x) * kWaves + wave) * kTileRows * kTileCols;
@@ -51,7 +52,7 @@ void run_roundtrip(uint32_t rows, uint32_t cols, uint32_t ld_in, uint32_t ld_out
   // Every row a tile can touch, so stray stores are detected.
   const size_t out_rows = grid.y * kWaves * kTileRows;
   const T sentinel = static_cast<T>(0xA5A5A5A5A5A5A5A5ull);
-  const T pad = static_cast<T>(0xEEEEEEEEEEEEEEEEull);
+  const T pad      = static_cast<T>(0xEEEEEEEEEEEEEEEEull);
 
   std::vector<T> h_in(static_cast<size_t>(rows) * ld_in);
   std::vector<T> h_out(out_rows * ld_out, sentinel);
@@ -80,8 +81,8 @@ void run_roundtrip(uint32_t rows, uint32_t cols, uint32_t ld_in, uint32_t ld_out
   size_t load_mismatches = 0;
   for (size_t tile = 0; tile < h_dump.size() / (kTileRows * kTileCols); ++tile) {
     const size_t block = tile / kWaves, wave = tile % kWaves;
-    const size_t row0 = ((block / grid.x) * kWaves + wave) * kTileRows;
-    const size_t col0 = (block % grid.x) * kTileCols;
+    const size_t row0  = ((block / grid.x) * kWaves + wave) * kTileRows;
+    const size_t col0  = (block % grid.x) * kTileCols;
     for (size_t i = 0; i < kTileRows * kTileCols; ++i) {
       const size_t r = row0 + i / kTileCols, c = col0 + i % kTileCols;
       const T expected = (r < rows && c < cols) ? h_in[r * ld_in + c] : T(0);
@@ -114,5 +115,7 @@ TYPED_TEST(RocmTdmTest, RoundTrip2D) {
   }
   run_roundtrip<TypeParam>(64, 128, 128, 128);  // whole tiles
   run_roundtrip<TypeParam>(100, 200, 256, 216);  // partial tiles, row pitch != cols
+  run_roundtrip<TypeParam>(256, 128, 128, 128);  // rows > cols
+  run_roundtrip<TypeParam>(200, 100, 112, 128);  // rows > cols, partial tiles
   run_roundtrip<TypeParam>(1, 1, 16, 16);
 }

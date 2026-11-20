@@ -88,8 +88,7 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
 
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 #ifdef __HIP_PLATFORM_AMD__
-  if ((input.dtype() == DType::kBFloat16 || input.dtype() == DType::kFloat16 ||
-       input.dtype() == DType::kFloat32)) {
+  if (is_high_precision_dtype(input.dtype())) {
     bool done = false;
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input.dtype(), IType,

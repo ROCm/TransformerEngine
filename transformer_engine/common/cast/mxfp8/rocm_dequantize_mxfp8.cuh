@@ -32,15 +32,7 @@ __device__ __forceinline__ size_t mx_preswizzle_scale_idx(size_t i, size_t j, si
   return (j / GROUP) * (padded_dim * GROUP) + i * GROUP + (j % GROUP);
 }
 
-// hip_bfloat16 rounds with per-element branches; __bf16 is branch-free (v_cvt_pk_bf16_f32 on gfx950+).
-template <typename T>
-__device__ __forceinline__ T cvt_from_float(const float x) {
-  if constexpr (std::is_same_v<T, bf16>) {
-    return __builtin_bit_cast(T, static_cast<__bf16>(x));
-  } else {
-    return static_cast<T>(x);
-  }
-}
+using common::cvt_from_float;
 
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED,
           bool WITH_GEMM_SWIZZLED_SCALES>

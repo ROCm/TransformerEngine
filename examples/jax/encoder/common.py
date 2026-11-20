@@ -185,3 +185,22 @@ def unpack_cached_datasets_if_available() -> None:
     artifacts_dir = _get_example_artifacts_dir()
     _unpack_cached_dataset(artifacts_dir, "mnist")
     _unpack_cached_dataset(artifacts_dir, "encoder")
+
+
+def _restore_eager_dataset_columns() -> None:
+    """datasets>=4 returns a lazy Column for ds["col"]; return the formatted column like before."""
+    import datasets
+
+    column_cls = getattr(datasets.arrow_dataset, "Column", None)
+    if column_cls is None:
+        return
+    lazy_getitem = datasets.Dataset.__getitem__
+
+    def eager_getitem(self, key):
+        item = lazy_getitem(self, key)
+        return item[:] if isinstance(item, column_cls) else item
+
+    datasets.Dataset.__getitem__ = eager_getitem
+
+
+_restore_eager_dataset_columns()

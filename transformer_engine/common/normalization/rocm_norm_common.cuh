@@ -15,10 +15,8 @@
 
 #include <algorithm>
 
-#include "../cast/core/rocm_tdm_common.cuh"
-#include "../util/rocm_amax_slots.cuh"
+#include "../cast/fp8/rocm_quantize_fp8_tdm.cuh"
 #include "../util/rocm_device_utils.cuh"
-#include "../util/rocm_tdm.cuh"
 
 namespace transformer_engine {
 namespace normalization {
@@ -73,8 +71,8 @@ inline size_t block_slice_bytes(const RowSplit &split) {
 }
 
 #ifdef __gfx1250__
-using dispatch::common::cvt_4x_to_fp8;
 using dispatch::common::cvt_from_float;
+using dispatch::fp8::tdm_kernel::cvt_4x_to_fp8;
 
 template <typename T, int BYTES = SLICE_BYTES>
 using slice_t = T[1][BYTES / sizeof(T)];

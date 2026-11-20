@@ -13,22 +13,40 @@
 
 namespace nvfp4_tdm {
 
-constexpr int kChunkDim = 128;
-constexpr int kThreads = 128;
-constexpr int kWaveSize = 32;
-constexpr int kWaves = kThreads / kWaveSize;            // 4
-constexpr int kBandY = kChunkDim / kWaves;              // 32
-constexpr int kColsPerLane = kChunkDim / kWaveSize;     // 4
-constexpr int kBlockDim = 16;                           // values per scale
-constexpr int kBlocks = kChunkDim / kBlockDim;          // 8 per chunk row or column
-constexpr int kBandBlocks = kBandY / kBlockDim;         // 2
+constexpr int kChunkDim    = 128;
+constexpr int kThreads     = 128;
+constexpr int kWaveSize    = 32;
+constexpr int kWaves       = kThreads / kWaveSize;   // 4
+constexpr int kBandY       = kChunkDim / kWaves;     // 32
+constexpr int kColsPerLane = kChunkDim / kWaveSize;  // 4
+constexpr int kBlockDim    = 16;                     // values per scale
+constexpr int kBlocks      = kChunkDim / kBlockDim;  // 8 per chunk row or column
+constexpr int kBandBlocks  = kBandY / kBlockDim;     // 2
 static_assert(kBandY == kWaveSize, "A lane per band row writes the rowwise scales");
 static_assert(kThreads == kChunkDim, "A thread per chunk column writes the columnwise scales");
 
 using Philox =
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
+// cvt_8x_to_fp4, rounding stochastically with a random byte of rbits per value. The conversion
+// rounds its first value up when bits 15:0 of its random operand plus the 16-bit fraction to the
+// next FP4 value carry, its second likewise with bits 31:16, and the other 6 with shifts of the
+// same bits, so each conversion takes only 2 values.
+__device__ __forceinline__ uint32_t cvt_8x_to_fp4_sr(const float *x, const uint2 rbits,
+                                                     const float scale) {
+  uint32_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const uint32_t bytes = ((i < 2 ? rbits.x : rbits.y) >> (16 * (i % 2))) & 0xFFFF;
+    // The bytes on top of half a byte, so that the probability of rounding up rounds to nearest.
+    const uint32_t r = (bytes & 0xFF) << 8 | (bytes & 0xFF00) << 16 | 0x00800080;
+    const dispatch::common::f32x8 v = {x[2 * i], x[2 * i + 1], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    packed |= (__builtin_amdgcn_cvt_scalef32_sr_pk8_fp4_f32(v, r, scale) & 0xFF) << (8 * i);
+  }
+  return packed;
+}
+
 // src[0..N) as floats, read up to 16 bytes at a time.
 template <int N, typename IType>
 __device__ __forceinline__ void load_floats(const IType *src, float *x) {
@@ -56,20 +74,18 @@ __device__ __forceinline__ uint2 encode_block(const float *x, const float encode
   }
   if constexpr (kSR) {
     const uint4 rbits = rng.generate4();
-    return make_uint2(
-        dispatch::common::cvt_8x_to_fp4_sr(y, make_uint2(rbits.x, rbits.y), 1.0f),
-        dispatch::common::cvt_8x_to_fp4_sr(y + 8, make_uint2(rbits.z, rbits.w), 1.0f));
+    return make_uint2(cvt_8x_to_fp4_sr(y, make_uint2(rbits.x, rbits.y), 1.0f),
+                      cvt_8x_to_fp4_sr(y + 8, make_uint2(rbits.z, rbits.w), 1.0f));
   } else {
     return make_uint2(dispatch::common::cvt_8x_to_fp4(y, 1.0f),
                       dispatch::common::cvt_8x_to_fp4(y + 8, 1.0f));
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // The tensor-level scales of an encoding, as block_scaled_1d_cast_transpose_kernel derives them.
 struct GlobalScales {
   float encode;
-  float encode_multiplier;
   float decode;
   float amax;  // what 4over6 dequantizes with
 };
@@ -79,7 +95,6 @@ __device__ __forceinline__ GlobalScales global_scales(const float *global_amax,
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   GlobalScales s;
   s.encode = global_amax == nullptr ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
-  s.encode_multiplier = s.encode * (1.0f / fp4_max);
   s.decode = 1.0 / s.encode;
   s.amax = global_amax == nullptr ? fp4_max * e4m3_max : global_amax[0];
   return s;
@@ -92,7 +107,6 @@ __device__ __forceinline__ GlobalScales row_global_scales(const float *global_am
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   GlobalScales s;
   s.encode = row < rows ? ComputeGlobalEncodeScaleFP4(global_amax[row], e4m3_max) : 1.0f;
-  s.encode_multiplier = s.encode * (1.0f / fp4_max);
   s.decode = 1.0f / s.encode;
   s.amax = row < rows ? global_amax[row] : fp4_max * e4m3_max;
   return s;
@@ -106,7 +120,8 @@ __device__ __forceinline__ fp8e4m3 block_scale(const float *x, const float amax,
                                                const float err_denom, float err6, float err4,
                                                float &encode_scale) {
   if constexpr (!k4Over6) {
-    const fp8e4m3 scale_inv = ComputeDecodeScaleFP4<fp8e4m3>(amax, g.encode_multiplier);
+    const fp8e4m3 scale_inv =
+        dispatch::nvfp4::core::compute_decoding_scaling_factor<fp8e4m3>(amax, g.encode);
     encode_scale = ComputeEncodeScaleFP4<fp8e4m3>(scale_inv, g.decode);
     return scale_inv;
   } else {
@@ -137,7 +152,7 @@ __device__ __forceinline__ void quantize_chunk(
     uint8_t *scales_t, const uint32_t rows, const uint32_t cols, const size_t scale_stride,
     const size_t scale_t_stride, const bool row_scaled, const size_t *rng_state,
     const float e4m3_max, const bool use_mse, const uint32_t chunk_Y, const uint32_t chunk_X) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   // 4over6 scales 2D blocks by their error, summed per row (rowwise) or column (colwise) first.
   constexpr bool k2DErr = k4Over6 && k2D;
   __shared__ alignas(128) IType in_sh[kWaves][kBandY][kChunkDim];
@@ -156,7 +171,7 @@ __device__ __forceinline__ void quantize_chunk(
   const int lane = threadIdx.x % kWaveSize;
   const uint32_t chunk_offset_Y = chunk_Y * kChunkDim;
   const uint32_t chunk_offset_X = chunk_X * kChunkDim;
-  const uint32_t band_offset_Y = chunk_offset_Y + wave * kBandY;
+  const uint32_t band_offset_Y  = chunk_offset_Y + wave * kBandY;
   // The columnwise stores need every wave at the barrier.
   const bool active = band_offset_Y < rows;
   if (!kColwise && !active) {
@@ -167,7 +182,7 @@ __device__ __forceinline__ void quantize_chunk(
     tdm::load_2d(in, input, rows, cols, cols, band_offset_Y, chunk_offset_X);
   }
 
-  const GlobalScales g = global_scales(global_amax, e4m3_max);
+  const GlobalScales g   = global_scales(global_amax, e4m3_max);
   const GlobalScales g_t = global_scales(global_amax_t, e4m3_max);
   const float err_denom = TypeExtrema<fp4e2m1>::max * e4m3_max;
   Philox rng;
@@ -248,8 +263,8 @@ __device__ __forceinline__ void quantize_chunk(
       // A lane per (candidate, block): upstream's reduction tree over the block's 16 rows or
       // columns.
       const int candidate = lane / (kBandBlocks * kBlocks);
-      const int b = lane / kBlocks % kBandBlocks;
-      const int block = lane % kBlocks;
+      const int b         = lane / kBlocks % kBandBlocks;
+      const int block     = lane % kBlocks;
       float err[kBlockDim];
       if constexpr (kRowwise) {
 #pragma unroll
@@ -276,7 +291,7 @@ __device__ __forceinline__ void quantize_chunk(
     constexpr bool kOneAtATime = k4Over6 && !k2D;
     constexpr int kUnroll = kOneAtATime ? 1 : kBandY / kRowsPerStep;
     const int block = lane % kBlocks;
-    auto &out = rowwise_sh[wave];
+    auto &out    = rowwise_sh[wave];
     auto &scales = rowwise_scale_sh[wave];
 #pragma unroll kUnroll
     for (int step = 0; step < kBandY / kRowsPerStep; step++) {
@@ -309,7 +324,7 @@ __device__ __forceinline__ void quantize_chunk(
     }
     tdm::store_2d(output_c, out, rows, cols / 2, cols / 2, band_offset_Y, chunk_offset_X / 2);
     // A lane per band row writes the row's scales.
-    const uint32_t row = band_offset_Y + lane;
+    const uint32_t row         = band_offset_Y + lane;
     const uint32_t first_scale = chunk_offset_X / kBlockDim;
     if (row < rows) {
       dispatch::common::store_bytes(scales_c + row * scale_stride + first_scale, scales[lane],
@@ -394,7 +409,7 @@ __device__ __forceinline__ void quantize_chunk(
                     chunk_offset_Y / 2);
     }
     // A thread per column writes its scales.
-    const uint32_t col = chunk_offset_X + threadIdx.x;
+    const uint32_t col         = chunk_offset_X + threadIdx.x;
     const uint32_t first_scale = chunk_offset_Y / kBlockDim;
     if (col < cols) {
       dispatch::common::store_bytes(scales_t + col * scale_t_stride + first_scale,
@@ -403,7 +418,7 @@ __device__ __forceinline__ void quantize_chunk(
     }
   }
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 template <bool kRowwise, bool kColwise, bool k2D, bool kSR, bool kRHT, bool k4Over6,
@@ -415,7 +430,7 @@ __global__ void __launch_bounds__(kThreads)
                     const size_t scale_stride, const size_t scale_t_stride, const bool row_scaled,
                     const size_t *rng_state, const float *noop, const float e4m3_max,
                     const bool use_mse) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -430,7 +445,7 @@ __global__ void __launch_bounds__(kThreads)
       input, global_amax, global_amax_t, sign_mask, output_c, output_t, scales_c, scales_t, rows,
       cols, scale_stride, scale_t_stride, row_scaled, rng_state, e4m3_max, use_mse, blockIdx.y,
       blockIdx.x);
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 constexpr int kGroupMaxTensors = 256;
@@ -457,7 +472,7 @@ template <bool kRowwise, bool kColwise, bool kSR, bool kRHT, bool k4Over6, typen
 __global__ void __launch_bounds__(kThreads)
     group_quantize_kernel(const GroupArgs args, const uint32_t sign_mask, const uint32_t cols,
                           const size_t *rng_state, const float e4m3_max, const bool use_mse) {
-  int t = 0;
+  int t  = 0;
   int hi = args.num_tensors - 1;
   while (t < hi) {
     const int mid = t + (hi - t) / 2;
@@ -475,14 +490,17 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 // Whether quantize_kernel takes an NVFP4 quantize: TDM applies, packed rows are whole 16-byte TDM
-// units, and it is not one of the modes left to block_scaled_1d_cast_transpose_kernel; swizzled
-// scales are requested only on GPUs without TDM, and 4over6 never with stochastic rounding.
+// units, the block scales are E4M3, and it is not one of the modes left to
+// block_scaled_1d_cast_transpose_kernel; swizzled scales are requested only on GPUs without TDM,
+// and 4over6 never with stochastic rounding.
 inline bool supported(const SimpleTensor &input, const SimpleTensor &output,
-                      const SimpleTensor &output_t, const size_t rows, const size_t cols,
+                      const SimpleTensor &output_t, const SimpleTensor &scale_inv,
+                      const SimpleTensor &scale_inv_t, const size_t rows, const size_t cols,
                       const bool rowwise, const bool colwise, const bool swizzled,
                       const bool use_4over6, const bool use_sr) {
-  return !(use_4over6 && use_sr) && !swizzled && !is_fp8_dtype(input.dtype) &&
-         (!rowwise || cols % 32 == 0) && (!colwise || rows % 32 == 0) &&
+  return !(use_4over6 && use_sr) && !swizzled && is_high_precision_dtype(input.dtype) &&
+         (!rowwise || (cols % 32 == 0 && scale_inv.dtype == DType::kFloat8E4M3)) &&
+         (!colwise || (rows % 32 == 0 && scale_inv_t.dtype == DType::kFloat8E4M3)) &&
          dispatch::common::use_tdm(rows, cols, {input.dptr, rowwise ? output.dptr : nullptr,
                                                 colwise ? output_t.dptr : nullptr});
 }
@@ -496,21 +514,19 @@ void launch(const SimpleTensor &input, const float *global_amax, const float *gl
             const float e4m3_max, const bool use_mse, cudaStream_t stream) {
   const dim3 grid(DIVUP(cols, static_cast<size_t>(kChunkDim)),
                   DIVUP(rows, static_cast<size_t>(kChunkDim)));
-  const auto run = [&](auto kernel) {
-    kernel<<<grid, kThreads, 0, stream>>>(
-        reinterpret_cast<const IType *>(input.dptr), global_amax, global_amax_t, rht_matrix,
-        reinterpret_cast<uint8_t *>(output.dptr), reinterpret_cast<uint8_t *>(output_t.dptr),
-        reinterpret_cast<uint8_t *>(scale_inv.dptr), reinterpret_cast<uint8_t *>(scale_inv_t.dptr),
-        rows, cols, rowwise ? scale_inv.shape[1] : 0, colwise ? scale_inv_t.shape[1] : 0,
-        row_scaled, rng_state, noop, e4m3_max, use_mse);
-  };
-  if (rowwise && colwise) {
-    run(quantize_kernel<true, true, k2D, kSR, kRHT, k4Over6, IType>);
-  } else if (rowwise) {
-    run(quantize_kernel<true, false, k2D, kSR, false, k4Over6, IType>);
-  } else {
-    run(quantize_kernel<false, true, k2D, kSR, kRHT, k4Over6, IType>);
-  }
+  // The RHT applies to the columnwise output only.
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      rowwise, kRowwise,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          colwise, kColwise,
+          quantize_kernel<kRowwise, kColwise, k2D, kSR, kRHT && kColwise, k4Over6, IType>
+          <<<grid, kThreads, 0, stream>>>(
+              reinterpret_cast<const IType *>(input.dptr), global_amax, global_amax_t, rht_matrix,
+              reinterpret_cast<uint8_t *>(output.dptr), reinterpret_cast<uint8_t *>(output_t.dptr),
+              reinterpret_cast<uint8_t *>(scale_inv.dptr),
+              reinterpret_cast<uint8_t *>(scale_inv_t.dptr), rows, cols,
+              rowwise ? scale_inv.shape[1] : 0, colwise ? scale_inv_t.shape[1] : 0, row_scaled,
+              rng_state, noop, e4m3_max, use_mse);));  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -526,8 +542,8 @@ inline bool quantize(const SimpleTensor &input, const SimpleTensor &global_amax,
                      const NVTENVFP44Over6Mode mode_4over6, const float *noop,
                      const float e4m3_max, cudaStream_t stream) {
   const bool use_4over6 = mode_4over6 != kNVTENVFP44Over6Disabled;
-  if (!supported(input, output, output_t, rows, cols, rowwise, colwise, swizzled, use_4over6,
-                 use_sr)) {
+  if (!supported(input, output, output_t, scale_inv, scale_inv_t, rows, cols, rowwise, colwise,
+                 swizzled, use_4over6, use_sr)) {
     return false;
   }
   const auto *amax = reinterpret_cast<const float *>(global_amax.dptr);
@@ -554,12 +570,14 @@ inline bool quantize(const SimpleTensor &input, const SimpleTensor &global_amax,
 
 // Whether quantize_rht applies: BF16 input, 1D scaling, and what quantize_kernel takes.
 inline bool supported_rht(const SimpleTensor &input, const SimpleTensor &output,
-                          const SimpleTensor &output_t, const size_t rows, const size_t cols,
+                          const SimpleTensor &output_t, const SimpleTensor &scale_inv,
+                          const SimpleTensor &scale_inv_t, const size_t rows, const size_t cols,
                           const bool use_2d, const bool swizzled) {
   const bool rowwise = output.dptr != nullptr;
   const bool colwise = output_t.dptr != nullptr;
   return input.dtype == DType::kBFloat16 && !use_2d && (rowwise || colwise) &&
-         supported(input, output, output_t, rows, cols, rowwise, colwise, swizzled, false, false);
+         supported(input, output, output_t, scale_inv, scale_inv_t, rows, cols, rowwise, colwise,
+                   swizzled, false, false);
 }
 
 // The rowwise NVFP4 of the BF16 input and the columnwise NVFP4 of the RHT of its transpose, as
@@ -590,16 +608,14 @@ void launch_group(const GroupArgs &args, const uint32_t sign_mask, const size_t 
                   const float e4m3_max, const bool use_mse, cudaStream_t stream) {
   const dim3 grid(DIVUP(cols, static_cast<size_t>(kChunkDim)),
                   args.first_chunk_Y[args.num_tensors]);
-  const auto run = [&](auto kernel) {
-    kernel<<<grid, kThreads, 0, stream>>>(args, sign_mask, cols, rng_state, e4m3_max, use_mse);
-  };
-  if (rowwise && colwise) {
-    run(group_quantize_kernel<true, true, kSR, kRHT, k4Over6, bf16>);
-  } else if (rowwise) {
-    run(group_quantize_kernel<true, false, kSR, false, k4Over6, bf16>);
-  } else {
-    run(group_quantize_kernel<false, true, kSR, kRHT, k4Over6, bf16>);
-  }
+  // The RHT applies to the columnwise outputs only.
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      rowwise, kRowwise,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          colwise, kColwise,
+          group_quantize_kernel<kRowwise, kColwise, kSR, kRHT && kColwise, k4Over6, bf16>
+          <<<grid, kThreads, 0, stream>>>(args, sign_mask, cols, rng_state, e4m3_max,
+                                          use_mse);));  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -615,7 +631,7 @@ inline bool group_quantize(const Tensor &input, const std::vector<Tensor *> &out
   using namespace dispatch::common::tdm_amax_kernel;
   const int num_tensors = outputs.size();
   const bool use_4over6 = config.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  const bool use_sr = config.stochastic_rounding;
+  const bool use_sr     = config.stochastic_rounding;
   if (num_tensors == 0 || num_tensors > kGroupMaxTensors || input.dtype() != DType::kBFloat16 ||
       config.nvfp4_2d_quantization || config.noop_tensor != nullptr ||
       (use_4over6 && (use_sr || with_rht))) {
@@ -644,8 +660,7 @@ inline bool group_quantize(const Tensor &input, const std::vector<Tensor *> &out
       continue;
     }
     NVTE_CHECK(output.scaling_mode == NVTE_NVFP4_1D_SCALING, "Expected NVFP4 outputs.");
-    const float output_e4m3_max =
-        te_fp8_fnuz() ? 240.0f : static_cast<float>(output.nvfp4_e4m3_max);
+    const float output_e4m3_max = static_cast<float>(output.get_nvfp4_scale_max());
     if (e4m3_max == 0) {
       rowwise = output.has_data();
       colwise = output.has_columnwise_data();
@@ -654,12 +669,13 @@ inline bool group_quantize(const Tensor &input, const std::vector<Tensor *> &out
     if (output.has_data() != rowwise || output.has_columnwise_data() != colwise ||
         output_e4m3_max != e4m3_max || output.row_scaled_nvfp4 ||
         !supported(SimpleTensor(const_cast<void *>(split), {rows, cols}, DType::kBFloat16),
-                   output.data, output.columnwise_data, rows, cols, rowwise, colwise,
+                   output.data, output.columnwise_data, output.scale_inv,
+                   output.columnwise_scale_inv, rows, cols, rowwise, colwise,
                    output.with_gemm_swizzled_scales, use_4over6, use_sr) ||
         (with_rht && rows % kBlockDim != 0)) {
       return false;
     }
-    auto *const amax = reinterpret_cast<float *>(output.amax.dptr);
+    auto *const amax   = reinterpret_cast<float *>(output.amax.dptr);
     auto *const amax_t = reinterpret_cast<float *>(output.columnwise_amax.dptr);
     NVTE_CHECK((amax != nullptr || !rowwise) && (amax_t != nullptr || !colwise),
                "NVFP4 outputs need the amaxes of their directions.");

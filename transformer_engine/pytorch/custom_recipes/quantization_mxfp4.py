@@ -214,7 +214,7 @@ class MXFP4QuantizerRef(Quantizer):
     HIP / Triton kernel behaviour:
 
     * E8M0 scale: ``floor(log2(amax_rounded)) - 2 + 127``
-    * FP4 encoding: threshold-based nearest-neighbour to E2M1 values
+    * FP4 encoding: round-to-nearest-even to E2M1 values (OCP MX roundTiesToEven)
     * Packing: ``(odd_nibble << 4) | even_nibble``
     """
 
@@ -330,13 +330,15 @@ class MXFP4QuantizerRef(Quantizer):
         )
         scaled_blocks = data_blocks * scale_vals
 
-        # --- FP4 encoding (threshold-based) ---
+        # --- FP4 encoding (round to nearest, ties to even) ---
         signs = (scaled_blocks < 0).astype(np.uint8)
         abs_vals = np.abs(scaled_blocks)
         indices = np.zeros_like(abs_vals, dtype=np.uint8)
         for threshold, code in [(0.25, 1), (0.75, 2), (1.25, 3),
                                 (1.75, 4), (2.5, 5), (3.5, 6), (5.0, 7)]:
-            indices = np.where(abs_vals >= threshold, code, indices)
+            # a tie only rounds up into an even code
+            above = abs_vals > threshold if code % 2 else abs_vals >= threshold
+            indices = np.where(above, code, indices)
         fp4_flat = ((signs << 3) | indices).reshape(M, N)
 
         # --- Pack two nibbles per byte ---

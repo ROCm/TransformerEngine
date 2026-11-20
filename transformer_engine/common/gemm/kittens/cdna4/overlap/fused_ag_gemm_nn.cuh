@@ -7,6 +7,7 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "overlap_common.cuh"
+#include "../mxfp8_gemm_helper.cuh"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -137,7 +138,7 @@ void persistent_ag_bf16_gemm_body(
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-#include "xcd_steal.inc"
+#include "../xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -591,6 +592,7 @@ namespace hk_mxfp8_ag_nn {
 
 using namespace kittens;
 using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
 
 // Per-PE pointer to each peer's [M,K] A buffer.
 using PeerPtrs = hk_overlap::PeerPtrsT<fp8e4m3>;
@@ -683,14 +685,14 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
             // ever does, since the gathered tensor is not a GEMM operand here.
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
         } else if (interleave_scales) {
-            // scale_A_smem is untouched until this block joins the compute queue, which it cannot
+            // scale_smem is untouched until this block joins the compute queue, which it cannot
             // do before the gather finishes -- so stage the pack there rather than grow the LDS.
-            static_assert(sizeof(scale_A_smem) >= 2 * 256 * sizeof(uint32_t),
-                          "scale_A_smem too small to stage KPP=2 scale tiles");
+            static_assert(sizeof(scale_smem) >= 2 * 256 * sizeof(uint32_t),
+                          "scale_smem too small to stage KPP=2 scale tiles");
             gather_all_plus_scales<1, true>(
                 my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive,
                 scale_base, scale_chunk_bytes, scale_K, packed_sa_raw, tiles_M, k_iters,
-                reinterpret_cast<uint32_t *>(&scale_A_smem[0]));
+                reinterpret_cast<uint32_t *>(&scale_smem[0][0]));
         } else {
             gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
         }
@@ -713,7 +715,7 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
             if (xcd_bucket) {
-#include "xcd_steal.inc"
+#include "../xcd_steal.inc"
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -758,39 +760,36 @@ void persistent_ag_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
         RT_C cA, cB, cC, cD;
         kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-        int tic = 0, toc = 1;
-        int tic_scales = 0, toc_scales = 1;
-
-        G::load(Bs[tic][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-        G::load(As[tic][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-        G::load(Bs[tic][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[tic][1]);
-        G::load(As[tic][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+        load_srd(Bs[s0][0], B_local, {0, 0, 0, b_half0}, sw_B, b_srd, b_base, b_lds[s0][0]);
+        load_srd(As[s0][0], A_local, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[s0][0]);
+        load_srd(Bs[s0][1], B_local, {0, 0, 0, b_half1}, sw_B, b_srd, b_base, b_lds[s0][1]);
+        load_srd(As[s0][1], A_local, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[s0][1]);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G::load(As[toc][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-        G::load(Bs[toc][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[toc][0]);
-        G::load(Bs[toc][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+        load_srd(As[!s0][0], A_local, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[!s0][0]);
+        load_srd(Bs[!s0][0], B_local, {0, 0, 1, b_half0}, sw_B, b_srd, b_base, b_lds[!s0][0]);
+        load_srd(Bs[!s0][1], B_local, {0, 0, 1, b_half1}, sw_B, b_srd, b_base, b_lds[!s0][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        G::load(scale_A_smem[0], scale_A_gl, {block_row, 0, 0, 0});
-        G::load(scale_B_lo[0],   scale_B_gl, {2 * block_col,     0, 0, 0});
-        G::load(scale_B_hi[0],   scale_B_gl, {2 * block_col + 1, 0, 0, 0});
+        G::load(scale_smem[s0][0], scale_A_gl, {block_row, 0, 0, 0});
+        G::load(scale_smem[s0][1], scale_B_gl, {2 * block_col,     0, 0, 0});
+        G::load(scale_smem[s0][2], scale_B_gl, {2 * block_col + 1, 0, 0, 0});
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
         if (warp_m == 1) __builtin_amdgcn_s_barrier();
 
-        // The AG path opens a warp_m skew in its prologue; the shared main loop closes it under
-        // this guard. The standalone GEMM includes the same file without defining it.
+        // The AG path opens a warp_m skew in its prologue, which the shared main loop closes, and needs the
+        // opaque peeled stages. The standalone GEMM includes the same file defining neither.
 
 #define MXFP8_AG_SKEW_CLOSE 1
-#define MXFP8_NN_K_UNROLL 1
+#define MXFP8_NN_OPAQUE_PEEL 1
 #include "../mxfp8_nn_mainloop.inc"
-#undef MXFP8_NN_K_UNROLL
+#undef MXFP8_NN_OPAQUE_PEEL
 #undef MXFP8_AG_SKEW_CLOSE
 
         gemm_epilogue<RT_C>(cA, cB, cC, cD, c_base, N_TOTAL, block_row, block_col, warp_m, warp_n);
