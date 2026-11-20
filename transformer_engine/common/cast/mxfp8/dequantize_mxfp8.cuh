@@ -314,7 +314,13 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
                           : reinterpret_cast<e8m0_t *>(input.columnwise_scale_inv.dptr);
 
+#ifdef __HIP_PLATFORM_AMD__
+  // gfx1250 pads the scale dims to multiples of 4, so take the stride from the checked shape.
+  const size_t scales_stride = use_rowwise_scaling ? input.scale_inv.shape[1]
+                                                   : input.columnwise_scale_inv.shape[1];
+#else
   const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
+#endif
 
   const size_t num_scale_tiles_X = use_rowwise_scaling ? DIVUP(cols, static_cast<size_t>(128))
                                                        : DIVUP(rows, static_cast<size_t>(128));

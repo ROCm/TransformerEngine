@@ -298,24 +298,33 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     cudaMalloc((void **)&single_in_d, single_data_size);
     cudaMalloc((void **)&single_out_d, single_out_size);
 #ifdef __HIP_PLATFORM_AMD__
-    // gfx1250's shape check needs the declared scale shape padded to a multiple of 4; over-allocate
-    // the buffer to match (padding entries are e8m0 identity and never read). Data stays compact.
+    // gfx1250's shape check needs the declared scale shape padded to a multiple of 4, so the
+    // compact member scales go in at the padded row stride (padding entries are e8m0 identity).
     const size_t align =
         (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
     std::vector<size_t> scale_shape_vec = {
         round_up_to_nearest_multiple(per_tensor_scales_first_dim[t], align),
         round_up_to_nearest_multiple(per_tensor_scales_last_dim[t], align)};
     const size_t alloc_scales_size = scale_shape_vec[0] * scale_shape_vec[1] * sizeof(fp8e8m0);
+    std::vector<fp8e8m0> padded_scales_h(scale_shape_vec[0] * scale_shape_vec[1], 127);
+    for (size_t r = 0; r < per_tensor_scales_first_dim[t]; ++r) {
+      std::memcpy(padded_scales_h.data() + r * scale_shape_vec[1],
+                  in_scales_h.data() + scales_offset + r * per_tensor_scales_last_dim[t],
+                  per_tensor_scales_last_dim[t] * sizeof(fp8e8m0));
+    }
     cudaMalloc((void **)&single_scales_d, alloc_scales_size);
-    cudaMemset(single_scales_d, 127, alloc_scales_size);  // fill with e8m0 identity
 #else
     cudaMalloc((void **)&single_scales_d, single_scales_size);
 #endif
 
     cudaMemcpy(single_in_d, in_data_h.data() + data_offset, single_data_size,
                cudaMemcpyHostToDevice);
+#ifdef __HIP_PLATFORM_AMD__
+    cudaMemcpy(single_scales_d, padded_scales_h.data(), alloc_scales_size, cudaMemcpyHostToDevice);
+#else
     cudaMemcpy(single_scales_d, in_scales_h.data() + scales_offset, single_scales_size,
                cudaMemcpyHostToDevice);
+#endif
     cudaMemset(single_out_d, 0, single_out_size);
 
     // Build single-tensor NVTETensor using TensorWrapper directly

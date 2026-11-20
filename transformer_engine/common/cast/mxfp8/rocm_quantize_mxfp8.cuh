@@ -24,6 +24,8 @@ struct MultiQuantizeMXFP8Args {
   float *amax_list[kMultiQuantizeMXFP8MaxTensors];
   int rows_list[kMultiQuantizeMXFP8MaxTensors];
   int cols_list[kMultiQuantizeMXFP8MaxTensors];
+  int scale_stride_rowwise_list[kMultiQuantizeMXFP8MaxTensors];
+  int scale_stride_colwise_list[kMultiQuantizeMXFP8MaxTensors];
   int block_range[kMultiQuantizeMXFP8MaxTensors + 1];
   int num_tensors;
 };
@@ -188,8 +190,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   e8m0_t *scales_colwise       = reinterpret_cast<e8m0_t *>(args.scales_colwise_list[tensor_id]);
   float *dbias_workspace       = nullptr;
   float *amax_ptr              = args.amax_list[tensor_id];
-  const size_t scale_stride_rowwise = DIVUP(cols, SCALE_DIM_X);
-  const size_t scale_stride_colwise = cols;
+  const size_t scale_stride_rowwise = args.scale_stride_rowwise_list[tensor_id];
+  const size_t scale_stride_colwise = args.scale_stride_colwise_list[tensor_id];
   const int dbias_y_offset     = block_id_Y;
 #include "rocm_quantize_mxfp8_body.inc"
 }
