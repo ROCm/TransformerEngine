@@ -9,22 +9,31 @@
 
 namespace te_kittens::cdna4::mxfp8 {
 
-template<bool COLWISE, int STEP, int NG>
+template<bool COLWISE, int STEP, int NG, bool BOUNDED = false>
 __device__ __forceinline__ void pack_scale_tile(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln,
-    int dim, int scale_K, int k_iter, int cblk, size_t out_tile) {
+    int dim, int scale_K, int k_iter, int cblk, size_t out_tile, int kb_shift = 0) {
 
+    // Dense shapes may end mid-tile or mid-K-block: scales outside the tensor become e8m0 0.
     constexpr int TILE_WORDS = 256;
     constexpr int PAD_WORDS  = (NG - 1) * STEP + 64; // covers OOB pack_scales read
     __shared__ uint32_t tile[PAD_WORDS];
 
-    int kb_base = k_iter * 4;
+    int kb_base = k_iter * 4 - kb_shift;
     int row0    = cblk * TILE_WORDS;
 
     for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
         uint32_t p = 0;
         if (i < TILE_WORDS) {
             int row = row0 + i;
-            if constexpr (COLWISE) {
+            if (BOUNDED && (row >= dim || kb_base < 0 || kb_base + 4 > scale_K)) {
+                for (int j = 0; j < 4; j++) {
+                    int kb = kb_base + j;
+                    if (row < dim && kb >= 0 && kb < scale_K) {
+                        size_t at = COLWISE ? (size_t)kb * dim + row : (size_t)row * scale_K + kb;
+                        p |= (uint32_t)scales[at] << (8 * j);
+                    }
+                }
+            } else if constexpr (COLWISE) {
                 int base = kb_base * dim + row;
                 p  =  (uint32_t)scales[base]              | ((uint32_t)scales[base +     dim] << 8)
                    | ((uint32_t)scales[base + 2 * dim] << 16) | ((uint32_t)scales[base + 3 * dim] << 24);
@@ -46,7 +55,7 @@ __device__ __forceinline__ void pack_scale_tile(const uint8_t *__restrict__ scal
 template<bool COLWISE, int STEP, int NG, bool SHARDED = false>
 __global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t *__restrict__ ln, int dim,
     int scale_K, int k_iters, int tiles_per_col, [[maybe_unused]] int cblk_off = 0,
-    [[maybe_unused]] int tiles_local = 0) {
+    [[maybe_unused]] int tiles_local = 0, int kb_shift = 0) {
 
     int tile_id = blockIdx.x;
     int k_iter, cblk;
@@ -62,14 +71,15 @@ __global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t 
         cblk     = tile_id % tiles_per_col;
         out_tile = (size_t)tile_id;
     }
-    pack_scale_tile<COLWISE, STEP, NG>(scales, ln, dim, scale_K, k_iter, cblk, out_tile);
+    pack_scale_tile<COLWISE, STEP, NG, !SHARDED>(scales, ln, dim, scale_K, k_iter, cblk, out_tile, kb_shift);
 }
 
 template<bool COLWISE, int STEP, int NG>
-void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_K, int k_iters, hipStream_t stream) {
-    int tiles_per_col = dim / 256;
+void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_K, int k_iters, hipStream_t stream,
+                        int kb_shift = 0) {
+    int tiles_per_col = (dim + 255) / 256;
     pack_scales_kernel<COLWISE, STEP, NG><<<k_iters * tiles_per_col, NG * 64, 0, stream>>>(
-        scales, ln, dim, scale_K, k_iters, tiles_per_col);
+        scales, ln, dim, scale_K, k_iters, tiles_per_col, 0, 0, kb_shift);
 }
 
 // Packs only the rank's own chunk into a full-width output, for the overlap path's interleaved
@@ -87,7 +97,7 @@ constexpr int TR_GROUP_LANES  = 16;
 constexpr int TR_LANE_BYTES   = 8;
 
 // Buffer-to-LDS tile load state. srd[h][1] starts WAVE_LOAD_BYTES early because the instruction offset
-// advances the global and the LDS address alike.
+// advances the global and the LDS address alike. Lanes whose K index (column, or row if K_ROWS) is below skip load 0.
 struct TileLoad {
     kittens::i32x4 srd[2][2];
     uint32_t lds[2][2];
@@ -95,9 +105,10 @@ struct TileLoad {
     uint32_t k_step;
 };
 
-template <int NUM_WARPS, typename ST>
+template <int NUM_WARPS, bool K_ROWS = false, typename ST>
 __device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t half_bytes, uint32_t k_step,
-                                                      uint32_t range, uint32_t row_stride, ST (&tiles)[2][2]) {
+                                                      uint32_t range, uint32_t row_stride, ST (&tiles)[2][2],
+                                                      int skip = 0, int range1 = -1) {
     static_assert(sizeof(ST) == 2 * NUM_WARPS * WAVE_LOAD_BYTES);
     static_assert(ST::underlying_subtiles_per_row == 1);
     static_assert(ST::underlying_subtile_bytes_per_thread == LANE_LOAD_BYTES);
@@ -106,8 +117,9 @@ __device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t
     TileLoad d;
 #pragma unroll
     for (int h = 0; h < 2; h++) {
-        d.srd[h][0] = kittens::make_srsrc(src + h * half_bytes, range);
-        d.srd[h][1] = kittens::make_srsrc(src + h * half_bytes - WAVE_LOAD_BYTES, range + WAVE_LOAD_BYTES);
+        const uint32_t r = h && range1 >= 0 ? range1 : range;
+        d.srd[h][0] = kittens::make_srsrc(src + h * half_bytes, r);
+        d.srd[h][1] = kittens::make_srsrc(src + h * half_bytes - WAVE_LOAD_BYTES, r + WAVE_LOAD_BYTES);
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             d.srd[h][0][i] = __builtin_amdgcn_readfirstlane(d.srd[h][0][i]);
@@ -131,8 +143,9 @@ __device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t
         const int subtile_off = byte % ST::underlying_subtile_bytes;
         const uint32_t swizzled = ST::swizzle({subtile_off / ST::underlying_subtile_row_bytes,
                                                subtile_off % ST::underlying_subtile_row_bytes});
-        d.sw[i] = (swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows) * row_stride +
-                  swizzled % ST::underlying_subtile_row_bytes;
+        const int row = swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows;
+        const int col = swizzled % ST::underlying_subtile_row_bytes;
+        d.sw[i] = (K_ROWS ? row : col) < skip ? 0x80000000u : row * row_stride + col;
     }
     d.k_step = k_step;
     return d;
