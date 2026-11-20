@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "../common.h"
@@ -2226,7 +2227,10 @@ bool use_hipblaslt() {
          (legacy != nullptr && strcmp(legacy, "1") == 0);
 }
 
-// NVTE_HK_SPLITK: "auto" (default), "0" or "1" for no split, N to force N splits.
+// gfx1250 HipKittens GEMMs without bias/GELU epilogue pick their tile and split-K themselves unless forced:
+// NVTE_HK_SPLITK: "auto" (default), "0" or "1" for no split, N to force N splits (invalid N runs unsplit).
+// NVTE_HK_TILE: "auto" (default) or BMxBN with BM, BN in {128, 256}. Forcing only the split keeps 256x256,
+// forcing only the tile runs it unsplit.
 int hk_splitk() {
   const char *env = std::getenv("NVTE_HK_SPLITK");
   if (env == nullptr || env[0] == '\0' || strcmp(env, "auto") == 0) {
@@ -2235,6 +2239,17 @@ int hk_splitk() {
   const int splits = getenv<int>("NVTE_HK_SPLITK");
   NVTE_CHECK(splits >= 0, "NVTE_HK_SPLITK must be auto or a non-negative integer, got ", env);
   return splits > 1 ? splits : 1;
+}
+
+void hk_tile(int *tile_m, int *tile_n) {
+  const char *env = std::getenv("NVTE_HK_TILE");
+  if (env == nullptr || env[0] == '\0' || strcmp(env, "auto") == 0) {
+    return;
+  }
+  char end = '\0';
+  const bool valid = sscanf(env, "%dx%d%c", tile_m, tile_n, &end) == 2 &&
+                     (*tile_m == 128 || *tile_m == 256) && (*tile_n == 128 || *tile_n == 256);
+  NVTE_CHECK(valid, "NVTE_HK_TILE must be auto or BMxBN with BM, BN in {128, 256}, got ", env);
 }
 
 // HipKittens runs MXFP8 GEMMs, and bf16/fp16 GEMMs on gfx1250. False means nothing was launched.
@@ -2247,7 +2262,7 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
   const DType a_dtype = inputA->data.dtype;
   const bool a_mxfp8  = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING;
   const bool b_mxfp8  = inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
-  const bool is_16bit = gfx1250 && is_tensor_scaling(inputA->scaling_mode) &&
+  const bool is_16bit = is_tensor_scaling(inputA->scaling_mode) &&
                         is_tensor_scaling(inputB->scaling_mode) &&
                         (a_dtype == DType::kBFloat16 || a_dtype == DType::kFloat16) &&
                         inputB->data.dtype == a_dtype;
@@ -2259,6 +2274,11 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
 
   const GemmParam p = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
   const int splitk = gfx1250 ? hk_splitk() : 0;
+  int tile_m = 0;
+  int tile_n = 0;
+  if (gfx1250) {
+    hk_tile(&tile_m, &tile_n);
+  }
   if (is_16bit) {
     return kittens_bf16_gemm(p.A, p.B, outputD->data.dptr, m, n, k, transa == CUBLAS_OP_T,
                              transb == CUBLAS_OP_T, static_cast<int>(p.Atype),
@@ -2266,7 +2286,7 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
                              static_cast<int>(inputBias->data.dtype), outputPreGelu->data.dptr,
                              static_cast<int>(outputD->data.dtype),
                              static_cast<int>(outputPreGelu->data.dtype), grad, alpha, beta, splitk,
-                             cu_count, workspace, workspaceSize, stream);
+                             tile_m, tile_n, cu_count, workspace, workspaceSize, stream);
   }
   const bool mxfp8_compact = a_mxfp8 && b_mxfp8 && !inputA->with_gemm_swizzled_scales &&
                              !inputB->with_gemm_swizzled_scales;
@@ -2276,7 +2296,7 @@ bool try_kittens_gemm(const Tensor *inputA, cublasOperation_t transa, const Tens
                             inputBias->data.dptr, static_cast<int>(inputBias->data.dtype),
                             outputPreGelu->data.dptr, static_cast<int>(outputD->data.dtype),
                             static_cast<int>(outputPreGelu->data.dtype), grad, alpha, beta, splitk,
-                            cu_count, workspace, workspaceSize, stream);
+                            tile_m, tile_n, cu_count, workspace, workspaceSize, stream);
 }
 #endif
 

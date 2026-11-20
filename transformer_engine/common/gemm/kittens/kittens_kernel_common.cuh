@@ -96,22 +96,4 @@ __device__ __forceinline__ void store8(T *p, const V &v, int n, bool vec) {
     }
 }
 
-template <typename OutT, bool ACC>
-__global__ void __launch_bounds__(REDUCE_THREADS)
-splitk_reduce_kernel(const float *__restrict__ ws, OutT *__restrict__ D, float alpha, float beta,
-                     size_t mn, int splits) {
-    for (size_t i = (size_t(blockIdx.x) * REDUCE_THREADS + threadIdx.x) * 8; i < mn;
-         i += size_t(gridDim.x) * REDUCE_THREADS * 8) {
-        v8f v = *reinterpret_cast<const v8f *>(ws + i);
-        for (int z = 1; z < splits; z++) {
-            v += *reinterpret_cast<const v8f *>(ws + z * mn + i);
-        }
-        v *= alpha;
-        if constexpr (ACC) {
-            v += beta * __builtin_convertvector(*reinterpret_cast<const vec8<OutT> *>(D + i), v8f);
-        }
-        *reinterpret_cast<vec8<OutT> *>(D + i) = __builtin_convertvector(v, vec8<OutT>);
-    }
-}
-
 }  // namespace te_kittens

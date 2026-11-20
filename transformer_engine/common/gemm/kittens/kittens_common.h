@@ -117,6 +117,7 @@ struct MXFP8GemmArgs {
     bool grad;
     float alpha, beta;
     int splitk;
+    int tile_m, tile_n;
     int cu_count;
     void *workspace;
     size_t workspace_size;
@@ -183,7 +184,7 @@ inline bool kittens_mxfp8_gemm(
     int a_dtype, int b_dtype, bool mxfp8_compact,
     const void *bias, int bias_dtype,
     void *aux_gelu, int out_dtype, int aux_dtype,
-    bool grad, float alpha, float beta, int splitk, int cu_count,
+    bool grad, float alpha, float beta, int splitk, int tile_m, int tile_n, int cu_count,
     void *workspace, size_t workspace_size,
     hipStream_t stream) {
     MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
@@ -194,7 +195,7 @@ inline bool kittens_mxfp8_gemm(
     MXFP8GemmArgs args{
         A, B, C, scale_A, scale_B, M, N, K, transa, transb,
         a_dtype, b_dtype, mxfp8_compact, bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
-        grad, alpha, beta, splitk, cu_count, workspace, workspace_size, stream};
+        grad, alpha, beta, splitk, tile_m, tile_n, cu_count, workspace, workspace_size, stream};
     return backend->gemm(args);
 }
 
@@ -249,6 +250,7 @@ struct Bf16GemmArgs {
     bool grad;
     float alpha, beta;
     int splitk;
+    int tile_m, tile_n;
     int cu_count;
     void *workspace;
     size_t workspace_size;
@@ -278,7 +280,7 @@ inline bool kittens_bf16_gemm(
     int a_dtype, int b_dtype,
     const void *bias, int bias_dtype,
     void *aux_gelu, int out_dtype, int aux_dtype,
-    bool grad, float alpha, float beta, int splitk, int cu_count,
+    bool grad, float alpha, float beta, int splitk, int tile_m, int tile_n, int cu_count,
     void *workspace, size_t workspace_size,
     hipStream_t stream) {
     Bf16GemmBackend *backend = Bf16GemmBackend::get();
@@ -289,6 +291,6 @@ inline bool kittens_bf16_gemm(
     Bf16GemmArgs args{
         A, B, C, M, N, K, transa, transb, a_dtype, b_dtype,
         bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
-        grad, alpha, beta, splitk, cu_count, workspace, workspace_size, stream};
+        grad, alpha, beta, splitk, tile_m, tile_n, cu_count, workspace, workspace_size, stream};
     return backend->gemm(args);
 }

@@ -90,7 +90,7 @@ else()
                              cdna4/overlap/comm_gemm.cpp
                      FLAGS -gline-tables-only)
 
-    set(_cdna5_flags "")
+    set(_cdna5_flags "SHELL:-mllvm -amdgpu-expert-scheduling-mode")
     if(DEFINED ENV{NVTE_HK_GFX1250_MCAST})
         list(APPEND _cdna5_flags -DNVTE_HK_GFX1250_MCAST=$ENV{NVTE_HK_GFX1250_MCAST})
     endif()
