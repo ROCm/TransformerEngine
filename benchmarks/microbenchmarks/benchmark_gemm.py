@@ -70,8 +70,7 @@ _HIPBLASLT_TUNING = {"TE_HIPBLASLT_TUNING_RUN_COUNT": "10", "TE_HIPBLASLT_TUNING
 
 # Triton's env is resolved at runtime by _triton_gemm_env (mechanism varies by build).
 GEMM_BACKENDS = {
-    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None,
-                   **_HIPBLASLT_TUNING},
+    "hipblaslt":  {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: "1", _GEMM_BACKEND: None},
     "hipkittens": {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: None},
     "flydsl":     {_GEMM_TRITON: None, _HIPBLASLT_MXFP8: None, _GEMM_BACKEND: "FLYDSL"},
     "aiter":      {_GEMM_TRITON: None, _HIPBLASLT_MXFP4: None, _GEMM_BACKEND: None},
@@ -308,6 +307,8 @@ def test_gemm(microbench, case, monkeypatch):
     backend_env = _triton_gemm_env() if case["Backend"] == "triton" else GEMM_BACKENDS[case["Backend"]]
     apply_backend_env(monkeypatch, backend_env)
     apply_backend_env(monkeypatch, PRECISION_ENV.get(case["Precision"], {}))
+    # All backends: TE's algo cache ignores the tuning env, so an untuned fallback would pin it.
+    apply_backend_env(monkeypatch, _HIPBLASLT_TUNING)
     microbench.run(
         case,
         lambda: bench_gemm(

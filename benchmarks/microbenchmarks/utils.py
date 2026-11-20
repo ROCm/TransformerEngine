@@ -777,19 +777,15 @@ def _format_metric_number(value, precision):
 def _metric_row_from_records(metric_records):
     row = {}
     for metric in metric_records:
-        row[_metric_time_key(metric)] = _format_metric_number(
-            metric["ms"], metric.get("ms_precision", 4)
-        )
+        # Significant digits: 4 fixed decimals are 0.1 us steps, ~1% of the shortest times.
+        row[_metric_time_key(metric)] = f"{metric['ms']:.6g}"
         row[_metric_throughput_key(metric)] = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
         # Kernel columns appear only under --kernel-profile, empty where unmeasured.
         if _KERNEL_PROFILE or metric.get("kernel_ms") is not None:
             km = metric.get("kernel_ms")
-            row[_metric_kernel_time_key(metric)] = (
-                _format_metric_number(km, metric.get("ms_precision", 4))
-                if km is not None else ""
-            )
+            row[_metric_kernel_time_key(metric)] = f"{km:.6g}" if km is not None else ""
             kt = metric.get("kernel_throughput")
             row[_metric_kernel_throughput_key(metric)] = (
                 _format_metric_number(kt, metric.get("throughput_precision", 2))
@@ -1293,6 +1289,7 @@ def _write_run_info(path, meta):
         "cpus": meta.get("cpus") or "unpinned",
         "hw_queues": os.environ.get("GPU_MAX_HW_QUEUES", "HIP default"),
         "interleave": meta.get("interleave", 1),
+        "gpu_check": meta.get("gpu_check") or "?",
     }
     path.write_text("".join(f"{k + ':':12}{v}\n" for k, v in info.items()))
 
@@ -1431,7 +1428,7 @@ def _aggregate_rows(store):
                 a = agg.get(key)
                 if a is None:
                     a = agg[key] = {"wall_work": 0.0, "wall_time": 0.0,
-                                    "kern_work": 0.0, "kern_time": 0.0, "n": 0}
+                                    "kern_work": 0.0, "kern_time": 0.0, "n": 0, "kern_n": 0}
                     order.append(key)
                 a["wall_work"] += thr * wall_ms
                 a["wall_time"] += wall_ms
@@ -1440,6 +1437,7 @@ def _aggregate_rows(store):
                 if k_ms and k_thr and k_ms > 0:
                     a["kern_work"] += k_thr * k_ms
                     a["kern_time"] += k_ms
+                    a["kern_n"] += 1
     return agg, order
 
 
@@ -1471,7 +1469,10 @@ def format_aggregate_table(store):
         group_text = "  ".join(parts) or "all"
         cells = [suite, group_text, str(a["n"]), thr_cell(a["wall_work"], a["wall_time"], unit)]
         if has_kernel:
-            cells.append(thr_cell(a["kern_work"], a["kern_time"], unit))
+            kernel = thr_cell(a["kern_work"], a["kern_time"], unit)
+            if 0 < a["kern_n"] < a["n"]:
+                kernel += f" ({a['kern_n']}/{a['n']})"
+            cells.append(kernel)
         body.append(cells)
     body.sort(key=lambda r: (r[0], r[1]))
     widths = [max(len(headers[i]), *(len(r[i]) for r in body)) for i in range(len(headers))]
@@ -1489,6 +1490,8 @@ def format_aggregate_table(store):
     ]
     caption = (f"aggregate throughput (work-weighted harmonic mean over shapes): "
                f"{len(body)} groups")
+    if any(0 < a["kern_n"] < a["n"] for a in agg.values()):
+        caption += "; (k/n): kernel throughput over the k of n shapes with a kernel time"
     return "\n".join(
         [caption, "", row(headers), "| " + " | ".join(align) + " |", *(row(r) for r in body)]
     )

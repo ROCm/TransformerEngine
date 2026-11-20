@@ -183,6 +183,22 @@ def detect_gpu_interference(snapshot):
     return "ok", foreign
 
 
+def gpu_check_summary(status, foreign):
+    """One-line result of :func:`detect_gpu_interference` for ``run_info.txt``."""
+    if status == "unavailable":
+        return "not checked (could not list the GPU's processes via amdsmi)"
+    if status == "not_amd":
+        return "not checked (not an AMD GPU)"
+    if not foreign:
+        return "no other processes"
+    # PIDs and executable names only: run_info.txt is published with the dashboard data.
+    procs = []
+    for _gpu, pid, cmd in foreign:
+        exe = "" if cmd == f"pid {pid}" else os.path.basename((cmd.split() or [""])[0])
+        procs.append(f"pid {pid} ({exe})" if exe else f"pid {pid}")
+    return f"{len(foreign)} other process(es): {', '.join(procs)}"
+
+
 def format_gpu_interference(foreign):
     """Render the foreign-process list as a warning banner."""
     bar = "=" * 74

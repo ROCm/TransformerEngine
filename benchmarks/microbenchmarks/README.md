@@ -103,7 +103,7 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
   dashboard instead of the `--csv` outputs:
   `<dashboard-out>/<arch>_<host>_gpu<id>_<pci>/<date>_<commit>/` with
   `benchmark_<family>.csv` (each row tagged with the run timestamp and commit),
-  `run_info.txt` (host, GPU, software versions, CPU pinning, HW queues, interleave rounds)
+  `run_info.txt` (host, GPU, versions, CPU pinning, HW queues, interleave, interference check)
   and, with `--csv-samples`, `samples/`. `--dashboard-out DIR` sets the base directory (default
   `results`); `--gpu-model NAME` overrides the detected GPU model (the run is refused if
   no model can be detected and none is given). The rows are tagged with the commit of the
@@ -124,11 +124,14 @@ python benchmark_gemm.py -k "not flydsl"     # skip FlyDSL (long compile times)
   override (with `4`, HIP's default, the per-expert grouped GEMM path runs up to ~2x slower;
   see [HW queues](BENCHMARKING_NOTES.md#hw-queues)). The header and `run_info.txt` show the
   value used.
-- The `hipblaslt` rows of `benchmark_gemm.py` run with TE's hipBLASLt tuning
-  (`TE_HIPBLASLT_TUNING_RUN_COUNT=10`, `TE_HIPBLASLT_TUNING_ALGO_COUNT=10`), which Megatron's
-  training scripts enable for dense GEMMs. Each shape is tuned at its first call (about a
-  minute per MXFP8 shape, whose hipBLASLt kernels are compiled on the fly); the `Kernels`
-  CSV column (see [CSV output](#csv-output)) shows the kernels it picked.
+- `benchmark_gemm.py` runs with TE's hipBLASLt tuning (`TE_HIPBLASLT_TUNING_RUN_COUNT=10`,
+  `TE_HIPBLASLT_TUNING_ALGO_COUNT=10`), which Megatron's training scripts enable for dense
+  GEMMs. Each shape is tuned at its first hipBLASLt call (about a minute per MXFP8 shape,
+  whose hipBLASLt kernels are compiled on the fly); the `Kernels` CSV column (see
+  [CSV output](#csv-output)) shows the kernels it picked. The tuning is set for every
+  backend's rows: TE caches one algorithm per GEMM shape whether or not it was tuned, so
+  another backend falling back to hipBLASLt first (e.g. under `--interleave`) would
+  otherwise leave the `hipblaslt` row with an untuned algorithm.
 
 ### Kernel profiling
 

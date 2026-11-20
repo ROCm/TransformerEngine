@@ -180,7 +180,8 @@ cache (the AMD Infinity Cache size on gfx942/gfx950), and capped at 1000 buffers
   registered and slow down every later autocast exit.
 - At startup the harness warns (or, with `--abort-on-gpu-interference`, aborts) if another
   process is using the benchmark GPU. The direct-run shim enters pytest before torch
-  touches the GPU, so the benchmark's own process is not reported.
+  touches the GPU, so the benchmark's own process is not reported. Dashboard runs record the
+  result in `run_info.txt`, also when the check could not run (e.g. without `amdsmi`).
 
 ### Dashboard runs
 
@@ -189,7 +190,8 @@ cache (the AMD Infinity Cache size on gfx942/gfx950), and capped at 1000 buffers
 
 - `benchmark_<family>.csv`, each row tagged with the run timestamp, commit SHA and commit
   date;
-- `run_info.txt` with the host, GPU, software versions, CPU pinning and HW-queue setting;
+- `run_info.txt` with the host, GPU, software versions, CPU pinning, HW-queue setting,
+  interleave rounds, harness commit and GPU interference check result;
 - `samples/` with per-sample times when `--csv-samples` is given.
 
 ## Known limitations

@@ -123,8 +123,10 @@ def pytest_configure(config):
     # each case's position in the unshuffled collection, which the merged results keep.
     config._microbench_rounds = {}
     config._microbench_order = {}
+    gpu_check = "disabled (--no-gpu-interference-check)"
     if not config.getoption("--no-gpu-interference-check"):
         status, foreign = gpu_neighbors.detect_gpu_interference(_GPU_SNAPSHOT)
+        gpu_check = gpu_neighbors.gpu_check_summary(status, foreign)
         if foreign:
             print(gpu_neighbors.format_gpu_interference(foreign))
             if config.getoption("--abort-on-gpu-interference"):
@@ -157,6 +159,7 @@ def pytest_configure(config):
     if plan is not None:
         config._dashboard_plan = plan
         plan.meta["interleave"] = config.getoption("--interleave")
+        plan.meta["gpu_check"] = gpu_check
         if config._cpu_pin is not None:
             plan.meta["cpus"] = config._cpu_pin.description
 
