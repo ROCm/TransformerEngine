@@ -22,7 +22,7 @@ namespace rocm {
 namespace mxfp8_tdm = dispatch::mxfp8::tdm_kernel;
 namespace fp8_tdm = dispatch::fp8::tdm_kernel;
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 // The mean, 0 for RMSNorm, and the rsigma of a row whose part xv the wave holds, with all waves of
 // the block taking part as in row_sum. Zeros stand in for the elements outside the row. Explicit
 // FMAs keep the results independent of the compiler's contractions, so all kernels agree.
@@ -74,7 +74,7 @@ __device__ __forceinline__ float2 row_stats(const Vec<IType, VEC> (&xv)[MAX_VECS
     return {stats.x, rsqrtf(fmaf(part.rn, stats.y, epsilon))};
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 // LayerNorm, or RMSNorm with RMS, of the rows of params.x into params.z, with the statistics of row
 // r in params.mu[r] (LayerNorm) and params.rs[r]. Like ln_fwd_tuned_kernel, it raises the amax,
@@ -86,7 +86,7 @@ template <bool RMS, typename IType, typename WType, typename OType, int MAX_WAVE
 __global__ void __launch_bounds__(MAX_WAVES_PER_BLOCK * WAVE_SIZE)
     norm_fwd_kernel(const ForwardKernelParams params, const RowSplit split,
                     float *const amax_slots) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr int VEC = VEC_BYTES / sizeof(IType);
   extern __shared__ __attribute__((aligned(128))) char slices_smem[];
   __shared__ float2 stats_sh[2][MAX_WAVES_PER_BLOCK];
@@ -177,7 +177,7 @@ __global__ void __launch_bounds__(MAX_WAVES_PER_BLOCK * WAVE_SIZE)
       reciprocal<float>(static_cast<float *>(params.scale_inv), scale);
     }
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // The MXFP8 output of a normalization, as Tensor lays it out.
@@ -198,7 +198,7 @@ struct Mxfp8Out {
 template <bool RMS, typename IType, typename WType, typename OType, bool COLWISE>
 __global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
     norm_mxfp8_kernel(const ForwardKernelParams params, const Mxfp8Out out) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   using mxfp8_tdm::band_t;
   constexpr int BAND_Y = mxfp8_tdm::BAND_Y;
   constexpr int LANE_COLS = mxfp8_tdm::COLS_PER_LANE;
@@ -278,7 +278,7 @@ __global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
   }
   // The block's LDS must outlive the stores.
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 // LayerNorm, or RMSNorm with RMS, of the 128x128 chunk (blockIdx.y, blockIdx.x) of params.x into
@@ -290,7 +290,7 @@ template <bool RMS, typename IType, typename WType, typename OType>
 __global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
     norm_fp8_transpose_kernel(const ForwardKernelParams params, void *const z_t,
                               float *const amax_slots) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   using fp8_tdm::band_t;
   constexpr int WAVES = fp8_tdm::WAVES;
   constexpr int BAND_Y = fp8_tdm::BAND_Y;
@@ -431,7 +431,7 @@ __global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
   }
   // The block's LDS must outlive the stores.
   tdm::wait<0>();
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace rocm

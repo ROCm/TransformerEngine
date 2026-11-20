@@ -70,7 +70,7 @@ inline size_t block_slice_bytes(const RowSplit &split) {
   return static_cast<size_t>(block_waves(split)) * STAGES * SLICE_BYTES;
 }
 
-#ifdef __gfx1250__
+#ifdef __GFX12__
 using dispatch::common::cvt_from_float;
 using dispatch::fp8::tdm_kernel::cvt_4x_to_fp8;
 
@@ -396,7 +396,7 @@ __device__ __forceinline__ void block_raise_amax(float amax, float *amax_ptr, fl
     rocm_atomicMaxFloat(rocm_amax_target(amax_ptr, amax_slots, blockIdx.x), block_amax);
   }
 }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 
 }  // namespace rocm
 }  // namespace normalization

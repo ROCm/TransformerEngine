@@ -33,7 +33,7 @@ inline size_t bwd_block_slice_bytes(const RowSplit &split, const bool add) {
 template <bool RMS, typename IType, int MAX_WAVES_PER_BLOCK, bool ADD>
 __global__ void __launch_bounds__(MAX_WAVES_PER_BLOCK * WAVE_SIZE)
     norm_bwd_kernel(const BackwardKernelParams params, const RowSplit split) {
-#ifdef __gfx1250__
+#ifdef __GFX12__
   constexpr int VEC = VEC_BYTES / sizeof(IType);
   constexpr int K = BWD_VECS_PER_LANE;
   constexpr int TENSORS = ADD ? 3 : 2;
@@ -198,7 +198,7 @@ __global__ void __launch_bounds__(MAX_WAVES_PER_BLOCK * WAVE_SIZE)
   if constexpr (!RMS) {
     store_partials(dbeta, static_cast<float *>(params.dbeta_part));
   }
-#endif  // __gfx1250__
+#endif  // __GFX12__
 }
 
 }  // namespace rocm
