@@ -497,6 +497,8 @@ struct MultiQuantizeArgs {
   float *amax[MULTI_MAX_TENSORS];
   uint32_t rows[MULTI_MAX_TENSORS];
   uint32_t cols[MULTI_MAX_TENSORS];
+  uint32_t scale_stride_rowwise[MULTI_MAX_TENSORS];
+  uint32_t scale_stride_colwise[MULTI_MAX_TENSORS];
   // Tensor t owns chunk rows [first_chunk_Y[t], first_chunk_Y[t + 1]).
   uint32_t first_chunk_Y[MULTI_MAX_TENSORS + 1];
   int num_tensors;
@@ -526,8 +528,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       static_cast<const IType *>(args.input[t]), nullptr,
       static_cast<OType *>(args.output_rowwise[t]), static_cast<OType *>(args.output_colwise[t]),
       static_cast<e8m0_t *>(args.scales_rowwise[t]), static_cast<e8m0_t *>(args.scales_colwise[t]),
-      nullptr, args.amax[t], rows, cols, {DIVUP(cols, SCALE_DIM_X), 4, 1, false},
-      {1, 4 * cols, cols, false}, chunk_Y, blockIdx.x, 0);
+      nullptr, args.amax[t], rows, cols, {args.scale_stride_rowwise[t], 4, 1, false},
+      {1, 4 * args.scale_stride_colwise[t], args.scale_stride_colwise[t], false}, chunk_Y,
+      blockIdx.x, 0);
 }
 
 }  // namespace tdm_kernel
@@ -711,6 +714,8 @@ inline bool multi_quantize_tdm(const std::vector<Tensor *> &input_list,
     args.amax[i] = reinterpret_cast<float *>(output_list[i]->amax.dptr);
     args.rows[i] = rows;
     args.cols[i] = cols;
+    args.scale_stride_rowwise[i] = rowwise ? output_list[i]->scale_inv.shape[1] : 0;
+    args.scale_stride_colwise[i] = colwise ? output_list[i]->columnwise_scale_inv.shape[1] : 0;
     args.first_chunk_Y[i + 1] = args.first_chunk_Y[i] + DIVUP(rows, CHUNK_DIM_Y);
     chunks_X = std::max(chunks_X, DIVUP(cols, CHUNK_DIM_X));
   }
