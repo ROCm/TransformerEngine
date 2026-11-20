@@ -20,6 +20,11 @@
 #include "../util/logging.h"
 #include "../util/system.h"
 #include "transformer_engine/transformer_engine.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../utils.cuh"
+#include "../cast/core/rocm_tdm_common.cuh"
+#include "../transpose/rocm_transpose_tdm.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace {
@@ -1417,10 +1422,18 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     const int original_M = input->flat_first_dim();
     const int original_K = DIVUP(input->flat_last_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
     const int input_stride = k;
-    swizzle_scaling_mx_kernel<true><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
-        reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
-        m, groups, input_stride, original_M, original_K, noop);
+    // Without padding, the swizzle transposes the [m][groups] words of 4 scales.
+    if (m == original_M && k == original_K && m % 4 == 0 &&
+        dispatch::common::use_tdm(m, groups * 4, {input->scale_inv.dptr, output->scale_inv.dptr})) {
+      detail::transpose_tdm::launch(reinterpret_cast<const uint32_t*>(input->scale_inv.dptr),
+                                    reinterpret_cast<uint32_t*>(output->scale_inv.dptr), m, groups,
+                                    noop, stream);
+    } else {
+      swizzle_scaling_mx_kernel<true><<<grid, block, 0, stream>>>(
+          reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
+          reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
+          m, groups, input_stride, original_M, original_K, noop);
+    }
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 
