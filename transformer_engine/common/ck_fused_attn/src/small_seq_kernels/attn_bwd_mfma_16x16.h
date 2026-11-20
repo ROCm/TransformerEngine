@@ -15,6 +15,7 @@ using bhalf_t = __bf16;
 using bf16x4  = __bf16 __attribute__((ext_vector_type(4)));
 using bf16x8  = __bf16 __attribute__((ext_vector_type(8)));
 using floatx4 = float __attribute__((ext_vector_type(4)));
+using shortx4 = int16_t __attribute__((ext_vector_type(4)));  // A and B of the bf16 `_1k` MFMAs
 #endif
 
 #ifndef CEIL_DIV
@@ -154,7 +155,7 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
                 const int dim_off = k * 16;
                 bf16x4 a = *(const bf16x4*)(&Q_lds_bwd[(qt * 16 + lane_col) * hd_pad + dim_off + lane_row * 4]);
                 bf16x4 b = *(const bf16x4*)(&K_lds_bwd[(kvt * 16 + lane_col) * hd_pad + dim_off + lane_row * 4]);
-                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc, 0, 0, 0);
+                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc, 0, 0, 0);
             }
 
             int reg_base = (qt * kv_tiles + kvt) * 4;
@@ -266,7 +267,7 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
                     b[k] = dO_lds[q_row * hd_pad + dim_idx + lane_col];
                 }
 
-                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc, 0, 0, 0);
+                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc, 0, 0, 0);
             }
 
             // Write grad_V
@@ -426,7 +427,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                 // B: V[kv, d]
                 bf16x4 b = *(const bf16x4*)(&KV_lds[(kvt * 16 + lane_col) * hd_pad + dim_off + lane_row * 4]);
 
-                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc, 0, 0, 0);
+                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc, 0, 0, 0);
             }
 
             int reg_base = (qt * kv_tiles + kvt) * 4;
@@ -470,7 +471,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                 const int dim_off = k * 16;
                 bf16x4 a = *(const bf16x4*)(&Q_lds[(qt * 16 + lane_col) * hd_pad + dim_off + lane_row * 4]);
                 bf16x4 b = *(const bf16x4*)(&KV_lds[(kvt * 16 + lane_col) * hd_pad + dim_off + lane_row * 4]);
-                acc_s = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc_s, 0, 0, 0);
+                acc_s = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc_s, 0, 0, 0);
             }
 
             int reg_base = (qt * kv_tiles + kvt) * 4;
@@ -595,7 +596,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                     b[k] = KV_lds[(kv_base + lane_row * 4 + k) * hd_pad + dim_idx + lane_col];
                 }
 
-                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc, 0, 0, 0);
+                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc, 0, 0, 0);
             }
 
             // Write grad_Q
@@ -646,7 +647,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
                     b[k] = Q_lds[(q_base + lane_row * 4 + k) * hd_pad + dim_idx + lane_col];
                 }
 
-                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, acc, 0, 0, 0);
+                acc = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k((shortx4)a, (shortx4)b, acc, 0, 0, 0);
             }
 
             // Write grad_K
