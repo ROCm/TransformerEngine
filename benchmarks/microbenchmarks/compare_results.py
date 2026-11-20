@@ -7,7 +7,8 @@
 """
 Compare two CSVs from the same benchmark suite.
 
-Auto-detects metric columns (containing "TFLOPS" or "GB/s") and key columns.
+Auto-detects metric columns (containing "TFLOPS" or "GB/s") and key columns. Both CSVs
+must have the same key columns; only the metric columns they share are compared.
 Outputs a markdown <details> block to stdout with per-config results,
 and optionally appends a summary table row to --summary-file.
 
@@ -33,6 +34,10 @@ def auto_detect_columns(df):
         and "Time" not in c
     ]
     return key_cols, metric_cols
+
+
+def _column_list(cols):
+    return ", ".join(sorted(cols)) or "-"
 
 
 def print_key_table(title, rows_df, key_cols):
@@ -73,10 +78,37 @@ def main():
     candidate_df = pd.read_csv(args.candidate_csv)
 
     key_cols, metric_cols = auto_detect_columns(baseline_df)
+    cand_key_cols, cand_metric_cols = auto_detect_columns(candidate_df)
 
-    if not metric_cols:
+    if set(key_cols) != set(cand_key_cols):
+        sys.exit(
+            f"error: {args.baseline_csv} and {args.candidate_csv} are not comparable: "
+            f"their key columns differ\n"
+            f"  only in baseline:  {_column_list(set(key_cols) - set(cand_key_cols))}\n"
+            f"  only in candidate: {_column_list(set(cand_key_cols) - set(key_cols))}\n"
+            "Compare CSVs of the same benchmark from the same harness version (CSVs from "
+            "before the pytest harness have one row per case with Forward/Backward columns, "
+            "newer ones one row per direction)."
+        )
+
+    if not metric_cols and not cand_metric_cols:
         print("No metric columns found.")
         return 0
+
+    shared = [c for c in metric_cols if c in cand_metric_cols]
+    if not shared:
+        sys.exit(
+            f"error: {args.baseline_csv} and {args.candidate_csv} have no metric columns "
+            f"in common\n"
+            f"  baseline:  {_column_list(metric_cols)}\n"
+            f"  candidate: {_column_list(cand_metric_cols)}"
+        )
+    ignored = set(metric_cols) ^ set(cand_metric_cols)
+    if ignored:
+        # e.g. kernel columns when only one run used --kernel-profile
+        print(f"note: ignoring metric columns not in both CSVs: {_column_list(ignored)}",
+              file=sys.stderr)
+    metric_cols = shared
 
     for col in metric_cols:
         baseline_df[col] = pd.to_numeric(baseline_df[col], errors="coerce")

@@ -258,4 +258,7 @@ python compare_results.py baseline.csv candidate.csv --bench-name GEMM
 The script auto-detects metric columns, computes speedups for overlapping rows,
 and reports rows that exist only in the baseline or only in the candidate. It ignores the
 run-tag columns of `--dashboard-run` CSVs (`run_ts`, `commit_sha`, `commit_date`), so two
-dashboard runs can be compared directly.
+dashboard runs can be compared directly. It refuses CSVs whose key columns differ (different
+benchmarks, or CSVs from before and after the pytest harness, which changed the layout and
+the measurement) and compares only the metric columns both CSVs have (e.g. kernel columns
+when only one run used `--kernel-profile`).
