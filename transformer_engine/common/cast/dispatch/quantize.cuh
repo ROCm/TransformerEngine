@@ -818,6 +818,9 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
     args.amax_list[pos] = reinterpret_cast<float *>(output_list[i]->amax.dptr);
     args.rows_list[pos] = rows;
     args.cols_list[pos] = cols;
+    args.scale_stride_rowwise_list[pos] = use_rowwise ? output_list[i]->scale_inv.shape[1] : 0;
+    args.scale_stride_colwise_list[pos] =
+        use_colwise ? output_list[i]->columnwise_scale_inv.shape[1] : 0;
     args.block_range[pos + 1] = args.block_range[pos] + row_tiles;
     args.num_tensors++;
   }

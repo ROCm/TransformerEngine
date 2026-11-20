@@ -59,6 +59,8 @@ void performTest(const std::vector<std::pair<size_t, size_t>> &tensor_dims,
   for (size_t i = 0; i < num_tensors; i++) {
     auto [rows, cols] = tensor_dims[i];
     if (rows == 0 || cols == 0) continue;
+    outputs_multi[i].to_cpu();
+    outputs_ref[i].to_cpu();
     if (rowwise) {
       auto *multi_data = outputs_multi[i].rowwise_cpu_dptr<OType>();
       auto *ref_data   = outputs_ref[i].rowwise_cpu_dptr<OType>();
@@ -69,10 +71,12 @@ void performTest(const std::vector<std::pair<size_t, size_t>> &tensor_dims,
       }
       auto *multi_scales = outputs_multi[i].rowwise_cpu_scale_inv_ptr<uint8_t>();
       auto *ref_scales   = outputs_ref[i].rowwise_cpu_scale_inv_ptr<uint8_t>();
-      size_t num_scales = rows * ((cols + 31) / 32);
-      for (size_t j = 0; j < num_scales; j++) {
-        ASSERT_EQ(multi_scales[j], ref_scales[j])
-            << "Scale mismatch at tensor " << i << " scale " << j;
+      const size_t stride = outputs_ref[i].rowwise_scale_inv_shape().data[1];
+      for (size_t r = 0; r < rows; r++) {
+        for (size_t c = 0; c < (cols + 31) / 32; c++) {
+          ASSERT_EQ(multi_scales[r * stride + c], ref_scales[r * stride + c])
+              << "Scale mismatch at tensor " << i << " row " << r << " scale " << c;
+        }
       }
     }
     if (colwise) {
@@ -82,6 +86,15 @@ void performTest(const std::vector<std::pair<size_t, size_t>> &tensor_dims,
         ASSERT_EQ(static_cast<uint8_t>(multi_data[j]),
                   static_cast<uint8_t>(ref_data[j]))
             << "Colwise mismatch at tensor " << i << " element " << j;
+      }
+      auto *multi_scales = outputs_multi[i].columnwise_cpu_scale_inv_ptr<uint8_t>();
+      auto *ref_scales   = outputs_ref[i].columnwise_cpu_scale_inv_ptr<uint8_t>();
+      const size_t stride = outputs_ref[i].columnwise_scale_inv_shape().data[1];
+      for (size_t r = 0; r < (rows + 31) / 32; r++) {
+        for (size_t c = 0; c < cols; c++) {
+          ASSERT_EQ(multi_scales[r * stride + c], ref_scales[r * stride + c])
+              << "Colwise scale mismatch at tensor " << i << " row " << r << " col " << c;
+        }
       }
     }
   }
@@ -104,6 +117,14 @@ std::vector<std::pair<size_t, size_t>> getTestDims(int config) {
       return {{0, 128},
               {128, 256},
               {256, 128}};
+    // Scale strides gfx1250 pads to a multiple of 4: rowwise, and in case 4 colwise too
+    case 3:
+      return {{96, 160},
+              {64, 96},
+              {160, 224}};
+    case 4:
+      return {{64, 98},
+              {32, 50}};
     default:
       return {};
   }
@@ -146,7 +167,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Values(0, 1, 2),
+        ::testing::Values(0, 1, 2, 3, 4),
         ::testing::Values(Rowwise, Colwise, Both)),
     [](const testing::TestParamInfo<MultiQuantizeMXFP8TestSuite::ParamType> &info) {
       return test::typeName(std::get<0>(info.param)) + "_" +
