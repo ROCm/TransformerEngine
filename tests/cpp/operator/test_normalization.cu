@@ -337,3 +337,23 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<7>(info.param));
     return name;
   });
+
+#ifdef __HIP_PLATFORM_AMD__
+// The gfx1250 TDM kernels normalize rows of over 8192 columns and backpropagate multiples of 16
+INSTANTIATE_TEST_SUITE_P(
+  RocmTdm,
+  NormTestSuite,
+  ::testing::Combine(
+    ::testing::Values(false),
+    ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
+    ::testing::Values(DType::kBFloat16),
+    ::testing::Values(DType::kBFloat16, DType::kFloat8E4M3),
+    ::testing::Values(std::pair<size_t, size_t>{4, 8448}),
+    ::testing::Values(false),
+    ::testing::Values(false),
+    ::testing::Values(false, true)),
+  [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
+    return normToString.at(std::get<1>(info.param)) + "_" +
+           test::typeName(std::get<3>(info.param)) + (std::get<7>(info.param) ? "_bwd_add" : "");
+  });
+#endif

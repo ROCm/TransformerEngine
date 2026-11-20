@@ -180,6 +180,8 @@ run_test_config() {
     cpp 1 mxfp4 "*MXFP4*"
     cpp 1 fp8 "$FP8"
     cpp 1 norm "OperatorTest/NormTestSuite.*"
+    # TDM norm smoke test; the norm group's shapes take the other kernels
+    cpp 1 norm_tdm "RocmTdm/NormTestSuite.*" 1
     cpp 1 gemm "OperatorTest/GEMMTestSuite.*:OperatorTestFP8/FP8GEMMTestSuite.*"
     py 1 nvfp4/test_nvfp4_quantize_exact.py -k "not 1024 and not 2048 and not 8192"
     py 1 attention/test_attention.py -k rocjitsu_smoke_test
