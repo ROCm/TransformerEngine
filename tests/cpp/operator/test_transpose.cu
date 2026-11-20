@@ -66,6 +66,11 @@ std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {8, 8},
                                                      {1223, 1583}, // Primes 200, 250
                                                      {1, 541},     // Prime 100
+#ifdef __HIP_PLATFORM_AMD__
+                                                     // Multiples of 16 with partial 128-row and 128-byte chunks (gfx1250 TDM)
+                                                     {144, 400},
+                                                     {4112, 48},
+#endif  // #ifdef __HIP_PLATFORM_AMD__
                                                      {1987, 1}};   // Prime 300
 }  // namespace
 

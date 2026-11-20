@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,6 +19,12 @@
 #include "../util/string.h"
 #include "../utils.cuh"
 #include "./transpose.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../util/cuda_runtime.h"
+#include "../util/system.h"
+#include "../cast/core/rocm_tdm_common.cuh"
+#include "./rocm_transpose_tdm.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace detail {
@@ -193,6 +201,35 @@ __global__ void __launch_bounds__(block_size)
   }
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// Transposes with the gfx1250 Tensor Data Mover where it applies.
+bool try_transpose_tdm(const Tensor &input, const Tensor &noop, Tensor *output, cudaStream_t stream) {
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
+  const size_t type_size = typeToSize(input.data.dtype);
+  if (type_size > 4 || num_rows % 16 != 0 ||
+      !dispatch::common::use_tdm(num_rows, row_length, {input.data.dptr, output->data.dptr})) {
+    return false;
+  }
+  const auto *noop_ptr = static_cast<const fp32 *>(noop.data.dptr);
+  if (type_size == 1) {
+    transpose_tdm::launch(static_cast<const uint8_t *>(input.data.dptr),
+                          static_cast<uint8_t *>(output->data.dptr), num_rows, row_length, noop_ptr,
+                          stream);
+  } else if (type_size == 2) {
+    transpose_tdm::launch(static_cast<const uint16_t *>(input.data.dptr),
+                          static_cast<uint16_t *>(output->data.dptr), num_rows, row_length, noop_ptr,
+                          stream);
+  } else {
+    transpose_tdm::launch(static_cast<const uint32_t *>(input.data.dptr),
+                          static_cast<uint32_t *>(output->data.dptr), num_rows, row_length, noop_ptr,
+                          stream);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  return true;
+}
+#endif  // #ifdef __HIP_PLATFORM_AMD__
+
 }  // namespace
 
 void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStream_t stream) {
@@ -221,6 +258,12 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
     NVTE_CHECK(noop.data.dtype == DType::kFloat32);
     NVTE_CHECK(noop.data.dptr != nullptr);
   }
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (try_transpose_tdm(input, noop, &output, stream)) {
+    return;
+  }
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       input.data.dtype, Type, constexpr const char *type_name = TypeInfo<Type>::name;

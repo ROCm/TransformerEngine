@@ -13,6 +13,9 @@
 
 #include "../../common.h"
 #include "../common.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../../util/cuda_runtime.h"
+#endif
 #include "transformer_engine/normalization.h"
 #include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
@@ -52,13 +55,15 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   // MXFP8 output: Transformer Engine's fused kernel, which alone writes GEMM-swizzled scales,
   // unless cuDNN is requested or the kernel does not support the tensors.
-  if (is_mxfp8_scaling(z->scaling_mode)) {
 #ifdef __HIP_PLATFORM_AMD__
-    // No cuDNN on ROCm, and ROCm emits compact scales only.
+  // gfx1250 quantizes in its TDM normalization kernels, which also write the GEMM's pre-swizzled
+  // scales. Elsewhere there is no cuDNN on ROCm, and ROCm emits compact scales only.
+  if (is_mxfp8_scaling(z->scaling_mode) && cuda::sm_arch() != 125) {
     NVTE_CHECK(!z->with_gemm_swizzled_scales,
                "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
     const bool use_cudnn = false;
 #else
+  if (is_mxfp8_scaling(z->scaling_mode)) {
     const bool use_cudnn = use_cudnn_norm_fwd();
 #endif
     const bool te_supported = is_supported_by_te_rmsnorm_fwd_mxfp8(x, gamma, *z);
@@ -104,7 +109,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 #endif
   {
     norm_backend = NVTE_Norm_Backend::Te;
+#ifdef __HIP_PLATFORM_AMD__
+    is_aligned = is_ptr_aligned(z->data.dptr, z->columnwise_data.dptr, x.data.dptr,
+                                gamma.data.dptr, rsigma->data.dptr);
+#else
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, rsigma->data.dptr);
+#endif
   }
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
@@ -132,7 +142,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
                 workspace->data.dptr, stream);
 
   // Compute FP8 transpose if required
+#ifdef __HIP_PLATFORM_AMD__
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode) &&
+      !plan->wrote_z_transpose()) {
+#else
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+#endif
     NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
     auto *t = convertNVTETensor(transpose_data);
     t->data = z->columnwise_data;
