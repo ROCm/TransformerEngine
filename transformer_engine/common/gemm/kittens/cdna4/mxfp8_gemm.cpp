@@ -1346,6 +1346,7 @@ struct GroupedTab {
     const void *b[MAX_TAB_EXPERTS];
     void *c[MAX_TAB_EXPERTS];
     int tile_off[MAX_TAB_EXPERTS + 1];
+    int rows[MAX_TAB_EXPERTS];
 };
 
 struct WgradExpertInfo {
@@ -1355,6 +1356,7 @@ struct WgradExpertInfo {
     int k_iters;
     int sa_tile_offset;
     int sb_tile_offset;
+    int shift;
 };
 
 struct WgradTab {
@@ -1365,6 +1367,7 @@ struct PackTab {
     const uint8_t *src[MAX_TAB_EXPERTS];
     int off[MAX_TAB_EXPERTS + 1];
     int k_iters[MAX_TAB_EXPERTS];
+    int tokens[MAX_TAB_EXPERTS];
 };
 
 enum struct ScalePack {
@@ -1375,7 +1378,7 @@ enum struct ScalePack {
 
 struct GroupedNoAux {};
 
-template <bool COLWISE, int STEP, int NG, ScalePack MODE>
+template <bool COLWISE, int STEP, int NG, ScalePack MODE, bool BOUNDED = false>
 __global__ void pack_scales_tab_kernel(const PackTab tab, uint32_t *__restrict__ ln, int num_experts, int dim,
     int scale_K, int k_iters, int tiles_per_col, int expert_stride) {
 
@@ -1385,22 +1388,25 @@ __global__ void pack_scales_tab_kernel(const PackTab tab, uint32_t *__restrict__
         e = hk_upper_bound(tab.off, num_experts, tile_id / k_iters);
         int tpc = tab.off[e + 1] - tab.off[e];
         tile_id -= k_iters * tab.off[e];
-        pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + (size_t)k_iters * tab.off[e] * NG * 64, tpc * 256,
-                                           scale_K, tile_id / tpc, tile_id % tpc, tile_id);
+        pack_scale_tile<COLWISE, STEP, NG, BOUNDED>(tab.src[e], ln + (size_t)k_iters * tab.off[e] * NG * 64,
+                                                    BOUNDED ? tab.tokens[e] : tpc * 256, scale_K, tile_id / tpc,
+                                                    tile_id % tpc, tile_id);
     } else if constexpr (MODE == ScalePack::VARYING) {
         int e_k_iters = tab.k_iters[e];
         if (tile_id >= e_k_iters * tiles_per_col) {
             return;
         }
-        pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + tab.off[e], dim, e_k_iters * 4,
-                                           tile_id / tiles_per_col, tile_id % tiles_per_col, tile_id);
+        int e_scale_K = BOUNDED ? tab.tokens[e] / 32 : e_k_iters * 4;
+        pack_scale_tile<COLWISE, STEP, NG, BOUNDED>(tab.src[e], ln + tab.off[e], dim, e_scale_K,
+                                                    tile_id / tiles_per_col, tile_id % tiles_per_col, tile_id,
+                                                    e_k_iters * 4 - e_scale_K);
     } else {
         pack_scale_tile<COLWISE, STEP, NG>(tab.src[e], ln + (size_t)e * expert_stride, dim, scale_K,
                                            tile_id / tiles_per_col, tile_id % tiles_per_col, tile_id);
     }
 }
 
-template <int CBSZ, int BLGP, typename OutGL>
+template <int CBSZ, int BLGP, bool EDGE, typename OutGL>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
     const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl, const GroupedTab tab, int num_experts,
@@ -1472,12 +1478,14 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
         const uint32_t a_row_stride = A_local.template stride<2>() * sizeof(T);
         const uint32_t b_row_stride = B_local.template stride<2>() * sizeof(T);
+        const int b_rows = EDGE ? tab.rows[expert_id] - n_tile * BLOCK_COL : BLOCK_COL;
         const TileLoad a_dma = prefill_tile_load<NUM_WARPS>(&A_local[{0, 0, block_m, 0}], HALF_ROW * a_row_stride,
                                                             BLOCK_K * sizeof(T), HALF_ROW * a_row_stride,
                                                             a_row_stride, As);
         const TileLoad b_dma = prefill_tile_load<NUM_WARPS>(&B_local[{0, 0, n_tile * BLOCK_COL, 0}],
                                                             HALF_COL * b_row_stride, BLOCK_K * sizeof(T),
-                                                            HALF_COL * b_row_stride, b_row_stride, Bs);
+                                                            min(b_rows, HALF_COL) * b_row_stride, b_row_stride, Bs, 0,
+                                                            max(min(b_rows - HALF_COL, HALF_COL), 0) * b_row_stride);
         const TileLoad &a_k0 = a_dma;
         const TileLoad &b_k0 = b_dma;
         const ScaleLoad s_dma = prefill_scale_load(scale_A_gl, scale_B_gl, sa_batch, 2 * sb_batch, sa_stride,
@@ -1498,13 +1506,16 @@ void mxfp8_grouped_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
         OutGL C_local(C);
         C_local.raw_ptr = (typename OutGL::dtype *)tab.c[expert_id];
+        if constexpr (EDGE) {
+            C_local.rows_internal = tab.rows[expert_id];
+        }
 
-        gemm_epilogue<GemmEpilogue::DEFAULT, false, true, false, RT_C, RT_C_T>(cA, cB, cC, cD, C_local,
+        gemm_epilogue<GemmEpilogue::DEFAULT, false, true, EDGE, RT_C, RT_C_T>(cA, cB, cC, cD, C_local,
             GroupedNoAux{}, nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
     }
 }
 
-template <int CBSZ, int BLGP, typename OutGL>
+template <int CBSZ, int BLGP, bool EDGE, typename OutGL>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
     const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl, const GroupedTab tab, int num_experts,
@@ -1603,7 +1614,8 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
         const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
         const int a_row_stride = A_local.template stride<2>() * sizeof(T);
         const int b_row_stride = B_local.template stride<2>() * sizeof(T);
-        kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride, a_row_stride);
+        const int a_rows = EDGE ? tab.rows[expert_id] : A_local.rows();
+        kittens::i32x4 a_srd = kittens::make_srsrc(a_base, a_rows * a_row_stride, EDGE ? 0 : a_row_stride);
         kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
 
         const int n_iters = k_iters - 2;
@@ -1621,8 +1633,11 @@ void mxfp8_grouped_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C
 
         OutGL C_local(C);
         C_local.raw_ptr = (typename OutGL::dtype *)tab.c[expert_id];
+        if constexpr (EDGE) {
+            C_local.rows_internal = tab.rows[expert_id];
+        }
 
-        gemm_epilogue<GemmEpilogue::DEFAULT, false, false, false, RT_C, RT_C>(cA, cB, cC, cD, C_local,
+        gemm_epilogue<GemmEpilogue::DEFAULT, false, false, EDGE, RT_C, RT_C>(cA, cB, cC, cD, C_local,
             GroupedNoAux{}, nullptr, 0, block_m, block_row, block_col, warp_m, warp_n);
     }
 }
@@ -1664,15 +1679,19 @@ static void grouped_mxfp8_gemm_chunk(const void *const *A_array, const void *con
     PackTab    wtab{};
     PackTab    atab{};
     int n_tiles = 0;
+    bool edge = false;
     for (int g = 0; g < num_experts; g++) {
         tab.a[g]        = nn ? B_array[g] : A_array[g];
         tab.b[g]        = nn ? A_array[g] : B_array[g];
         tab.c[g]        = C_array[g];
         tab.tile_off[g] = n_tiles;
+        tab.rows[g]     = N_array[g];
         wtab.src[g]     = (const uint8_t *)scale_A_array[g];
         atab.src[g]     = (const uint8_t *)scale_B_array[g];
         atab.off[g]     = n_tiles;
-        n_tiles += N_array[g] / BLOCK_COL;
+        atab.tokens[g]  = N_array[g];
+        n_tiles += kittens::ceil_div(N_array[g], BLOCK_COL);
+        edge = edge || N_array[g] % BLOCK_COL != 0;
     }
     tab.tile_off[num_experts] = n_tiles;
     atab.off[num_experts]     = n_tiles;
@@ -1684,14 +1703,19 @@ static void grouped_mxfp8_gemm_chunk(const void *const *A_array, const void *con
     if (nn) {
         pack_scales_tab_kernel<true, 32, 8, ScalePack::UNIFORM><<<wgrid, 8 * 64, 0, stream>>>(
             wtab, sb_pk, num_experts, M, scale_K, k_iters, tiles_M, 2 * k_iters * M);
-        pack_scales_tab_kernel<false, 64, 4, ScalePack::CONCAT><<<k_iters * n_tiles, 4 * 64, 0, stream>>>(
-            atab, sa_pk, num_experts, 0, scale_K, k_iters, 0, 0);
     } else {
         pack_scales_tab_kernel<false, 64, 4, ScalePack::UNIFORM><<<wgrid, 4 * 64, 0, stream>>>(
             wtab, sa_pk, num_experts, M, scale_K, k_iters, tiles_M, k_iters * M);
-        pack_scales_tab_kernel<false, 32, 8, ScalePack::CONCAT><<<k_iters * n_tiles, 8 * 64, 0, stream>>>(
-            atab, sb_pk, num_experts, 0, scale_K, k_iters, 0, 0);
     }
+    KITTENS_BOOL_SWITCH(edge, EDGE,
+        if (nn) {
+            pack_scales_tab_kernel<false, 64, 4, ScalePack::CONCAT, EDGE><<<k_iters * n_tiles, 4 * 64, 0, stream>>>(
+                atab, sa_pk, num_experts, 0, scale_K, k_iters, 0, 0);
+        } else {
+            pack_scales_tab_kernel<false, 32, 8, ScalePack::CONCAT, EDGE><<<k_iters * n_tiles, 8 * 64, 0, stream>>>(
+                atab, sb_pk, num_experts, 0, scale_K, k_iters, 0, 0);
+        }
+    ) // NOLINT(*)
 
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)tab.a[0], nullptr, nullptr, nn ? (size_t)max_N : (size_t)M, (size_t)K);
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)tab.b[0], nullptr, nullptr, nn ? (size_t)K : (size_t)max_N,
@@ -1705,20 +1729,21 @@ static void grouped_mxfp8_gemm_chunk(const void *const *A_array, const void *con
     const int a_slot_fp8 = nn ? b_fp8 : a_fp8;
     const int b_slot_fp8 = nn ? a_fp8 : b_fp8;
     const int num_tiles  = tiles_M * n_tiles;
-    KITTENS_BOOL_SWITCH(a_slot_fp8, CBSZ,
-        KITTENS_BOOL_SWITCH(b_slot_fp8, BLGP,
-            if (nn) {
-                const int wgs = persistent_grid((const void *)mxfp8_grouped_nn_kernel<CBSZ, BLGP, OutGL>,
-                                                num_tiles, ctr, stream);
-                mxfp8_grouped_nn_kernel<CBSZ, BLGP, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, gl_SA, gl_SB, tab, num_experts, K, tiles_M, n_tiles, num_tiles, ctr);
-            } else {
-                const int wgs = persistent_grid((const void *)mxfp8_grouped_tn_kernel<CBSZ, BLGP, OutGL>,
-                                                num_tiles, ctr, stream);
-                mxfp8_grouped_tn_kernel<CBSZ, BLGP, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_C, gl_SA, gl_SB, tab, num_experts, K, tiles_M, n_tiles, num_tiles, ctr);
-            }
-    )) // NOLINT(*)
+    KITTENS_BOOL_SWITCH(edge, EDGE,
+        KITTENS_BOOL_SWITCH(a_slot_fp8, CBSZ,
+            KITTENS_BOOL_SWITCH(b_slot_fp8, BLGP,
+                if (nn) {
+                    const int wgs = persistent_grid((const void *)mxfp8_grouped_nn_kernel<CBSZ, BLGP, EDGE, OutGL>,
+                                                    num_tiles, ctr, stream);
+                    mxfp8_grouped_nn_kernel<CBSZ, BLGP, EDGE, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, gl_SA, gl_SB, tab, num_experts, K, tiles_M, n_tiles, num_tiles, ctr);
+                } else {
+                    const int wgs = persistent_grid((const void *)mxfp8_grouped_tn_kernel<CBSZ, BLGP, EDGE, OutGL>,
+                                                    num_tiles, ctr, stream);
+                    mxfp8_grouped_tn_kernel<CBSZ, BLGP, EDGE, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_C, gl_SA, gl_SB, tab, num_experts, K, tiles_M, n_tiles, num_tiles, ctr);
+                }
+    ))) // NOLINT(*)
 }
 
 static bool grouped_mxfp8_gemm(
@@ -1737,19 +1762,26 @@ static bool grouped_mxfp8_gemm(
         return false;
     }
 
-    int total_N = 0;
-    int max_N   = 0;
+    int total_tiles = 0;
+    int max_N       = 0;
+    bool edge = false;
     for (int g = 0; g < num_experts; g++) {
-        if (N_array[g] % BLOCK_COL != 0) { warn_fallback("HK-grouped", "N_array not 256-aligned"); return false; }
-        total_N += N_array[g];
+        if (N_array[g] % 32 != 0) { warn_fallback("HK-grouped", "N_array not 32-aligned"); return false; }
+        total_tiles += kittens::ceil_div(N_array[g], BLOCK_COL);
         max_N = std::max(max_N, N_array[g]);
+        edge = edge || N_array[g] % BLOCK_COL != 0;
     }
-    if (total_N == 0) {
+    if (total_tiles == 0) {
         return true;
+    }
+    // Unaligned NN drops the activation rows past an expert by the range check so needs 31-bit offset
+    if (edge && !transa && kittens_align_up(max_N, BLOCK_COL) * K >= 0x80000000ull) {
+        warn_fallback("HK-grouped", "expert too large for unaligned NN");
+        return false;
     }
 
     int k_iters = K / BLOCK_K;
-    size_t act_words    = (size_t)k_iters * total_N;
+    size_t act_words    = (size_t)k_iters * total_tiles * BLOCK_COL;
     size_t weight_words = (size_t)k_iters * std::min(num_experts, MAX_TAB_EXPERTS) * M;
     size_t sa_pk_bytes  = kittens_align_up((transa ? weight_words : act_words) * sizeof(uint32_t), 256);
     size_t sb_pk_bytes  = kittens_align_up(2 * (transa ? act_words : weight_words) * sizeof(uint32_t), 256);
@@ -1779,7 +1811,7 @@ static bool grouped_mxfp8_gemm(
     return true;
 }
 
-template <int CBSZ, int BLGP, bool ACCUMULATE, typename OutGL>
+template <int CBSZ, int BLGP, bool ACCUMULATE, bool EDGE, typename OutGL>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_wgrad_nt_kernel(
     const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
@@ -1793,6 +1825,8 @@ void mxfp8_wgrad_nt_kernel(
     using RT_B     = kittens::rt<kittens::fp8e4m3, REG_N, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
     using RT_C     = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
     using RT_C_T   = kittens::rt_fl<REG_N, REG_M, kittens::row_l, kittens::rt_16x16_s>;
+
+    constexpr bool DMA = ACCUMULATE || EDGE;
 
     __shared__ alignas(ST_A::underlying_subtile_bytes) ST_A As[2][2];
     __shared__ alignas(ST_B::underlying_subtile_bytes) ST_B Bs[2][2];
@@ -1809,7 +1843,7 @@ void mxfp8_wgrad_nt_kernel(
     constexpr int copies_A = BLOCK_K * HALF_ROW * sizeof(T) / bpm;
     constexpr int copies_B = BLOCK_K * HALF_COL * sizeof(T) / bpm;
     uint32_t sw_A[copies_A], sw_B[copies_B];
-    if constexpr (!ACCUMULATE) {
+    if constexpr (!DMA) {
         G::prefill_swizzled_offsets(As[0][0], A, sw_A);
         G::prefill_swizzled_offsets(Bs[0][0], B, sw_B);
     }
@@ -1883,24 +1917,37 @@ void mxfp8_wgrad_nt_kernel(
             }
         }
 
+        const int shift = EDGE ? __builtin_amdgcn_readfirstlane(info.shift) : 0;
+
         gl_fp8_rt A_local(A);
-        A_local.raw_ptr = (T *)info.a_ptr;
+        A_local.raw_ptr = (T *)info.a_ptr - (size_t)shift * A_local.template stride<2>();
 
         gl_fp8_rt B_local(B);
-        B_local.raw_ptr = (T *)info.b_ptr;
+        B_local.raw_ptr = (T *)info.b_ptr - (size_t)shift * B_local.template stride<2>();
 
-        // Only the ACCUMULATE instantiation loads through the LDS DMA helpers; the other keeps G::load.
-        [[maybe_unused]] TileLoad a_dma, b_dma;
+        [[maybe_unused]] TileLoad a_dma, b_dma, a_k0, b_k0;
         [[maybe_unused]] ScaleLoad s_dma;
-        if constexpr (ACCUMULATE) {
+        if constexpr (DMA) {
             const uint32_t a_row_stride = A_local.template stride<2>() * sizeof(T);
             const uint32_t b_row_stride = B_local.template stride<2>() * sizeof(T);
-            a_dma = prefill_tile_load<NUM_WARPS>(&A_local[{0, 0, 0, block_m}], HALF_ROW * sizeof(T),
-                                                 BLOCK_K * a_row_stride,
-                                                 (k_iters * BLOCK_K - 1) * a_row_stride + HALF_ROW, a_row_stride, As);
-            b_dma = prefill_tile_load<NUM_WARPS>(&B_local[{0, 0, 0, n_tile * BLOCK_COL}], HALF_COL * sizeof(T),
-                                                 BLOCK_K * b_row_stride,
-                                                 (k_iters * BLOCK_K - 1) * b_row_stride + HALF_COL, b_row_stride, Bs);
+            const uint32_t a_range      = (k_iters * BLOCK_K - 1) * a_row_stride + HALF_ROW;
+            const uint32_t b_range      = (k_iters * BLOCK_K - 1) * b_row_stride + HALF_COL;
+            a_dma = prefill_tile_load<NUM_WARPS, EDGE>(&A_local[{0, 0, 0, block_m}], HALF_ROW * sizeof(T),
+                                                       BLOCK_K * a_row_stride, a_range, a_row_stride, As,
+                                                       EDGE ? shift - BLOCK_K : 0);
+            b_dma = prefill_tile_load<NUM_WARPS, EDGE>(&B_local[{0, 0, 0, n_tile * BLOCK_COL}], HALF_COL * sizeof(T),
+                                                       BLOCK_K * b_row_stride, b_range, b_row_stride, Bs,
+                                                       EDGE ? shift - BLOCK_K : 0);
+            if constexpr (EDGE) {
+                a_k0 = prefill_tile_load<NUM_WARPS, true>(&A_local[{0, 0, 0, block_m}], HALF_ROW * sizeof(T),
+                                                          BLOCK_K * a_row_stride, a_range, a_row_stride, As, shift);
+                b_k0 = prefill_tile_load<NUM_WARPS, true>(&B_local[{0, 0, 0, n_tile * BLOCK_COL}],
+                                                          HALF_COL * sizeof(T), BLOCK_K * b_row_stride, b_range,
+                                                          b_row_stride, Bs, shift);
+            } else {
+                a_k0 = a_dma;
+                b_k0 = b_dma;
+            }
             s_dma = prefill_scale_load(scale_A_gl, scale_B_gl, sa_base + m_tile, 2 * (sb_base + n_tile), tiles_M,
                                        2 * tiles_N, scale_smem);
         }
@@ -1908,11 +1955,11 @@ void mxfp8_wgrad_nt_kernel(
         const int n_iters = k_iters - 2;
         const bool s0 = n_iters & 1;
 
-        if constexpr (ACCUMULATE) {
-            tile_load_m0(b_dma, s0, 0, 0);
-            tile_load_m0(a_dma, s0, 0, 0);
-            tile_load_m0(b_dma, s0, 1, 0);
-            tile_load_m0(a_dma, s0, 1, 0);
+        if constexpr (DMA) {
+            tile_load_m0(b_k0, s0, 0, 0);
+            tile_load_m0(a_k0, s0, 0, 0);
+            tile_load_m0(b_k0, s0, 1, 0);
+            tile_load_m0(a_k0, s0, 1, 0);
         } else {
             G::load(Bs[s0][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B);
             G::load(As[s0][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A);
@@ -1923,7 +1970,7 @@ void mxfp8_wgrad_nt_kernel(
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        if constexpr (ACCUMULATE) {
+        if constexpr (DMA) {
             tile_load_m0(a_dma, !s0, 0, 1);
             tile_load_m0(b_dma, !s0, 0, 1);
             tile_load_m0(b_dma, !s0, 1, 1);
@@ -1935,7 +1982,7 @@ void mxfp8_wgrad_nt_kernel(
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        if constexpr (ACCUMULATE) {
+        if constexpr (DMA) {
             scale_load_m0(s_dma, s0, 0);
         } else {
             G::load(scale_smem[s0][0], scale_A_gl, {sa_base + m_tile, 0, 0, 0});
@@ -1949,7 +1996,7 @@ void mxfp8_wgrad_nt_kernel(
         if (warp_m == 1) {
             __builtin_amdgcn_s_barrier();
         }
-        if constexpr (ACCUMULATE) {
+        if constexpr (DMA) {
             asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[!s0][1]) : "memory", "m0");
         }
 
@@ -1957,7 +2004,7 @@ void mxfp8_wgrad_nt_kernel(
         if (s0) {
             constexpr int TIC = 1;
             constexpr int TOC = TIC ^ 1;
-            if constexpr (!ACCUMULATE) {
+            if constexpr (!DMA) {
                 G::load(scale_smem[TOC][0], scale_A_gl, {sa_base + (k + 1) * tiles_M + m_tile, 0, 0, 0});
                 G::load(scale_smem[TOC][1], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile),     0, 0, 0});
                 G::load(scale_smem[TOC][2], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile) + 1, 0, 0, 0});
@@ -1965,7 +2012,7 @@ void mxfp8_wgrad_nt_kernel(
 
             load_cols<ST_B, 2 * TIC>(b0, b_frag);
             load_cols<ST_A, 2 * TIC>(a, a_frag);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 tile_load(a_dma, 1, k + 1);
             } else {
                 G::load(As[TOC][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
@@ -1973,17 +2020,17 @@ void mxfp8_wgrad_nt_kernel(
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_barrier();
 
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 asm volatile("s_mov_b32 m0, %0" :: "s"(s_dma.lds[TOC]) : "memory", "m0");
             }
             kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
             kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 scale_load(s_dma, k + 1);
             }
             __builtin_amdgcn_s_setprio(2);
             kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 __builtin_amdgcn_sched_barrier(0);
                 asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][0]) : "memory", "m0");
             }
@@ -1993,7 +2040,7 @@ void mxfp8_wgrad_nt_kernel(
 
             kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
             load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 tile_load(a_dma, 0, k + 2);
             } else {
                 G::load(As[TIC][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A);
@@ -2003,7 +2050,7 @@ void mxfp8_wgrad_nt_kernel(
 
             __builtin_amdgcn_s_setprio(2);
             kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 __builtin_amdgcn_sched_barrier(0);
                 asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][0]) : "memory", "m0");
             }
@@ -2012,7 +2059,7 @@ void mxfp8_wgrad_nt_kernel(
 
             kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
             load_cols<ST_A, 2 * TIC + 1>(a, a_frag);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 tile_load(b_dma, 0, k + 2);
             } else {
                 G::load(Bs[TIC][0], B_local, {0, 0, k + 2, n_tile * 2    }, sw_B);
@@ -2022,7 +2069,7 @@ void mxfp8_wgrad_nt_kernel(
 
             __builtin_amdgcn_s_setprio(2);
             kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 __builtin_amdgcn_sched_barrier(0);
                 asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][1]) : "memory", "m0");
             }
@@ -2030,7 +2077,7 @@ void mxfp8_wgrad_nt_kernel(
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 tile_load(b_dma, 1, k + 2);
             } else {
                 G::load(Bs[TIC][1], B_local, {0, 0, k + 2, n_tile * 2 + 1}, sw_B);
@@ -2040,7 +2087,7 @@ void mxfp8_wgrad_nt_kernel(
 
             __builtin_amdgcn_s_setprio(2);
             kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 __builtin_amdgcn_sched_barrier(0);
                 asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][1]) : "memory", "m0");
             }
@@ -2052,7 +2099,7 @@ void mxfp8_wgrad_nt_kernel(
             {
                 constexpr int TIC = 0;
                 constexpr int TOC = TIC ^ 1;
-                if constexpr (!ACCUMULATE) {
+                if constexpr (!DMA) {
                     G::load(scale_smem[TOC][0], scale_A_gl, {sa_base + (k + 1) * tiles_M + m_tile, 0, 0, 0});
                     G::load(scale_smem[TOC][1], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile),     0, 0, 0});
                     G::load(scale_smem[TOC][2], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile) + 1, 0, 0, 0});
@@ -2060,7 +2107,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 load_cols<ST_B, 2 * TIC>(b0, b_frag);
                 load_cols<ST_A, 2 * TIC>(a, a_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(a_dma, 1, k + 1);
                 } else {
                     G::load(As[TOC][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
@@ -2068,17 +2115,17 @@ void mxfp8_wgrad_nt_kernel(
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     asm volatile("s_mov_b32 m0, %0" :: "s"(s_dma.lds[TOC]) : "memory", "m0");
                 }
                 kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
                 kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     scale_load(s_dma, k + 1);
                 }
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][0]) : "memory", "m0");
                 }
@@ -2088,7 +2135,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
                 load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(a_dma, 0, k + 2);
                 } else {
                     G::load(As[TIC][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A);
@@ -2098,7 +2145,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][0]) : "memory", "m0");
                 }
@@ -2107,7 +2154,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
                 load_cols<ST_A, 2 * TIC + 1>(a, a_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(b_dma, 0, k + 2);
                 } else {
                     G::load(Bs[TIC][0], B_local, {0, 0, k + 2, n_tile * 2    }, sw_B);
@@ -2117,7 +2164,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][1]) : "memory", "m0");
                 }
@@ -2125,7 +2172,7 @@ void mxfp8_wgrad_nt_kernel(
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(b_dma, 1, k + 2);
                 } else {
                     G::load(Bs[TIC][1], B_local, {0, 0, k + 2, n_tile * 2 + 1}, sw_B);
@@ -2135,7 +2182,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][1]) : "memory", "m0");
                 }
@@ -2146,7 +2193,7 @@ void mxfp8_wgrad_nt_kernel(
             {
                 constexpr int TIC = 1;
                 constexpr int TOC = TIC ^ 1;
-                if constexpr (!ACCUMULATE) {
+                if constexpr (!DMA) {
                     G::load(scale_smem[TOC][0], scale_A_gl, {sa_base + (k + 1) * tiles_M + m_tile, 0, 0, 0});
                     G::load(scale_smem[TOC][1], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile),     0, 0, 0});
                     G::load(scale_smem[TOC][2], scale_B_gl, {2 * (sb_base + (k + 1) * tiles_N + n_tile) + 1, 0, 0, 0});
@@ -2154,7 +2201,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 load_cols<ST_B, 2 * TIC>(b0, b_frag);
                 load_cols<ST_A, 2 * TIC>(a, a_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(a_dma, 1, k + 1);
                 } else {
                     G::load(As[TOC][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
@@ -2162,17 +2209,17 @@ void mxfp8_wgrad_nt_kernel(
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     asm volatile("s_mov_b32 m0, %0" :: "s"(s_dma.lds[TOC]) : "memory", "m0");
                 }
                 kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_smem[TIC][0], warp_m);
                 kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_smem[TIC][1], warp_n);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     scale_load(s_dma, k + 1);
                 }
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][0]) : "memory", "m0");
                 }
@@ -2182,7 +2229,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_smem[TIC][2], warp_n);
                 load_cols<ST_B, 2 * TIC + 1>(b1, b_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(a_dma, 0, k + 2);
                 } else {
                     G::load(As[TIC][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A);
@@ -2192,7 +2239,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cB, a, b1, cB, &sa_h0, &sb_h1);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][0]) : "memory", "m0");
                 }
@@ -2201,7 +2248,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_smem[TIC][0], 2 + warp_m);
                 load_cols<ST_A, 2 * TIC + 1>(a, a_frag);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(b_dma, 0, k + 2);
                 } else {
                     G::load(Bs[TIC][0], B_local, {0, 0, k + 2, n_tile * 2    }, sw_B);
@@ -2211,7 +2258,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cC, a, b0, cC, &sa_h1, &sb_h0);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(b_dma.lds[TIC][1]) : "memory", "m0");
                 }
@@ -2219,7 +2266,7 @@ void mxfp8_wgrad_nt_kernel(
                 __builtin_amdgcn_s_barrier();
                 __builtin_amdgcn_sched_barrier(0);
 
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     tile_load(b_dma, 1, k + 2);
                 } else {
                     G::load(Bs[TIC][1], B_local, {0, 0, k + 2, n_tile * 2 + 1}, sw_B);
@@ -2229,7 +2276,7 @@ void mxfp8_wgrad_nt_kernel(
 
                 __builtin_amdgcn_s_setprio(2);
                 kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
-                if constexpr (ACCUMULATE) {
+                if constexpr (DMA) {
                     __builtin_amdgcn_sched_barrier(0);
                     asm volatile("s_mov_b32 m0, %0" :: "s"(a_dma.lds[TIC][1]) : "memory", "m0");
                 }
@@ -2247,7 +2294,7 @@ void mxfp8_wgrad_nt_kernel(
             constexpr int TIC = 0;
             constexpr int TOC = TIC ^ 1;
             int k = k_iters - 2;
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 scale_load_m0(s_dma, TOC, k + 1);
             } else {
                 G::load(scale_smem[TOC][0], scale_A_gl, {sa_base + (k + 1) * tiles_M + m_tile, 0, 0, 0});
@@ -2264,7 +2311,7 @@ void mxfp8_wgrad_nt_kernel(
 
             load_cols<ST_B, 2 * TIC>(b0, b_frag);
             load_cols<ST_A, 2 * TIC>(a, a_frag);
-            if constexpr (ACCUMULATE) {
+            if constexpr (DMA) {
                 tile_load_m0(a_dma, TOC, 1, k + 1);
             } else {
                 G::load(As[TOC][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
@@ -2368,6 +2415,10 @@ void mxfp8_wgrad_nt_kernel(
     }
 }
 
+static int wgrad_k_iters(int M_g) {
+    return M_g == 0 ? 0 : std::max(kittens::ceil_div(M_g, BLOCK_K), 2);
+}
+
 template <typename OutGL>
 static void grouped_mxfp8_wgrad_chunk(const void *const *A_array, const void *const *B_array,
     void *const *D_array, const void *const *scale_A_array, const void *const *scale_B_array, const int *M_array,
@@ -2384,19 +2435,24 @@ static void grouped_mxfp8_wgrad_chunk(const void *const *A_array, const void *co
     int max_k_iters = 0;
     int sa_tiles    = 0;
     int sb_tiles    = 0;
+    bool edge = false;
     for (int i = 0; i < num_experts; i++) {
         int g       = order[i];
-        int k_iters = M_array[g] / BLOCK_K;
-        tab.info[i] = {A_array[g], B_array[g], D_array[g], k_iters, sa_tiles, sb_tiles};
+        int k_iters = wgrad_k_iters(M_array[g]);
+        int shift   = k_iters * BLOCK_K - M_array[g];
+        tab.info[i] = {A_array[g], B_array[g], D_array[g], k_iters, sa_tiles, sb_tiles, shift};
         if (k_iters == 0) {
             continue;
         }
+        edge = edge || k_iters * BLOCK_K != M_array[g];
         atab.src[num_active]     = (const uint8_t *)scale_A_array[g];
         atab.off[num_active]     = sa_tiles * 256;
         atab.k_iters[num_active] = k_iters;
+        atab.tokens[num_active]  = M_array[g];
         btab.src[num_active]     = (const uint8_t *)scale_B_array[g];
         btab.off[num_active]     = sb_tiles * 512;
         btab.k_iters[num_active] = k_iters;
+        btab.tokens[num_active]  = M_array[g];
         num_active++;
         max_k_iters = std::max(max_k_iters, k_iters);
         sa_tiles   += k_iters * tiles_M;
@@ -2404,12 +2460,14 @@ static void grouped_mxfp8_wgrad_chunk(const void *const *A_array, const void *co
     }
 
     if (num_active > 0) {
-        pack_scales_tab_kernel<true, 64, 4, ScalePack::VARYING>
-            <<<dim3(max_k_iters * tiles_M, num_active), 4 * 64, 0, stream>>>(
-                atab, sa_pk, num_active, N, 0, 0, tiles_M, 0);
-        pack_scales_tab_kernel<true, 32, 8, ScalePack::VARYING>
-            <<<dim3(max_k_iters * tiles_N, num_active), 8 * 64, 0, stream>>>(
-                btab, sb_pk, num_active, K, 0, 0, tiles_N, 0);
+        KITTENS_BOOL_SWITCH(edge, EDGE,
+            pack_scales_tab_kernel<true, 64, 4, ScalePack::VARYING, EDGE>
+                <<<dim3(max_k_iters * tiles_M, num_active), 4 * 64, 0, stream>>>(
+                    atab, sa_pk, num_active, N, 0, 0, tiles_M, 0);
+            pack_scales_tab_kernel<true, 32, 8, ScalePack::VARYING, EDGE>
+                <<<dim3(max_k_iters * tiles_N, num_active), 8 * 64, 0, stream>>>(
+                    btab, sb_pk, num_active, K, 0, 0, tiles_N, 0);
+        ) // NOLINT(*)
     }
 
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(sa_pk), sa_tiles, nullptr, nullptr, nullptr);
@@ -2419,14 +2477,15 @@ static void grouped_mxfp8_wgrad_chunk(const void *const *A_array, const void *co
     OutGL gl_D((typename OutGL::dtype *)D_array[order[0]], nullptr, nullptr, (size_t)K, (size_t)N);
 
     const int num_tiles = num_experts * tiles_M * tiles_N;
-    KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
-        KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
-            KITTENS_BOOL_SWITCH(b_fp8, BLGP,
-                const int wgs = persistent_grid((const void *)mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE, OutGL>,
-                                                num_tiles, ctr, stream);
-                mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
-                    gl_A, gl_B, gl_D, gl_SA, gl_SB, tab, tiles_M, tiles_N, tiles_M * tiles_N, num_tiles, ctr);
-    ))) // NOLINT(*)
+    KITTENS_BOOL_SWITCH(edge, EDGE,
+        KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
+            KITTENS_BOOL_SWITCH(a_fp8, CBSZ,
+                KITTENS_BOOL_SWITCH(b_fp8, BLGP,
+                    const void *kernel = (const void *)mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE, EDGE, OutGL>;
+                    const int wgs = persistent_grid(kernel, num_tiles, ctr, stream);
+                    mxfp8_wgrad_nt_kernel<CBSZ, BLGP, ACCUMULATE, EDGE, OutGL><<<wgs, NUM_THREADS, 0, stream>>>(
+                        gl_A, gl_B, gl_D, gl_SA, gl_SB, tab, tiles_M, tiles_N, tiles_M * tiles_N, num_tiles, ctr);
+    )))) // NOLINT(*)
 }
 
 static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B_array, void *const *D_array,
@@ -2447,19 +2506,26 @@ static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B
     size_t total_sa_entries = 0;
     size_t total_sb_entries = 0;
     int max_M = 0;
+    bool edge = false;
     for (int g = 0; g < num_experts; g++) {
         int M_g = M_array[g];
-        if (M_g != 0 && (M_g % BLOCK_K != 0 || M_g < 256)) {
-            warn_fallback("HK-wgrad", "M_i not 128-aligned or < 256");
+        if (M_g % 32 != 0) {
+            warn_fallback("HK-wgrad", "M_i not 32-aligned");
             return false;
         }
         if (M_g == 0 && accumulate) {
             continue;
         }
         keyed.push_back({-M_g, g});
-        total_sa_entries += (size_t)(M_g / BLOCK_K) * N;
-        total_sb_entries += (size_t)2 * (M_g / BLOCK_K) * K;
+        total_sa_entries += (size_t)wgrad_k_iters(M_g) * N;
+        total_sb_entries += (size_t)2 * wgrad_k_iters(M_g) * K;
         max_M = std::max(max_M, M_g);
+        edge = edge || wgrad_k_iters(M_g) * BLOCK_K != M_g;
+    }
+    // The head shift masks rows with an out-of-range offset, so every expert's bytes need 31-bit offsets.
+    if (edge && (size_t)wgrad_k_iters(max_M) * BLOCK_K * std::max(N, K) >= 0x80000000ull) {
+        warn_fallback("HK-wgrad", "expert too large");
+        return false;
     }
     if (keyed.empty()) {
         return true;

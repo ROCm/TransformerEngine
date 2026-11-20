@@ -371,16 +371,14 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     if recipe.custom():
         return recipe.quantization_alignment
     if recipe.mxfp8():
-        # HipKittens grouped GEMM requires 256-aligned expert dimensions.
+        # HipKittens grouped GEMM requires 32-aligned expert dimensions.
         # HK is used by default when NVTE_USE_CUTLASS_GROUPED_GEMM=1,
         # unless NVTE_USE_CK_GROUPED_GEMM=1 explicitly selects CK.
         use_hk = os.environ.get("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "0") == "1"
         use_ck = os.environ.get("NVTE_USE_CK_GROUPED_GEMM", "0") == "1"
         use_cutlass = os.environ.get("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
         use_hipkittens = use_hk or (use_cutlass and not use_ck)
-        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
-            if use_hipkittens:
-                return 256
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and not use_hipkittens:
             # All gfx950 MXFP8 GEMMs need K % 128, and the split size is K in wgrad.
             return 128
         return 32

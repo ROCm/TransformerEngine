@@ -97,7 +97,7 @@ constexpr int TR_GROUP_LANES  = 16;
 constexpr int TR_LANE_BYTES   = 8;
 
 // Buffer-to-LDS tile load state. srd[h][1] starts WAVE_LOAD_BYTES early because the instruction offset
-// advances the global and the LDS address alike.
+// advances the global and the LDS address alike. Lanes whose K index (column, or row if K_ROWS) is below skip load 0.
 struct TileLoad {
     kittens::i32x4 srd[2][2];
     uint32_t lds[2][2];
@@ -105,7 +105,7 @@ struct TileLoad {
     uint32_t k_step;
 };
 
-template <int NUM_WARPS, typename ST>
+template <int NUM_WARPS, bool K_ROWS = false, typename ST>
 __device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t half_bytes, uint32_t k_step,
                                                       uint32_t range, uint32_t row_stride, ST (&tiles)[2][2],
                                                       int skip = 0, int range1 = -1) {
@@ -143,10 +143,9 @@ __device__ __forceinline__ TileLoad prefill_tile_load(const void *base, uint32_t
         const int subtile_off = byte % ST::underlying_subtile_bytes;
         const uint32_t swizzled = ST::swizzle({subtile_off / ST::underlying_subtile_row_bytes,
                                                subtile_off % ST::underlying_subtile_row_bytes});
+        const int row = swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows;
         const int col = swizzled % ST::underlying_subtile_row_bytes;
-        d.sw[i] = col < skip ? 0x80000000u
-                             : (swizzled / ST::underlying_subtile_row_bytes + subtile * ST::underlying_subtile_rows) *
-                                   row_stride + col;
+        d.sw[i] = (K_ROWS ? row : col) < skip ? 0x80000000u : row * row_stride + col;
     }
     d.k_step = k_step;
     return d;
