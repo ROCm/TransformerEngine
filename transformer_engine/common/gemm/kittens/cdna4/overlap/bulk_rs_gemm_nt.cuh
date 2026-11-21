@@ -45,7 +45,7 @@ struct PeerPtrs {
 
 __device__ __forceinline__
 void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
-                  const PeerPtrs &peers, size_t shard_elems, size_t band_elems)
+                  const PeerPtrs &peers, size_t shard_elems, size_t band_elems, bool deep = false)
 {
     typedef int v4i __attribute__((ext_vector_type(4)));
     const size_t lines = band_elems / 8;                  // one int4 = 8 bf16
@@ -63,17 +63,36 @@ void rs_pull_fold(int w, int nred, int bands, int gband, int tp_size, int my_pe,
         v4i *const dst = (v4i *)(out + boff);
         for (size_t l = l0 + threadIdx.x; l < l1; l += blockDim.x) {
             float acc[8];
+            if (deep) {
 #pragma unroll 1
-            for (int s = 0; s < tp_size; s++) {
-                const bf16 *base = peers.base[s] + soff + boff;
-                const v4i v = ((const v4i *)base)[l];
-                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
-                if (s == 0) {
+                for (int s = 0; s < tp_size; s += 2) {   // tp_size is 4 or 8: always even
+                    const v4i v0 = ((const v4i *)(peers.base[s] + soff + boff))[l];
+                    const v4i v1 = ((const v4i *)(peers.base[s + 1] + soff + boff))[l];
+                    const __hip_bfloat16 *x0 = reinterpret_cast<const __hip_bfloat16 *>(&v0);
+                    const __hip_bfloat16 *x1 = reinterpret_cast<const __hip_bfloat16 *>(&v1);
+                    if (s == 0) {
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
-                } else {
+                        for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x0[j]);
+                    } else {
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
+                        for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x0[j]);
+                    }
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x1[j]);
+                }
+            } else {
+#pragma unroll 1
+                for (int s = 0; s < tp_size; s++) {
+                    const bf16 *base = peers.base[s] + soff + boff;
+                    const v4i v = ((const v4i *)base)[l];
+                    const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
+                    if (s == 0) {
+#pragma unroll
+                        for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
+                    } else {
+#pragma unroll
+                        for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
+                    }
                 }
             }
             v4i res;
@@ -446,3 +465,191 @@ static inline void dispatch(rs_globals g) {
 }
 
 }  // namespace hk_rs_nt
+
+namespace hk_mxfp8_rs_nt {
+
+using namespace kittens;
+using namespace hk_overlap;
+using namespace te_kittens::cdna4::mxfp8;
+
+// The MXFP8 K step, 128 rather than hk_overlap::K_STEP's bf16 64.
+constexpr int BLOCK_K = 128;
+
+using G = kittens::group<NUM_WARPS>;
+
+using gl_fp8_rt   = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
+using gl_scale_rt = kittens::gl<kittens::fp8e8m0, -1, 1, 16, 64>;
+using gl_bf16_rt  = kittens::gl<kittens::bf16, 1, 1, -1, -1>;
+
+// Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
+using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
+
+// Reads the pre-packed lane-native scale for group lg on this lane
+__device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg) {
+    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
+}
+
+template<typename RT_C, typename OutGL>
+__device__ __forceinline__ void gemm_epilogue(
+    RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
+    const OutGL &C, int block_row, int block_col, int warp_m, int warp_n) {
+
+    auto oc = [&](int m_off, int n_off) {
+        return kittens::coord<RT_C>{0, 0, block_row * WARPS_ROW * 2 + m_off,
+                                          block_col * WARPS_COL * 2 + n_off};
+    };
+
+    kittens::store(C, cA, oc(warp_m, warp_n));
+    kittens::store(C, cB, oc(warp_m, WARPS_COL + warp_n));
+    kittens::store(C, cC, oc(WARPS_ROW + warp_m, warp_n));
+    kittens::store(C, cD, oc(WARPS_ROW + warp_m, WARPS_COL + warp_n));
+}
+
+struct mxfp8_rs_globals {
+    gl_fp8_rt a;                   // dY, stored [K=tokens, M=out_local]
+    gl_fp8_rt b;                   // X,  stored [K=tokens, N=hidden]
+    gl_bf16_rt c;                  // dW,        [M=out_local, N=hidden]
+    gl_scale_rt sa;                // lane-native scales for the a slot
+    gl_scale_rt sb;                // lane-native scales for the b slot, hi/lo tile pair
+    int nred;
+    int bands;
+    int gband;                     // bands folded per cycle; gband == bands is one pass
+    int tp_size;
+    int my_pe;
+    bool fold_deep;                // rs_pull_fold's two-loads-in-flight mode
+    hk_rs_nt::PeerPtrs peers;
+    size_t shard_elems;            // (tokens/tp) * hidden
+    size_t band_elems;             // RS_BAND_ROWS * hidden
+    hipStream_t stream;
+    int *counters;                 // [NUM_XCDS] per-XCD tile cursors, then the exit count; self-resetting
+    int M = c.rows();
+    int N = c.cols();
+    int K = a.rows();
+    dim3 grid() {
+        const int want = (N / BLOCK_COL) * (M / BLOCK_ROW) + nred;
+        return dim3(want > GRID_CAP ? GRID_CAP : want);
+    }
+    dim3 block() { return dim3(NUM_THREADS); }
+};
+
+constexpr int NUM_XCDS = 8;
+
+// Next tile of this XCD's share (t = xcd + NUM_XCDS * i), else one stolen from another XCD.
+__device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
+    const int x0 = (int)blockIdx.x;
+#pragma unroll 1
+    for (int s = 0; s < NUM_XCDS; s++) {
+        const int x   = (x0 + s) & (NUM_XCDS - 1);
+        const int cnt = (total - x + NUM_XCDS - 1) / NUM_XCDS;
+        if (__hip_atomic_load(&bucket_ctr[x], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) >= cnt) {
+            continue;
+        }
+        const int i = atomicAdd(&bucket_ctr[x], 1);
+        if (i < cnt) {
+            return x + NUM_XCDS * i;
+        }
+    }
+    return total;
+}
+
+template <int CBSZ, int BLGP>
+__global__ __launch_bounds__(NUM_THREADS, 2)
+void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
+    if ((int)blockIdx.x < g.nred) {
+        hk_rs_nt::rs_pull_fold((int)blockIdx.x, g.nred, g.bands, g.gband, g.tp_size, g.my_pe,
+                               g.peers, g.shard_elems, g.band_elems, g.fold_deep);
+    }
+
+    const int k_iters = K / BLOCK_K;
+    const int tiles_M = M / BLOCK_ROW;
+    const int tiles_N = N / BLOCK_COL;
+    const int total   = tiles_M * tiles_N;
+
+    const int WGM = 8;
+
+    const int sa_stride = tiles_M;
+    const int sb_stride = tiles_N;
+
+    const gl_fp8_rt   A_local    = g.a;
+    const gl_fp8_rt   B_local    = g.b;
+    const gl_scale_rt scale_A_gl = g.sa;
+    const gl_scale_rt scale_B_gl = g.sb;
+
+#include "mxfp8_nt_prologue.inc"
+
+#pragma unroll 1
+    while (true) {
+        __shared__ int s_tile_idx;
+        if (threadIdx.x == 0) {
+            s_tile_idx = claim_xcd_tile(g.counters, total);
+        }
+        __syncthreads();
+        const int t = s_tile_idx;
+        if (t >= total) {
+            break;
+        }
+
+        const int wgid              = kittens::chiplet_transform_chunked(t, total, NUM_XCDS, WGM * WGM);
+        const int num_wgid_in_group = WGM * tiles_N;
+        const int group_id          = wgid / num_wgid_in_group;
+        const int first_pid_m       = group_id * WGM;
+        const int group_size_m      = min(tiles_M - first_pid_m, WGM);
+        const int m_tile            = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+        const int n_tile            = (wgid % num_wgid_in_group) / group_size_m;
+
+        const int a_row_tile = m_tile;
+        const int block_row  = m_tile;
+        const int block_col  = n_tile;
+        const int sa_batch   = m_tile;
+        const int sb_batch   = n_tile;
+
+        RT_A a;
+        RT_B b0, b1;
+        RT_C cA, cB, cC, cD;
+        kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
+
+#include "../mxfp8_nt_preload.inc"
+
+#define MXFP8_NT_OPAQUE_PEEL 1
+#include "../mxfp8_nt_mainloop.inc"
+#undef MXFP8_NT_OPAQUE_PEEL
+
+        // Hide the output stride from LICM; hoisted, the epilogue offsets spill.
+        gl_bf16_rt c_out = g.c;
+        asm volatile("" : "+s"(c_out.cols_internal));
+        gemm_epilogue<RT_C>(cA, cB, cC, cD, c_out, block_row, block_col, warp_m, warp_n);
+
+        // Close the preload's warp_m skew.
+        if (warp_m == 0) {
+            __builtin_amdgcn_s_barrier();
+        }
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    }
+
+    if (threadIdx.x == 0) {
+        if (__hip_atomic_fetch_add(&g.counters[NUM_XCDS], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
+            == (int)gridDim.x - 1) {
+            for (int x = 0; x <= NUM_XCDS; x++) {
+                __hip_atomic_store(&g.counters[x], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            }
+        }
+    }
+}
+
+template <int CBSZ, int BLGP>
+static void dispatch(mxfp8_rs_globals g) {
+    mxfp8_wgrad_rs_tk<CBSZ, BLGP><<<g.grid(), g.block(), 0, g.stream>>>(g, g.M, g.N, g.K);
+}
+
+using bulk_rs_mxfp8_fn_t = void (*)(mxfp8_rs_globals);
+
+static bulk_rs_mxfp8_fn_t get_bulk_rs_mxfp8_fn(KittensDType a_dt, KittensDType b_dt) {
+    const int a_fp8_code = fp8_code(a_dt), b_fp8_code = fp8_code(b_dt);
+    if (a_fp8_code == 0 && b_fp8_code == 0) return dispatch<0, 0>;
+    if (a_fp8_code == 0 && b_fp8_code == 1) return dispatch<0, 1>;
+    if (a_fp8_code == 1 && b_fp8_code == 0) return dispatch<1, 0>;
+    if (a_fp8_code == 1 && b_fp8_code == 1) return dispatch<1, 1>;
+    return nullptr;
+}
+
+}  // namespace hk_mxfp8_rs_nt
