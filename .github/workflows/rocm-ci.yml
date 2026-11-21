@@ -51,6 +51,9 @@ env:
   # rerun/ kept by actions/cache. ci/run_queue.sh reads the same variable.
   TE_CI_DATA_DIR: ci-data
 
+permissions:
+  contents: read
+
 jobs:
   select_image:
     name: Select Docker Image
@@ -60,19 +63,25 @@ jobs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
+          persist-credentials: false
           ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
           sparse-checkout: ci/ci_config.json
           sparse-checkout-cone-mode: false
 
       - name: Select Docker Image Tag
         id: select-image
+        env:
+          CONFIG_FROM_SOURCE: ${{ inputs.test_config_from_source }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'dev' }}
+          BRANCH_NAME: ${{ github.base_ref || github.ref_name }}
+          MANUAL_OVERRIDE: ${{ inputs.docker_image_override }}
         run: |
-          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
+          if [[ "${CONFIG_FROM_SOURCE}" == "true" ]]; then
+             echo "::notice::Debugging mode: Using ci/ci_config.json from ${GITHUB_REF_NAME}"
           else
-             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
+             echo "::notice::Using ci/ci_config.json from ${DEFAULT_BRANCH}"
           fi
 
           if [[ ! -f "ci/ci_config.json" ]]; then
@@ -80,7 +89,6 @@ jobs:
              exit 1
           fi
 
-          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
           echo "Determining image for branch: $BRANCH_NAME"
           VERSION_KEY="$BRANCH_NAME"
 
@@ -93,7 +101,6 @@ jobs:
           echo "Selected config key: $JSON_KEY"
           IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
 
-          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
           fi
@@ -119,17 +126,22 @@ jobs:
       ran_in_attempt: ${{ github.run_attempt }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
-          # A PR is diffed against its base branch, which needs the history
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+          # A PR run checks out GitHub's merge commit (refs/pull/N/merge). Its two
+          # parents, the base tip and the PR head, are all the diff needs. Other
+          # events never diff, but one extra commit is negligible when blobless.
+          fetch-depth: 2
+          # The diff reads only commits and trees; only the gating script is needed on disk.
+          filter: blob:none
+          sparse-checkout: .github/scripts
 
       - name: Select suites
         id: scope
         env:
           EVENT: ${{ github.event_name }}
           SKIP_SCOPE: ${{ contains(github.event.pull_request.labels.*.name, 'ci-skip-scope') }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           everything() {
@@ -146,9 +158,12 @@ jobs:
             exit 0
           fi
 
-          # The whole PR against its merge base, not just the latest push.
+          # The whole PR as it would merge into its base, not just the latest push:
+          # the merge commit against its first parent. HEAD^2 must be the PR head,
+          # or HEAD is not the merge commit this diff assumes.
           # --no-renames lists a moved file at both its old and its new path.
-          if ! git diff --name-status --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed.txt; then
+          if [[ "$(git rev-parse -q --verify 'HEAD^2' 2>/dev/null)" != "$HEAD_SHA" ]] \
+             || ! git diff --name-status --no-renames HEAD^1 HEAD > /tmp/changed.txt; then
             echo "::warning::could not list the PR's changes; running every suite"
             everything "the PR's changes could not be listed"
             exit 0
@@ -180,7 +195,9 @@ jobs:
         arch_label: [mi30x, mi35x]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Initialize required submodules
         run: |
@@ -201,14 +218,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - &run_container
         name: Run Container
@@ -225,9 +242,9 @@ jobs:
             --pid=host \
             --group-add $(getent group render | cut -d: -f3) \
             --group-add $(getent group video | cut -d: -f3) \
-            -v "${{ github.workspace }}:/workspace" \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
+            "${DOCKER_IMAGE}"
 
       - name: Install packages
         run: |
@@ -250,7 +267,7 @@ jobs:
           )"
 
       - name: Restore learned test weights
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -261,7 +278,7 @@ jobs:
       # "Re-run all jobs" run the whole queue.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -274,6 +291,7 @@ jobs:
         timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.sgpu_suites }}
         run: |
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
@@ -294,19 +312,19 @@ jobs:
           # No core dumps: a crashing test would leave a root-owned, mode 0600 GPU
           # core dump in the uploaded results, which fails the log upload.
           docker exec \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e TE_CI_DATA_DIR \
             -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.sgpu_suites }}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue sgpu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
       - name: Save learned test weights
         if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-sgpu-weights-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -344,7 +362,7 @@ jobs:
       # attempt's list rather than an older one.
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-sgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -374,7 +392,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: ${{ env.TE_CI_DATA_DIR }}/**
@@ -403,7 +421,9 @@ jobs:
         arch_label: [mi30x, mi35x]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Host Diagnostics
         run: |
@@ -417,14 +437,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - *run_container
 
@@ -449,7 +469,7 @@ jobs:
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -462,6 +482,7 @@ jobs:
         timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.mgpu_suites }}
         run: |
           rm -rf "$TE_CI_DATA_DIR/test-results"
 
@@ -472,13 +493,13 @@ jobs:
             || echo "no per-test lists restored; any queued item re-runs whole"
 
           docker exec \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e TE_CI_DATA_DIR \
             -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.mgpu_suites }}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             te-runner bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue mgpu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
@@ -507,7 +528,7 @@ jobs:
 
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-mgpu-rerun-${{ matrix.arch_label }}-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -537,7 +558,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: logs-mgpu-${{ matrix.arch_label }}
           path: ${{ env.TE_CI_DATA_DIR }}/**
@@ -566,7 +587,9 @@ jobs:
       CONTAINER: te-emu-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Initialize required submodules
         run: |
@@ -580,9 +603,23 @@ jobs:
         run: |
           echo "ref=$(sed -n 's/^: \${ROCJITSU_REF:=\([0-9a-f]*\)}$/\1/p' ci/rocjitsu.sh)" >> "$GITHUB_OUTPUT"
 
-      # ci/rocjitsu.sh reuses a build of the same rocm-systems commit
-      - name: Cache rocjitsu build
-        uses: actions/cache@v6
+      # ci/rocjitsu.sh reuses a build of the same rocm-systems commit, cached
+      # here across runs. Restore and save (below) are separate steps, rather
+      # than one combined actions/cache, for two reasons:
+      #   - zizmor's cache-poisoning audit flags any combined read+write
+      #     cache action on a workflow reachable from pull_request, as this
+      #     one is (via rocm-ci-dispatch.yml). GitHub's own merge-ref cache
+      #     scoping already keeps a PR run's cache writes from reaching
+      #     trusted push-to-dev runs, so the split doesn't add that
+      #     protection; it satisfies the audit for a protection GitHub
+      #     already provides here.
+      #   - It lets the save step check build/rocjitsu/ref (below) before
+      #     saving. The combined action only skips saving when the whole
+      #     path is missing, not when a failed build has left partial
+      #     content under it, so a broken build could still get cached.
+      - name: Restore rocjitsu build
+        id: restore-rocjitsu
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: build/rocjitsu
           key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
@@ -590,14 +627,14 @@ jobs:
       # Download artifacts and pull the Docker image concurrently
       - parallel:
           - name: Download build artifacts
-            uses: actions/download-artifact@v8
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
             with:
               name: te-rocm-wheels
               path: dist/
 
           - name: Pull Docker Image
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              docker pull "${DOCKER_IMAGE}"
 
       - name: Run Container
         run: |
@@ -608,9 +645,9 @@ jobs:
             --name "$CONTAINER" \
             --network=host \
             --shm-size=16G \
-            -v "${{ github.workspace }}:/workspace" \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
+            "${DOCKER_IMAGE}"
 
       - name: Install packages
         run: |
@@ -631,7 +668,7 @@ jobs:
           )"
 
       - name: Restore learned test weights
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -640,7 +677,7 @@ jobs:
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
         if: needs.scope.outputs.ran_in_attempt != github.run_attempt
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -651,24 +688,39 @@ jobs:
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
         timeout-minutes: 210
+        env:
+          TE_CI_EMU_SLOTS: ${{ vars.TE_CI_EMU_SLOTS || '8' }}
+          TE_CI_SUITES: ${{ needs.scope.outputs.emu_suites }}
         run: |
           rm -rf "$TE_CI_DATA_DIR/test-results"
           mkdir -p "$TE_CI_DATA_DIR/weights" "$TE_CI_DATA_DIR/rerun"
 
           docker exec \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_LEVEL="${TEST_LEVEL}" \
             -e TE_CI_DATA_DIR \
             -e JUNITXML_PREFIX="/workspace/$TE_CI_DATA_DIR/test-results/" \
             -e JUNITXML_SUFFIX=.xml \
             -e GITHUB_ACTIONS \
-            -e TE_CI_EMU_SLOTS="${{ vars.TE_CI_EMU_SLOTS || '8' }}" \
-            -e TE_CI_SUITES="${{ needs.scope.outputs.emu_suites }}" \
+            -e TE_CI_EMU_SLOTS="${TE_CI_EMU_SLOTS}" \
+            -e TE_CI_SUITES="${TE_CI_SUITES}" \
             "$CONTAINER" bash -c "ulimit -c 0; exec bash /workspace/ci/run_queue.sh --queue emu \
               --log-dir /workspace/$TE_CI_DATA_DIR/test-results/logs"
 
+      # build_rocjitsu() (ci/rocjitsu.sh) writes build/rocjitsu/ref only after
+      # a build completes and matches $ROCJITSU_REF; it deletes that file
+      # before every rebuild attempt, so its presence means a complete,
+      # correctly-pinned build, not a build that failed partway through and
+      # left partial content under build/rocjitsu/build/.
+      - name: Save rocjitsu build
+        if: always() && steps.restore-rocjitsu.outputs.cache-hit != 'true' && hashFiles('build/rocjitsu/ref') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: build/rocjitsu
+          key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
+
       - name: Save learned test weights
         if: always() && hashFiles(format('{0}/weights/*', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/weights
           key: te-emu-weights-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -689,7 +741,7 @@ jobs:
 
       - name: Save this attempt's failed items
         if: always() && hashFiles(format('{0}/rerun/**', env.TE_CI_DATA_DIR)) != ''
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.TE_CI_DATA_DIR }}/rerun
           key: te-emu-rerun-l${{ env.TEST_LEVEL }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -719,7 +771,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: logs-emu
           path: ${{ env.TE_CI_DATA_DIR }}/**

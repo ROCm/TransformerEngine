@@ -419,7 +419,8 @@ def compile_triton(
                 is_hip,
                 is_gluon,
             )
-        ).encode()
+        ).encode(),
+        usedforsecurity=False,
     ).hexdigest()
 
     if cache_key in _TRITON_KERNEL_CACHE:
@@ -823,6 +824,8 @@ def triton_call_lowering(
         and len(jax.local_devices()) > 1
         and os.environ.get("NVTE_JAX_TRITON_PREWARM", "1") != "0"
     ):
-        _prewarm_kernel_call(ctx, rule, hashlib.md5(compressed_call_proto).hexdigest())
+        _prewarm_kernel_call(
+            ctx, rule, hashlib.md5(compressed_call_proto, usedforsecurity=False).hexdigest()
+        )
 
     return rule(ctx, *array_args)

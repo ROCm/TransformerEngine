@@ -27,7 +27,7 @@ import glob
 import json
 import os
 import sys
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 -- parses only this CI run's own JUnit XML
 from collections import defaultdict
 
 # UI shows at most ~10 annotations of each level; cap to keep the log readable.
@@ -220,7 +220,9 @@ def main():
         suite_time = 0.0
 
         try:
-            root = ET.parse(xf).getroot()
+            # xf is this CI run's own pytest --junitxml output, not externally
+            # sourced or untrusted input.
+            root = ET.parse(xf).getroot()  # nosec B314
         except (ET.ParseError, OSError) as exc:
             # Truncated/unreadable XML => the pytest process was killed while
             # writing it (hard timeout, segfault, or job cancellation).

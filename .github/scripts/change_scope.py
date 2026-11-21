@@ -77,8 +77,6 @@ RULES = [
     # published by hand and named in ci/ci_config.json, so a PR editing its
     # recipe still runs on the published image.
     (".github/scripts/Dockerfile.ci.deps", NOTHING, "CI image recipe; ci-deps-docker-publish.yml"),
-    (".github/scripts/aiter_prebuild_upload.sh", NOTHING, "aiter-prebuilt-upload.yml"),
-    (".github/scripts/check_for_ngc_images.sh", NOTHING, "attach-wheels-to-release.yml"),
     (".github/scripts/**", EVERYTHING, "CI scripts"),
     (".github/**", NOTHING, "other workflows run on their own triggers"),
     # Test sources. No sGPU test imports from tests/pytorch/distributed, but the
