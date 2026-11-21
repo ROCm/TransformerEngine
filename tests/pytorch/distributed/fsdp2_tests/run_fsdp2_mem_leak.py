@@ -127,6 +127,14 @@ def _get_dist_info():
     return world_size, device
 
 
+def _get_seq_len(recipe_name):
+    """Get the per-rank sequence length of the input for a recipe."""
+    # ROCm FP8 block-scaling GEMMs need K % 128 == 0; SEQ_LEN * BATCH_PER_RANK is the wgrad K.
+    if IS_HIP_EXTENSION and recipe_name in ("Float8BlockScaling", "HybridFloat8BlockScaling"):
+        return 128 // BATCH_PER_RANK
+    return SEQ_LEN
+
+
 def _run_training_step(model, optimizer, recipe, x, target):
     """Run one forward + backward + optimizer step."""
     optimizer.zero_grad(set_to_none=True)
@@ -284,7 +292,8 @@ def test_fp8_temp_accumulation_across_layers(recipe_name, quantized_model_init):
     recipe = get_recipe_from_string(recipe_name)
     world_size, device = _get_dist_info()
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # ── bf16 baseline ──
@@ -405,7 +414,8 @@ def test_transpose_cache_retained_after_backward(recipe_name, quantized_model_in
     recipe = get_recipe_from_string(recipe_name)
     world_size, device = _get_dist_info()
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # ── bf16 baseline ──
@@ -508,7 +518,8 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # bf16 baseline
@@ -571,7 +582,8 @@ def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    seq_len = _get_seq_len(hybrid_recipe_name)
+    x = torch.randn(seq_len, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     # bf16 baseline
@@ -615,7 +627,8 @@ def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     # slightly negative (~-0.02..-0.09 MiB vs a ~2 MiB bf16 delta). The tolerance only
     # absorbs allocator/measurement noise; a genuinely retained gathered weight or
     # transpose cache would be MiB-scale (>> 256 KiB).
-    tolerance = 256 * 1024  # 256 KiB
+    # Per SEQ_LEN tokens: ROCm block scaling runs a longer input (~3.3 KiB/token excess there).
+    tolerance = 256 * 1024 * seq_len // SEQ_LEN
 
     assert excess <= tolerance, (
         f"Hybrid backward retains {excess/1024**2:.2f} MiB more than bf16 baseline. "

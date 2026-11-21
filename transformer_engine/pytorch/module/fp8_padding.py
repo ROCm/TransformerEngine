@@ -84,10 +84,10 @@ class Fp8Padding(torch.nn.Module):
     align_size : int, optional
                  Alignment size for each grouped input. If not provided, it is
                  determined from the active recipe on the first forward pass:
-                 32 for MXFP8, 128 for NVFP4, 16 for other built-in recipes,
-                 and ``CustomRecipe.quantization_alignment`` for custom recipes.
-
-    TODO: invesitgate the alignment requirement for non-mxfp8 cases on ROCm
+                 32 for MXFP8 (on gfx950: 128, or 256 with the HipKittens grouped GEMM),
+                 128 for NVFP4, 256 for MXFP4, 128 for FP8 block scaling on ROCm,
+                 16 for other built-in recipes, and
+                 ``CustomRecipe.quantization_alignment`` for custom recipes.
     """
 
     def __init__(

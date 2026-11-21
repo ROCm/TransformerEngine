@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +11,7 @@ import gc
 import weakref
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import (
     DotProductAttention,
     GroupedLinear,
@@ -42,6 +45,8 @@ reset_rng_states()
 
 model_configs = {
     "small": ModelConfig(2, 32, 2, 32),
+    # ROCm FP8 block scaling: hidden size and token count are multiples of 128.
+    "small_k128": ModelConfig(1, 128, 2, 64),
 }
 
 
@@ -485,6 +490,10 @@ def test_make_graphed_callables(
             "with checkpoint=True, SM>=10, "
             "and DelayedScaling recipe"
         )
+
+    # ROCm FP8 block-scaling GEMMs require K % 128 == 0; "small" has hidden size and tokens 64.
+    if IS_HIP_EXTENSION and fp8 and fp8_recipe.float8_block_scaling() and model_config == "small":
+        model_config = "small_k128"
 
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]

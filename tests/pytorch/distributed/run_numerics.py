@@ -1037,6 +1037,9 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     # Set parameter data type
     params_dtype = kwargs.get("params_dtype", torch.float32)
     FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
+    if IS_HIP_EXTENSION and QUANTIZATION == "fp8_block_scaling":
+        # ROCm FP8 block-scaling GEMMs need K % 128 == 0; the per-rank FFN size is a GEMM K.
+        FFN_HIDDEN_SIZE = 128 * WORLD_SIZE
 
     # Create models
     model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
@@ -1141,6 +1144,9 @@ def test_layernorm_mlp():
 def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
     params_dtype = kwargs.get("params_dtype", torch.float32)
     FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
+    if IS_HIP_EXTENSION and QUANTIZATION == "fp8_block_scaling":
+        # ROCm FP8 block-scaling GEMMs need K % 128 == 0; the per-rank FFN size is a GEMM K.
+        FFN_HIDDEN_SIZE = 128 * WORLD_SIZE
 
     model_single_node = te.TransformerLayer(
         HIDDEN_SIZE, FFN_HIDDEN_SIZE, NR_HEADS, attention_dropout=0, hidden_dropout=0, **kwargs
@@ -1200,6 +1206,11 @@ def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
 
 
 def test_transformer_layer():
+    params_dtype_16bit = torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16
+    if IS_HIP_EXTENSION and QUANTIZATION == "fp8_block_scaling":
+        # The mean MSE loss over these large outputs puts nearly all attention Q/K gradients
+        # below fp16's smallest subnormal (2^-24), so comparing them in fp16 is degenerate.
+        params_dtype_16bit = torch.bfloat16
     kwargs_list = [
         {},
         {"num_gqa_groups": 4},
@@ -1216,7 +1227,7 @@ def test_transformer_layer():
         {"fuse_qkv_params": True, "fuse_wgrad_accumulation": True},
         {"qkv_weight_interleaved": False},
         {"bias": False},
-        {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
+        {"params_dtype": params_dtype_16bit},
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]

@@ -632,12 +632,6 @@ def test_grouped_linear_accuracy_rocm_backends(
     ):
         pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
 
-    if recipe is not None and recipe.float8_block_scaling():
-        # The HipKittens/CK grouped GEMM backends do not support FP8 block scaling
-        # (they abort at runtime). The blockwise path is covered by the default and
-        # Triton backends in test_grouped_linear_accuracy instead.
-        pytest.skip("HipKittens/CK grouped GEMM backends do not support FP8 block scaling.")
-
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
     monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
     monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
@@ -653,7 +647,9 @@ def test_grouped_linear_accuracy_rocm_backends(
         and recipe is None
         and dtype in (torch.bfloat16, torch.float16)
     )
-    if expect_ck_no_fallback:
+    # FP8 block scaling is not supported by these backends and must run one GEMM per group.
+    expect_blockwise_fallback = recipe is not None and recipe.float8_block_scaling()
+    if expect_ck_no_fallback or expect_blockwise_fallback:
         monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
     test_grouped_linear_accuracy(
@@ -680,6 +676,9 @@ def test_grouped_linear_accuracy_rocm_backends(
             f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
             f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
         )
+    if expect_blockwise_fallback:
+        captured = capfd.readouterr()
+        assert "Fallback to cuBLAS grouped GEMM" in captured.err, captured.err
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backend")
