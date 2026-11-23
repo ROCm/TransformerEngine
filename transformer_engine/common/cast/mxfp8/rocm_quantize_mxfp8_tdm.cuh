@@ -448,9 +448,12 @@ struct MultiQuantizeArgs {
   uint32_t cols[MULTI_MAX_TENSORS];
   uint32_t scale_stride_rowwise[MULTI_MAX_TENSORS];
   uint32_t scale_stride_colwise[MULTI_MAX_TENSORS];
+  // The padded rows of pre-swizzled rowwise scales
+  uint32_t scale_rows_rowwise[MULTI_MAX_TENSORS];
   // Tensor t owns chunk rows [first_chunk_Y[t], first_chunk_Y[t + 1]).
   uint32_t first_chunk_Y[MULTI_MAX_TENSORS + 1];
   int num_tensors;
+  bool preswizzled;
 };
 
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
@@ -472,13 +475,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if (chunk_Y * CHUNK_DIM_Y >= rows || blockIdx.x * CHUNK_DIM_X >= cols) {
     return;
   }
+  const ScaleLayout rowwise_scales =
+      args.preswizzled ? preswizzled_scale_layout(args.scale_rows_rowwise[t])
+                       : compact_scale_layout(args.scale_stride_rowwise[t], false);
+  // The row stride of pre-swizzled colwise scales is their padded m.
+  const ScaleLayout colwise_scales =
+      args.preswizzled ? preswizzled_scale_layout(args.scale_stride_colwise[t])
+                       : compact_scale_layout(args.scale_stride_colwise[t], true);
   quantize_chunk<false, false, false, Empty, nullptr, IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
                  false>(
       static_cast<const IType *>(args.input[t]), nullptr,
       static_cast<OType *>(args.output_rowwise[t]), static_cast<OType *>(args.output_colwise[t]),
       static_cast<e8m0_t *>(args.scales_rowwise[t]), static_cast<e8m0_t *>(args.scales_colwise[t]),
-      nullptr, args.amax[t], rows, cols, compact_scale_layout(args.scale_stride_rowwise[t], false),
-      compact_scale_layout(args.scale_stride_colwise[t], true), chunk_Y, blockIdx.x, 0);
+      nullptr, args.amax[t], rows, cols, rowwise_scales, colwise_scales, chunk_Y, blockIdx.x, 0);
 }
 
 }  // namespace tdm_kernel
@@ -509,16 +518,18 @@ bool quantize_tdm(const Tensor &input, const Tensor *act_input, const Tensor *no
   // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where the output asks for that.
   const bool preswizzled = output->with_gemm_swizzled_scales;
   // Like the quantization, the fill obeys noop only without fusions.
-  const float *const fill_noop =
-      (IS_DBIAS || IS_DACT || IS_ACT) ? nullptr : reinterpret_cast<const float *>(noop->data.dptr);
+  ScalePadding padding(
+      (IS_DBIAS || IS_DACT || IS_ACT) ? nullptr : reinterpret_cast<const float *>(noop->data.dptr),
+      stream);
   const ScaleLayout rowwise_scales =
       rowwise ? prepare_scales(output->scale_inv, false, preswizzled, rows, DIVUP(cols, size_t{32}),
-                               fill_noop, stream)
+                               padding)
               : ScaleLayout{};
   const ScaleLayout colwise_scales =
       colwise ? prepare_scales(output->columnwise_scale_inv, true, preswizzled, cols,
-                               DIVUP(rows, size_t{32}), fill_noop, stream)
+                               DIVUP(rows, size_t{32}), padding)
               : ScaleLayout{};
+  padding.fill();
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -630,11 +641,14 @@ inline bool multi_quantize_tdm(const std::vector<Tensor *> &input_list,
   const size_t num_tensors = input_list.size();
   const bool rowwise = output_list[0]->has_data();
   const bool colwise = output_list[0]->has_columnwise_data();
+  // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where the outputs ask for that.
+  const bool preswizzled = output_list[0]->with_gemm_swizzled_scales;
   if (num_tensors > MULTI_MAX_TENSORS) {
     return false;
   }
   for (size_t i = 0; i < num_tensors; i++) {
-    if (!use_tdm(input_list[i]->flat_first_dim(), input_list[i]->flat_last_dim(),
+    if (output_list[i]->with_gemm_swizzled_scales != preswizzled ||
+        !use_tdm(input_list[i]->flat_first_dim(), input_list[i]->flat_last_dim(),
                  {input_list[i]->data.dptr, rowwise ? output_list[i]->data.dptr : nullptr,
                   colwise ? output_list[i]->columnwise_data.dptr : nullptr})) {
       return false;
@@ -642,7 +656,9 @@ inline bool multi_quantize_tdm(const std::vector<Tensor *> &input_list,
   }
   MultiQuantizeArgs args;
   args.num_tensors = num_tensors;
+  args.preswizzled = preswizzled;
   args.first_chunk_Y[0] = 0;
+  ScalePadding padding(nullptr, stream);
   size_t chunks_X = 0;
   for (size_t i = 0; i < num_tensors; i++) {
     const size_t rows = input_list[i]->flat_first_dim();
@@ -657,9 +673,20 @@ inline bool multi_quantize_tdm(const std::vector<Tensor *> &input_list,
     args.cols[i] = cols;
     args.scale_stride_rowwise[i] = rowwise ? output_list[i]->scale_inv.shape[1] : 0;
     args.scale_stride_colwise[i] = colwise ? output_list[i]->columnwise_scale_inv.shape[1] : 0;
+    args.scale_rows_rowwise[i] = rowwise ? output_list[i]->scale_inv.shape[0] : 0;
+    // The kernel lays out the scales as prepare_scales does.
+    if (preswizzled && rowwise) {
+      prepare_scales(output_list[i]->scale_inv, false, true, rows, DIVUP(cols, size_t{32}),
+                     padding);
+    }
+    if (preswizzled && colwise) {
+      prepare_scales(output_list[i]->columnwise_scale_inv, true, true, cols,
+                     DIVUP(rows, size_t{32}), padding);
+    }
     args.first_chunk_Y[i + 1] = args.first_chunk_Y[i] + DIVUP(rows, CHUNK_DIM_Y);
     chunks_X = std::max(chunks_X, DIVUP(cols, CHUNK_DIM_X));
   }
+  padding.fill();
   const dim3 grid(chunks_X, args.first_chunk_Y[num_tensors]);
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_list[0]->data.dtype, IType,

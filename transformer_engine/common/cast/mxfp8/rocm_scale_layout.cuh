@@ -54,42 +54,81 @@ inline ScaleLayout scale_layout(const SimpleTensor &scales, const bool colwise,
   return compact_scale_layout(stride, colwise);
 }
 
-// Fills scales with E8M0 127 (1.0), the padding of pre-swizzled scales, unless noop is set.
+// The scale tensors of one fill launch.
+constexpr int SCALE_FILL_BATCH = 128;
+struct ScaleFillArgs {
+  uint32_t *scales[SCALE_FILL_BATCH];
+  size_t words[SCALE_FILL_BATCH];
+};
+
+// Fills scale tensor blockIdx.y of args with E8M0 127 (1.0), the padding of pre-swizzled scales,
+// unless noop is set.
 template <typename = void>
-__global__ void fill_scales_kernel(uint32_t *scales, const size_t words, const float *noop) {
+__global__ void fill_scales_kernel(const ScaleFillArgs args, const float *noop) {
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
+  uint32_t *const scales = args.scales[blockIdx.y];
+  const size_t words = args.words[blockIdx.y];
   for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < words; i += gridDim.x * blockDim.x) {
     scales[i] = 0x7F7F7F7F;
   }
 }
 
-// The kernels write pre-swizzled scales only within the tensor, valid_m x valid_k of them, so where
-// the scale tensor has padding, this fills it beforehand, unless noop is set.
-template <typename = void>
-void fill_scale_padding(const SimpleTensor &scales, const size_t valid_m, const size_t valid_k,
-                        const bool colwise, const float *noop, hipStream_t stream) {
-  const size_t padded_m = colwise ? scales.shape[1] : scales.shape[0];
-  const size_t padded_k = colwise ? scales.shape[0] : scales.shape[1];
-  const size_t words = padded_m * padded_k / 4;
-  if ((padded_m == valid_m && padded_k == valid_k) || words == 0) {
-    return;
-  }
-  fill_scales_kernel<<<std::min<size_t>(DIVUP(words, size_t{256}), 1024), 256, 0, stream>>>(
-      static_cast<uint32_t *>(scales.dptr), words, noop);
-  NVTE_CHECK_CUDA(hipGetLastError());
-}
+// The kernels write pre-swizzled scales only within the tensor, so where scale tensors have
+// padding, this fills them beforehand, unless noop is set, with one launch per SCALE_FILL_BATCH.
+class ScalePadding {
+ public:
+  ScalePadding(const float *noop, hipStream_t stream) : noop_(noop), stream_(stream) {}
 
-// The layout of scales with valid_m x valid_k of them within the tensor, after filling the padding
-// of pre-swizzled ones unless noop is set.
+  // Adds scales, valid_m x valid_k of them within the tensor.
+  template <typename = void>
+  void add(const SimpleTensor &scales, const size_t valid_m, const size_t valid_k,
+           const bool colwise) {
+    const size_t padded_m = colwise ? scales.shape[1] : scales.shape[0];
+    const size_t padded_k = colwise ? scales.shape[0] : scales.shape[1];
+    const size_t words = padded_m * padded_k / 4;
+    if ((padded_m == valid_m && padded_k == valid_k) || words == 0) {
+      return;
+    }
+    if (num_ == SCALE_FILL_BATCH) {
+      fill();
+    }
+    args_.scales[num_] = static_cast<uint32_t *>(scales.dptr);
+    args_.words[num_] = words;
+    max_words_ = std::max(max_words_, words);
+    num_++;
+  }
+
+  // Launches the fills of the added scales, before the kernels that write the scales.
+  template <typename = void>
+  void fill() {
+    if (num_ == 0) {
+      return;
+    }
+    const dim3 grid(std::min<size_t>(DIVUP(max_words_, size_t{256}), 1024), num_);
+    fill_scales_kernel<<<grid, 256, 0, stream_>>>(args_, noop_);
+    NVTE_CHECK_CUDA(hipGetLastError());
+    num_ = 0;
+    max_words_ = 0;
+  }
+
+ private:
+  ScaleFillArgs args_{};
+  int num_ = 0;
+  size_t max_words_ = 0;
+  const float *noop_;
+  hipStream_t stream_;
+};
+
+// The layout of scales with valid_m x valid_k of them within the tensor; adds pre-swizzled ones to
+// padding.
 template <typename = void>
 ScaleLayout prepare_scales(const SimpleTensor &scales, const bool colwise, const bool preswizzled,
-                           const size_t valid_m, const size_t valid_k, const float *noop,
-                           hipStream_t stream) {
+                           const size_t valid_m, const size_t valid_k, ScalePadding &padding) {
   const ScaleLayout layout = scale_layout(scales, colwise, preswizzled);
   if (preswizzled) {
-    fill_scale_padding(scales, valid_m, valid_k, colwise, noop, stream);
+    padding.add(scales, valid_m, valid_k, colwise);
   }
   return layout;
 }

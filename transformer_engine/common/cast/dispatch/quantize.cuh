@@ -801,7 +801,12 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
              "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
              mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
 
-  // The batched kernels write compact scales, the single-tensor quantize also pre-swizzled ones.
+  if (mxfp8::multi_quantize_tdm(input_list, output_list, stream)) {
+    return;
+  }
+
+  // The generic batched kernel writes compact scales, the single-tensor quantize also pre-swizzled
+  // ones.
   if (std::any_of(output_list.begin(), output_list.end(),
                   [](const Tensor *t) { return mxfp8::preswizzled_scales(*t); })) {
     Tensor dummy_tensor;
@@ -810,10 +815,6 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
                                                            output_list[i], nullptr, nullptr, false,
                                                            stream);
     }
-    return;
-  }
-
-  if (mxfp8::multi_quantize_tdm(input_list, output_list, stream)) {
     return;
   }
 
