@@ -131,6 +131,17 @@ __device__ __forceinline__ float *rocm_amax_target(float *amax, float *slots, un
   return slots != nullptr ? slots + (block % ROCM_AMAX_SLOTS) * ROCM_AMAX_SLOT_STRIDE : amax;
 }
 
+// Raises the amax at the block's rocm_amax_target to value. Atomics on one address serialize, so
+// only those that may raise it are issued; it only grows during a kernel, so a stale read can only
+// cause a redundant atomic.
+__device__ __forceinline__ void rocm_raise_amax(float *amax, float *slots, unsigned int block,
+                                                float value) {
+  float *const target = rocm_amax_target(amax, slots, block);
+  if (value > *target) {
+    rocm_atomicMaxFloat(target, value);
+  }
+}
+
 namespace transformer_engine {
 
 // The zeroed slots for a kernel of num_blocks blocks on stream, or nullptr to raise the amax
@@ -319,6 +330,43 @@ template <int N>
 __device__ __forceinline__ void wait() {
   __builtin_amdgcn_s_wait_tensorcnt(N);
   asm volatile("" ::: "memory");  // the compiler does not see the TDM's LDS writes
+}
+
+// Writes the transpose of a lane's block of 4 rows by 4 bytes, one row per word of packed, into the
+// dense LDS tile t that a TDM store then writes: row x0 + j of t gets column j of the block at
+// column y.
+template <typename T, size_t N, size_t R, size_t C>
+__device__ __forceinline__ void store_transposed_quad(T (&t)[N][R][C], const uint32_t (&packed)[4],
+                                                      const int x0, const int y) {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
+                "Transposed elements are 1, 2 or 4 bytes");
+  if constexpr (sizeof(T) == 1) {
+    const uint32_t lo01      = __builtin_amdgcn_perm(packed[1], packed[0], 0x05010400);
+    const uint32_t hi01      = __builtin_amdgcn_perm(packed[1], packed[0], 0x07030602);
+    const uint32_t lo23      = __builtin_amdgcn_perm(packed[3], packed[2], 0x05010400);
+    const uint32_t hi23      = __builtin_amdgcn_perm(packed[3], packed[2], 0x07030602);
+    const uint32_t column[4] = {__builtin_amdgcn_perm(lo23, lo01, 0x05040100),
+                                __builtin_amdgcn_perm(lo23, lo01, 0x07060302),
+                                __builtin_amdgcn_perm(hi23, hi01, 0x05040100),
+                                __builtin_amdgcn_perm(hi23, hi01, 0x07060302)};
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      const int x = x0 + j;
+      *reinterpret_cast<uint32_t *>(&t[x / R][x % R][y]) = column[j];
+    }
+  } else if constexpr (sizeof(T) == 2) {
+#pragma unroll
+    for (int j = 0; j < 2; j++) {
+      const uint32_t sel = j == 0 ? 0x05040100 : 0x07060302;
+      const int x        = x0 + j;
+      *reinterpret_cast<uint2 *>(&t[x / R][x % R][y]) =
+          make_uint2(__builtin_amdgcn_perm(packed[1], packed[0], sel),
+                     __builtin_amdgcn_perm(packed[3], packed[2], sel));
+    }
+  } else {
+    *reinterpret_cast<uint4 *>(&t[x0 / R][x0 % R][y]) =
+        make_uint4(packed[0], packed[1], packed[2], packed[3]);
+  }
 }
 
 }  // namespace tdm
