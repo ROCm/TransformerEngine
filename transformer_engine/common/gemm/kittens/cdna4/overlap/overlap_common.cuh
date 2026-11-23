@@ -7,7 +7,9 @@
 #include "hip/hip_runtime.h"
 #include "kittens.cuh"
 #include "../xcd_sched_common.cuh"
+#include <hip/hip_bfloat16.h>
 #include <cstddef>
+#include <cstdio>
 #include <vector>
 
 // Pieces shared by the fused comm+GEMM overlap kernels; each pulls them into its own namespace
@@ -326,6 +328,205 @@ void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_st
             }
         }
     }
+}
+
+constexpr int RS_MAX_TP = 8;
+
+// Arrival poison, a comm workgroup still reading it knows the producing GEMM has not stored there yet
+// NOTE: These are signalling NaNs, so while hardware should never output them, if a user initializes their
+// data or pads with this specific value, they will see hangs until the timeout is hit.
+#define RS_SENT_BF16 0xFFAAu
+#define RS_SENT_DW ((unsigned int)RS_SENT_BF16 * 0x00010001u)
+
+struct RsPeers {
+    kittens::bf16 *stage[RS_MAX_TP];
+};
+
+typedef int rs_v4i __attribute__((ext_vector_type(4)));
+typedef const volatile __attribute__((address_space(1))) rs_v4i *rs_gvol4;
+
+__device__ __forceinline__
+rs_v4i sent_load16(const rs_v4i *p) {
+    return *(rs_gvol4)(size_t)p;
+}
+
+// NOTE: a dword compare can match a half of a real value that happens to equal the poison half.
+__device__ __forceinline__
+unsigned int sent_slot_pending(const int *__restrict__ v) {
+    unsigned int hit = 0u;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const unsigned int y = (unsigned int)v[j] ^ RS_SENT_DW;
+        hit |= (y - 0x00010001u) & ~y & 0x80008000u;
+    }
+    return hit;
+}
+
+template <int TP, bool NT>
+__device__ __forceinline__
+void pull_reduce_all_sent(int my_pe, int ncomm, int bands,
+                          const kittens::bf16 *__restrict__ local_stage, const RsPeers &peers,
+                          kittens::bf16 *__restrict__ out, size_t band_elems, uint64_t warn_ticks,
+                          kittens::bf16 *__restrict__ next_stage = nullptr) {
+    const int w        = (int)blockIdx.x;
+    const size_t lines = band_elems / 8;
+    typedef int v4i __attribute__((ext_vector_type(4)));
+
+    const uint64_t deadline = warn_ticks ? wall_clock64() + warn_ticks : 0;
+    bool warned = (warn_ticks == 0);
+
+    const size_t per_g = (lines + (size_t)ncomm - 1) / (size_t)ncomm;
+    const size_t g0    = (size_t)w * per_g;
+    if (g0 >= lines) return;
+    const size_t g1    = (g0 + per_g < lines) ? (g0 + per_g) : lines;
+
+    const v4i poison = {(int)RS_SENT_DW, (int)RS_SENT_DW, (int)RS_SENT_DW, (int)RS_SENT_DW};
+
+    for (int b0 = 0; b0 < bands; b0++) {
+        const size_t soff = ((size_t)my_pe * bands + b0) * band_elems;
+        v4i *dst          = (v4i *)(out + (size_t)b0 * band_elems);
+
+        for (size_t l = g0 + threadIdx.x; l < g1; ) {
+            float acc[8];
+            unsigned int pend = 0u;
+#pragma unroll 1
+            for (int s = 0; s < TP; s++) {
+                const kittens::bf16 *base = (s == my_pe) ? local_stage : peers.stage[s];
+                const v4i v = sent_load16((const rs_v4i *)(base + soff) + l);
+                pend |= sent_slot_pending((const int *)&v);
+                const __hip_bfloat16 *x = reinterpret_cast<const __hip_bfloat16 *>(&v);
+                if (s == 0) {
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] = __bfloat162float(x[j]);
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[j] += __bfloat162float(x[j]);
+                }
+            }
+            if (pend != 0u) {
+                if (!warned && wall_clock64() > deadline) {
+                    unsigned int srcs = 0u;
+#pragma unroll 1
+                    for (int s = 0; s < TP; s++) {
+                        const kittens::bf16 *b = (s == my_pe) ? local_stage : peers.stage[s];
+                        const v4i pv = sent_load16((const rs_v4i *)(b + soff) + l);
+                        if (sent_slot_pending((const int *)&pv)) srcs |= (1u << s);
+                    }
+                    printf("[fused GEMM+RS] fold still waiting: my_pe=%d block=%d band=%d "
+                           "line=%llu pending_srcs=0x%02x\n",
+                           my_pe, (int)blockIdx.x, b0, (unsigned long long)l, srcs);
+                    warned = true;
+                }
+                continue;
+            }
+            v4i res;
+            __hip_bfloat16 *a = reinterpret_cast<__hip_bfloat16 *>(&res);
+#pragma unroll
+            for (int j = 0; j < 8; j++) a[j] = __float2bfloat16(acc[j]);
+            if constexpr (NT) {
+                __builtin_nontemporal_store(res, &dst[l]);
+            } else {
+                dst[l] = res;
+            }
+            if (next_stage) {
+#pragma unroll
+                for (int s = 0; s < TP; s++) {
+                    v4i *nxt = (v4i *)(next_stage + ((size_t)s * bands + b0) * band_elems);
+                    __builtin_nontemporal_store(poison, &nxt[l]);
+                }
+            }
+            l += blockDim.x;
+        }
+    }
+}
+
+#ifndef COMM_WG
+#define COMM_WG 8
+#endif
+
+__device__ __constant__ unsigned int rs_sent_dw_device = RS_SENT_DW;
+
+struct RsLaunchCfg {
+    int comm_wg  = COMM_WG;
+    int wb_group = 1;
+    uint64_t warn_ticks = 0;   // 0 disables the fold's stall report
+    kittens::bf16 *next_stage = nullptr;
+};
+
+struct CdWalk {
+    int q, tf, dq, dr;
+};
+
+__host__ __device__ __forceinline__
+CdWalk cd_walk_init(int pos, int stride, int tiles_free) {
+    CdWalk w;
+    w.q  = pos / tiles_free;
+    w.tf = pos - w.q * tiles_free;
+    w.dq = stride / tiles_free;
+    w.dr = stride - w.dq * tiles_free;
+    return w;
+}
+
+template <int TP, bool BANDS_ON_N, typename TD>
+__host__ __device__ __forceinline__
+TD cd_walk_desc(CdWalk w, int my_pe, int bands) {
+    const int j    = w.q % TP;
+    const int band = w.q / TP;
+    TD td;
+    td.chunk_id = (j == 0) ? my_pe : ((j - 1 < my_pe) ? j - 1 : j);
+    if constexpr (BANDS_ON_N) {
+        td.tile_n = td.chunk_id * bands + band;
+        td.tile_m = w.tf;
+    } else {
+        td.tile_m = td.chunk_id * bands + band;
+        td.tile_n = w.tf;
+    }
+    return td;
+}
+
+__host__ __device__ __forceinline__
+CdWalk cd_walk_next(CdWalk w, int tiles_free) {
+    w.q  += w.dq;
+    w.tf += w.dr;
+    if (w.tf >= tiles_free) {
+        w.tf -= tiles_free;
+        w.q  += 1;
+    }
+    return w;
+}
+
+template <bool BANDS_ON_N, typename TD>
+static std::vector<TD> build_rs_work_queue(int M, int N_total, int tp_size, int my_pe) {
+    const int tiles_free = BANDS_ON_N ? M / BLOCK_ROW : N_total / BLOCK_COL;
+    const int bands      = BANDS_ON_N ? (N_total / tp_size) / BLOCK_COL : (M / tp_size) / BLOCK_ROW;
+
+    std::vector<TD> queue;
+    queue.reserve((size_t)tiles_free * bands * tp_size);
+
+    auto emit = [&](int chunk, int band) {
+        for (int f = 0; f < tiles_free; f++) {
+            TD td{};
+            td.chunk_id = chunk;
+            if constexpr (BANDS_ON_N) {
+                td.tile_m = f;
+                td.tile_n = chunk * bands + band;
+            } else {
+                td.tile_m = chunk * bands + band;
+                td.tile_n = f;
+            }
+            queue.push_back(td);
+        }
+    };
+
+    for (int band = 0; band < bands; band++) {
+        emit(my_pe, band);
+        for (int c = 0; c < tp_size; c++) {
+            if (c != my_pe) {
+                emit(c, band);
+            }
+        }
+    }
+    return queue;
 }
 
 }  // namespace hk_overlap
