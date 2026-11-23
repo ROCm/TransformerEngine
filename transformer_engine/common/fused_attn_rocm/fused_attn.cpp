@@ -209,6 +209,7 @@ const std::unordered_map<NVTE_QKV_Layout, std::string> mNVTEQKVLayoutStr = {
   {NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD, "BSHD_SBHD_SBHD"},
   {NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD, "THD_BSHD_BSHD"},
   {NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD, "THD_SBHD_SBHD"},
+  {NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD, "BHSD_BHSD_BHSD"},
 };
 
 // for printing bias_type in log_fused_attn_config
@@ -314,7 +315,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }else if(fused_attn_rocm::is_small_seq_supported_static(
                  static_cast<DType>(q_dtype), qkv_layout, bias_type, attn_mask_type, dropout,
                  max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, num_attn_heads,
-                 num_gqa_groups, softmax_type, false)){
+                 num_gqa_groups, softmax_type, window_size_left, window_size_right, false)){
       ck_max_logit_unsupported = "when the small-seq kernels may run (NVTE_FUSED_ATTN_CK_SMALLSEQ=1)";
     }
   }
@@ -430,7 +431,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       is_training, return_max_logit, attn_scale, dropout,
       qkv_layout, bias_type, attn_mask_type, softmax_type,
-      window_size_left, window_size_right,
+      window_size_left, window_size_right, bottom_right_diagonal,
       input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
@@ -544,7 +545,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       softmax_type,
-      window_size_left, window_size_right,
+      window_size_left, window_size_right, bottom_right_diagonal,
       deterministic,
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
       input_SoftmaxOffset,

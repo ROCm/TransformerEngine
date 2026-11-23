@@ -43,7 +43,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
       chunk_size, noop_flag_cu.data(),
       static_cast<NVTEDType>(GetTransformerEngineDType(tensor_lists[0][0].scalar_type())),
       g_l2norm_cache.addresses_dev.data_ptr<int64_t>(),
-      g_l2norm_cache.sizes_dev.data_ptr<int>(),
+      g_l2norm_cache.sizes_dev.data_ptr<int64_t>(),
       g_l2norm_cache.block_to_tensor_dev.data_ptr<int>(),
       g_l2norm_cache.chunk_offsets_dev.data_ptr<int>(),
       total_chunks, output_cu.data(), ret_cu.data(), stream);
@@ -145,7 +145,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
       chunk_size, noop_flag_cu.data(),
       static_cast<NVTEDType>(GetTransformerEngineDType(tensor_lists[0][0].scalar_type())),
       g_unscale_l2norm_cache.addresses_dev.data_ptr<int64_t>(),
-      g_unscale_l2norm_cache.sizes_dev.data_ptr<int>(),
+      g_unscale_l2norm_cache.sizes_dev.data_ptr<int64_t>(),
       g_unscale_l2norm_cache.block_to_tensor_dev.data_ptr<int>(),
       g_unscale_l2norm_cache.chunk_offsets_dev.data_ptr<int>(),
       total_chunks, output_cu.data(), ret_cu.data(),

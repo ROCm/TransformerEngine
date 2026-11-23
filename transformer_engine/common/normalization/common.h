@@ -467,6 +467,13 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
 }
 #endif
 
+// RMSNorm forward with MXFP8 output by Transformer Engine's fused kernel
+// (rmsnorm/rmsnorm_fwd_mxfp8.cu), which also writes GEMM-swizzled scaling factors.
+bool is_supported_by_te_rmsnorm_fwd_mxfp8(const Tensor& x, const Tensor& gamma, const Tensor& z);
+void rmsnorm_fwd_mxfp8(const Tensor& x, const Tensor& gamma, float epsilon, Tensor* z,
+                       Tensor* rsigma, int multiprocessorCount, bool zero_centered_gamma,
+                       cudaStream_t stream);
+
 }  // namespace normalization
 }  // namespace transformer_engine
 
