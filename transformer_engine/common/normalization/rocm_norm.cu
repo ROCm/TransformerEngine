@@ -152,21 +152,17 @@ PlanKernel get_fwd_mxfp8_kernel(const bool rms, const DType itype, const DType o
     NVTE_CHECK_CUDA(hipGetLastError());
     // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where z asks for that.
     const bool preswizzled = z.with_gemm_swizzled_scales;
-    if (preswizzled) {
-      mxfp8_tdm::fill_scale_padding(z.scale_inv, rows, DIVUP(cols, size_t{32}), false, nullptr,
-                                    lp.stream);
-      if (lp.training) {
-        mxfp8_tdm::fill_scale_padding(z.columnwise_scale_inv, cols, DIVUP(rows, size_t{32}), true,
-                                      nullptr, lp.stream);
-      }
-    }
-    const Mxfp8Out out{z.data.dptr,
-                       z.columnwise_data.dptr,
-                       static_cast<e8m0_t *>(z.scale_inv.dptr),
-                       static_cast<e8m0_t *>(z.columnwise_scale_inv.dptr),
-                       mxfp8_tdm::scale_layout(z.scale_inv, false, preswizzled),
-                       lp.training ? mxfp8_tdm::scale_layout(z.columnwise_scale_inv, true, preswizzled)
-                                   : mxfp8_tdm::ScaleLayout{}};
+    const Mxfp8Out out{
+        z.data.dptr,
+        z.columnwise_data.dptr,
+        static_cast<e8m0_t *>(z.scale_inv.dptr),
+        static_cast<e8m0_t *>(z.columnwise_scale_inv.dptr),
+        dispatch::mxfp8::prepare_scales(z.scale_inv, false, preswizzled, rows,
+                                        DIVUP(cols, size_t{32}), nullptr, lp.stream),
+        lp.training ? dispatch::mxfp8::prepare_scales(z.columnwise_scale_inv, true, preswizzled,
+                                                      cols, DIVUP(rows, size_t{32}), nullptr,
+                                                      lp.stream)
+                    : dispatch::mxfp8::ScaleLayout{}};
     const Mxfp8Kernel kernel = lp.training ? both_kernel : rowwise_kernel;
     kernel<<<grid, mxfp8_tdm::THREADS_PER_CHUNK, 0, lp.stream>>>(lp.params, out);
     NVTE_CHECK_CUDA(hipGetLastError());
@@ -241,8 +237,8 @@ PlanKernel get_fwd_kernel(const NVTE_Norm_Type norm_type, const DType wtype, con
     stats_blocks = fwd_blocks(stats_kernel, split, params.rows, launch_params.multiprocessorCount);
   }
   const size_t rows = params.rows;
-  const dim3 chunks(DIVUP(static_cast<size_t>(params.cols), fp8_tdm::CHUNK_DIM_X),
-                    DIVUP(rows, fp8_tdm::CHUNK_DIM_Y));
+  const dim3 chunks(DIVUP(static_cast<size_t>(params.cols), mxfp8_tdm::CHUNK_DIM_X),
+                    DIVUP(rows, mxfp8_tdm::CHUNK_DIM_Y));
   return [=](LaunchParams<ForwardKernelParams> &lp, const bool configure) {
     if (configure) {
       return;
@@ -254,8 +250,8 @@ PlanKernel get_fwd_kernel(const NVTE_Norm_Type norm_type, const DType wtype, con
       NVTE_CHECK_CUDA(hipGetLastError());
       float *const amax_slots =
           amax != nullptr ? rocm_amax_slots(chunks.x * chunks.y, lp.stream) : nullptr;
-      transpose_kernel<<<chunks, fp8_tdm::THREADS_PER_CHUNK, 0, lp.stream>>>(lp.params, z_t,
-                                                                             amax_slots);
+      transpose_kernel<<<chunks, mxfp8_tdm::THREADS_PER_CHUNK, 0, lp.stream>>>(lp.params, z_t,
+                                                                               amax_slots);
       NVTE_CHECK_CUDA(hipGetLastError());
       if (amax_slots != nullptr) {
         rocm_amax_finalize(amax_slots, amax, nullptr, lp.stream);

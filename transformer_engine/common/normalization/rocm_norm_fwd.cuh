@@ -12,7 +12,6 @@
 // tensor-scaled outputs with their transpose. This expects its includer to have included
 // normalization/common.h, which brings the MXFP8 TDM quantize.
 
-#include "../cast/fp8/rocm_quantize_fp8_tdm.cuh"
 #include "rocm_norm_common.cuh"
 
 namespace transformer_engine {
@@ -20,7 +19,6 @@ namespace normalization {
 namespace rocm {
 
 namespace mxfp8_tdm = dispatch::mxfp8::tdm_kernel;
-namespace fp8_tdm = dispatch::fp8::tdm_kernel;
 
 #ifdef __GFX12__
 // The mean, 0 for RMSNorm, and the rsigma of a row whose part xv the wave holds, with all waves of
@@ -186,8 +184,8 @@ struct Mxfp8Out {
   void *colwise;
   e8m0_t *scales_rowwise;
   e8m0_t *scales_colwise;
-  mxfp8_tdm::ScaleLayout rowwise_scales;
-  mxfp8_tdm::ScaleLayout colwise_scales;
+  dispatch::mxfp8::ScaleLayout rowwise_scales;
+  dispatch::mxfp8::ScaleLayout colwise_scales;
 };
 
 // LayerNorm, or RMSNorm with RMS, of the 128x128 chunk (blockIdx.y, blockIdx.x) of params.x into
@@ -284,33 +282,34 @@ __global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
 // LayerNorm, or RMSNorm with RMS, of the 128x128 chunk (blockIdx.y, blockIdx.x) of params.x into
 // the FP8 params.z and its cols x rows transpose z_t, with the statistics norm_fwd_kernel left in
 // params.mu and params.rs. The outputs and the amax are those of norm_fwd_kernel. As in the FP8
-// TDM quantize, each wave normalizes its band of the chunk and the waves assemble the chunk's
-// transpose in LDS, which stays at the quantize's 64 KB for 16-bit inputs.
+// TDM quantize, with the chunks of the MXFP8 one, each wave normalizes its band of the chunk and
+// the waves assemble the chunk's transpose in LDS, which stays at the quantize's 64 KB for 16-bit
+// inputs.
 template <bool RMS, typename IType, typename WType, typename OType>
-__global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
+__global__ void __launch_bounds__(mxfp8_tdm::THREADS_PER_CHUNK)
     norm_fp8_transpose_kernel(const ForwardKernelParams params, void *const z_t,
                               float *const amax_slots) {
 #ifdef __GFX12__
-  using fp8_tdm::band_t;
-  constexpr int WAVES = fp8_tdm::WAVES;
-  constexpr int BAND_Y = fp8_tdm::BAND_Y;
-  constexpr int LANE_COLS = fp8_tdm::COLS_PER_LANE;
-  constexpr int QUADS = fp8_tdm::QUADS;
+  using mxfp8_tdm::band_t;
+  constexpr int WAVES = mxfp8_tdm::WAVES;
+  constexpr int BAND_Y = mxfp8_tdm::BAND_Y;
+  constexpr int LANE_COLS = mxfp8_tdm::COLS_PER_LANE;
+  constexpr int QUADS = BAND_Y / 4;
   // DPP8 selector: lane k of each group of 8 reads lane (k + 1) % 8.
   constexpr unsigned NEXT_LANE = 1 | 2 << 3 | 3 << 6 | 4 << 9 | 5 << 12 | 6 << 15 | 7 << 18;
   static_assert(QUADS == 8, "A group of DPP8 lanes holds the statistics of a band");
   __shared__ alignas(128) band_t<IType> in_sh[WAVES];
   __shared__ alignas(128) band_t<OType> out_sh[WAVES];
   // Wave w stores rows [w * BAND_Y, (w + 1) * BAND_Y) of the transposed chunk.
-  __shared__ alignas(128) OType t_sh[WAVES][BAND_Y][fp8_tdm::CHUNK_DIM_Y];
+  __shared__ alignas(128) OType t_sh[WAVES][BAND_Y][mxfp8_tdm::CHUNK_DIM_Y];
 
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
   const int lane = threadIdx.x % WAVE_SIZE;
   const int lane_col = lane * LANE_COLS;
   const uint64_t rows = params.rows;
   const uint32_t cols = params.cols;
-  const uint64_t chunk_row = static_cast<uint64_t>(blockIdx.y) * fp8_tdm::CHUNK_DIM_Y;
-  const uint32_t chunk_col = blockIdx.x * fp8_tdm::CHUNK_DIM_X;
+  const uint64_t chunk_row = static_cast<uint64_t>(blockIdx.y) * mxfp8_tdm::CHUNK_DIM_Y;
+  const uint32_t chunk_col = blockIdx.x * mxfp8_tdm::CHUNK_DIM_X;
   const uint64_t band_row0 = chunk_row + wave * BAND_Y;
   const float scale = *static_cast<const float *>(params.scale);
   float amax = 0.0f;
@@ -385,7 +384,7 @@ __global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
                                                 o[3] * scale);
         *reinterpret_cast<uint32_t *>(&out_sh[wave][y][lane_col]) = packed[i];
       }
-      fp8_tdm::store_transposed_quad(t_sh, packed, lane_col, wave, quad);
+      tdm::store_transposed_quad(t_sh, packed, lane_col, wave * BAND_Y + quad * 4);
 #pragma unroll
       for (int i = 0; i < 4; i++) {
         if constexpr (!RMS) {
@@ -419,12 +418,8 @@ __global__ void __launch_bounds__(fp8_tdm::THREADS_PER_CHUNK)
     for (int w = 0; w < WAVES; w++) {
       block_amax = fmaxf(block_amax, *reinterpret_cast<const float *>(in_sh[w]));
     }
-    float *const amax_dst = rocm_amax_target(static_cast<float *>(params.amax), amax_slots,
-                                             blockIdx.y * gridDim.x + blockIdx.x);
-    // As in the quantize, only atomics that may raise the amax are issued.
-    if (block_amax > *amax_dst) {
-      rocm_atomicMaxFloat(amax_dst, block_amax);
-    }
+    rocm_raise_amax(static_cast<float *>(params.amax), amax_slots,
+                    blockIdx.y * gridDim.x + blockIdx.x, block_amax);
   }
   if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
     reciprocal<float>(static_cast<float *>(params.scale_inv), scale);

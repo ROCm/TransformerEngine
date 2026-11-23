@@ -51,55 +51,8 @@ template <typename T, size_t BAND_ROWS = BAND_Y>
 using band_t = T[BAND_ROWS][CHUNK_DIM_X];
 
 #ifdef __GFX12__
+using common::cvt_4x_to_fp8;
 using common::cvt_from_float;
-
-// Like the generic kernels, plain casts saturate as rocm_pack_4xfloat8 does, Inf included, and
-// fused ones as static_cast<OType>, which keeps Inf and NaN.
-template <typename OType, bool SATURATE_INF>
-__device__ __forceinline__ uint32_t cvt_4x_to_fp8(const float x0, const float x1, const float x2,
-                                                  const float x3) {
-  if constexpr (SATURATE_INF) {
-    return rocm_pack_4xfloat8<OType>(x0, x1, x2, x3);
-  } else {
-    constexpr float max = transformer_engine::detail::TypeExtrema<OType>::max;
-    const auto saturate = [](const float x) {
-      return __builtin_isfinite(x) ? __builtin_amdgcn_fmed3f(x, max, -max) : x;
-    };
-    int packed = 0;
-    if constexpr (std::is_same_v<OType, fp8e4m3>) {
-      packed = __builtin_amdgcn_cvt_pk_fp8_f32(saturate(x0), saturate(x1), packed, false);
-      packed = __builtin_amdgcn_cvt_pk_fp8_f32(saturate(x2), saturate(x3), packed, true);
-    } else {
-      packed = __builtin_amdgcn_cvt_pk_bf8_f32(saturate(x0), saturate(x1), packed, false);
-      packed = __builtin_amdgcn_cvt_pk_bf8_f32(saturate(x2), saturate(x3), packed, true);
-    }
-    return static_cast<uint32_t>(packed);
-  }
-}
-
-// Writes the lane's COLS_PER_LANE columns of a quad of packed rows of wave's BAND_ROWS-row band,
-// transposed, into the chunk's transpose t.
-template <typename OType, size_t N, size_t BAND_ROWS>
-__device__ __forceinline__ void store_transposed_quad(OType (&t)[N][BAND_ROWS][CHUNK_DIM_Y],
-                                                      const uint32_t (&packed)[4],
-                                                      const int lane_offset_X, const int wave,
-                                                      const int quad) {
-  // Column j of the quad: byte j of each row
-  const uint32_t lo01 = __builtin_amdgcn_perm(packed[1], packed[0], 0x05010400);
-  const uint32_t hi01 = __builtin_amdgcn_perm(packed[1], packed[0], 0x07030602);
-  const uint32_t lo23 = __builtin_amdgcn_perm(packed[3], packed[2], 0x05010400);
-  const uint32_t hi23 = __builtin_amdgcn_perm(packed[3], packed[2], 0x07030602);
-  const uint32_t column[COLS_PER_LANE] = {__builtin_amdgcn_perm(lo23, lo01, 0x05040100),
-                                          __builtin_amdgcn_perm(lo23, lo01, 0x07060302),
-                                          __builtin_amdgcn_perm(hi23, hi01, 0x05040100),
-                                          __builtin_amdgcn_perm(hi23, hi01, 0x07060302)};
-#pragma unroll
-  for (int j = 0; j < COLS_PER_LANE; j++) {
-    const int x = lane_offset_X + j;
-    *reinterpret_cast<uint32_t *>(&t[x / BAND_ROWS][x % BAND_ROWS][wave * BAND_ROWS + quad * 4]) =
-        column[j];
-  }
-}
 #endif  // __GFX12__
 
 // Quantizes chunk (chunk_Y, chunk_X) of a rows x cols tensor into output and, with TRANSPOSE, into
@@ -182,7 +135,7 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
         *reinterpret_cast<uint32_t *>(&out[y][lane_offset_X]) = packed[i];
       }
       if constexpr (TRANSPOSE) {
-        store_transposed_quad(t_sh, packed, lane_offset_X, wave, quad);
+        tdm::store_transposed_quad(t_sh, packed, lane_offset_X, wave * BAND_Y + quad * 4);
       }
     }
     tdm::store_2d(output, out, rows, cols, cols, band_offset_Y, chunk_offset_X);
@@ -231,13 +184,7 @@ __device__ __forceinline__ void quantize_chunk(const IType *input, const IType *
     for (int w = 0; w < WAVES; w++) {
       block_amax = fmaxf(block_amax, reinterpret_cast<const float *>(in_sh[w])[CHUNK_DIM_X]);
     }
-    float *const amax_dst =
-        rocm_amax_target(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x);
-    // Atomics on one address serialize, so only those that may raise the amax are issued. It only
-    // grows during the kernel, so a stale read can only cause a redundant atomic.
-    if (block_amax > *amax_dst) {
-      rocm_atomicMaxFloat(amax_dst, block_amax);
-    }
+    rocm_raise_amax(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x, block_amax);
   }
   tdm::wait<0>();
 #endif  // __GFX12__
@@ -459,8 +406,8 @@ __global__ void __launch_bounds__((gated_waves<IS_DGATED, TRANSPOSE>() * WAVE_SI
       for (int step = 0; step < QUADS; step++) {
 #pragma unroll
         for (int h = 0; h < HALVES; h++) {
-          store_transposed_quad(t_sh[h], packed[step][h], lane_offset_X, wave,
-                                (first_quad + step) % QUADS);
+          tdm::store_transposed_quad(t_sh[h], packed[step][h], lane_offset_X,
+                                     wave * BAND_Y + (first_quad + step) % QUADS * 4);
         }
       }
     }
@@ -483,11 +430,7 @@ __global__ void __launch_bounds__((gated_waves<IS_DGATED, TRANSPOSE>() * WAVE_SI
     for (int w = 0; w < WAVES; w++) {
       block_amax = fmaxf(block_amax, wave_amax[w * AMAX_STRIDE]);
     }
-    float *const amax_dst =
-        rocm_amax_target(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x);
-    if (block_amax > *amax_dst) {
-      rocm_atomicMaxFloat(amax_dst, block_amax);
-    }
+    rocm_raise_amax(amax_ptr, amax_slots, blockIdx.y * gridDim.x + blockIdx.x, block_amax);
   }
   if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
     *scale_inv_ptr = __frcp_rn(scale);
@@ -622,7 +565,7 @@ __device__ __forceinline__ void quantize_block2d_chunk(
         }
       }
       if constexpr (TRANSPOSE) {
-        store_transposed_quad(t_sh, packed, lane_offset_X, wave, quad);
+        tdm::store_transposed_quad(t_sh, packed, lane_offset_X, wave * BAND_Y + quad * 4);
       }
     }
     if (output != nullptr) {
@@ -769,7 +712,7 @@ __device__ __forceinline__ void quantize_block1d_chunk(
                                                   static_cast<float>(x.data.elt[2]) * col_scale[2],
                                                   static_cast<float>(x.data.elt[3]) * col_scale[3]);
         }
-        store_transposed_quad(t_sh, packed, col_offset_X, wave, quad);
+        tdm::store_transposed_quad(t_sh, packed, col_offset_X, wave * BAND_Y + quad * 4);
       }
     }
     __syncthreads();

@@ -28,40 +28,6 @@ constexpr uint32_t THREADS = WAVES * WAVE_SIZE;
 constexpr uint32_t BAND_ROWS = CHUNK_ROWS / WAVES;  // 32
 constexpr uint32_t QUADS = BAND_ROWS / 4;           // 8
 
-#ifdef __GFX12__
-// Writes the transpose of a lane's block of 4 rows by 4 bytes, one row per word of packed, into the chunk's
-// transpose t: row x0 + j of t gets column j of the block at column y.
-template <typename T, size_t N, size_t R, size_t C>
-__device__ __forceinline__ void store_transposed_quad(T (&t)[N][R][C], const uint32_t (&packed)[4], const int x0,
-                                                      const int y) {
-  if constexpr (sizeof(T) == 1) {
-    const uint32_t lo01      = __builtin_amdgcn_perm(packed[1], packed[0], 0x05010400);
-    const uint32_t hi01      = __builtin_amdgcn_perm(packed[1], packed[0], 0x07030602);
-    const uint32_t lo23      = __builtin_amdgcn_perm(packed[3], packed[2], 0x05010400);
-    const uint32_t hi23      = __builtin_amdgcn_perm(packed[3], packed[2], 0x07030602);
-    const uint32_t column[4] = {__builtin_amdgcn_perm(lo23, lo01, 0x05040100),
-                                __builtin_amdgcn_perm(lo23, lo01, 0x07060302),
-                                __builtin_amdgcn_perm(hi23, hi01, 0x05040100),
-                                __builtin_amdgcn_perm(hi23, hi01, 0x07060302)};
-#pragma unroll
-    for (int j = 0; j < 4; j++) {
-      const int x = x0 + j;
-      *reinterpret_cast<uint32_t *>(&t[x / R][x % R][y]) = column[j];
-    }
-  } else if constexpr (sizeof(T) == 4) {
-    *reinterpret_cast<uint4 *>(&t[x0 / R][x0 % R][y]) = make_uint4(packed[0], packed[1], packed[2], packed[3]);
-  } else {
-#pragma unroll
-    for (int j = 0; j < 2; j++) {
-      const uint32_t sel = j == 0 ? 0x05040100 : 0x07060302;
-      const int x        = x0 + j;
-      *reinterpret_cast<uint2 *>(&t[x / R][x % R][y]) =
-          make_uint2(__builtin_amdgcn_perm(packed[1], packed[0], sel), __builtin_amdgcn_perm(packed[3], packed[2], sel));
-    }
-  }
-}
-#endif  // __GFX12__
-
 // Block b transposes the chunk at row chunk b / col_chunks and column chunk b % col_chunks of the rows x cols input.
 template <typename T>
 __global__ void __launch_bounds__(THREADS)
@@ -97,7 +63,7 @@ __global__ void __launch_bounds__(THREADS)
       for (int i = 0; i < 4; i++) {
         packed[i] = *reinterpret_cast<const uint32_t *>(&in_sh[wave][quad * 4 + i][lane * ELEMS]);
       }
-      store_transposed_quad(t_sh, packed, lane * ELEMS, wave * BAND_ROWS + quad * 4);
+      tdm::store_transposed_quad(t_sh, packed, lane * ELEMS, wave * BAND_ROWS + quad * 4);
     }
   }
   __syncthreads();

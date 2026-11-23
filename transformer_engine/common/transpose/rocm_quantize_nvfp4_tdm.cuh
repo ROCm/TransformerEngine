@@ -155,6 +155,8 @@ __device__ __forceinline__ void quantize_chunk(
 #ifdef __GFX12__
   // 4over6 scales 2D blocks by their error, summed per row (rowwise) or column (colwise) first.
   constexpr bool k2DErr = k4Over6 && k2D;
+  // Unrolled, 4over6 scoring overflows the instruction cache in all but 2D rowwise-only kernels.
+  constexpr bool kRolled = k4Over6 && (!k2D || kColwise);
   __shared__ alignas(128) IType in_sh[kWaves][kBandY][kChunkDim];
   __shared__ alignas(128) uint8_t rowwise_sh[kRowwise ? kWaves : 1][kBandY][kChunkDim / 2];
   __shared__ alignas(8) uint8_t rowwise_scale_sh[kRowwise ? kWaves : 1][kBandY][kBlocks];
@@ -225,8 +227,9 @@ __device__ __forceinline__ void quantize_chunk(
     if (active) {
       if constexpr (kRowwise) {
         constexpr int kRowsPerStep = kWaveSize / kBlocks;
+        constexpr int kUnroll      = kRolled ? 1 : kBandY / kRowsPerStep;
         const int block = lane % kBlocks;
-#pragma unroll
+#pragma unroll kUnroll
         for (int step = 0; step < kBandY / kRowsPerStep; step++) {
           const int y = step * kRowsPerStep + lane / kBlocks;
           float x[kBlockDim];
@@ -240,9 +243,9 @@ __device__ __forceinline__ void quantize_chunk(
         }
       }
       if constexpr (kColwise) {
-#pragma unroll
+#pragma unroll 1
         for (int b = 0; b < kBandBlocks; b++) {
-#pragma unroll
+#pragma unroll 1
           for (int i = 0; i < kColsPerLane; i++) {
             const int c = lane * kColsPerLane + i;
             float x[kBlockDim];
@@ -287,9 +290,7 @@ __device__ __forceinline__ void quantize_chunk(
   if (kRowwise && active) {
     // Per step, a lane quantizes a block of a row, kBlocks lanes the whole row.
     constexpr int kRowsPerStep = kWaveSize / kBlocks;  // 4
-    // 1D 4over6 scores every block here, so a step at a time keeps its code and registers small.
-    constexpr bool kOneAtATime = k4Over6 && !k2D;
-    constexpr int kUnroll = kOneAtATime ? 1 : kBandY / kRowsPerStep;
+    constexpr int kUnroll      = kRolled ? 1 : kBandY / kRowsPerStep;
     const int block = lane % kBlocks;
     auto &out    = rowwise_sh[wave];
     auto &scales = rowwise_scale_sh[wave];
@@ -374,7 +375,7 @@ __device__ __forceinline__ void quantize_chunk(
       const int lane_offset_X = lane * kColsPerLane;
 #pragma unroll
       for (int b = 0; b < kBandBlocks; b++) {
-        if constexpr (k4Over6 && !k2D) {
+        if constexpr (kRolled) {
           // A column at a time, as the rowwise steps.
 #pragma unroll 1
           for (int i = 0; i < kColsPerLane; i++) {

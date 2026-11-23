@@ -793,14 +793,17 @@ def fused_rs_gemm_eligible(
     fp8: bool,
     gelu: bool = False,
     is_dgrad: bool = False,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether the fused GEMM+RS backend covers this call."""
     if not _ub_is_fused(name):
         return True  # not our backend
     if is_dgrad:
         return False
-    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
-    if fp8 or gelu or bias is not None:
+    # TODO: Drop these as the kernel gains fp8, bias and gelu support.
+    if gelu or bias is not None:
+        return False
+    if fp8 and not mxfp8:
         return False
     if dtype != torch.bfloat16:
         return False
@@ -847,12 +850,15 @@ def fused_bulk_rs_eligible(
     tp_size: int,
     fp8: bool,
     bias: Optional[torch.Tensor] = None,
+    mxfp8: bool = False,
 ) -> bool:
     """Whether this call may use the bulk reduce-scatter overlap."""
     if not IS_HIP_EXTENSION:
         return True
     # TODO: Add bias support
-    eligible = _ub_is_fused(name) and not fp8 and dtype == torch.bfloat16 and bias is None
+    eligible = (
+        _ub_is_fused(name) and (not fp8 or mxfp8) and dtype == torch.bfloat16 and bias is None
+    )
     if eligible:
         m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=False)
         eligible = _fused_gemm_shape_ok(m, k, n_chunk, tp_size)

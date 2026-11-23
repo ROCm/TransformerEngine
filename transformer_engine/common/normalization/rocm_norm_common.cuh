@@ -15,7 +15,7 @@
 
 #include <algorithm>
 
-#include "../cast/fp8/rocm_quantize_fp8_tdm.cuh"
+#include "../cast/core/rocm_tdm_common.cuh"
 #include "../util/rocm_device_utils.cuh"
 
 namespace transformer_engine {
@@ -71,8 +71,8 @@ inline size_t block_slice_bytes(const RowSplit &split) {
 }
 
 #ifdef __GFX12__
+using dispatch::common::cvt_4x_to_fp8;
 using dispatch::common::cvt_from_float;
-using dispatch::fp8::tdm_kernel::cvt_4x_to_fp8;
 
 template <typename T, int BYTES = SLICE_BYTES>
 using slice_t = T[1][BYTES / sizeof(T)];
@@ -393,7 +393,7 @@ __device__ __forceinline__ void block_raise_amax(float amax, float *amax_ptr, fl
     for (int w = 0; w < static_cast<int>(blockDim.x / WAVE_SIZE); w++) {
       block_amax = fmaxf(block_amax, amax_sh[w]);
     }
-    rocm_atomicMaxFloat(rocm_amax_target(amax_ptr, amax_slots, blockIdx.x), block_amax);
+    rocm_raise_amax(amax_ptr, amax_slots, blockIdx.x, block_amax);
   }
 }
 #endif  // __GFX12__
