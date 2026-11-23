@@ -2945,6 +2945,21 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 }
 
 #ifdef USE_ROCM
+namespace {
+
+// The MXFP4 cast kernel writes one scale per 32-element block, but the FP4 GEMMs also read the
+// padding get_scale_shape adds, so a padded scale tensor must start zeroed.
+at::Tensor allocate_mxfp4_scale_inv(const std::vector<size_t>& scale_shape, size_t num_blocks,
+                                    const at::TensorOptions& opts) {
+  const std::vector<int64_t> shape(scale_shape.begin(), scale_shape.end());
+  if (product(scale_shape) != num_blocks) {
+    return at::zeros(shape, opts);
+  }
+  return at::empty(shape, opts);
+}
+
+}  // namespace
+
 MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
@@ -2981,21 +2996,20 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor;
   const auto uint8_tensor_opts =
       at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  const size_t num_blocks = flat_first_dim * flat_last_dim / MXFP4_BLOCK_SIZE;
   if (rowwise_usage) {
-    const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
-                                                     rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), uint8_tensor_opts);
-    rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    rowwise_scale_inv_tensor =
+        allocate_mxfp4_scale_inv(rowwise_scale_inv_shape, num_blocks, uint8_tensor_opts);
   }
   if (columnwise_usage) {
-    const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
-                                                     columnwise_scale_inv_shape.end());
     std::vector<int64_t> shape_int64_2d = {static_cast<int64_t>(flat_first_dim),
                                            static_cast<int64_t>(flat_last_dim)};
     const auto transpose_shape_int64 = make_transpose_shape<int64_t>(shape_int64_2d);
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), uint8_tensor_opts);
-    columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    columnwise_scale_inv_tensor =
+        allocate_mxfp4_scale_inv(columnwise_scale_inv_shape, num_blocks, uint8_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -3072,18 +3086,17 @@ std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  const size_t num_blocks = static_cast<size_t>(total_elements) / MXFP4_BLOCK_SIZE;
   if (rowwise_usage) {
     rowwise_data = at::empty({total_data_elements}, uint8_opts);
     const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+    rowwise_scale_inv = allocate_mxfp4_scale_inv({product(scale_shape)}, num_blocks, uint8_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_data_elements}, uint8_opts);
     const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+    columnwise_scale_inv = allocate_mxfp4_scale_inv({product(scale_shape)}, num_blocks, uint8_opts);
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -3180,6 +3193,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  const size_t num_blocks = flat_first_dim * flat_last_dim / MXFP4_BLOCK_SIZE;
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -3190,11 +3204,8 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_rowwise_data") = *rowwise_data;
     }
     if (!rowwise_scale_inv) {
-      const auto scale_inv_shape = get_scale_shape(shape, false);
-      const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
-                                                       scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      rowwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      rowwise_scale_inv = allocate_mxfp4_scale_inv(get_scale_shape(shape, false), num_blocks, opts);
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
   } else {  // rowwise_usage == false
@@ -3219,11 +3230,9 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_columnwise_data") = *columnwise_data;
     }
     if (!columnwise_scale_inv) {
-      const auto scale_inv_shape = get_scale_shape(shape, true);
-      const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
-                                                       scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      columnwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      columnwise_scale_inv =
+          allocate_mxfp4_scale_inv(get_scale_shape(shape, true), num_blocks, opts);
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
   } else {  // columnwise_usage == false
