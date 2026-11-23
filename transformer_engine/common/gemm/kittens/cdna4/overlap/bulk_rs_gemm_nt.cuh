@@ -521,7 +521,7 @@ struct mxfp8_rs_globals {
     size_t shard_elems;            // (tokens/tp) * hidden
     size_t band_elems;             // RS_BAND_ROWS * hidden
     hipStream_t stream;
-    int *counters;                 // [NUM_XCDS] per-XCD tile cursors, then the exit count; self-resetting
+    int *bucket_ctr;               // [NUM_XCDS_AFF] per-XCD tile cursors, zeroed per call
     int M = c.rows();
     int N = c.cols();
     int K = a.rows();
@@ -531,26 +531,6 @@ struct mxfp8_rs_globals {
     }
     dim3 block() { return dim3(NUM_THREADS); }
 };
-
-constexpr int NUM_XCDS = 8;
-
-// Next tile of this XCD's share (t = xcd + NUM_XCDS * i), else one stolen from another XCD.
-__device__ __forceinline__ int claim_xcd_tile(int *bucket_ctr, int total) {
-    const int x0 = (int)blockIdx.x;
-#pragma unroll 1
-    for (int s = 0; s < NUM_XCDS; s++) {
-        const int x   = (x0 + s) & (NUM_XCDS - 1);
-        const int cnt = (total - x + NUM_XCDS - 1) / NUM_XCDS;
-        if (__hip_atomic_load(&bucket_ctr[x], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) >= cnt) {
-            continue;
-        }
-        const int i = atomicAdd(&bucket_ctr[x], 1);
-        if (i < cnt) {
-            return x + NUM_XCDS * i;
-        }
-    }
-    return total;
-}
 
 template <int CBSZ, int BLGP>
 __global__ __launch_bounds__(NUM_THREADS, 2)
@@ -581,7 +561,7 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
     while (true) {
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
-            s_tile_idx = claim_xcd_tile(g.counters, total);
+            s_tile_idx = te_kittens::cdna4::claim_xcd_tile_strided(g.bucket_ctr, total);
         }
         __syncthreads();
         const int t = s_tile_idx;
@@ -589,7 +569,7 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
             break;
         }
 
-        const int wgid              = kittens::chiplet_transform_chunked(t, total, NUM_XCDS, WGM * WGM);
+        const int wgid              = kittens::chiplet_transform_chunked(t, total, NUM_XCDS_AFF, WGM * WGM);
         const int num_wgid_in_group = WGM * tiles_N;
         const int group_id          = wgid / num_wgid_in_group;
         const int first_pid_m       = group_id * WGM;
@@ -624,15 +604,6 @@ void mxfp8_wgrad_rs_tk(const mxfp8_rs_globals g, int M, int N, int K) {
             __builtin_amdgcn_s_barrier();
         }
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-    }
-
-    if (threadIdx.x == 0) {
-        if (__hip_atomic_fetch_add(&g.counters[NUM_XCDS], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
-            == (int)gridDim.x - 1) {
-            for (int x = 0; x <= NUM_XCDS; x++) {
-                __hip_atomic_store(&g.counters[x], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-            }
-        }
     }
 }
 

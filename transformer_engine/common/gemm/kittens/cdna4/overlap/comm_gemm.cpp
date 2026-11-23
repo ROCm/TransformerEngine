@@ -477,9 +477,9 @@ bool run_mxfp8(const KittensAgGemmArgs &args) {
     // enough that reading it contiguously beats a separate prologue pass.
     const bool interleave = args.scale_chunk_bytes != 0 && K >= 16384;
 
-    // NVTE_AG_DIAG=1 reports which scale path the geometry selected, once per call.
-    if (args.scale_chunk_bytes && std::getenv("NVTE_AG_DIAG")) {
-        std::fprintf(stderr, "[AG_DIAG] M=%d N=%d K=%d tp=%d scales=%s\n",
+    // NVTE_LOG_COMM_GEMM_CONFIG=1 reports which scale path the geometry selected, once per call.
+    if (args.scale_chunk_bytes && kittens_log_comm_gemm_config()) {
+        std::fprintf(stderr, "[AG_CONFIG] M=%d N=%d K=%d tp=%d scales=%s\n",
             M, N_TOTAL, K, tp_size, interleave ? "interleaved" : "gathered");
     }
 
@@ -897,24 +897,6 @@ bool bulk_rs_shape_ok_mxfp8(int M, int N, int K, int nred) {
            nred >= 0 && nred % 8 == 0;
 }
 
-// Per-userbuffer, self-resetting tile counters for the MXFP8 bulk RS kernel.
-std::map<const void *, int *> g_bulk_rs_counters;
-
-static int *bulk_rs_mxfp8_counters(const void *ub, hipStream_t stream) {
-    int *&c = g_bulk_rs_counters[ub];
-    if (!c) {
-        const size_t bytes = (hk_mxfp8_rs_nt::NUM_XCDS + 1) * sizeof(int);
-        void *p = nullptr;
-        if (hipMalloc(&p, bytes) != hipSuccess) return nullptr;
-        if (hipMemsetAsync(p, 0, bytes, stream) != hipSuccess) {
-            static_cast<void>(hipFree(p));
-            return nullptr;
-        }
-        c = static_cast<int *>(p);
-    }
-    return c;
-}
-
 bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     using namespace hk_mxfp8_rs_nt;
 
@@ -945,6 +927,8 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     std::lock_guard<std::mutex> lock(g_mu);
 
     Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+    int *bucket_ctr = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    const size_t counter_bytes = ws.used;
 
     // Lane-native scale buffers: the A slot is 256 words/tile, the B slot 512 (hi/lo pair).
     const size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
@@ -952,6 +936,8 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
     uint32_t *packed_sa = static_cast<uint32_t *>(ws.take(sa_bytes));
     uint32_t *packed_sb = static_cast<uint32_t *>(ws.take(sb_bytes));
     if (!ws.fits()) return false;
+
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
 
     launch_pack_scales<true, 64, 4>((const uint8_t *)args.scale_B, packed_sa, M, scale_K, k_iters,
                                     args.stream);
@@ -965,9 +951,6 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
         peers.base[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
     }
     peers.base[args.rank] = static_cast<bf16 *>(args.ub);
-
-    int *counters = bulk_rs_mxfp8_counters(args.ub, args.stream);
-    if (!counters) return false;
 
     if (args.arrive_peers && args.arrive_local) {
         ag_ready_kernel<<<1, 64, 0, args.stream>>>(
@@ -988,7 +971,7 @@ bool run_bulk_rs_mxfp8(const KittensRsGemmArgs &args) {
         gl_scale_rt(reinterpret_cast<fp8e8m0 *>(packed_sb), 2 * k_iters * tiles_N,
                     nullptr, nullptr, nullptr),
         nred, bands, bands, tp_size, args.rank, comm.fold_deep, peers, shard_elems, band_elems, args.stream,
-        counters};
+        bucket_ctr};
     launch(g);
     return hipGetLastError() == hipSuccess;
 }
@@ -1003,11 +986,12 @@ std::map<PlanKey, RsPlan> g_rs_plans;
 
 std::map<const void *, uint64_t> g_rs_epoch;
 
-struct RsRegion {
-    int   *counters    = nullptr;
-    size_t stage_bytes = 0;
+// Epoch whose stage half a fused RS MXFP8 call left poisoned; any other call on the ub invalidates it.
+struct RsArmed {
+    uint64_t epoch;
+    size_t   stage_bytes;
 };
-std::map<const void *, RsRegion> g_rs_regions;
+std::map<const void *, RsArmed> g_rs_armed;
 
 int rs_comm_wg_tn(int tokens, int hidden, int k_local) {
     const int tiles = (tokens / hk_rs_tn::BLOCK_ROW) * (hidden / hk_rs_tn::BLOCK_COL);
@@ -1138,6 +1122,8 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     const RsPlan &plan = it->second;
 
     Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
+    int *tile_counter  = static_cast<int *>(ws.take(sizeof(int)));
+    const size_t counter_bytes = ws.used;
 
     // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair).
     size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_m * 256 * sizeof(uint32_t), 256);
@@ -1152,20 +1138,15 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     const FusedRsLayout lay = fused_rs_layout(args.shard_bytes, tp_size);
 
-    RsRegion &region = g_rs_regions[args.ub];
-    if (!region.counters) {
-        void *c = nullptr;
-        if (hipMalloc(&c, 2 * sizeof(int)) != hipSuccess) return false;
-        region.counters = static_cast<int *>(c);
-        if (hipMemsetAsync(region.counters, 0, 2 * sizeof(int), args.stream) != hipSuccess) {
-            return false;
-        }
-        region.stage_bytes = 0;
-    }
-    const bool bootstrap = (region.stage_bytes != lay.stage_bytes);
-    region.stage_bytes   = lay.stage_bytes;
-
     const uint64_t epoch = g_rs_epoch[args.ub]++;
+
+    auto armed_it = g_rs_armed.find(args.ub);
+    const bool armed = armed_it != g_rs_armed.end() && armed_it->second.epoch == epoch &&
+                       armed_it->second.stage_bytes == lay.stage_bytes;
+    if (armed_it != g_rs_armed.end()) {
+        g_rs_armed.erase(armed_it);
+    }
+
     const size_t stage_off = (epoch & 1ull) ? lay.recv_off : 0;
     const size_t next_off  = (epoch & 1ull) ? 0 : lay.recv_off;
 
@@ -1181,11 +1162,13 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
 
     bf16 *local_stage = peers.stage[args.rank];
 
+    if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
+
     // Arms the sentinel, which is what orders a peer's stage read against its epilogue store. Only
-    // a bootstrap call arms it here; the kernel's comm workgroups poison the other half for the
+    // an unarmed call arms it here; the kernel's comm workgroups poison the other half for the
     // next call.
     if (!sentinel_pattern_agrees()) return false;
-    if (bootstrap) {
+    if (!armed) {
         const size_t stage_dw = lay.stage_bytes / sizeof(unsigned int);
         if (hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(local_stage), RS_SENT_DW, stage_dw,
                               args.stream) != hipSuccess) {
@@ -1208,9 +1191,11 @@ bool run_fused_rs_mxfp8(const KittensRsGemmArgs &args) {
     launch(M, N_TOTAL, K, static_cast<fp8e4m3 *>(const_cast<void *>(args.A)),
            static_cast<fp8e4m3 *>(const_cast<void *>(args.B)), local_stage,
            static_cast<bf16 *>(args.D), packed_sa, packed_sb, static_cast<TileDesc *>(plan.queue),
-           plan.num_tiles, region.counters, peers, args.rank, tp_size, cfg,
+           plan.num_tiles, tile_counter, peers, args.rank, tp_size, cfg,
            args.stream);
-    return hipGetLastError() == hipSuccess;
+    if (hipGetLastError() != hipSuccess) return false;
+    g_rs_armed[args.ub] = RsArmed{epoch + 1, lay.stage_bytes};
+    return true;
 }
 
 bool rs_guards_ok(const KittensRsGemmArgs &args) {
@@ -1233,11 +1218,11 @@ bool rs_guards_ok(const KittensRsGemmArgs &args) {
     const bool ok = ok_tp && ok_rank && ok_tokens && ok_hidden && ok_k && ok_bands && ok_shard &&
                     ok_ptrs;
 
-    // NVTE_RS_DIAG=1 reports which guard rejected a shape, and the geometry, once per call.
-    if (!ok && std::getenv("NVTE_RS_DIAG")) {
+    // NVTE_LOG_COMM_GEMM_CONFIG=1 reports which guard rejected a shape, and the geometry, once per call.
+    if (!ok && kittens_log_comm_gemm_config()) {
         const FusedRsLayout l = fused_rs_layout(args.shard_bytes, tp_size);
         std::fprintf(stderr,
-            "[RS_DIAG] tokens=%d hidden=%d K=%d tp=%d bands=%d shard=%zu stage=%zu total=%zu "
+            "[RS_CONFIG] tokens=%d hidden=%d K=%d tp=%d bands=%d shard=%zu stage=%zu total=%zu "
             "tp:%d rank:%d tokens:%d hidden:%d k:%d bands:%d shard:%d ptrs:%d\n",
             tokens, hidden, K, tp_size, bands, args.shard_bytes, l.stage_bytes, l.total_bytes,
             ok_tp, ok_rank, ok_tokens, ok_hidden, ok_k, ok_bands, ok_shard, ok_ptrs);
@@ -1275,14 +1260,7 @@ void kittens_persistent_plans_reset_cdna4() {
     g_plans.clear();
     g_rs_plans.clear();
     g_rs_epoch.clear();
-    for (auto &kv : g_rs_regions) {
-        if (kv.second.counters) static_cast<void>(hipFree(kv.second.counters));
-    }
-    g_rs_regions.clear();
-    for (auto &kv : g_bulk_rs_counters) {
-        if (kv.second) static_cast<void>(hipFree(kv.second));
-    }
-    g_bulk_rs_counters.clear();
+    g_rs_armed.clear();
     g_peers.clear();
 }
 

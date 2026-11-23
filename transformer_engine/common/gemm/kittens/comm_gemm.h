@@ -8,8 +8,19 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 #include "kittens_common.h"
+
+// NVTE_LOG_COMM_GEMM_CONFIG=1 logs the comm+GEMM kernel and config chosen.
+inline bool kittens_log_comm_gemm_config() {
+    static const bool on = [] {
+        const char *env = std::getenv("NVTE_LOG_COMM_GEMM_CONFIG");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }();
+    return on;
+}
 
 // A second all-gather, carried alongside the GEMM's own but not consumed by it: no compute block
 // waits on these arrivals, so the gathered tensor's dtype and scales are the caller's business.

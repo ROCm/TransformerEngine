@@ -136,7 +136,7 @@ def _run_layer(
     env["PYTORCH_JIT"] = "0"
     env["NVTE_TORCH_COMPILE"] = "0"
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
-    env["NVTE_RS_DIAG"] = "1"
+    env["NVTE_LOG_COMM_GEMM_CONFIG"] = "1"
     return subprocess.run(test_cmd, env=env, capture_output=True, check=False)
 
 
@@ -169,8 +169,8 @@ def _output_hashes(stdout):
 
 def _assert_fused_rs_precision(result, quantization):
     stderr = result.stderr.decode()
-    ran_mxfp8 = "[RS_DIAG] launched mxfp8" in stderr
-    ran_bf16 = "[RS_DIAG] launched bf16" in stderr
+    ran_mxfp8 = "[RS_CONFIG] launched mxfp8" in stderr
+    ran_bf16 = "[RS_CONFIG] launched bf16" in stderr
     if quantization == "mxfp8":
         assert ran_mxfp8, f"the fused RS MXFP8 kernel never ran\n{stderr}"
         assert not ran_bf16, f"the fused RS fell back to the bf16 kernel\n{stderr}"
@@ -181,8 +181,8 @@ def _assert_fused_rs_precision(result, quantization):
 
 def _assert_bulk_rs_precision(result, quantization):
     stderr = result.stderr.decode()
-    ran_mxfp8 = "[RS_DIAG] bulk launched mxfp8" in stderr
-    ran_bf16 = "[RS_DIAG] bulk launched bf16" in stderr
+    ran_mxfp8 = "[RS_CONFIG] bulk launched mxfp8" in stderr
+    ran_bf16 = "[RS_CONFIG] bulk launched bf16" in stderr
     if quantization == "mxfp8":
         assert ran_mxfp8, f"the bulk RS MXFP8 kernel never ran\n{stderr}"
         assert not ran_bf16, f"the bulk RS fell back to the bf16 kernel\n{stderr}"
@@ -223,7 +223,7 @@ def test_fused_ag_overlap_mxfp8_interleaved_scales(nprocs, layout):
         num_heads=INTERLEAVE_NUM_HEADS,
         head_dim=INTERLEAVE_HEAD_DIM,
         extra_args=[f"--ffn-hidden-size={INTERLEAVE_FFN_HIDDEN}"],
-        env_extra={"NVTE_AG_DIAG": "1"},
+        env_extra={"NVTE_LOG_COMM_GEMM_CONFIG": "1"},
     )
     _assert_numerics_passed(result)
     assert "UB SCALE CHECK PASSED" in result.stdout.decode(), result.stdout.decode()

@@ -169,14 +169,6 @@ void persistent_rs_mxfp8_gemm(const gl<fp8e4m3, 1, 1, -1, -1> A, const gl<fp8e4m
     if (wb_tick != 0 && threadIdx.x == 0) {
         __builtin_amdgcn_fence(__ATOMIC_RELEASE, "");
     }
-
-    if (threadIdx.x == 0) {
-        if (__hip_atomic_fetch_add(&tile_counter[1], 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
-            == (int)gridDim.x - 1) {
-            __hip_atomic_store(&tile_counter[0], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-            __hip_atomic_store(&tile_counter[1], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-        }
-    }
 }
 
 template <int CBSZ, int BLGP>

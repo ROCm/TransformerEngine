@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include <cstdio>
-#include <cstdlib>
 
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/gemm.h>
@@ -369,11 +368,11 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
   return kittens_fused_ag_gemm_bf16(args);
 }
 
-// Once per call site under NVTE_RS_DIAG: which RS kernel ran, for the fused overlap tests.
-static void rs_diag_once(bool &traced, const char *what) {
-  if (!traced && std::getenv("NVTE_RS_DIAG")) {
+// Once per call site under NVTE_LOG_COMM_GEMM_CONFIG: which RS kernel ran, for the fused overlap tests.
+static void rs_log_once(bool &traced, const char *what) {
+  if (!traced && kittens_log_comm_gemm_config()) {
     traced = true;
-    std::fprintf(stderr, "[RS_DIAG] %s\n", what);
+    std::fprintf(stderr, "[RS_CONFIG] %s\n", what);
   }
 }
 
@@ -430,11 +429,11 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
     static bool traced_mxfp8 = false;
-    rs_diag_once(traced_mxfp8, "launched mxfp8");
+    rs_log_once(traced_mxfp8, "launched mxfp8");
     return kittens_fused_rs_gemm_mxfp8(args);
   }
   static bool traced_bf16 = false;
-  rs_diag_once(traced_bf16, "launched bf16");
+  rs_log_once(traced_bf16, "launched bf16");
   return kittens_fused_rs_gemm_bf16(args);
 }
 
@@ -563,11 +562,11 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
     args.a_dtype = static_cast<KittensDType>(A.dtype());
     args.b_dtype = static_cast<KittensDType>(B.dtype());
     static bool traced_mxfp8 = false;
-    rs_diag_once(traced_mxfp8, "bulk launched mxfp8");
+    rs_log_once(traced_mxfp8, "bulk launched mxfp8");
     return kittens_bulk_rs_gemm_mxfp8(args);
   }
   static bool traced_bf16 = false;
-  rs_diag_once(traced_bf16, "bulk launched bf16");
+  rs_log_once(traced_bf16, "bulk launched bf16");
   return kittens_bulk_rs_gemm_bf16(args);
 }
 #endif
@@ -663,7 +662,7 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                            _ub_reg, _tp_id, _tp_size, _rs_signal_base + _tp_size,
                                            stream_main);
     NVTE_CHECK(launched,
-               "fused GEMM+RS failed to launch; set NVTE_RS_DIAG=1 for the guard breakdown");
+               "fused GEMM+RS failed to launch; set NVTE_LOG_COMM_GEMM_CONFIG=1 for the guard breakdown");
     _rs_signal_base += _tp_size;
     return;
   }
