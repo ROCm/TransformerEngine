@@ -6,6 +6,7 @@
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
+use_framework_venv "${TE_CI_TORCH_VENV:-}"
 
 TEST_DIR=${TE_PATH}tests/pytorch
 

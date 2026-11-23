@@ -28,6 +28,17 @@ resolve_rocm_path() {
     exit 1
 }
 
+# Switch to a framework's own venv when CI builds one per framework
+# (ci/install_deps.sh). ROCM_PATH is dropped so start_message
+# resolves that venv's ROCm. A no-op outside such a container.
+use_framework_venv() {
+    if [ -n "$1" ] && [ -x "$1/bin/python" ]; then
+        export VIRTUAL_ENV="$1"
+        export PATH="$1/bin:$PATH"
+        unset ROCM_PATH
+    fi
+}
+
 REALPATH=realpath
 realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo

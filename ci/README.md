@@ -7,6 +7,7 @@ There are 5 executable scripts here:
 * `pytorch.sh` - install prerequisites and run tests/pytorch framework integration tests
 * `rocjitsu.sh` - run a small-shape subset of tests/cpp and tests/pytorch on gfx1250 (MI455X) emulated on the CPU, see [below](#gfx1250-emulation)
 * `run_queue.sh` - run the scripts above as one work queue spread across the GPUs of the box; this is what CI runs
+* `install_deps.sh` - install the packages the tests need into a plain Ubuntu 24.04 container; see [CI test environment](#ci-test-environment)
 
 The scripts return 0 in case of test success, and other values for testing errors. Logging is performed on standard output and error streams.
 
@@ -37,7 +38,7 @@ CI keeps `weights/` and `rerun/` across runs with `actions/cache`, so "Re-run fa
 
 ### Running locally
 
-Run from the repo root inside a TE CI docker with Transformer Engine installed. `run_queue.sh` needs bash 5.1 or newer, `rocminfo`, and `python3` with pandas.
+Run from the repo root in the [CI test environment](#ci-test-environment), with Transformer Engine installed. The suites run in the active venv; with one venv per framework, as in CI, export `TE_CI_TORCH_VENV=/opt/venv-torch` and `TE_CI_JAX_VENV=/opt/venv-jax` and each suite runs in its own. `run_queue.sh` needs bash 5.1 or newer, `rocminfo`, and `python3` with pandas.
 
 ```sh
 # Single-GPU tests on every visible GPU
@@ -60,10 +61,17 @@ JUNITXML_PREFIX=ci-data/test-results/ JUNITXML_SUFFIX=.xml TEST_LEVEL=3 ci/run_q
 
 ## Which suites a pull request runs
 
-Pull requests run only the suites their changed paths can affect, by the rules in [`.github/scripts/change_scope.py`](../.github/scripts/change_scope.py); pushes and manual runs always run every suite. The "Select Test Suites" job summary lists the rule each changed path matched.
+Pull requests and manual runs run only the suites their changed paths can affect, by the rules in [`.github/scripts/change_scope.py`](../.github/scripts/change_scope.py); a manual run's changes are its branch's against `dev`. Runs on `dev` and release branches run every suite. The "Plan Build and Tests" job summary lists the rule each changed path matched.
+* For every suite and a fresh TE build, whatever the branch changed, run "Build and Test Branch" by hand with **Full run** checked.
 * CI uses the PR's own copy of the rules, so a change that alters what a path affects (a new or renamed suite, moved tests) should update `change_scope.py` in the same PR.
-* The `ci-skip-scope` label runs every suite at the PR's `ci-level`, from the next run (adding a `ci-level` label or pushing a commit).
 * To see what a branch would run: `git diff --name-status --no-renames dev...HEAD | python3 .github/scripts/change_scope.py`
+
+### Reusing TE builds
+
+A run builds TE only when a file built into the wheels changed. Otherwise it reuses an earlier build of the same files: from its own PR's or branch's runs, or from runs on the branch the PR targets (`dev` for a manual run), while their artifacts are kept (3 days).
+* `BUILD_RULES` in `change_scope.py` lists what isn't built into the wheels: tests, docs, CI scripts. Anything else rebuilds, including the build workflow and `build_tools/`. A new directory rebuilds until it is listed there, so list one that isn't part of the build.
+* Runs on `dev` and release branches, and manual runs with **Full run**, always build.
+* The "Plan Build and Tests" job summary says which build a run uses.
 
 ## gfx1250 emulation
 
@@ -82,8 +90,43 @@ TEST_LEVEL=1 TEST_FILTER=cpp_nvfp4.b0.0 ci/rocjitsu.sh
 
 In CI, the `emu_tests` job of [`rocm-ci.yml`](../.github/workflows/rocm-ci.yml) runs the emu queue on the runner named by the repository variable `TE_CPU_TEST_RUNNER` (default `build-only-te`) with 8 slots, so the runtime and the learned item durations do not depend on the size of the runner; the repository variable `TE_CI_EMU_SLOTS` overrides the slot count. The job is advisory: its failures do not fail the run.
 
-## CI Docker images
+## CI test environment
 
-Default and release-specific TE CI images are listed in [`ci_config.json`](ci_config.json) under `docker_images`.
+The tests run in a plain Ubuntu 24.04 container set up by [`install_deps.sh`](install_deps.sh). Every version is in [`deps/pyproject.toml`](deps/pyproject.toml), and [`deps/uv.lock`](deps/uv.lock) pins each package's exact version and sha256. By default it installs PyTorch and JAX into one venv, `/opt/venv`. `--frameworks torch` or `--frameworks jax` installs one framework into its own venv, `/opt/venv-torch` or `/opt/venv-jax`; CI does that for each framework a job needs, so each suite runs without the other framework installed.
 
-The default image is built from [`.github/scripts/Dockerfile.ci.deps`](../.github/scripts/Dockerfile.ci.deps). It pins [ROCm/aiter](https://github.com/ROCm/aiter) at commit [`77455e3ecf4f0d28756afc452e914940c45b944b`](https://github.com/ROCm/aiter/commit/77455e3ecf4f0d28756afc452e914940c45b944b). That revision was validated in CI for **MXFP4 FP4 GEMM** kernel coverage.
+| File | What it is |
+|---|---|
+| `deps/pyproject.toml` | Every version: the packages of both frameworks, PyTorch's, JAX's and each GPU arch's, then in `[tool.te-ci]` the base image, aiter and Flash Attention |
+| `deps/uv.lock` | Generated by `uv lock`: exact versions and hashes, for both GPU archs and frameworks |
+| `deps/build_fa_wheel.sh` | Builds the Flash Attention wheel for `uv.lock`'s torch; `--upload` publishes it |
+
+[`ci_config.json`](ci_config.json) names the docker images of the release branches' CI, whose workflows read it from `dev`.
+
+### Set it up locally
+
+1. Start Ubuntu 24.04 with the GPUs and this repo:
+   ```sh
+   docker run -it --network=host --device=/dev/kfd --device=/dev/dri --shm-size=16G \
+     --group-add $(getent group video | cut -d: -f3) --group-add $(getent group render | cut -d: -f3) \
+     -v "$PWD:/workspace" -w /workspace ubuntu:24.04
+   ```
+2. Inside it, install PyTorch and JAX for this machine's GPU, and activate the venv:
+   ```sh
+   ci/install_deps.sh
+   source /opt/venv/bin/activate
+   ```
+
+### Update it
+
+1. Edit `deps/pyproject.toml`.
+2. Regenerate `deps/uv.lock` and install from it:
+   ```sh
+   ci/install_deps.sh --update-locks
+   ```
+3. Commit `deps/pyproject.toml` and `deps/uv.lock` together. CI installs the lock, and fails if it doesn't match `pyproject.toml`.
+
+### Flash Attention
+
+Flash Attention is built for the exact torch, ROCm and Python, so it isn't in `uv.lock`: `install_deps.sh` installs the wheel of the `flash-attn` release in `pyproject.toml` built for `uv.lock`'s, from its ghcr.io package (`flash-attn-wheels`). CI publishes it: when the wheel isn't published yet, the "Flash Attention wheel" job builds and uploads it next to the TE build, and the tests wait for it. Locally, `install_deps.sh` builds a missing wheel itself, which takes a while; while the package is private, `GHCR_TOKEN` set to a GitHub token with `read:packages` fetches it instead.
+
+Only the "Publish Flash Attention wheel" workflow run by hand with "override" on replaces a published wheel.

@@ -7,12 +7,14 @@
 # `ci/run_queue.sh --queue emu` runs the items side by side; run directly, this script runs
 # them one after another.
 
-# CI installs only TE's PyTorch extension, although the image also has JAX
+# Only TE's PyTorch extension is installed for these tests
 export NVTE_FRAMEWORK=pytorch
 
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
+# PyTorch's tests, and the C++ tests built against its ROCm, run in the torch venv
+use_framework_venv "${TE_CI_TORCH_VENV:-}"
 
 TEST_DIR=${TE_PATH}tests/pytorch
 
@@ -36,7 +38,7 @@ LARGE_SHAPES="$LARGE_SHAPES:*X16384X1616*:*32X1481X677*:*2304x768x4096*:*768x307
 KNOWN_FAILURES="*/CastMXFP82DQuantizationTestSuite.*:*/SwizzledScalesFusedCastMXFP8TestSuite.*"
 
 install_prerequisites() {
-    # The CI image carries no gfx1250 device code for the ROCm libraries and PyTorch.
+    # The CI test environment carries no gfx1250 device code for the ROCm libraries and PyTorch.
     _pkgs=`python3 - <<'EOF'
 from importlib.metadata import PackageNotFoundError, version
 
@@ -189,7 +191,7 @@ fi
 
 # ci/run_queue.sh hands out CPU slots as device ids; every emulated process has one GPU of its own.
 unset HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-# Keep ROCr from loading its gfx1250 B0-to-A0 hotswap hook (opt-out in older releases such as the image's).
+# Keep ROCr from loading its gfx1250 B0-to-A0 hotswap hook (opt-out in older releases such as CI's).
 export HSA_HOTSWAP_DISABLE=1 HSA_HOTSWAP_ENABLE=0
 # The tests' CPU reference code (OpenMP, PyTorch) would otherwise start a thread per CPU in every item.
 : ${OMP_NUM_THREADS:=$ROCJITSU_CPU_BUDGET}

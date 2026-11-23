@@ -63,6 +63,10 @@ on:
       docker_image_tag_override:
         type: string
         default: ''
+      artifact_name:
+        description: 'Name of the artifact the wheels are uploaded as'
+        type: string
+        default: te-rocm-wheels
 
 env:
   ROCM_DOCKERFILE: build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86
@@ -235,7 +239,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: te-rocm-wheels
+          name: ${{ inputs.artifact_name || 'te-rocm-wheels' }}
           path: |
             ${{ runner.temp }}/wheelhouse/*.whl
             ${{ runner.temp }}/wheelhouse/*.tar.gz
