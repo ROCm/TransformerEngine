@@ -82,6 +82,8 @@ else()
     kittens_add_arch(TAG cdna4 GFX gfx950
                      SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp
                              cdna4/overlap/comm_gemm.cpp
+                             cdna4/grouped_f16_gemm.cpp cdna4/grouped_f16_tn.cpp
+                             cdna4/grouped_f16_nn.cpp cdna4/grouped_f16_nt.cpp
                      FLAGS -gline-tables-only)
 
     add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})

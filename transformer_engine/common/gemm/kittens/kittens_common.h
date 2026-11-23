@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -228,3 +229,23 @@ inline bool kittens_grouped_mxfp8_wgrad(
         workspace, workspace_size, stream};
     return backend->grouped_wgrad(args);
 }
+
+struct GroupedF16GemmArgs {
+    const void *const *A_array;
+    const void *const *B_array;
+    void *const *D_array;
+    const void *const *bias_array;
+    const int64_t *M_array;
+    int num_experts;
+    int N, K;
+    bool transa, transb;
+    int in_dtype, out_dtype, bias_dtype;
+    bool grad, accumulate;
+    int cu_count;
+    void *workspace;
+    size_t workspace_size;
+    hipStream_t stream;
+};
+
+bool kittens_grouped_f16_gemm_supported(int sm_arch);
+bool kittens_grouped_f16_gemm(const GroupedF16GemmArgs &args);

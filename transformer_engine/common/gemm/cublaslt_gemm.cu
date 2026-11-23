@@ -1149,6 +1149,9 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
 bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream);
+bool try_kittens_grouped_f16_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D, const NVTETensor *bias,
+    int num_gemms, bool transa, bool transb, bool grad, NVTETensor *workspace,
+    bool accumulate, int math_sm_count, cudaStream_t stream);
 }
 #endif
 
@@ -1195,6 +1198,15 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     }
     return true;
   };
+
+#if defined(__HIP_PLATFORM_AMD__) && defined(USE_HIPKITTENS_GEMM)
+  // HipKittens BF16/FP16 grouped GEMM handles bias / dbias.
+  if (is_empty_arr(pre_gelu_out) &&
+      transformer_engine::try_kittens_grouped_f16_gemm(A, B, D, bias, num_gemms, transa, transb, grad,
+                                                     workspace, accumulate, math_sm_count, stream)) {
+    return;
+  }
+#endif
 
 #ifndef __HIP_PLATFORM_AMD__
   auto all_groups_uniform_k128 = [&](const NVTETensor *p, bool trans) -> bool {

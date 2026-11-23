@@ -72,16 +72,6 @@ enum struct OutDtype {
     FP16,
 };
 
-template <typename T>
-__device__ __forceinline__ int hk_upper_bound(const T *arr, int n, T val) {
-    int lo = 0, hi = n - 1;
-    while (lo < hi) {
-        int mid = (lo + hi + 1) / 2;
-        if (arr[mid] <= val) { lo = mid; } else { hi = mid - 1; }
-    }
-    return lo;
-}
-
 // Shared epilogue. TRANSPOSE_OUT selects the TN/NT form, where C is [N, M] and the col_l
 // accumulators transpose before the store; otherwise (NN, flipped operand slots) the accumulator
 // already carries C's orientation and stores straight through. BLAS bias has length m, which is
@@ -1129,7 +1119,6 @@ static void warn_fallback(const char *tag, const char *reason) {
 constexpr int SCHED_CHUNK      = 64;
 constexpr int SCHED_CTR_GLOBAL = NUM_XCDS_AFF;
 constexpr int SCHED_CTR_BYTES  = 256;
-constexpr int MAX_TAB_EXPERTS  = 64;
 
 struct GroupedTab {
     const void *a[MAX_TAB_EXPERTS];

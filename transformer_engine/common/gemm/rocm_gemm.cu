@@ -2645,6 +2645,127 @@ bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, N
         accumulate,
         ws->data.dptr, ws->data.shape[0], stream);
 }
+
+// BF16/FP16 grouped GEMM (TN fprop, NN dgrad, NT wgrad); the selection flags are read per call since tests toggle them
+bool try_kittens_grouped_f16_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D, const NVTETensor *bias,
+    int num_gemms, bool transa, bool transb, bool grad, NVTETensor *workspace,
+    bool accumulate, int math_sm_count, cudaStream_t stream) {
+    if (num_gemms <= 1) {
+        return false;
+    }
+    const bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
+    if (!use_hk && (!kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM") ||
+                    kittens_env_set("NVTE_USE_CK_GROUPED_GEMM"))) {
+        return false;
+    }
+    if (!kittens_grouped_f16_gemm_supported(cuda::sm_arch())) {
+        return false;
+    }
+
+    const auto *tA0 = convertNVTETensorCheck(A[0]);
+    const auto *tB0 = convertNVTETensorCheck(B[0]);
+    const auto *tD0 = convertNVTETensorCheck(D[0]);
+    if (!tA0->has_data() || !tB0->has_data() || !is_fp16_dtype(tA0->data.dtype)) {
+        return false;
+    }
+
+    const bool warn_fallback = kittens_env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+
+    // Uniform weight [N][K]: A for TN and NN, D for NT
+    const auto *tW0 = convertNVTETensorCheck((transa || !transb) ? A[0] : D[0]);
+    if (tW0->data.shape.size() != 2 || tW0->data.shape[0] > INT32_MAX || tW0->data.shape[1] > INT32_MAX) {
+        if (warn_fallback) {
+            fprintf(stderr, "[HK-grouped_f16] weight is not 2D or exceeds int\n");
+        }
+        return false;
+    }
+    const size_t ref_n = tW0->data.shape[0];
+    const size_t ref_k = tW0->data.shape[1];
+
+    const DType in_dtype  = tA0->data.dtype;
+    const DType out_dtype = tD0->data.dtype;
+    DType bias_dtype = in_dtype;
+    bool with_bias = false;
+
+    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), bias_ptrs(num_gemms);
+    std::vector<void *> d_ptrs(num_gemms);
+    std::vector<int64_t> m_arr(num_gemms);
+
+    for (int i = 0; i < num_gemms; i++) {
+        const auto *tA    = convertNVTETensorCheck(A[i]);
+        const auto *tB    = convertNVTETensorCheck(B[i]);
+        const auto *tD    = convertNVTETensorCheck(D[i]);
+        const auto *tBias = convertNVTETensorCheck(bias[i]);
+
+        if (!is_delayed_tensor_scaling(tA->scaling_mode) || !is_delayed_tensor_scaling(tB->scaling_mode) ||
+            !tA->has_data() || !tB->has_data() || !tD->has_data() ||
+            tA->data.dtype != in_dtype || tB->data.dtype != in_dtype || tD->data.dtype != out_dtype) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped_f16] scaled, missing or mixed-type operand at expert %d\n", i);
+            }
+            return false;
+        }
+
+        const auto &sa = tA->data.shape;
+        const auto &sb = tB->data.shape;
+        const auto &sd = tD->data.shape;
+        size_t m_i = 0;
+        bool shapes_ok = sa.size() == 2 && sb.size() == 2 && sd.size() == 2;
+        if (shapes_ok && transa && !transb) {
+            m_i = sb[0];
+            shapes_ok = sa[0] == ref_n && sa[1] == ref_k && sb[1] == ref_k && sd[0] == m_i && sd[1] == ref_n;
+        } else if (shapes_ok && !transa && !transb) {
+            m_i = sb[0];
+            shapes_ok = sa[0] == ref_n && sa[1] == ref_k && sb[1] == ref_n && sd[0] == m_i && sd[1] == ref_k;
+        } else if (shapes_ok && !transa && transb) {
+            m_i = sa[0];
+            shapes_ok = sa[1] == ref_k && sb[0] == m_i && sb[1] == ref_n && sd[0] == ref_n && sd[1] == ref_k;
+        } else {
+            shapes_ok = false;
+        }
+        if (!shapes_ok) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped_f16] layout or shapes not covered at expert %d\n", i);
+            }
+            return false;
+        }
+
+        if (i == 0 && tBias->has_data()) {
+            with_bias  = true;
+            bias_dtype = tBias->data.dtype;
+        }
+        if (tBias->has_data() != with_bias ||
+            (with_bias && (tBias->data.dtype != bias_dtype || tBias->data.numel() != ref_n))) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped_f16] bias missing, misshaped or mixed-type at expert %d\n", i);
+            }
+            return false;
+        }
+        if (m_i > 0 && (!is_aligned_tensor_data(*tA, 16) || !is_aligned_tensor_data(*tB, 16) ||
+                        !is_aligned_tensor_data(*tD, 16) || (with_bias && !is_aligned_tensor_data(*tBias, 16)))) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped_f16] operand not 16 B aligned at expert %d\n", i);
+            }
+            return false;
+        }
+
+        a_ptrs[i]    = tA->data.dptr;
+        b_ptrs[i]    = tB->data.dptr;
+        d_ptrs[i]    = tD->data.dptr;
+        bias_ptrs[i] = tBias->data.dptr;
+        m_arr[i]     = static_cast<int64_t>(m_i);
+    }
+
+    auto *ws = convertNVTETensorCheck(workspace[0]);
+    const int cu_count = (math_sm_count > 0 && math_sm_count < cuda::sm_count()) ? math_sm_count : cuda::sm_count();
+
+    GroupedF16GemmArgs args{
+        a_ptrs.data(), b_ptrs.data(), d_ptrs.data(), with_bias ? bias_ptrs.data() : nullptr, m_arr.data(),
+        num_gemms, static_cast<int>(ref_n), static_cast<int>(ref_k), transa, transb,
+        static_cast<int>(in_dtype), static_cast<int>(out_dtype), static_cast<int>(bias_dtype),
+        grad, accumulate, cu_count, ws->data.dptr, ws->data.shape[0], stream};
+    return kittens_grouped_f16_gemm(args);
+}
 #endif
 
 } //namespace transformer_engine
