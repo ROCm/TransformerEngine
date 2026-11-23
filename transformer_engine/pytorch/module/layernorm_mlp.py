@@ -2871,11 +2871,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 ub_overlap_ag = False
             if ub_overlap_rs and is_grad_enabled and not fused_rs_gemm_eligible(
                 "fc2_fprop", fc2_weight, fc2_bias_tensor, self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs = False
             if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
                 "fc1_dgrad", fc1_weight, None, self.activation_dtype, self.tp_size, self.fp8,
-                is_dgrad=True,
+                is_dgrad=True, mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
@@ -2888,6 +2889,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             # layernorm_linear.py already gate on this; LayerNormMLP did not.
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 "fc1_wgrad", inp, fc1_weight, self.activation_dtype, self.tp_size, self.fp8,
+                mxfp8=is_mxfp8,
             ):
                 ub_bulk_wgrad = False
             fwd_args = LayerNormMLPFwdArgs(
