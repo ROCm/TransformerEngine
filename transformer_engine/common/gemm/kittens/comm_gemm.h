@@ -8,8 +8,19 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 #include "kittens_common.h"
+
+// NVTE_LOG_COMM_GEMM_CONFIG=1 logs the comm+GEMM kernel and config chosen.
+inline bool kittens_log_comm_gemm_config() {
+    static const bool on = [] {
+        const char *env = std::getenv("NVTE_LOG_COMM_GEMM_CONFIG");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }();
+    return on;
+}
 
 // A second all-gather, carried alongside the GEMM's own but not consumed by it: no compute block
 // waits on these arrivals, so the gathered tensor's dtype and scales are the caller's business.
@@ -59,6 +70,8 @@ struct KittensRsGemmArgs {
     const void *A;
     const void *B;
     void *D;
+    const void *scale_A;   // MXFP8 only; null on the bf16 paths
+    const void *scale_B;   // MXFP8 only; null on the bf16 paths
     void *ub;
     const void *peer_ub;
     int peer_first;
@@ -74,6 +87,8 @@ struct KittensRsGemmArgs {
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
+    KittensDType a_dtype;
+    KittensDType b_dtype;
 };
 
 bool kittens_fused_ag_gemm_supported(int sm_arch);
@@ -93,10 +108,14 @@ bool kittens_bulk_rs_gemm_supported(int sm_arch);
 
 bool kittens_bulk_rs_gemm_bf16(const KittensRsGemmArgs &args);
 
+bool kittens_bulk_rs_gemm_mxfp8(const KittensRsGemmArgs &args);
+
 bool kittens_fused_rs_gemm_supported(int sm_arch);
 
 bool kittens_fused_rs_gemm_shape_ok(int tokens, int hidden, int k, int tp_size);
 
 bool kittens_fused_rs_gemm_bf16(const KittensRsGemmArgs &args);
+
+bool kittens_fused_rs_gemm_mxfp8(const KittensRsGemmArgs &args);
 
 size_t kittens_fused_rs_region_bytes(size_t chunk_bytes, int tp_size);

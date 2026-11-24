@@ -34,20 +34,24 @@ bool is_ck_backend_supported(
 constexpr size_t kSmallSeqMaxSeqlen = 17;
 
 // Small-seq eligibility is split into static and runtime checks:
-// - Static: config known at call time (dtype, head dims, heads, bias, dropout, mask).
+// - Static: config known at call time (dtype, layout, head dims, heads, bias, dropout, mask, window).
 //   Used during workspace sizing to reserve THD probe buffers and to gate the small-seq path
 //   before any device data is read.
 // - Runtime: actual per-batch max seqlen for THD/ragged inputs (from cu_seqlens on device).
 //   Even when static config matches, individual batches may exceed kSmallSeqMaxSeqlen; probe
 //   at execute time and fall back to regular CK when out of range.
 bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type,
                                    NVTE_Mask_Type mask_type,
                                    float dropout,
                                    size_t head_dim_qk,
                                    size_t head_dim_v,
                                    size_t num_attn_heads,
-                                   size_t num_gqa_groups);
+                                   size_t num_gqa_groups,
+                                   NVTE_Softmax_Type softmax_type,
+                                   int64_t window_size_left,
+                                   int64_t window_size_right);
 
 bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
                                     size_t runtime_max_seqlen_kv);
@@ -58,7 +62,7 @@ void fused_attn_ck_fwd(
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias,
   const Tensor* input_SoftmaxOffset,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
@@ -75,7 +79,7 @@ void fused_attn_ck_bwd(
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   NVTE_Softmax_Type softmax_type,
-  int64_t window_size_left, int64_t window_size_right,
+  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
   bool deterministic,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
   const Tensor* input_SoftmaxOffset,

@@ -19,6 +19,7 @@ from .utils import (
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
+    get_bolt_build_flags,
     nccl_ep_enabled,
     setup_mpi_flags,
 )
@@ -40,7 +41,7 @@ def install_requirements() -> List[str]:
         # supplies the cuDNN headers for the CUDA build (ROCm uses a stub).
         requirements += [
             "nvdlfw-inspect",
-            "nvidia-cudnn-frontend>=1.28.0",
+            "nvidia-cudnn-frontend>=1.29.0",
         ]
     return requirements
 
@@ -97,6 +98,9 @@ def setup_pytorch_extension(
     else:
         cxx_flags.append("-g0")
 
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
+
     # Version-dependent CUDA options
     if not rocm_build():
         try:
@@ -108,6 +112,11 @@ def setup_pytorch_extension(
                 raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
     setup_mpi_flags(include_dirs, cxx_flags)
+
+    # ProcessGroupNCCL class declarations are gated on USE_C10D_NCCL. get_nccl_comm_ptr
+    # borrows the raw ncclComm_t from that backend and is used by both NCCL EP and the
+    # cuSolverMp path, so the macro is needed regardless of the NCCL EP gate below.
+    cxx_flags.append("-DUSE_C10D_NCCL")
 
     # Mirror the NCCL EP gate from setup.py / common CMake. When disabled, the
     # ep.cpp source no-ops at the #ifdef boundary; without the define it would
@@ -151,6 +160,7 @@ def setup_pytorch_extension(
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},
+        extra_link_args=linker_flags,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

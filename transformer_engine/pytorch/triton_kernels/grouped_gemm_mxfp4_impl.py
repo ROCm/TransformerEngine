@@ -1,33 +1,37 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950)."""
+"""TE-side quantization bridge + dispatch for grouped MXFP4 GEMM (gfx950, gfx1250)."""
 
 from __future__ import annotations
 
-import os
 from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from ..tensor.mxfp4_tensor import MXFP4Quantizer
-from ..utils import round_up_to_nearest_multiple
+from ..utils import get_device_compute_capability, round_up_to_nearest_multiple
 from .grouped_gemm_mxfp4 import (
-    _is_gfx950,
     grouped_gemm_a8w4_triton_kernel,
     grouped_gemm_mxfp4_triton_kernel,
     grouped_gemm_mxfp4_variable_k_triton_kernel,
 )
+from .cast_transpose import mxfp8_e4m3_rowwise_downcast
 
 # Logical contraction tile the kernels step by (see grouped_gemm_mxfp4.py).
 BLOCK_SIZE_K = 128
-# Per-group wgrad M padding multiple; must be >= the largest wgrad BLOCK_K the
-# kernel may pick. 256 lets the variable-K autotune try BLOCK_K=256 (at the cost
-# of more padding for small groups). Default 128 = unchanged behavior.
-WGRAD_PAD_MULTIPLE = int(os.environ.get("NVTE_MXFP4_WGRAD_PAD", str(BLOCK_SIZE_K)))
 # One E8M0 scale per 32-element block.
 MXFP4_BLOCK = 32
+# Archs with the scaled-FP4 matrix op used by tl.dot_scaled: gfx950 (MFMA), gfx1250 (WMMA).
+MXFP4_GEMM_ARCHS = ((9, 5), (12, 5))
+
+
+def _wgrad_pad_multiple() -> int:
+    """Per-group wgrad M padding multiple; must be >= the largest wgrad BLOCK_K the
+    kernel may pick. 256 on gfx1250, where the BLOCK_K=256 wgrad is 1.2-1.6x faster
+    (padding included)."""
+    return 256 if get_device_compute_capability() == (12, 5) else BLOCK_SIZE_K
 
 
 def _quantizer(*, rowwise: bool, columnwise: bool) -> MXFP4Quantizer:
@@ -78,12 +82,11 @@ def _check_splits(
         )
 
 
-def _require_gfx950() -> None:
-    # The kernels use the CDNA4 scaled-FP4 MFMA (tl.dot_scaled e2m1); no other arch has it.
-    if not _is_gfx950():
+def _require_mxfp4_gemm_arch() -> None:
+    if get_device_compute_capability() not in MXFP4_GEMM_ARCHS:
         raise RuntimeError(
-            "grouped MXFP4 GEMM requires gfx950 (CDNA4); the current device lacks the"
-            " scaled-FP4 MFMA used by tl.dot_scaled(..., \"e2m1\", ...)."
+            "grouped MXFP4 GEMM requires gfx950 or gfx1250; the current device lacks the"
+            " scaled-FP4 matrix op used by tl.dot_scaled(..., \"e2m1\", ...)."
         )
 
 
@@ -106,16 +109,15 @@ def _row_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 def _col_operand(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Col-wise MXFP4: ``x`` [M, F] -> (data [F, M/2] u8, scale [F, M/32] u8).
 
-    Requests both directions (matching the production transpose-quant path); the
-    row-wise result is discarded. Both dims are zero-padded to a 32-multiple for
-    the quantizer and sliced back (both are free/masked in the GEMM).
+    Both dims are zero-padded to a 32-multiple for the quantizer and sliced back
+    (both are free/masked in the GEMM).
     """
     M, Feat = x.shape
     M_pad = round_up_to_nearest_multiple(M, MXFP4_BLOCK)
     Feat_pad = round_up_to_nearest_multiple(Feat, MXFP4_BLOCK)
     if M_pad != M or Feat_pad != Feat:
         x = F.pad(x.contiguous(), (0, Feat_pad - Feat, 0, M_pad - M))
-    q = _quantizer(rowwise=True, columnwise=True).quantize(x.contiguous())
+    q = _quantizer(rowwise=False, columnwise=True).quantize(x.contiguous())
     data = q._columnwise_data.view(torch.uint8)[:Feat, : M // 2]
     scale = q._columnwise_scale_inv[:Feat, : M // MXFP4_BLOCK].contiguous()
     return data, scale
@@ -145,15 +147,14 @@ def _row_col_operand(
     return row_data, row_scale, col_data, col_scale
 
 
-def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Row-wise MXFP8 (e4m3): ``x`` [M, K] -> (data [M, K] e4m3, scale [M, K/32] u8).
+def _row_operand_mxfp8_torch(x: torch.Tensor, transpose_scale: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Row-wise MXFP8 (e4m3): ``x`` [M, K] -> (data [M, K] e4m3, scale u8).
 
-    Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block,
-    with the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. This is a
-    reference cast matching the a8w4 kernel's tested operand layout; the GATE-2
-    quantizer-parity pass swaps in the recipe quantizer for exact QAT parity.
-    ``K`` (the contraction) is already a 32-multiple; ``M`` needs no padding since
-    the scale is per-row.
+    Plain OCP MXFP8: unpacked e4m3 element bytes + one E8M0 scale per 1x32 block, with
+    the Kimi-K3 ``ceil(log2(amax / 448))`` block-scale rule. Torch multi-pass reference;
+    :func:`_row_operand_mxfp8` uses the fused single-pass kernel on gfx950/gfx1250. ``K`` (the
+    contraction) is already a 32-multiple; ``M`` needs no padding (scale is per-row).
+    ``transpose_scale`` emits the scale ``[K/32, M]`` instead of ``[M, K/32]``.
     """
     fmax = torch.finfo(torch.float8_e4m3fn).max
     M, K = x.shape
@@ -163,7 +164,20 @@ def _row_operand_mxfp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     q = (xb / torch.exp2(exp)).clamp(-fmax, fmax).to(torch.float8_e4m3fn)
     data = q.reshape(M, K).contiguous()
     scale = (exp.squeeze(-1) + 127).to(torch.uint8)
+    if transpose_scale:
+        scale = scale.t().contiguous()
     return data, scale
+
+
+def _row_operand_mxfp8(x: torch.Tensor, transpose_scale: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Row-wise MXFP8 (e4m3) downcast (ceil rule): fused single-pass Triton on gfx950/gfx1250
+    (:func:`mxfp8_e4m3_rowwise_downcast`), else the bit-identical torch reference
+    :func:`_row_operand_mxfp8_torch`. Used by the a8w4 forward (GATE-2 fused quant).
+    ``transpose_scale`` emits the scale ``[K/32, M]``.
+    """
+    if get_device_compute_capability() in MXFP4_GEMM_ARCHS:
+        return mxfp8_e4m3_rowwise_downcast(x, transpose_scale=transpose_scale)
+    return _row_operand_mxfp8_torch(x, transpose_scale=transpose_scale)
 
 
 def _quantize_weights_row_col(
@@ -191,30 +205,29 @@ def _col_operand_grouped_padded(
     x: torch.Tensor,
     m_splits: Sequence[int],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Per-group col-wise MXFP4 with each group's M padded to WGRAD_PAD_MULTIPLE.
+    """Per-group col-wise MXFP4 with each group's M padded to ``_wgrad_pad_multiple()``.
 
     ``x`` [total_M, F] grouped along M -> (data [F, total_pad/2] u8,
     scale [F, total_pad/32] u8, go_pad [G+1] int64). Padding rows are zeros, so
-    they contribute nothing to the wgrad contraction over M.
+    they contribute nothing to the wgrad contraction over M. All groups are cast in
+    one quantize: the padded group boundaries are 32-aligned, so no scale block spans
+    two groups and the result equals casting each group separately.
     """
-    Feat = x.shape[1]
-    datas: List[torch.Tensor] = []
-    scales: List[torch.Tensor] = []
+    m_list = [int(m) for m in m_splits]
+    pad = _wgrad_pad_multiple()
+    pad_list = [round_up_to_nearest_multiple(m, pad) for m in m_list]
     offs = [0]
-    start = 0
-    for m in m_splits:
-        m = int(m)
-        xg = x[start : start + m]
-        start += m
-        m_pad = round_up_to_nearest_multiple(m, WGRAD_PAD_MULTIPLE)
-        if m_pad != m:
-            xg = F.pad(xg, (0, 0, 0, m_pad - m))
-        data, scale = _col_operand(xg)  # (F, m_pad/2), (F, m_pad/32)
-        datas.append(data)
-        scales.append(scale)
+    for m_pad in pad_list:
         offs.append(offs[-1] + m_pad)
-    data = torch.cat(datas, dim=1).contiguous()
-    scale = torch.cat(scales, dim=1).contiguous()
+    if pad_list == m_list:
+        xp = x
+    else:
+        xp = x.new_zeros((offs[-1], x.shape[1]))
+        start = 0
+        for m, off in zip(m_list, offs):
+            xp[off : off + m] = x[start : start + m]
+            start += m
+    data, scale = _col_operand(xp)  # (F, total_pad/2), (F, total_pad/32)
     go_pad = torch.tensor(offs, dtype=torch.int64, device=x.device)
     return data, scale, go_pad
 
@@ -242,7 +255,7 @@ def grouped_gemm_mxfp4_fprop(
         [total_M, N] output in ``out_dtype``.
     """
     K = a.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(K, "K")
 
     if weight_row is not None:
@@ -284,6 +297,7 @@ def grouped_gemm_a8w4_fprop(
     out_dtype: torch.dtype = torch.bfloat16,
     num_cu: Optional[int] = None,
     weight_row: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    weight_scale_transposed: bool = False,
 ) -> torch.Tensor:
     """Grouped a8w4 forward: ``C[g] = A[g] @ W[g]^T`` (contract K).
 
@@ -297,18 +311,22 @@ def grouped_gemm_a8w4_fprop(
         m_splits: per-group token counts (len G).
         weight_row: optional pre-quantized row-wise MXFP4 weights
             ``(data [G, N, K/2], scale [G, N, K/32])`` -- skips the weight cast.
+        weight_scale_transposed: set ``True`` when ``weight_row``'s scale is already the
+            transposed ``[G, K/32, N]`` swizzle layout (a cached transpose); otherwise the
+            plain ``[G, N, K/32]`` scale is transposed here.
 
     Returns:
         [total_M, N] output in ``out_dtype``.
     """
     K = a.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(K, "K")
 
     if weight_row is not None:
         b_data, b_scale = weight_row
         N = b_data.shape[1]
         _check_splits(m_splits, a.shape[0], b_data.shape[0])
+        b_scale_is_transposed = weight_scale_transposed  # caller declares the cached layout
     else:
         N = weights[0].shape[0]
         _check_splits(m_splits, a.shape[0], len(weights))
@@ -319,8 +337,14 @@ def grouped_gemm_a8w4_fprop(
             b_scales.append(s)
         b_data = torch.stack(b_datas, dim=0)  # (G, N, K/2)
         b_scale = torch.stack(b_scales, dim=0)  # (G, N, K/32)
+        b_scale_is_transposed = False  # fresh weight quant is always plain [G, N, K/32]
 
-    a_data, a_scale = _row_operand_mxfp8(a)  # (total_M, K) e4m3, (total_M, K/32) e8m0
+    a_data, a_scale = _row_operand_mxfp8(a, transpose_scale=True)  # a_scale [K/32, total_M]
+    # a8w4 swizzle: the kernel consumes both scales transposed ([G, K/32, N]). The plain
+    # weight quant / documented weight_row is [G, N, K/32]; transpose unless the caller
+    # already cached it transposed (weight_scale_transposed).
+    if not b_scale_is_transposed:
+        b_scale = b_scale.transpose(1, 2).contiguous()
     group_offs = _prefix_offsets(m_splits, a.device)
     return grouped_gemm_a8w4_triton_kernel(
         a_data,
@@ -333,6 +357,153 @@ def grouped_gemm_a8w4_fprop(
         group_offs_out=group_offs,
         out_dtype=out_dtype,
         num_cu=num_cu,
+        scale_transposed=True,
+    )
+
+
+def _check_prequantized_operands(
+    a_data: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_data: torch.Tensor,
+    b_scale: torch.Tensor,
+    *,
+    a_is_mxfp8: bool,
+    scale_transposed: bool = False,
+) -> None:
+    """Validate pre-quantized operand ranks/shapes/dtypes/devices before launch.
+
+    The raw kernel indexes straight into these buffers, so a malformed operand would
+    read out of bounds rather than fail; reject it up front. Assumes ``b_data`` is
+    3-D ``[G, N, K/2]`` with ``K`` a 128-multiple (checked by the caller).
+    """
+    G, N = b_data.shape[0], b_data.shape[1]
+    K = b_data.shape[2] * 2
+    grid_k = K // MXFP4_BLOCK  # one E8M0 scale per 32-elem block along K
+    total_M = a_data.shape[0]
+    a_cols = K if a_is_mxfp8 else K // 2  # e4m3 unpacked vs e2m1 packed
+
+    if a_data.ndim != 2 or a_data.shape[1] != a_cols:
+        raise ValueError(
+            f"a_data must be [total_M, {a_cols}]"
+            f" ({'e4m3' if a_is_mxfp8 else 'packed e2m1'}), got {tuple(a_data.shape)}"
+        )
+    # Scales may be over-allocated (the reference quantizer pads rows to 256 and
+    # cols to 8); the kernel reads only the valid region via group offsets + strides,
+    # so require they merely *cover* [rows, K/32]. When ``scale_transposed`` the
+    # scales are stored [K/32, total_M] / [G, K/32, N].
+    if scale_transposed:
+        if a_scale.ndim != 2 or a_scale.shape[0] < grid_k or a_scale.shape[1] < total_M:
+            raise ValueError(
+                f"transposed a_scale must cover at least [{grid_k}, {total_M}],"
+                f" got {tuple(a_scale.shape)}"
+            )
+        if (
+            b_scale.ndim != 3
+            or b_scale.shape[0] != G
+            or b_scale.shape[1] < grid_k
+            or b_scale.shape[2] < N
+        ):
+            raise ValueError(
+                f"transposed b_scale must cover at least [{G}, {grid_k}, {N}],"
+                f" got {tuple(b_scale.shape)}"
+            )
+    else:
+        if a_scale.ndim != 2 or a_scale.shape[0] < total_M or a_scale.shape[1] < grid_k:
+            raise ValueError(
+                f"a_scale must cover at least [{total_M}, {grid_k}], got {tuple(a_scale.shape)}"
+            )
+        if (
+            b_scale.ndim != 3
+            or b_scale.shape[0] != G
+            or b_scale.shape[1] < N
+            or b_scale.shape[2] < grid_k
+        ):
+            raise ValueError(
+                f"b_scale must cover at least [{G}, {N}, {grid_k}], got {tuple(b_scale.shape)}"
+            )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("E8M0 scales (a_scale, b_scale) must be uint8")
+    if a_data.element_size() != 1 or b_data.element_size() != 1:
+        raise TypeError("packed data operands (a_data, b_data) must be 1-byte")
+    devices = {a_data.device, a_scale.device, b_data.device, b_scale.device}
+    if len(devices) != 1:
+        raise ValueError(f"pre-quantized operands must share one device, got {devices}")
+
+
+def grouped_gemm_mxfp4_fprop_prequantized(
+    a_data: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_data: torch.Tensor,
+    b_scale: torch.Tensor,
+    m_splits: Sequence[int],
+    *,
+    a_is_mxfp8: bool,
+    out_dtype: torch.dtype = torch.bfloat16,
+    num_cu: Optional[int] = None,
+    scale_transposed: bool = False,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Grouped forward from already-quantized operands: ``C[g] = A[g] @ W[g]^T``.
+
+    Unlike :func:`grouped_gemm_mxfp4_fprop` / :func:`grouped_gemm_a8w4_fprop`, this
+    takes the packed data + E8M0 scales directly (no internal cast), so a recipe's
+    own reference quantizer owns the quantization and this only drives the GEMM.
+
+    Args:
+        a_data: activation data grouped along M by ``m_splits`` -- ``[total_M, K]``
+            e4m3 when ``a_is_mxfp8`` else ``[total_M, K/2]`` packed e2m1.
+        a_scale: ``[total_M, K/32]`` uint8 E8M0 activation scales.
+        b_data: ``[G, N, K/2]`` packed e2m1 weights.
+        b_scale: ``[G, N, K/32]`` uint8 E8M0 weight scales.
+        m_splits: per-group token counts (len G).
+        a_is_mxfp8: ``True`` routes the MXFP8(e4m3) x MXFP4(e2m1) a8w4 kernel;
+            ``False`` the MXFP4 x MXFP4 kernel.
+        scale_transposed: when ``True`` the E8M0 scales are laid out ``[K/32, total_M]``
+            / ``[G, K/32, N]`` so the kernel loads them without the per-iter ``tl.trans``.
+        out: optional ``[total_M, N]`` ``out_dtype`` buffer the kernel writes into instead
+            of allocating (caller-provided output; must match device).
+
+    Returns:
+        ``[total_M, N]`` output in ``out_dtype``.
+    """
+    _require_mxfp4_gemm_arch()
+    if b_data.ndim != 3:
+        raise ValueError(f"b_data (weights) must be 3-D [G, N, K/2], got rank {b_data.ndim}")
+    N = b_data.shape[1]
+    K = b_data.shape[2] * 2  # weights are packed 2 e2m1 elems/byte along K
+    _check_contract(K, "K")
+    _check_splits(m_splits, a_data.shape[0], b_data.shape[0])
+    _check_prequantized_operands(
+        a_data, a_scale, b_data, b_scale, a_is_mxfp8=a_is_mxfp8, scale_transposed=scale_transposed
+    )
+    total_M = a_data.shape[0]
+    if out is not None and (
+        tuple(out.shape) != (total_M, N)
+        or out.dtype != out_dtype
+        or out.device != a_data.device
+    ):
+        raise ValueError(
+            f"out must be [{total_M}, {N}] {out_dtype} on {a_data.device}, got"
+            f" {tuple(out.shape)} {out.dtype} on {out.device}"
+        )
+    if total_M == 0:  # empty MoE routing batch: no tokens for this GPU's experts
+        return out if out is not None else torch.empty((0, N), dtype=out_dtype, device=a_data.device)
+
+    group_offs = _prefix_offsets(m_splits, a_data.device)
+    kernel = grouped_gemm_a8w4_triton_kernel if a_is_mxfp8 else grouped_gemm_mxfp4_triton_kernel
+    return kernel(
+        a_data,
+        a_scale,
+        b_data,
+        b_scale,
+        group_offs,
+        N,
+        K,
+        group_offs_out=group_offs,
+        out_dtype=out_dtype,
+        num_cu=num_cu,
+        scale_transposed=scale_transposed,
+        out=out,
     )
 
 
@@ -363,7 +534,7 @@ def grouped_gemm_mxfp4_dgrad(
         [total_M, K] input gradient in ``out_dtype``.
     """
     N = grad_out.shape[1]
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     _check_contract(N, "N")
 
     if weight_col is not None:
@@ -426,7 +597,7 @@ def grouped_gemm_mxfp4_wgrad(
     N = grad_out.shape[1]
     K = a.shape[1]
     G = len(m_splits)
-    _require_gfx950()
+    _require_mxfp4_gemm_arch()
     if a.shape[0] != grad_out.shape[0]:
         raise ValueError(f"a rows ({a.shape[0]}) must equal grad_out rows ({grad_out.shape[0]})")
     _check_splits(m_splits, a.shape[0])
@@ -437,9 +608,8 @@ def grouped_gemm_mxfp4_wgrad(
     # Whether every padded group length is 256-divisible; part of the wgrad autotune
     # key so a cached BLOCK_K=256 config is never reused on a shape that can't take
     # it. Computed from the Python splits, so the hot path needs no device sync.
-    can256 = int(
-        all(round_up_to_nearest_multiple(int(m), WGRAD_PAD_MULTIPLE) % 256 == 0 for m in m_splits)
-    )
+    pad = _wgrad_pad_multiple()
+    can256 = int(all(round_up_to_nearest_multiple(int(m), pad) % 256 == 0 for m in m_splits))
 
     return grouped_gemm_mxfp4_variable_k_triton_kernel(
         lhs_data,

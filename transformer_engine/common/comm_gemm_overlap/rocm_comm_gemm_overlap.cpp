@@ -4,6 +4,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <cstdio>
+
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -250,6 +252,18 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
+// Matrix view of a tensor with its leading dims flattened, as the GEMM sees it: modules pass
+// N-D activations ([s, b, h]) since upstream stopped flattening them.
+static size_t flat_rows(const TensorWrapper &t) {
+  size_t rows = 1;
+  for (size_t i = 0; i + 1 < t.ndim(); ++i) {
+    rows *= t.size(i);
+  }
+  return rows;
+}
+
+static size_t flat_cols(const TensorWrapper &t) { return t.ndim() == 0 ? 1 : t.size(t.ndim() - 1); }
+
 // Raw inputs for a second all-gather region; hk_fused_ag_gemm resolves them into peer pointers.
 struct AuxAgSource {
   int reg;
@@ -309,9 +323,9 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
     scale_B = reinterpret_cast<char *>(ubuf.dptr()) + scale_base_offset;
   }
 
-  const size_t m       = (transa) ? A.size(0) : A.size(1);
-  const size_t k       = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const size_t m       = (transa) ? flat_rows(A) : flat_cols(A);
+  const size_t k       = (transa) ? flat_cols(A) : flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
              "fused AG+GEMM reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
@@ -354,6 +368,14 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
   return kittens_fused_ag_gemm_bf16(args);
 }
 
+// Once per call site under NVTE_LOG_COMM_GEMM_CONFIG: which RS kernel ran, for the fused overlap tests.
+static void rs_log_once(bool &traced, const char *what) {
+  if (!traced && kittens_log_comm_gemm_config()) {
+    traced = true;
+    std::fprintf(stderr, "[RS_CONFIG] %s\n", what);
+  }
+}
+
 // Fused GEMM + reduce-scatter, launched by fused_overlap_rs below.
 static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                              bool transb, const TensorWrapper &bias,
@@ -364,13 +386,29 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
   // TODO: Add bias support
   NVTE_CHECK(!accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0,
              "fused GEMM+RS reached with an unsupported epilogue");
-  NVTE_CHECK(A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16 && rs_output.dtype() == DType::kBFloat16,
-             "fused GEMM+RS reached with a non-bf16 operand");
+  NVTE_CHECK(rs_output.dtype() == DType::kBFloat16, "fused GEMM+RS reached with a non-bf16 output");
   NVTE_CHECK(transa, "fused GEMM+RS is TN only");
 
-  const size_t m       = (transa) ? A.size(0) : A.size(1);
-  const size_t k       = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const bool is_fp8 = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype());
+  NVTE_CHECK(is_fp8 || (A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16),
+             "fused GEMM+RS reached with unsupported operand types");
+
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
+  if (is_fp8) {
+    NVTE_CHECK(A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                   B_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING,
+               "fused GEMM+RS with FP8 operands only supports MXFP8_1D_SCALING");
+    NVTE_CHECK(A_tensor->has_data() && B_tensor->has_data(),
+               "fused GEMM+RS with MXFP8 reached with an operand missing row-wise usage");
+  }
+
+  const void *scale_A = is_fp8 ? A_tensor->scale_inv.dptr : nullptr;
+  const void *scale_B = is_fp8 ? B_tensor->scale_inv.dptr : nullptr;
+
+  const size_t m       = (transa) ? flat_rows(A) : flat_cols(A);
+  const size_t k       = (transa) ? flat_cols(A) : flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   const size_t tokens  = n_chunk * tp_size;
   NVTE_CHECK(kittens_fused_rs_gemm_shape_ok(static_cast<int>(tokens), static_cast<int>(m),
                                             static_cast<int>(k), tp_size),
@@ -379,7 +417,7 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      B.dptr(), A.dptr(), rs_output.dptr(), ubuf.dptr(),
+      A.dptr(), B.dptr(), rs_output.dptr(), scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -387,6 +425,15 @@ static bool hk_fused_rs_gemm(const TensorWrapper &A, bool transa, const TensorWr
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(tokens), static_cast<int>(k),
       tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
+  if (is_fp8) {
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
+    static bool traced_mxfp8 = false;
+    rs_log_once(traced_mxfp8, "launched mxfp8");
+    return kittens_fused_rs_gemm_mxfp8(args);
+  }
+  static bool traced_bf16 = false;
+  rs_log_once(traced_bf16, "launched bf16");
   return kittens_fused_rs_gemm_bf16(args);
 }
 
@@ -414,14 +461,14 @@ static bool hk_bulk_ag_gemm(const TensorWrapper &A, bool transa, const TensorWra
   NVTE_CHECK(bulk_bf16 || bulk_fp8, "fused bulk AG reached with an unsupported operand type");
   NVTE_CHECK(ubuf.numel() != 0, "fused bulk AG reached without a gather destination");
 
-  const size_t m       = A.size(1);
-  const size_t k       = A.size(0);
-  const size_t n_chunk = chunk.size(0);
+  const size_t m       = flat_cols(A);
+  const size_t k       = flat_rows(A);
+  const size_t n_chunk = flat_rows(chunk);
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
              "fused bulk AG reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
-  NVTE_CHECK(D.size(0) == n_chunk * tp_size,
-             "fused bulk AG: the GEMM writes ", D.size(0), " rows but the kernel grid is sized for ",
+  NVTE_CHECK(flat_rows(D) == n_chunk * tp_size,
+             "fused bulk AG: the GEMM writes ", flat_rows(D), " rows but the kernel grid is sized for ",
              n_chunk * tp_size, " from the Userbuffers region.");
 
   const void *scale_A = nullptr;
@@ -461,36 +508,49 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
   if (transa || !transb || accumulate || bias.numel() != 0 || pre_gelu_out.numel() != 0) {
     return false;
   }
-  if (A.dtype() != DType::kBFloat16 || B.dtype() != DType::kBFloat16 ||
-      D.dtype() != DType::kBFloat16 || ubuf.dtype() != DType::kBFloat16) {
+  auto A_tensor = convertNVTETensorCheck(A.data());
+  auto B_tensor = convertNVTETensorCheck(B.data());
+  const bool bulk_bf16 = A.dtype() == DType::kBFloat16 && B.dtype() == DType::kBFloat16;
+  const bool bulk_fp8  = is_fp8_dtype(A.dtype()) && is_fp8_dtype(B.dtype()) &&
+                         A_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                         B_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING &&
+                         A_tensor->has_columnwise_data() && B_tensor->has_columnwise_data();
+  if (!bulk_bf16 && !bulk_fp8) {
+    return false;
+  }
+  if (D.dtype() != DType::kBFloat16 || ubuf.dtype() != DType::kBFloat16) {
     return false;
   }
   if (rs_output.numel() != 0 || ubuf.numel() == 0) {
     return false;
   }
+
+  const void *scale_A = bulk_fp8 ? A_tensor->columnwise_scale_inv.dptr : nullptr;
+  const void *scale_B = bulk_fp8 ? B_tensor->columnwise_scale_inv.dptr : nullptr;
   if (tp_size != 4 && tp_size != 8) {
     return false;
   }
 
-  const size_t tokens = ubuf.size(0);
-  const size_t hidden = ubuf.size(1);
+  const size_t tokens = flat_rows(ubuf);
+  const size_t hidden = flat_cols(ubuf);
   if (tokens % (static_cast<size_t>(tp_size) * 256) != 0 || hidden % 256 != 0) {
     return false;
   }
 
-  const size_t m = A.size(1);
-  const size_t k = A.size(0);
-  const size_t n = B.size(1);
+  const size_t m = flat_cols(A);
+  const size_t k = flat_rows(A);
+  const size_t n = flat_cols(B);
   if (m % 256 != 0 || n % 256 != 0 || k % 128 != 0 || k < 256) {
     return false;
   }
-  if (B.size(0) != k || k != tokens || m != hidden || D.size(0) != n || D.size(1) != m) {
+  if (flat_rows(B) != k || k != tokens || m != hidden || flat_rows(D) != n || flat_cols(D) != m) {
     return false;
   }
 
   const int rank_round_tp = comm->myrank - tp_id;
   KittensRsGemmArgs args{
-      A.dptr(), B.dptr(), D.dptr(), ubuf.dptr(),
+      bulk_fp8 ? A.columnwise_dptr() : A.dptr(), bulk_fp8 ? B.columnwise_dptr() : B.dptr(), D.dptr(),
+      scale_A, scale_B, ubuf.dptr(),
       reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
       rank_round_tp % comm->nvsize, comm->nvsize,
       GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
@@ -498,6 +558,15 @@ static bool hk_bulk_rs_gemm(const TensorWrapper &A, bool transa, const TensorWra
       static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
       signal, static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), tp_id, tp_size,
       tokens / tp_size * hidden * ubuf.element_size(), workspace.dptr(), workspace.bytes(), stream};
+  if (bulk_fp8) {
+    args.a_dtype = static_cast<KittensDType>(A.dtype());
+    args.b_dtype = static_cast<KittensDType>(B.dtype());
+    static bool traced_mxfp8 = false;
+    rs_log_once(traced_mxfp8, "bulk launched mxfp8");
+    return kittens_bulk_rs_gemm_mxfp8(args);
+  }
+  static bool traced_bf16 = false;
+  rs_log_once(traced_bf16, "bulk launched bf16");
   return kittens_bulk_rs_gemm_bf16(args);
 }
 #endif
@@ -593,7 +662,7 @@ void CommOverlapP2PBase::fused_overlap_rs(const TensorWrapper &A, bool transa, c
                                            _ub_reg, _tp_id, _tp_size, _rs_signal_base + _tp_size,
                                            stream_main);
     NVTE_CHECK(launched,
-               "fused GEMM+RS failed to launch; set NVTE_RS_DIAG=1 for the guard breakdown");
+               "fused GEMM+RS failed to launch; set NVTE_LOG_COMM_GEMM_CONFIG=1 for the guard breakdown");
     _rs_signal_base += _tp_size;
     return;
   }

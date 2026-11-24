@@ -1739,6 +1739,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
+  kwargs["scale_inv_dtype"] = MakePythonDType(DType::kFloat8E8M0);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1931,8 +1932,6 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
   const bool nvfp4_use_4over6 = quantizer.attr("nvfp4_use_4over6").cast<bool>();
   this->nvfp4_e4m3_max = quantizer.attr("nvfp4_e4m3_max").cast<int>();
-  NVTE_CHECK(this->nvfp4_e4m3_max == 448 || this->nvfp4_e4m3_max == 256,
-             "Unsupported NVFP4 E4M3 max: ", this->nvfp4_e4m3_max);
   const auto nvfp4_4over6_err_mode = quantizer.attr("nvfp4_4over6_err_mode").cast<std::string>();
   if (!nvfp4_use_4over6) {
     this->nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
@@ -1944,6 +1943,10 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
+  this->scale_dtype = quantizer.attr("scale_dtype").cast<DType>();
+  NVTE_CHECK(this->scale_dtype == DType::kFloat8E4M3 || this->scale_dtype == DType::kFloat8UE5M3,
+             "Unsupported NVFP4 scale dtype: ", static_cast<int>(this->scale_dtype));
+  this->disable_second_level_scale = quantizer.attr("disable_second_level_scale").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -1976,10 +1979,15 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
 
 bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
                                                      bool for_grouped_kernel) {
+  if (transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")) {
+    return false;
+  }
   const auto [rows, cols] = get_2d_dims(shape);
   const size_t row_align = for_grouped_kernel ? 128 : 64;
-  return rows % row_align == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
-         transformer_engine::cuda::sm_arch() <= 110;
+  const int sm_arch = transformer_engine::cuda::sm_arch();
+  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
+                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
@@ -1998,6 +2006,12 @@ bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector
     return false;
   }
   if (q.with_rht) {
+    const int sm_arch = transformer_engine::cuda::sm_arch();
+    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
+    // Keep the existing post-quantize swizzle until that path gains an in-kernel swizzle epilogue.
+    if (sm_arch == 120 || sm_arch == 121) {
+      return false;
+    }
     return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   }
   // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
@@ -2028,8 +2042,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
   }
@@ -2051,7 +2065,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const int64_t amax_rows = row_scaled_nvfp4 ? static_cast<int64_t>(flat_first_dim) : 1;
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
+    if (!disable_second_level_scale) {
+      amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
+    }
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -2067,7 +2083,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
     const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
-    amax_columnwise = at::empty({amax_cols}, bit32_tensor_opts);
+    if (!disable_second_level_scale) {
+      amax_columnwise = at::empty({amax_cols}, bit32_tensor_opts);
+    }
   }
 
   // Convert tensors to Python
@@ -2078,8 +2096,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   auto rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
   auto columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
   auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
-  auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage);
-  auto amax_columnwise_py = py_cast(amax_columnwise, columnwise_usage);
+  auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage && !disable_second_level_scale);
+  auto amax_columnwise_py =
+      py_cast(amax_columnwise, columnwise_usage && !disable_second_level_scale);
 
   // Construct Python NVFP4 tensor
   py::object out_py;
@@ -2093,11 +2112,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["amax_rowwise"] = amax_rowwise_py;
     kwargs["amax_columnwise"] = amax_columnwise_py;
     kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
+    kwargs["scale_dtype"] = MakePythonDType(this->scale_dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
-    kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
+    kwargs["nvfp4_e4m3_max"] = py::cast(this->nvfp4_e4m3_max);
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
@@ -2124,12 +2144,13 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["amax_rowwise"] = amax_rowwise_py;
     kwargs["amax_columnwise"] = amax_columnwise_py;
     kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
+    kwargs["scale_dtype"] = MakePythonDType(this->scale_dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
-    kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
+    kwargs["nvfp4_e4m3_max"] = py::cast(this->nvfp4_e4m3_max);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -2145,9 +2166,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   TensorWrapper out_cpp(NVTE_NVFP4_1D_SCALING);
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
-    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), this->scale_dtype,
                                   rowwise_scale_inv_shape);
-    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    if (!disable_second_level_scale) {
+      out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2156,14 +2179,18 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
     out_cpp.set_columnwise_data(columnwise_data_tensor.data_ptr(), DType::kFloat4E2M1,
                                 col_data_shape_fp4);
-    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), this->scale_dtype,
                                      columnwise_scale_inv_shape);
-    out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                getTensorShape(amax_columnwise));
+    if (!disable_second_level_scale) {
+      out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
+                                  getTensorShape(amax_columnwise));
+    }
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
+  if (this->nvfp4_e4m3_max != 0) {
+    out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
+  }
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -2195,8 +2222,8 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
     NVTE_CHECK(!columnwise_usage,
@@ -2212,7 +2239,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
     const int64_t amax_elements = row_scaled_nvfp4 ? static_cast<int64_t>(logical_first_dim)
                                                    : static_cast<int64_t>(num_tensors);
-    rowwise_amax = at::empty({amax_elements}, float_opts);
+    if (!disable_second_level_scale) {
+      rowwise_amax = at::empty({amax_elements}, float_opts);
+    }
   }
 
   if (columnwise_usage) {
@@ -2220,23 +2249,29 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const auto scale_shape = get_scale_shape(logical_shape_vec, true);
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
-    columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    if (!disable_second_level_scale) {
+      columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    }
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
-    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), this->scale_dtype,
                                   getTensorShape(*rowwise_scale_inv));
-    out_cpp.set_amax(rowwise_amax->data_ptr(), DType::kFloat32, getTensorShape(*rowwise_amax));
+    if (rowwise_amax.has_value()) {
+      out_cpp.set_amax(rowwise_amax->data_ptr(), DType::kFloat32, getTensorShape(*rowwise_amax));
+    }
   }
   if (columnwise_usage) {
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
                                 getTensorShape(*columnwise_data));
-    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), this->scale_dtype,
                                      getTensorShape(*columnwise_scale_inv));
-    out_cpp.set_columnwise_amax(columnwise_amax->data_ptr(), DType::kFloat32,
-                                getTensorShape(*columnwise_amax));
+    if (columnwise_amax.has_value()) {
+      out_cpp.set_columnwise_amax(columnwise_amax->data_ptr(), DType::kFloat32,
+                                  getTensorShape(*columnwise_amax));
+    }
   }
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
@@ -2275,7 +2310,8 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
   kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
-  kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
+  kwargs["nvfp4_e4m3_max"] = py::cast(this->nvfp4_e4m3_max);
+  kwargs["scale_inv_dtype"] = MakePythonDType(this->scale_dtype);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -2354,15 +2390,16 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
   }
   tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
   tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);
-  tensor.attr("_nvfp4_e4m3_max") = py::cast(nvfp4_e4m3_max);
+  tensor.attr("_nvfp4_e4m3_max") = py::cast(this->nvfp4_e4m3_max);
+  tensor.attr("_scale_dtype") = MakePythonDType(this->scale_dtype);
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -2381,7 +2418,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
     const int64_t amax_rows = row_scaled_nvfp4 ? static_cast<int64_t>(flat_first_dim) : 1;
-    if (!amax_rowwise || amax_rowwise->numel() != amax_rows) {
+    if (disable_second_level_scale) {
+      amax_rowwise.reset();
+      tensor.attr("_amax_rowwise") = py::none();
+    } else if (!amax_rowwise || amax_rowwise->numel() != amax_rows) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
@@ -2424,7 +2464,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
     const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
-    if (!amax_columnwise || amax_columnwise->numel() != amax_cols) {
+    if (disable_second_level_scale) {
+      amax_columnwise.reset();
+      tensor.attr("_amax_columnwise") = py::none();
+    } else if (!amax_columnwise || amax_columnwise->numel() != amax_cols) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
@@ -2450,9 +2493,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   TensorWrapper out_cpp(NVTE_NVFP4_1D_SCALING);
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
-    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), this->scale_dtype,
                                   getTensorShape(*rowwise_scale_inv));
-    out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    if (amax_rowwise.has_value()) {
+      out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2461,14 +2506,18 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), DType::kFloat4E2M1,
                                 col_data_shape_fp4);
-    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), this->scale_dtype,
                                      getTensorShape(*columnwise_scale_inv));
-    out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
-                                getTensorShape(*amax_columnwise));
+    if (amax_columnwise.has_value()) {
+      out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
+                                  getTensorShape(*amax_columnwise));
+    }
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
+  if (this->nvfp4_e4m3_max != 0) {
+    out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
+  }
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};
@@ -2558,7 +2607,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
   auto reduce_amaxes = [&]() {
-    if (!this->with_amax_reduction) {
+    if (!this->with_amax_reduction || this->disable_second_level_scale) {
       return;
     }
 
@@ -2642,6 +2691,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
   // we need separate RNG states for each to ensure they use different random numbers.
+  // TensorWrapper does not own storage; retain both RNG buffers through dispatch.
+  at::Tensor rng_state;
+  at::Tensor rng_state_columnwise;
   TensorWrapper te_rng_state;
   TensorWrapper te_rng_state_columnwise;
 
@@ -2663,7 +2715,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
     // Generate RNG state for rowwise quantization
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-    auto rng_state = torch::empty({2}, opts);
+    rng_state = torch::empty({2}, opts);
     philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
@@ -2671,7 +2723,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     // Generate separate RNG state for columnwise quantization
     if (need_separate_columnwise_rng) {
       at::PhiloxCudaState philox_args_columnwise = init_philox_state(gen, rng_elts_per_thread);
-      auto rng_state_columnwise = torch::empty({2}, opts);
+      rng_state_columnwise = torch::empty({2}, opts);
       philox_unpack(philox_args_columnwise, static_cast<int64_t*>(rng_state_columnwise.data_ptr()));
       te_rng_state_columnwise = makeTransformerEngineTensor(rng_state_columnwise);
       quant_config_columnwise.set_stochastic_rounding(true);
@@ -2705,7 +2757,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
 #ifdef USE_ROCM
-      if (compute_amax && rht_output_t.defined()) {
+      if (compute_amax && !this->disable_second_level_scale && rht_output_t.defined()) {
         // Fused path: compute amax AND write transposed RHT output in one kernel.
         // Create a wrapper with amax fields from out + data pointing to rht_output_t.
         TensorWrapper amax_and_transform(out.scaling_mode());
@@ -2724,7 +2776,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         });
       } else
 #endif
-      if (compute_amax) {
+      if (compute_amax && !this->disable_second_level_scale) {
         NVTE_SCOPED_GIL_RELEASE({
           nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                        this->rht_matrix_random_sign_mask_t, stream);
@@ -2737,7 +2789,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
-    if (compute_amax && !row_scaled_nvfp4) {
+    if (compute_amax && !row_scaled_nvfp4 && !this->disable_second_level_scale) {
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
@@ -2810,7 +2862,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // unfused path also needs memory allocation for intermediate buffer for RHT output
       at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
 #endif
-      bool skip_hadamard = compute_amax && rht_output_t.defined();
+      bool skip_hadamard =
+          compute_amax && !this->disable_second_level_scale && rht_output_t.defined();
       if (this->columnwise_usage && !skip_hadamard) {
         rht_output_t =
             allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
@@ -2892,6 +2945,21 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 }
 
 #ifdef USE_ROCM
+namespace {
+
+// The MXFP4 cast kernel writes one scale per 32-element block, but the FP4 GEMMs also read the
+// padding get_scale_shape adds, so a padded scale tensor must start zeroed.
+at::Tensor allocate_mxfp4_scale_inv(const std::vector<size_t>& scale_shape, size_t num_blocks,
+                                    const at::TensorOptions& opts) {
+  const std::vector<int64_t> shape(scale_shape.begin(), scale_shape.end());
+  if (product(scale_shape) != num_blocks) {
+    return at::zeros(shape, opts);
+  }
+  return at::empty(shape, opts);
+}
+
+}  // namespace
+
 MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
@@ -2928,21 +2996,20 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor;
   const auto uint8_tensor_opts =
       at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  const size_t num_blocks = flat_first_dim * flat_last_dim / MXFP4_BLOCK_SIZE;
   if (rowwise_usage) {
-    const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
-                                                     rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), uint8_tensor_opts);
-    rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    rowwise_scale_inv_tensor =
+        allocate_mxfp4_scale_inv(rowwise_scale_inv_shape, num_blocks, uint8_tensor_opts);
   }
   if (columnwise_usage) {
-    const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
-                                                     columnwise_scale_inv_shape.end());
     std::vector<int64_t> shape_int64_2d = {static_cast<int64_t>(flat_first_dim),
                                            static_cast<int64_t>(flat_last_dim)};
     const auto transpose_shape_int64 = make_transpose_shape<int64_t>(shape_int64_2d);
     columnwise_data_tensor =
         at::empty(convert_shape_for_fp4(transpose_shape_int64), uint8_tensor_opts);
-    columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    columnwise_scale_inv_tensor =
+        allocate_mxfp4_scale_inv(columnwise_scale_inv_shape, num_blocks, uint8_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -3019,18 +3086,17 @@ std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  const size_t num_blocks = static_cast<size_t>(total_elements) / MXFP4_BLOCK_SIZE;
   if (rowwise_usage) {
     rowwise_data = at::empty({total_data_elements}, uint8_opts);
     const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+    rowwise_scale_inv = allocate_mxfp4_scale_inv({product(scale_shape)}, num_blocks, uint8_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_data_elements}, uint8_opts);
     const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+    columnwise_scale_inv = allocate_mxfp4_scale_inv({product(scale_shape)}, num_blocks, uint8_opts);
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -3127,6 +3193,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  const size_t num_blocks = flat_first_dim * flat_last_dim / MXFP4_BLOCK_SIZE;
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -3137,11 +3204,8 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_rowwise_data") = *rowwise_data;
     }
     if (!rowwise_scale_inv) {
-      const auto scale_inv_shape = get_scale_shape(shape, false);
-      const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
-                                                       scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      rowwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      rowwise_scale_inv = allocate_mxfp4_scale_inv(get_scale_shape(shape, false), num_blocks, opts);
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
   } else {  // rowwise_usage == false
@@ -3166,11 +3230,9 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_columnwise_data") = *columnwise_data;
     }
     if (!columnwise_scale_inv) {
-      const auto scale_inv_shape = get_scale_shape(shape, true);
-      const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
-                                                       scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      columnwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      columnwise_scale_inv =
+          allocate_mxfp4_scale_inv(get_scale_shape(shape, true), num_blocks, opts);
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
   } else {  // columnwise_usage == false
