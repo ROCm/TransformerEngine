@@ -88,6 +88,8 @@ def _validate_common_epilogue(
     accumulate,
     alpha,
     beta,
+    supports_accumulate=False,
+    supports_alpha=False,
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
@@ -102,12 +104,16 @@ def _validate_common_epilogue(
     if quantizer is not None:
         raise FlyDSLUnsupportedError("FlyDSL GEMM output quantization is not implemented")
 
-    if float(alpha) != 1.0 or float(beta) != 0.0:
-        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1 and beta=0")
-
-    # TODO: Add accumulate option
-    if accumulate:
+    # TODO: Add accumulate option to the non-MXFP4 backends
+    if accumulate and not supports_accumulate:
         raise FlyDSLUnsupportedError("FlyDSL GEMM accumulation is not implemented")
+
+    # TODO: Add alpha to the non-MXFP4 backends
+    if float(alpha) != 1.0 and not supports_alpha:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM currently supports only alpha=1")
+
+    if float(beta) != 0.0 and not accumulate:
+        raise FlyDSLUnsupportedError("FlyDSL GEMM supports beta != 0 only when accumulating")
 
     # Forward BIAS is implemented across all backends; the fused bias-gradient
     # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
@@ -1056,6 +1062,10 @@ def _run_mxfp4(
     D,
     *,
     output_dtype: torch.dtype,
+    accumulate=False,
+    alpha=1.0,
+    beta=0.0,
+    bias=None,
 ):
     """Dispatch MXFP4 (gfx1250) through the single TN kernel for TN/NN/NT."""
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
@@ -1078,6 +1088,8 @@ def _run_mxfp4(
             f"{a_flydsl.device} and {b_flydsl.device}"
         )
 
+    if accumulate and D is None:
+        raise ValueError("FlyDSL MXFP4 accumulation requires an output tensor D to accumulate into")
     if D is not None:
         output_shape = torch.Size(D.shape)
     elif transb:
@@ -1097,7 +1109,18 @@ def _run_mxfp4(
         device=a_flydsl.device,
         backend_name=f"MXFP4 {layout}",
     )
-    mxfp4_matmul(a_flydsl, a_scale, b_flydsl, b_scale, D.view(m, n))
+    _, bias_arg = _resolve_bias(bias, n)
+    mxfp4_matmul(
+        a_flydsl,
+        a_scale,
+        b_flydsl,
+        b_scale,
+        D.view(m, n),
+        accumulate=accumulate,
+        alpha=alpha,
+        beta=beta,
+        bias=bias_arg,
+    )
     return D
 
 
@@ -1373,6 +1396,7 @@ def te_generic_gemm_flydsl(
     if transa and transb:
         raise FlyDSLUnsupportedError("FlyDSL GEMM does not support transa=True, transb=True (TT)")
 
+    is_mxfp4 = a_kind == "mxfp4" or b_kind == "mxfp4"
     _validate_common_epilogue(
         quantizer=quantizer,
         bias=bias,
@@ -1381,13 +1405,13 @@ def te_generic_gemm_flydsl(
         accumulate=accumulate,
         alpha=alpha,
         beta=beta,
+        supports_accumulate=is_mxfp4,
+        supports_alpha=is_mxfp4,
     )
 
-    if a_kind == "mxfp4" or b_kind == "mxfp4":
+    if is_mxfp4:
         if a_kind != b_kind:
             raise ValueError("Mixed MXFP4 and non-MXFP4 FlyDSL GEMM inputs are not supported")
-        if bias is not None:
-            raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused bias is not implemented")
         if gelu:
             raise FlyDSLUnsupportedError("FlyDSL MXFP4 GEMM fused GELU is not implemented")
 
@@ -1409,6 +1433,10 @@ def te_generic_gemm_flydsl(
             transb,
             D,
             output_dtype=mxfp4_output_dtypes[output_dtype],
+            accumulate=accumulate,
+            alpha=alpha,
+            beta=beta,
+            bias=bias,
         )
         return D, None, None, None
 

@@ -34,9 +34,11 @@ config: fp32 / fp16 / bf16, same- and mixed-format tensor-wise FP8, same- and
 mixed-format MXFP8, TN / NN / NT, batched multidim FP8, the fused forward BIAS
 epilogue, and the fused GELU_AUX / GELU_AUX_BIAS epilogues. BGRADB and DGELU are
 not implemented on any FlyDSL path yet. MXFP4 (gfx1250) covers TN / NN / NT
-with FP32 / BF16 / FP16 output against a torch.matmul reference only. FlyDSL kernels require tile-aligned
-launch dimensions, so its shapes are aligned to the 256x256x128 kernel contract
-rather than reusing the odd-sized Triton edge-mask cases.
+with FP32 / BF16 / FP16 output, with and without accumulation into the output,
+alpha scaling and the BIAS epilogue, against a torch.matmul reference
+only. FlyDSL kernels require tile-aligned launch dimensions, so its shapes are
+aligned to the 256x256x128 kernel contract rather than reusing the odd-sized Triton
+edge-mask cases.
 """
 
 import importlib.util
@@ -173,6 +175,8 @@ FLYDSL_MXFP8_SHAPES = [
 ]
 
 FLYDSL_MXFP4_SHAPES = [
+    (512, 256, 512),  # two K tiles: no K step after the prologue
+    (512, 384, 512),  # three K tiles
     (512, 512, 512),
     (512, 1024, 512),
     (512, 512, 1024),  # M != N
@@ -1163,6 +1167,157 @@ def test_flydsl_vs_pytorch_mxfp4(M, K, N, layout, out_dtype):
         assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
     else:
         assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize("beta", [None, -0.5], ids=["beta=default", "beta=-0.5"])
+def test_flydsl_vs_pytorch_mxfp4_accumulate(M, K, N, layout, out_dtype, beta):
+    """MXFP4 FlyDSL GEMM accumulating into ``out``: ``D = A @ B + beta * D``."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    expected = ab + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, _, _, _ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        beta=beta,
+        accumulate=True,
+    )
+
+    assert output.data_ptr() == d.data_ptr()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize(
+    "alpha, beta, accumulate",
+    [(-2.5, None, False), (-2.5, None, True), (0.5, -0.5, True)],
+    ids=["alpha=-2.5", "alpha=-2.5,acc", "alpha=0.5,acc-beta=-0.5"],
+)
+def test_flydsl_vs_pytorch_mxfp4_alpha(M, K, N, layout, out_dtype, alpha, beta, accumulate):
+    """MXFP4 FlyDSL GEMM with alpha: ``D = alpha * A @ B [+ beta * D]``."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    expected = alpha * ab
+    if accumulate:
+        expected = expected + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, _, _, _ = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        alpha=alpha,
+        beta=beta,
+        accumulate=accumulate,
+    )
+
+    assert output.data_ptr() == d.data_ptr()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+@pytest.mark.parametrize("M, K, N", FLYDSL_MXFP4_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "out_dtype", [torch.float32, torch.bfloat16, torch.float16], ids=["fp32", "bf16", "fp16"]
+)
+@pytest.mark.parametrize(
+    "alpha, beta, accumulate",
+    [(1.0, None, False), (-2.5, None, False), (1.0, None, True), (0.5, -0.5, True)],
+    ids=["plain", "alpha=-2.5", "acc", "alpha=0.5,acc-beta=-0.5"],
+)
+@pytest.mark.parametrize(
+    "bias_dtype", [torch.bfloat16, torch.float32], ids=["bias_bf16", "bias_fp32"]
+)
+def test_flydsl_vs_pytorch_mxfp4_bias(
+    M, K, N, layout, out_dtype, alpha, beta, accumulate, bias_dtype
+):
+    """MXFP4 FlyDSL GEMM with bias: ``D = alpha * A @ B [+ beta * D] + bias``."""
+    torch.manual_seed(42)
+
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(M, K, N, layout)
+    ab = compute_pytorch_reference(A_deq, B_deq, layout)
+    d_init = torch.randn(ab.shape, dtype=out_dtype, device="cuda")
+    bias = torch.randn(ab.shape[-1], dtype=bias_dtype, device="cuda")
+    expected = alpha * ab + bias.float()
+    if accumulate:
+        expected = expected + (1.0 if beta is None else beta) * d_init.float()
+
+    _set_backend(True, "FLYDSL")
+    d = d_init.clone()
+    output, bias_grad, gelu_input, extra_output = general_gemm(
+        A=A_mxfp4,
+        B=B_mxfp4,
+        out_dtype=out_dtype,
+        layout=layout,
+        out=d,
+        alpha=alpha,
+        beta=beta,
+        accumulate=accumulate,
+        bias=bias,
+    )
+
+    assert bias_grad is None and gelu_input is None and extra_output is None
+    assert output.data_ptr() == d.data_ptr()
+    if out_dtype == torch.float32:
+        assert_gemm_close(output, expected, atol=1e-3, rtol=1e-4)
+    else:
+        assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
+@requires_flydsl_mxfp4_backend
+def test_flydsl_mxfp4_unsupported_epilogues_raise():
+    """MXFP4 FlyDSL GEMM rejects GELU, DGELU and bias-gradient epilogues."""
+    from transformer_engine.pytorch.flydsl_kernels.gemm import FlyDSLUnsupportedError
+
+    torch.manual_seed(42)
+    A_mxfp4, B_mxfp4, A_deq, B_deq = create_mxfp4_tensors(512, 512, 768, "TN")
+    shape = compute_pytorch_reference(A_deq, B_deq, "TN").shape
+    bias = torch.randn(shape[-1], device="cuda")
+    gelu_in = torch.randn(shape, device="cuda")
+    _set_backend(True, "FLYDSL")
+    kwargs = dict(A=A_mxfp4, B=B_mxfp4, out_dtype=torch.float32, layout="TN")
+    for epilogue in (
+        dict(gelu=True),
+        dict(gelu=True, bias=bias),
+        dict(gelu=True, grad=True, gelu_in=gelu_in),
+        dict(bias=bias, grad=True),
+    ):
+        with pytest.raises(FlyDSLUnsupportedError):
+            general_gemm(**kwargs, **epilogue)
+    with pytest.raises(ValueError):
+        general_gemm(**kwargs, bias=torch.randn(shape[0], device="cuda"))
 
 
 @requires_flydsl_mxfp4_backend

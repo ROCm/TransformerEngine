@@ -3,9 +3,10 @@
 
 """FlyDSL MXFP4 TN GEMM for gfx1250.
 
-D[M, N] = a[M, K] @ b[N, K]^T with K-contiguous packed FP4 operands and E8M0 scales along K. TE's
-MXFP4 columnwise storage is a materialized transpose, so this one kernel serves TN/NN/NT.
-Tiles are staged with TDM into a 3-stage LDS pipeline and C is written back through LDS by TDM.
+D[M, N] = alpha * a[M, K] @ b[N, K]^T (+ beta * D) (+ bias[N]) with K-contiguous packed FP4
+operands and E8M0 scales along K. TE's MXFP4 columnwise storage is a materialized transpose, so this
+one kernel serves TN/NN/NT. Tiles are staged with TDM into a 3-stage LDS pipeline and C is written
+back through LDS by TDM.
 """
 
 import torch
@@ -48,14 +49,20 @@ def gemm_kernel(
     A_s: fx.Tensor,
     B_s: fx.Tensor,
     C: fx.Tensor,
+    Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
+    alpha: fx.Float32,
+    beta: fx.Float32,
     K_SHORT: fx.Constexpr[int],
     K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
+    ACC: fx.Constexpr[int],
+    SCALE: fx.Constexpr[int],
+    BIAS: fx.Constexpr[int],
 ):
 
     def as_words(t, rows, words_per_row):
@@ -119,6 +126,15 @@ def gemm_kernel(
     if smem.allocated_bytes < c_stage_bytes:
         smem.allocate(c_stage_bytes - smem.allocated_bytes)
     lds_C_ptr = fx.recast_iter(out_fx, smem.base_ptr)
+    if const_expr(ACC):
+        # C half 0 is prefetched here, half 1 at offset 0; each half is stored from where it landed
+        lds_Cpre = smem.allocate(fx.Array[fx.Int32, c_stage_bytes // 4]).peek()
+        lds_C_half = (fx.recast_iter(out_fx, lds_Cpre.ptr), lds_C_ptr)
+    else:
+        lds_C_half = (lds_C_ptr, lds_C_ptr)
+    if const_expr(BIAS):
+        # bias goes through LDS so it holds no VGPRs across the K loop
+        lds_bias = smem.allocate(fx.Array[fx.Float32, BLOCK_N]).peek().ptr
 
     sA_base_ptr = fx.get_iter(sA)
     sB_base_ptr = fx.get_iter(sB)
@@ -246,8 +262,18 @@ def gemm_kernel(
     def frag_view_ptr(ptr, off):
         return fx.make_view(fx.add_offset(ptr, off), fx.make_layout(1, 1))
 
-    # one TDM op per wave: tiles 0 and 1 and the scales
+    if const_expr(BIAS):
+        bias_box = fx.make_layout((1, BLOCK_N), (BLOCK_N, 1))
+        gBias = fx.make_view(fx.add_offset(fx.get_iter(Bias), bid_n * BLOCK_N), bias_box)
+        tdm_bias = fx.rocdl.make_tdm_atom(
+            gBias, [None, None], strides=[fx.Int64(BLOCK_N), None], num_warps=1
+        )
+
+    # one TDM op per wave: tiles 0 and 1 and the scales (and the bias tile)
     def issue_prologue_tdm():
+        if const_expr(BIAS):
+            if wave == NUM_WAVES - 1:
+                fx.copy(tdm_bias, gBias, fx.make_view(lds_bias, bias_box))
         if wave < 4:
             if wave == 0:
                 fx.copy(tdm_A1w, tAgA1w[None, 0], tAsA1w[None, 0])
@@ -409,12 +435,42 @@ def gemm_kernel(
             else:
                 fx.rocdl.s_wait_tensorcnt(0)
 
-    def k_step_rt(ks, cur, bases, issue=None, scales=False, exact=False, pending=1):
+    # C store: each wave writes C_WAVE_ROWS rows of each half
+    def make_c_tdm():
+        c_wave_box = fx.make_layout((C_WAVE_ROWS, BLOCK_N), (BLOCK_N, 1))
+        c_wave_row = bid_m * BLOCK_M + wave * C_WAVE_ROWS
+        gC_wave = [
+            fx.make_view(
+                fx.add_offset(
+                    fx.get_iter(C),
+                    fx.Int64(c_wave_row + h * C_HALF_ROWS) * N64 + fx.Int64(bid_n * BLOCK_N),
+                ),
+                c_wave_box,
+            )
+            for h in range(2)
+        ]
+        tdm_C = fx.rocdl.make_tdm_atom(gC_wave[0], [None, None], strides=[N64, None], num_warps=1)
+        lds_C_wave = [
+            fx.make_view(fx.add_offset(p, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
+            for p in lds_C_half
+        ]
+        return gC_wave, tdm_C, lds_C_wave
+
+    if const_expr(ACC):
+        gC_wave, tdm_C, lds_C_wave = make_c_tdm()
+
+    def load_c_half(h):
+        fx.copy(tdm_C, gC_wave[h], lds_C_wave[h])
+
+    def k_step_rt(ks, cur, bases, issue=None, scales=False, exact=False, pending=1, c_load=False):
         fx.rocdl.sched_barrier(0)
         wait_tile_rt(ks, pending)
         fx.rocdl.s_wait_dscnt(0)
         fx.barrier()
         fx.rocdl.sched_barrier(0)
+        if const_expr(c_load):
+            # after the last A/B wait, so it never holds up a K tile
+            load_c_half(0)
         if const_expr(issue is not None):
             issue_tdm_rt(issue[0], issue[1], ks, scales, exact)
         nxt = new_frags()
@@ -466,6 +522,9 @@ def gemm_kernel(
     fx.rocdl.s_wait_dscnt(0)
     fx.barrier()
     fx.rocdl.sched_barrier(0)
+    if const_expr(ACC and K_SHORT == 2):
+        # no K step follows
+        load_c_half(0)
     views0 = rt_views(rt_ptrs0())
     for ks in range_constexpr(-1, 1):
         if const_expr(K_SHORT == 0 or ks + NUM_STAGES < K_SHORT):
@@ -508,57 +567,112 @@ def gemm_kernel(
         cur = k_step_rt(1 + u, cur, bases, issue, scales=at_group, exact=u >= R - 8)
     ks_last = R + 3 if K_SHORT == 0 else K_SHORT - 1
     for ks in range_constexpr(max(ks_last - 2, 1), ks_last):
-        cur = k_step_rt(ks, cur, bases, pending=int(ks < ks_last - 1))
+        last = ks == ks_last - 1
+        cur = k_step_rt(ks, cur, bases, pending=int(not last), c_load=ACC and last)
+    if const_expr(ACC):
+        # the K loop is done reading A/B
+        fx.rocdl.s_wait_dscnt(0)
+        fx.barrier()
+        fx.rocdl.sched_barrier(0)
+        load_c_half(1)
     gemm_step(cur)
     x = bases[0] - wm * 16 * LDS_ROW_WORDS
     lane_mod16, khalf = x // LDS_ROW_WORDS, x % LDS_ROW_WORDS // 4
+    if const_expr(BIAS):
+        if const_expr(ACC):
+            # keeps the last WMMAs out of the combine, where they spill with bias
+            fx.rocdl.sched_barrier(0)
+        copy_atom_f32 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
 
-    # C store: each wave writes C_WAVE_ROWS rows of each half
-    c_wave_box = fx.make_layout((C_WAVE_ROWS, BLOCK_N), (BLOCK_N, 1))
-    c_wave_row = bid_m * BLOCK_M + wave * C_WAVE_ROWS
-    gC_wave = [
-        fx.make_view(
-            fx.add_offset(
-                fx.get_iter(C),
-                fx.Int64(c_wave_row + h * C_HALF_ROWS) * N64 + fx.Int64(bid_n * BLOCK_N),
-            ),
-            c_wave_box,
-        )
-        for h in range(2)
-    ]
-    tdm_C = fx.rocdl.make_tdm_atom(gC_wave[0], [None, None], strides=[N64, None], num_warps=1)
-    lds_C_wave = fx.make_view(fx.add_offset(lds_C_ptr, wave * C_WAVE_ROWS * BLOCK_N), c_wave_box)
+        # read at each use: holding the 4 values spills with accumulate
+        def bias_at(j):
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+            fx.copy(copy_atom_f32, frag_view_ptr(lds_bias, wn * 16 + lane_mod16 + 64 * j), reg)
+            fx.rocdl.sched_barrier(0x7FF)
+            return reg.load()[0]
+
+    if const_expr(not ACC):
+        gC_wave, tdm_C, lds_C_wave = make_c_tdm()
+        if const_expr(SCALE or BIAS):
+            if const_expr(BIAS):
+                bias_j = [bias_at(j) for j in range_constexpr(B_REPS)]
+            for acc_row in frag_acc:
+                for j in range_constexpr(B_REPS):
+                    acc_vals = acc_row[j].load()
+                    if const_expr(SCALE):
+                        acc_vals = acc_vals * alpha
+                    if const_expr(BIAS):
+                        acc_vals = acc_vals + bias_j[j]
+                    acc_row[j].store(acc_vals)
 
     if const_expr(OUT_KIND == 0):
         frag_c = frag_acc
     else:
         frag_c = [[fx.make_fragment_like(acc, out_fx) for acc in acc_row] for acc_row in frag_acc]
-        for i in range_constexpr(A_REPS):
-            for j in range_constexpr(B_REPS):
-                frag_c[i][j].store(frag_acc[i][j].load().to(out_fx))
+        if const_expr(not ACC):
+            for i in range_constexpr(A_REPS):
+                for j in range_constexpr(B_REPS):
+                    frag_c[i][j].store(frag_acc[i][j].load().to(out_fx))
 
     # accumulator (v, j, i) is tile row wm*16 + 8*khalf + v + 32*i, column wn*16 + lane_mod16 + 64*j
+    def c_offset(ii, j, v):
+        return lane_c + (32 * ii + v) * BLOCK_N + 64 * j
+
+    # each thread reads C where it scatters D, so no barrier is needed in between
+    def add_beta_c(h):
+        for ii in range_constexpr(4):
+            for j in range_constexpr(4):
+                acc = frag_acc[4 * h + ii][j]
+                c_old = fx.make_fragment_like(acc, out_fx)
+                for v in range_constexpr(8):
+                    src_c = fx.make_view(
+                        fx.add_offset(lds_C_half[h], c_offset(ii, j, v)), fx.make_layout(1, 1)
+                    )
+                    fx.copy(copy_atom_c, src_c, frag_view(c_old, v, fx.make_layout(1, 1)))
+                    # a merged ds_load_2addr is split with an s_wait_dscnt 0
+                    fx.rocdl.sched_barrier(0x7FF)
+                c_vals = c_old.load()
+                if const_expr(OUT_KIND != 0):
+                    c_vals = c_vals.to(fx.Float32)
+                acc_vals = acc.load()
+                if const_expr(SCALE):
+                    acc_vals = acc_vals * alpha
+                acc_vals = acc_vals + c_vals * beta
+                if const_expr(BIAS):
+                    acc_vals = acc_vals + bias_at(j)
+                acc.store(acc_vals)
+                if const_expr(OUT_KIND != 0):
+                    frag_c[4 * h + ii][j].store(acc.load().to(out_fx))
+
+    if const_expr(ACC):
+        fx.rocdl.s_wait_tensorcnt(1)
     fx.rocdl.s_wait_dscnt(0)
     fx.barrier()
     lane_c = (wm * 16 + 8 * khalf) * BLOCK_N + wn * 16 + lane_mod16
     for h in range_constexpr(2):
         if h > 0:
-            fx.rocdl.s_wait_tensorcnt(0)
+            if const_expr(ACC):
+                # C half 1, not the half 0 store (TDM ops complete in order)
+                fx.rocdl.s_wait_tensorcnt(1)
+            else:
+                fx.rocdl.s_wait_tensorcnt(0)
             fx.barrier()
+        if const_expr(ACC):
+            add_beta_c(h)
         # sched_barrier(0x7FF) keeps the stores from being merged into ds_store_2addr
         for ii in range_constexpr(4):
             for j in range_constexpr(4):
                 for v in range_constexpr(8):
                     src_c = frag_view(frag_c[4 * h + ii][j], v, fx.make_layout(1, 1))
                     dst_c = fx.make_view(
-                        fx.add_offset(lds_C_ptr, lane_c + (32 * ii + v) * BLOCK_N + 64 * j),
+                        fx.add_offset(lds_C_half[h], c_offset(ii, j, v)),
                         fx.make_layout(1, 1),
                     )
                     fx.copy(copy_atom_c, src_c, dst_c)
                     fx.rocdl.sched_barrier(0x7FF)
         fx.rocdl.s_wait_dscnt(0)
         fx.barrier()
-        fx.copy(tdm_C, lds_C_wave, gC_wave[h])
+        fx.copy(tdm_C, lds_C_wave[h], gC_wave[h])
     fx.rocdl.s_wait_tensorcnt(0)
 
 
@@ -569,20 +683,44 @@ def launch_gemm(
     A_s: fx.Tensor,
     B_s: fx.Tensor,
     C: fx.Tensor,
+    Bias: fx.Tensor,
     M: fx.Int32,
     N: fx.Int32,
     K: fx.Int32,
     As_sw: fx.Int32,
     Bs_sw: fx.Int32,
+    alpha: fx.Float32,
+    beta: fx.Float32,
     K_SHORT: fx.Constexpr[int],
     K_REM: fx.Constexpr[int],
     OUT_KIND: fx.Constexpr[int],
+    ACC: fx.Constexpr[int],
+    SCALE: fx.Constexpr[int],
+    BIAS: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_tot = (M // BLOCK_M) * (N // BLOCK_N)
-    gemm_kernel(A, B, A_s, B_s, C, M, N, K, As_sw, Bs_sw, K_SHORT, K_REM, OUT_KIND).launch(
-        grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream
-    )
+    gemm_kernel(
+        A,
+        B,
+        A_s,
+        B_s,
+        C,
+        Bias,
+        M,
+        N,
+        K,
+        As_sw,
+        Bs_sw,
+        alpha,
+        beta,
+        K_SHORT,
+        K_REM,
+        OUT_KIND,
+        ACC,
+        SCALE,
+        BIAS,
+    ).launch(grid=(grid_tot, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
 
 def _scale_row_words(scale, rows, K):
@@ -633,11 +771,15 @@ def mxfp4_matmul(
     b_scale: torch.Tensor,
     D: torch.Tensor,
     stream=None,
+    accumulate: bool = False,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    bias: torch.Tensor = None,
 ):
-    """D[M, N] = dequant(a, a_scale) @ dequant(b, b_scale)^T.
+    """D[M, N] = alpha * dequant(a, a_scale) @ dequant(b, b_scale)^T (+ beta * D) (+ bias).
 
     a [M, K/2] and b [N, K/2] packed FP4; scales E8M0 covering [M, K/32] and [N, K/32];
-    D float32, bfloat16 or float16.
+    D float32, bfloat16 or float16; bias float32 [N].
     """
     if a.ndim != 2 or b.ndim != 2 or D.ndim != 2:
         raise ValueError(
@@ -659,6 +801,14 @@ def mxfp4_matmul(
         raise FlyDSLUnsupportedError("FlyDSL MXFP4 requires contiguous a, b and D")
     if len({a.device, b.device, a_scale.device, b_scale.device, D.device}) != 1:
         raise ValueError("a, b, scales and D must be on the same device")
+    if bias is not None:
+        if bias.dtype != torch.float32 or bias.numel() != n or bias.device != D.device:
+            raise ValueError(
+                f"bias {tuple(bias.shape)} {bias.dtype} on {bias.device} must be float32 of "
+                f"length N={n} on {D.device}"
+            )
+        if not bias.is_contiguous():
+            raise FlyDSLUnsupportedError("FlyDSL MXFP4 requires a contiguous bias")
     check_mxfp4_shape(m, n, k)
 
     if stream is None:
@@ -669,13 +819,20 @@ def mxfp4_matmul(
         a_scale,
         b_scale,
         D,
+        bias.view(-1) if bias is not None else D,
         m,
         n,
         k,
         _scale_row_words(a_scale, m, k),
         _scale_row_words(b_scale, n, k),
+        float(alpha),
+        float(beta),
         *k_loop_constexprs(k),
         OUT_KINDS[D.dtype],
+        # beta == 0 does not read D, as in hipBLASLt
+        int(accumulate and float(beta) != 0.0),
+        int(float(alpha) != 1.0),
+        int(bias is not None),
         stream=stream,
     )
     return D
