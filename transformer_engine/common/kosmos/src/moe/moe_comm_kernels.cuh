@@ -18,39 +18,32 @@ using kittens::bf16;
 typedef short v8s __attribute__((ext_vector_type(8)));
 
 constexpr double C_DPUSH_WGMS_PER_GB        = 74.2;
-constexpr double C_MX_GEMM_SCALE            = 0.65;
 constexpr double C_LEGA_GEMM_WGMS_PER_TFLOP = 282.0;
 constexpr double C_DNCOMM_MARGIN            = 1.5;
-constexpr double C_MX_DNCOMM_MARGIN         = 1.0;
 constexpr int C_DNCOMM_MIN = 32;
 constexpr int C_DNCOMM_MAX = 64;
-__host__ __device__ inline int c_dispatch_ncomm(double push_gb, double gemm_tflop, bool mx = false) {
-  const double p = (mx ? C_MX_DNCOMM_MARGIN : C_DNCOMM_MARGIN) * push_gb * C_DPUSH_WGMS_PER_GB;
+__host__ __device__ inline int c_dispatch_ncomm(double push_gb, double gemm_tflop) {
+  const double p = C_DNCOMM_MARGIN * push_gb * C_DPUSH_WGMS_PER_GB;
   const double g = gemm_tflop * C_LEGA_GEMM_WGMS_PER_TFLOP;
   const int n = (int)ceil(256.0 * p / (p + g) / hk_moe::NUM_XCDS_AFF) * hk_moe::NUM_XCDS_AFF;
   return n < C_DNCOMM_MIN ? C_DNCOMM_MIN : (n > C_DNCOMM_MAX ? C_DNCOMM_MAX : n);
 }
 constexpr double C_LEGA_CLAIM_US = 4.0;
-// MXFP8 runs of 4 halve the claims of a run of 2 (a quarter of the per-workgroup claim time) at the cost of about one
-// tile of coarser end balance.
-__host__ __device__ inline int c_wgrad2_run(double wg2_tiles, int wgs, double mean_k, bool mx = false) {
+// Runs of 2 when claiming a tile would take longer than computing it.
+__host__ __device__ inline int c_wgrad2_run(double wg2_tiles, int wgs, double mean_k) {
   const double tile_us = 2.0 * 256.0 * 256.0 * mean_k / 1e12 * C_LEGA_GEMM_WGMS_PER_TFLOP * 1e3;
   const double claim_us = wg2_tiles / wgs * C_LEGA_CLAIM_US;
-  return claim_us > tile_us ? (mx && claim_us > 4.0 * tile_us ? 4 : 2) : 1;
+  return claim_us > tile_us ? 2 : 1;
 }
 
 constexpr double C_LEGB_GEMM_WGMS_PER_TFLOP = 229.0;
 constexpr double C_CNCOMM_MARGIN            = 0.75;
-constexpr double C_MX_CNCOMM_MARGIN         = 1.0;
 constexpr int C_CNCOMM_MIN    = 24;
-constexpr int C_MX_CNCOMM_MIN = 32;
 constexpr int C_CNCOMM_MAX    = 128;
-__host__ __device__ inline int c_combine_ncomm(double push_gb, double gemm_tflop, bool mx = false) {
+__host__ __device__ inline int c_combine_ncomm(double push_gb, double gemm_tflop) {
   const double p = push_gb * C_DPUSH_WGMS_PER_GB, g = gemm_tflop * C_LEGB_GEMM_WGMS_PER_TFLOP;
-  const double margin = mx ? C_MX_CNCOMM_MARGIN : C_CNCOMM_MARGIN;
-  const int lo = mx ? C_MX_CNCOMM_MIN : C_CNCOMM_MIN;
-  const int n  = (int)ceil(margin * 256.0 * p / g / hk_moe::NUM_XCDS_AFF) * hk_moe::NUM_XCDS_AFF;
-  return n < lo ? lo : (n > C_CNCOMM_MAX ? C_CNCOMM_MAX : n);
+  const int n = (int)ceil(C_CNCOMM_MARGIN * 256.0 * p / g / hk_moe::NUM_XCDS_AFF) * hk_moe::NUM_XCDS_AFF;
+  return n < C_CNCOMM_MIN ? C_CNCOMM_MIN : (n > C_CNCOMM_MAX ? C_CNCOMM_MAX : n);
 }
 
 static_assert(C_DNCOMM_MIN % hk_moe::NUM_XCDS_AFF == 0 && C_DNCOMM_MIN % MOE_EP == 0 &&
@@ -61,7 +54,6 @@ constexpr int C_DSLICE_MIN = 64;
 constexpr int C_DSLICE_MAX = 2;
 
 constexpr int C_PUSH_THREADS  = 512;
-constexpr int C_MX_PUSH_BURST = 4;
 
 __host__ __device__ __forceinline__ int dsig_index(int src, int blk, int sigb) {
   return src * sigb + blk;
@@ -96,35 +88,22 @@ using hk_moe::moe_prod_burst;
 using hk_moe::sig_index;
 using hk_moe::spin_backoff;
 
-// Q8: the forward's Y row is MXFP8 (the fp8 combine). CP: copy only (probs on input: dY = dOut), returns 0.
-template <int PB, bool Q8, bool CP = false>
+// One dY row (bf16(w dOut)) pushed, and its partial <dOut, Y> returned.
+template <int PB>
 __device__ __forceinline__ float cw_push_row(const CW_G v8s *src, const CW_G v8s *ysrc, cw_v4i *dst, float wgt,
                                              int stl, int u_per_row) {
   constexpr int TSG = 64;
-  const CW_G uint8_t *yq = (const CW_G uint8_t *)ysrc;
   float dot = 0.0f;
   int u = stl;
   for (; u + (PB - 1) * TSG < u_per_row; u += PB * TSG) {
     v8s x[PB], y[PB];
-    hk_moe::Mx8 ym[Q8 ? PB : 1];
 #pragma unroll
     for (int z = 0; z < PB; z++) {
       x[z] = src[u + z * TSG];
     }
-    if constexpr (CP) {
-#pragma unroll
-      for (int z = 0; z < PB; z++) {
-        cw_pay_store(dst, u + z * TSG, __builtin_bit_cast(cw_v4i, x[z]));
-      }
-      continue;
-    }
 #pragma unroll
     for (int z = 0; z < PB; z++) {
-      if constexpr (Q8) {
-        ym[z] = hk_moe::moe_ld8(yq, u + z * TSG, 8 * u_per_row);
-      } else {
-        y[z] = __builtin_nontemporal_load(ysrc + u + z * TSG);
-      }
+      y[z] = __builtin_nontemporal_load(ysrc + u + z * TSG);
     }
 #pragma unroll
     for (int z = 0; z < PB; z++) {
@@ -138,28 +117,17 @@ __device__ __forceinline__ float cw_push_row(const CW_G v8s *src, const CW_G v8s
 #pragma unroll
     for (int z = 0; z < PB; z++) {
       float yf[8];
-      if constexpr (Q8) {
-        hk_moe::moe_cv8(ym[z], yf);
-      }
 #pragma unroll
       for (int e = 0; e < 8; e++) {
-        dot = __builtin_fmaf(bits2f(x[z][e]), Q8 ? yf[e] : bits2f(y[z][e]), dot);
+        dot = __builtin_fmaf(bits2f(x[z][e]), bits2f(y[z][e]), dot);
       }
     }
   }
   for (; u < u_per_row; u += TSG) {
     const v8s x = src[u];
-    if constexpr (CP) {
-      cw_pay_store(dst, u, __builtin_bit_cast(cw_v4i, x));
-      continue;
-    }
     v8s y;
     float yf[8];
-    if constexpr (Q8) {
-      hk_moe::moe_dq8(yq, u, 8 * u_per_row, yf);
-    } else {
-      y = __builtin_nontemporal_load(ysrc + u);
-    }
+    y = __builtin_nontemporal_load(ysrc + u);
     v8s o;
 #pragma unroll
     for (int e = 0; e < 8; e++) {
@@ -168,7 +136,7 @@ __device__ __forceinline__ float cw_push_row(const CW_G v8s *src, const CW_G v8s
     cw_pay_store(dst, u, __builtin_bit_cast(cw_v4i, o));
 #pragma unroll
     for (int e = 0; e < 8; e++) {
-      dot = __builtin_fmaf(bits2f(x[e]), Q8 ? yf[e] : bits2f(y[e]), dot);
+      dot = __builtin_fmaf(bits2f(x[e]), bits2f(y[e]), dot);
     }
   }
   return dot;
@@ -180,23 +148,16 @@ __host__ __device__ __forceinline__ int bfree_index(int src, int sigb) {
   return MOE_EP * sigb + src;
 }
 
-// Column-wise Xp groups of local expert e from source src that have landed (after the BFREE and RFREE words).
-__host__ __device__ __forceinline__ int xcol_index(int src, int e, int sigb) {
-  return MOE_EP * sigb + MOE_EP * (e + 2) + src;
-}
-
 __device__ __forceinline__ void moe_bwd_bfree_store(const CDispatch *__restrict__ pp, int w, int bcall) {
   const CW_G CDispatch *p = (const CW_G CDispatch *)pp;
   CW_G int *bf = (CW_G int *)fs_uniform_ptr(p->peers.sig[w]) + bfree_index(p->my_rank, p->sigb);
   __hip_atomic_store(bf, bcall, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
-// Q8: the forward's Y rows are MXFP8 (the fp8 combine). pad: MX segments padded to 32 rows. PIN: probs on input,
-// dY = dOut unweighted and dtopkw 0 (the fold computes dprobs). YO: the forward's Y rows by slot are yo, not comby.
-template <bool MX = false, bool Q8 = false, bool PIN = false, bool YO = false>
+// yo: the forward's Y rows by token slot (the caller's saved y).
 __device__ __forceinline__ void moe_bwd_dispatch_push_role(const CDispatch *__restrict__ pp, int w,
                                                            const unsigned short *dout, float *dtopkw_out, int bcall,
-                                                           int bwait, int pad, const unsigned short *yo = nullptr) {
+                                                           int bwait, const unsigned short *yo) {
   const CW_G CDispatch *p = (const CW_G CDispatch *)pp;
   constexpr int NT = C_PUSH_THREADS;
   const int tid = (int)threadIdx.x;
@@ -212,7 +173,7 @@ __device__ __forceinline__ void moe_bwd_dispatch_push_role(const CDispatch *__re
   }
   __syncthreads();
   const CW_G unsigned short *dOut = (const CW_G unsigned short *)fs_uniform_ptr(dout);
-  const CW_G unsigned short *comby = (const CW_G unsigned short *)(YO ? fs_uniform_ptr(yo) : p->comby);
+  const CW_G unsigned short *comby = (const CW_G unsigned short *)fs_uniform_ptr(yo);
   CW_G float *dtopkw = (CW_G float *)fs_uniform_ptr(dtopkw_out);
   const CW_G float *send_w = (const CW_G float *)p->send_w;
   const CW_G int *send_slot = (const CW_G int *)p->send_slot;
@@ -264,22 +225,11 @@ __device__ __forceinline__ void moe_bwd_dispatch_push_role(const CDispatch *__re
         const int drow = __builtin_amdgcn_readfirstlane(b.dstbase + i);
         cw_v4i *dst = fs_uniform_ptr((cw_v4i *)(dbase + (size_t)drow * H));
         float dot;
-        if constexpr (PIN) {
-          switch (pb) {
-            case 7: dot = cw_push_row<7, false, true>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            case 6: dot = cw_push_row<6, false, true>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            case 4: dot = cw_push_row<4, false, true>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            default: dot = cw_push_row<8, false, true>(src, ysrc, dst, wgt, stl, u_per_row); break;
-          }
-        } else if constexpr (MX) {
-          dot = cw_push_row<C_MX_PUSH_BURST, Q8>(src, ysrc, dst, wgt, stl, u_per_row);
-        } else {
-          switch (pb) {
-            case 7: dot = cw_push_row<7, Q8>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            case 6: dot = cw_push_row<6, Q8>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            case 4: dot = cw_push_row<4, Q8>(src, ysrc, dst, wgt, stl, u_per_row); break;
-            default: dot = cw_push_row<8, Q8>(src, ysrc, dst, wgt, stl, u_per_row); break;
-          }
+        switch (pb) {
+          case 7: dot = cw_push_row<7>(src, ysrc, dst, wgt, stl, u_per_row); break;
+          case 6: dot = cw_push_row<6>(src, ysrc, dst, wgt, stl, u_per_row); break;
+          case 4: dot = cw_push_row<4>(src, ysrc, dst, wgt, stl, u_per_row); break;
+          default: dot = cw_push_row<8>(src, ysrc, dst, wgt, stl, u_per_row); break;
         }
 #pragma unroll
         for (int o = 32; o >= 1; o >>= 1) {
@@ -291,14 +241,6 @@ __device__ __forceinline__ void moe_bwd_dispatch_push_role(const CDispatch *__re
       }
     }
     int rend = rhi;
-    if constexpr (MX) {
-      // MX: the unit's last slice also writes its padding rows (to 32) as zeros, counted as landed.
-      rend += pad && sl + 1 == nsl ? hk_moe::plan_pad32(b.cnt) - b.cnt : 0;
-      cw_v4i *zd = fs_uniform_ptr((cw_v4i *)(dbase + (size_t)(b.dstbase + rhi) * H));
-      for (int q = tid; q < (rend - rhi) * u_per_row; q += NT) {
-        __builtin_nontemporal_store(cw_v4i{0, 0, 0, 0}, zd + q);
-      }
-    }
     __syncthreads();
     const int blo = (b.dstbase + rlo) / hk_moe::BLOCK_ROW;
     const int bhi = (b.dstbase + rend - 1) / hk_moe::BLOCK_ROW;
@@ -436,13 +378,12 @@ __device__ __forceinline__ void cw_copy_row(const CW_G cw_v4i *src, cw_v4i *dst,
   }
 }
 
-// Q8: the dXp row is MXFP8 (H fp8 bytes, then H / 32 E8M0 bytes) in its 2H-byte slot; only those bytes are sent.
-template <bool MX = false, bool Q8 = false>
+// Unit j's dXp rows pushed back to the token owners' combine slots.
 __device__ __forceinline__ void moe_bwd_combine_push_unit(const CCombine *__restrict__ pp, int j) {
   const CW_G CCombine *p = (const CW_G CCombine *)pp;
   constexpr int RS = C_PUSH_THREADS / 64, TSG = 64;
   const int tid = (int)threadIdx.x, sg = tid / TSG, stl = tid % TSG;
-  const int H = p->H, u_per_row = Q8 ? (H + H / 32 + 15) / 16 : H / 8, pb = moe_prod_burst(H);
+  const int H = p->H, u_per_row = H / 8, pb = moe_prod_burst(H);
   const CW_G int *blks = (const CW_G int *)p->blks;
   const CW_G int *src  = (const CW_G int *)p->src;
   const CW_G int *slot = (const CW_G int *)p->slot;
@@ -458,15 +399,11 @@ __device__ __forceinline__ void moe_bwd_combine_push_unit(const CCombine *__rest
       const int sl   = __builtin_amdgcn_readfirstlane(slot[off + i]);
       const CW_G cw_v4i *s = (const CW_G cw_v4i *)(Xp + (size_t)srow * H);
       cw_v4i *d = fs_uniform_ptr((cw_v4i *)(dbase + (size_t)sl * H));
-      if constexpr (MX) {
-        cw_copy_row<C_MX_PUSH_BURST>(s, d, stl, u_per_row);
-      } else {
-        switch (pb) {
-          case 7: cw_copy_row<7>(s, d, stl, u_per_row); break;
-          case 6: cw_copy_row<6>(s, d, stl, u_per_row); break;
-          case 4: cw_copy_row<4>(s, d, stl, u_per_row); break;
-          default: cw_copy_row<8>(s, d, stl, u_per_row); break;
-        }
+      switch (pb) {
+        case 7: cw_copy_row<7>(s, d, stl, u_per_row); break;
+        case 6: cw_copy_row<6>(s, d, stl, u_per_row); break;
+        case 4: cw_copy_row<4>(s, d, stl, u_per_row); break;
+        default: cw_copy_row<8>(s, d, stl, u_per_row); break;
       }
     }
   }
@@ -546,21 +483,16 @@ __device__ __forceinline__ void cw_dprobs_rows(const CW_G CSide *s, int t0, int 
   }
 }
 
-// dX of item i's tokens: bf16 of the sum of their k dXp rows (without R, of the routed slots: a dropped slot's row is
-// never written this call), plus the router's dX row when R (then one row group per pass, for registers) and the
-// shared expert's dX row when S; without R also their dprobs rows.
-template <int K, bool R, bool S = false, bool Q8 = false>
+// dX of item i's tokens: bf16 of the sum of their k dXp rows (of the routed slots: a dropped slot's row is never
+// written this call), and their dprobs rows.
+template <int K>
 __device__ __forceinline__ void cw_fold_item_k(const CW_G CSide *s, const bf16 *comb, int H, int i, bf16 *dx,
-                                               const bf16 *dxr, float *dprobs, const bf16 *dxs = nullptr) {
-  constexpr int NQ = R ? 1 : 2;
+                                               float *dprobs) {
+  constexpr int NQ = 2;
   const int T = s->T, k = K, nv = H >> 3, t0 = i * CSIDE_FOLD_TOK;
   const int n = min(CSIDE_FOLD_TOK, T - t0) * nv;
   const CW_G v8s *cb = (const CW_G v8s *)fs_uniform_ptr(comb + (size_t)t0 * k * H);
   CW_G v8s *ob = (CW_G v8s *)fs_uniform_ptr(dx + (size_t)t0 * H);
-  const CW_G v8s *rb = nullptr;
-  if constexpr (R) {
-    rb = (const CW_G v8s *)fs_uniform_ptr(dxr + (size_t)t0 * H);
-  }
   int tid_f = (int)threadIdx.x;
   asm volatile("" : "+v"(tid_f));  // opaque: else its lane offset is hoisted out of the caller's persistent loop
   for (int x0 = tid_f; x0 < n; x0 += NQ * C_PUSH_THREADS) {
@@ -573,7 +505,6 @@ __device__ __forceinline__ void cw_fold_item_k(const CW_G CSide *s, const bf16 *
       }
     }
     v8s v[NQ][K];
-    hk_moe::Mx8 m8[Q8 ? NQ : 1][Q8 ? K : 1];
     uint32_t m[NQ][K];
 #pragma unroll
     for (int q = 0; q < NQ; q++) {
@@ -582,14 +513,8 @@ __device__ __forceinline__ void cw_fold_item_k(const CW_G CSide *s, const bf16 *
       const CW_G v8s *src = cb + (size_t)tt * k * nv + cv;
 #pragma unroll
       for (int j = 0; j < K; j++) {
-        if constexpr (!R) {
-          m[q][j] = ~(uint32_t)(((const CW_G int *)fs_uniform_ptr(s->pk))[(size_t)(t0 + tt) * K + j] >> 31);
-        }
-        if constexpr (Q8) {
-          m8[q][j] = hk_moe::moe_ld8((const CW_G uint8_t *)(src - cv + (size_t)j * nv), cv, H);
-        } else {
-          v[q][j] = __builtin_nontemporal_load(src + (size_t)j * nv);
-        }
+        m[q][j] = ~(uint32_t)(((const CW_G int *)fs_uniform_ptr(s->pk))[(size_t)(t0 + tt) * K + j] >> 31);
+        v[q][j] = __builtin_nontemporal_load(src + (size_t)j * nv);
       }
     }
 #pragma unroll
@@ -597,35 +522,10 @@ __device__ __forceinline__ void cw_fold_item_k(const CW_G CSide *s, const bf16 *
 #pragma unroll
       for (int j = 0; j < K; j++) {
         float f[8];
-        if constexpr (Q8) {
-          hk_moe::moe_cv8(R ? m8[q][j] : hk_moe::moe_and8(m8[q][j], m[q][j]), f);
-        } else if constexpr (!R) {
-          v[q][j] = hk_moe::moe_and8(v[q][j], m[q][j]);
-        }
+        v[q][j] = hk_moe::moe_and8(v[q][j], m[q][j]);
 #pragma unroll
         for (int e = 0; e < 8; e++) {
-          acc[q][e] += Q8 ? f[e] : bits2f(v[q][j][e]);
-        }
-      }
-    }
-    if constexpr (R) {
-#pragma unroll
-      for (int q = 0; q < NQ; q++) {
-        const v8s y = __builtin_nontemporal_load(rb + min(x0 + q * C_PUSH_THREADS, n - 1));
-#pragma unroll
-        for (int e = 0; e < 8; e++) {
-          acc[q][e] += bits2f(y[e]);
-        }
-      }
-    }
-    if constexpr (S) {
-      const CW_G v8s *sb = (const CW_G v8s *)fs_uniform_ptr(dxs + (size_t)t0 * H);
-#pragma unroll
-      for (int q = 0; q < NQ; q++) {
-        const v8s y = __builtin_nontemporal_load(sb + min(x0 + q * C_PUSH_THREADS, n - 1));
-#pragma unroll
-        for (int e = 0; e < 8; e++) {
-          acc[q][e] += bits2f(y[e]);
+          acc[q][e] += bits2f(v[q][j][e]);
         }
       }
     }
@@ -642,114 +542,33 @@ __device__ __forceinline__ void cw_fold_item_k(const CW_G CSide *s, const bf16 *
       }
     }
   }
-  if constexpr (!R) {
-    cw_dprobs_rows<K>(s, t0, tid_f, dprobs);
-  }
+  cw_dprobs_rows<K>(s, t0, tid_f, dprobs);
 }
 
-// KS: the small-k kernels (k in {1, 2, 4}); the others take k in {6, 8, 10}. Q8: the dXp rows are MXFP8 (the fp8
-// combine).
-template <bool R, bool S, bool KS, bool Q8 = false>
+// KS: the small-k kernels (k in {1, 2, 4}); the others take k in {6, 8, 10}.
+template <bool KS>
 __device__ __forceinline__ void cw_fold_item_t(const CSide *__restrict__ sp, const bf16 *comb, int H, int i, bf16 *dx,
-                                               const bf16 *dxr, float *dprobs, const bf16 *dxs = nullptr) {
+                                               float *dprobs) {
   const CW_G CSide *s = (const CW_G CSide *)sp;
   if constexpr (KS) {
     switch (__builtin_amdgcn_readfirstlane(s->k)) {
-      case 1: cw_fold_item_k<1, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
-      case 2: cw_fold_item_k<2, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
-      default: cw_fold_item_k<4, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
+      case 1: cw_fold_item_k<1>(s, comb, H, i, dx, dprobs); break;
+      case 2: cw_fold_item_k<2>(s, comb, H, i, dx, dprobs); break;
+      default: cw_fold_item_k<4>(s, comb, H, i, dx, dprobs); break;
     }
   } else {
     switch (__builtin_amdgcn_readfirstlane(s->k)) {
-      case 6: cw_fold_item_k<6, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
-      case 8: cw_fold_item_k<8, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
-      default: cw_fold_item_k<10, R, S, Q8>(s, comb, H, i, dx, dxr, dprobs, dxs); break;
+      case 6: cw_fold_item_k<6>(s, comb, H, i, dx, dprobs); break;
+      case 8: cw_fold_item_k<8>(s, comb, H, i, dx, dprobs); break;
+      default: cw_fold_item_k<10>(s, comb, H, i, dx, dprobs); break;
     }
   }
 }
 
-// Probs on input (k = 1): item i's tokens' dX = bf16(w dXp (+ the shared expert's dX row when S)) and their dprobs
-// rows, <dXp, x> at the token's expert. One wave per token row; x [T][H] and w [T] are the forward's. Q8: the dXp rows
-// are MXFP8 (the fp8 combine).
-template <bool S, bool Q8 = false>
-__device__ __forceinline__ void cw_fold_item_pin(const CSide *__restrict__ sp, const bf16 *comb, int H, int i, bf16 *dx,
-                                                 float *dprobs, const bf16 *dxs, const bf16 *x, const float *w) {
-  const CW_G CSide *s = (const CW_G CSide *)sp;
-  const int T = s->T, E = s->E, nv = H >> 3, t0 = i * CSIDE_FOLD_TOK, t1 = min(t0 + CSIDE_FOLD_TOK, T);
-  int tid_f = (int)threadIdx.x;
-  asm volatile("" : "+v"(tid_f));  // opaque: else its lane offset is hoisted out of the caller's persistent loop
-  const int lane = tid_f & 63;
-  const CW_G int *pk = (const CW_G int *)fs_uniform_ptr(s->pk);
-  for (int t = t0 + __builtin_amdgcn_readfirstlane(tid_f / 64); t < t1; t += C_PUSH_THREADS / 64) {
-    // A dropped token (pk -1) has no dXp row: its dX is the shared expert's (or 0), its dprobs row 0.
-    const int ex = __builtin_amdgcn_readfirstlane(pk[t]);
-    const size_t r = (size_t)t * nv;
-    const CW_G v8s *cb = (const CW_G v8s *)fs_uniform_ptr(comb) + r;
-    const CW_G v8s *xb = (const CW_G v8s *)fs_uniform_ptr(x) + r;
-    const CW_G v8s *sb = (const CW_G v8s *)fs_uniform_ptr(dxs) + r;
-    CW_G v8s *ob = (CW_G v8s *)fs_uniform_ptr(dx) + r;
-    const float wt = ((const CW_G float *)fs_uniform_ptr(w))[t];
-    float dot = 0.0f;
-    for (int u = lane; u < nv; u += 64) {
-      if constexpr (Q8) {
-        float df[8] = {};
-        if (ex >= 0) {
-          hk_moe::moe_dq8((const CW_G uint8_t *)cb, u, H, df);
-        }
-        const v8s xv = xb[u];
-        v8s sv;
-        if constexpr (S) {
-          sv = __builtin_nontemporal_load(sb + u);
-        }
-        v8s o;
-#pragma unroll
-        for (int e = 0; e < 8; e++) {
-          dot = __builtin_fmaf(df[e], bits2f(xv[e]), dot);
-          o[e] = f2bf_bits(S ? __builtin_fmaf(wt, df[e], bits2f(sv[e])) : wt * df[e]);
-        }
-        __builtin_nontemporal_store(o, ob + u);
-        continue;
-      }
-      v8s d = {};
-      if (ex >= 0) {
-        d = __builtin_nontemporal_load(cb + u);
-      }
-      const v8s xv = xb[u];
-      v8s sv;
-      if constexpr (S) {
-        sv = __builtin_nontemporal_load(sb + u);
-      }
-      v8s o;
-#pragma unroll
-      for (int e = 0; e < 8; e++) {
-        dot = __builtin_fmaf(bits2f(d[e]), bits2f(xv[e]), dot);
-        o[e] = f2bf_bits(S ? __builtin_fmaf(wt, bits2f(d[e]), bits2f(sv[e])) : wt * bits2f(d[e]));
-      }
-      __builtin_nontemporal_store(o, ob + u);
-    }
-#pragma unroll
-    for (int o = 32; o >= 1; o >>= 1) {
-      dot += __shfl_xor(dot, o, 64);
-    }
-    CW_G float *pb = (CW_G float *)fs_uniform_ptr(dprobs) + (size_t)t * E;
-    for (int e = lane; e < E; e += 64) {
-      pb[e] = e == (ex & 0xFFFF) ? dot : 0.0f;
-    }
-  }
-}
-
-// dxs (S): the shared expert's dX rows [T][H], added too.
-template <bool S, bool KS, bool Q8 = false>
+template <bool KS>
 __device__ __forceinline__ void cw_fold_item(const CSide *__restrict__ sp, const bf16 *comb, int H, int i, bf16 *dx,
-                                             float *dprobs, const bf16 *dxs = nullptr) {
-  cw_fold_item_t<false, S, KS, Q8>(sp, comb, H, i, dx, nullptr, dprobs, dxs);
-}
-
-// cw_fold_item plus the router's dX rows dxr [T][H], without dprobs.
-template <bool S, bool KS, bool Q8 = false>
-__device__ __forceinline__ void cw_fold_item_r(const CSide *__restrict__ sp, const bf16 *comb, int H, int i, bf16 *dx,
-                                               const bf16 *dxr, const bf16 *dxs = nullptr) {
-  cw_fold_item_t<true, S, KS, Q8>(sp, comb, H, i, dx, dxr, nullptr, dxs);
+                                             float *dprobs) {
+  cw_fold_item_t<KS>(sp, comb, H, i, dx, dprobs);
 }
 
 __device__ __forceinline__ bool moe_bwd_combine_arrived(const CCombine *__restrict__ pp) {

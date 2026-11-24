@@ -21,13 +21,12 @@ _ACC_OF_DTYPE = {torch.float32: 1, torch.bfloat16: 2}
 
 # Status bits, OR-ed over the calls since the last query (src/moe/moe.h). Errors: 1 an expert id
 # outside [0, 8 E_loc) (-1 included: such a route is dropped), 2 a token routed twice to one expert,
-# 64 a call that could not run. Notes: 8 a call ran in rounds (over capacity), 16 a forward kept
-# only Xp, 32 a forward kept nothing, less than its save tier allowed (its rows did not fit the
-# saved rows); the backward then recomputes what is missing.
+# 64 a call that could not run. Notes: 8 a call ran in rounds (over capacity), 32 a forward kept
+# nothing, less than its save tier allowed (it ran in rounds, or its rows did not fit the saved
+# rows); the backward then recomputes what is missing. A training call keeps its tier or nothing.
 STATUS_BAD_ID = 1
 STATUS_DUPLICATE = 2
 STATUS_ROUNDS = 8
-STATUS_KEPT_XP = 16
 STATUS_KEPT_NOTHING = 32
 STATUS_ERROR = 64
 
@@ -369,7 +368,7 @@ def kosmos_moe(
         routed token, for the router-weight gradient) and a small routing record are kept always.
     saved_rows : int, optional
         Rows ``Xp``, ``G`` and ``A`` are sized for, at most the capacity (default: the capacity). A
-        call whose received rows do not fit keeps less (status bit 16 or 32) and its backward
+        call whose received rows do not fit keeps nothing (status bit 32) and its backward
         recomputes; it stays correct.
     fuse_wgrad_accumulation : bool
         Add the weight gradients into ``w.main_grad`` (Megatron's protocol) instead of returning

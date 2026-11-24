@@ -24,13 +24,7 @@ __device__ uint16_t moe_buf_load_u16(i32x4 srsrc, uint32_t voffset, uint32_t sof
     __asm("llvm.amdgcn.raw.buffer.load.i16");
 constexpr uint32_t MOE_AUX_WT = 17;
 
-// lo, hi: glu_bounds; the masks are TE's: dgate where g <= L, dup where |u| <= L.
-template <int CTRL>
-__device__ __forceinline__ float glu_dpp(float v) {
-  return __builtin_bit_cast(float, __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, v), CTRL, 0xf, 0xf, true));
-}
-
-// act: the activation itself (for the shared expert gate's gradient).
+// dgate, dup: the GLU backward of dav at (gv, uv); act: the activation itself.
 template <typename ACT>
 __device__ __forceinline__ void swiglu_bwd_elem(float dav, float gv, float uv, float lo, float hi, float &dgate,
                                                 float &dup, float &act) {
@@ -52,23 +46,15 @@ __device__ __forceinline__ void swiglu_bwd_elem(float dav, float gv, float uv, f
   }
 }
 
-// MEG: G and dG in Megatron's [gate; up] column order, up columns up_soff bytes after their gate column (else the
-// interleaved 128-column order, up 256 bytes after gate). GATE (MEG): the shared expert's sigmoid gate, sgl[0, 256) the
-// row block's per-token gates in LDS: dA is scaled by them, and each row's sum of dA act over the tile's 32 columns
-// goes to sgl[256 (1 + c) + row], c the column unit within the 256-column tile (the gate's gradient).
-template <typename ACT, bool MEG = false, bool GATE = false, typename RT>
+// G and dG in the interleaved 128-column order: up 256 bytes after gate.
+template <typename ACT, typename RT>
 __device__ __forceinline__ void swiglu_bwd_c_tile(i32x4 g_srd, i32x4 dg_srd, const RT &src, int row_unit,
-                                                  int col_unit, int row_stride, uint32_t lane_voff,
-                                                  uint32_t up_soff = 0,
-                                                  __attribute__((address_space(3))) float *sgl = nullptr,
-                                                  int lane = 0) {
-  static_assert(!GATE || MEG, "the gate is the shared expert's");
+                                                  int col_unit, int row_stride, uint32_t lane_voff) {
   static_assert(128 % RT::cols == 0, "an accumulator must not straddle a 128-column gate|up chunk");
   static_assert(RT::base_tile_stride == 4 && RT::base_tile_num_strides == 1, "col_l 16x16 accumulator");
   constexpr int NE = RT::height * RT::width * 4;
   const int i0 = col_unit * RT::cols;
-  const uint32_t sbase   = MEG ? (uint32_t)(((row_unit * RT::rows) * row_stride + i0) * 2)
-                               : (uint32_t)(((row_unit * RT::rows) * row_stride + (i0 / 128) * 256 + i0 % 128) * 2);
+  const uint32_t sbase   = (uint32_t)(((row_unit * RT::rows) * row_stride + (i0 / 128) * 256 + i0 % 128) * 2);
   const uint32_t rstride = (uint32_t)row_stride * 2;
   uint32_t gu[NE];
 #pragma unroll
@@ -80,7 +66,7 @@ __device__ __forceinline__ void swiglu_bwd_c_tile(i32x4 g_srd, i32x4 dg_srd, con
         const uint32_t so = sbase + (uint32_t)(i * RT::base_tile_rows + r) * rstride;
         const uint32_t vo = lane_voff + j * RT::base_tile_cols * 2;
         const uint32_t g  = moe_buf_load_u16(g_srd, vo, so, 0);
-        const uint32_t u  = MEG ? moe_buf_load_u16(g_srd, vo, so + up_soff, 0) : moe_buf_load_u16(g_srd, vo + 256, so, 0);
+        const uint32_t u  = moe_buf_load_u16(g_srd, vo + 256, so, 0);
         gu[(i * RT::width + j) * 4 + r] = (g & 0xffffu) | (u << 16);
       }
     }
@@ -89,40 +75,6 @@ __device__ __forceinline__ void swiglu_bwd_c_tile(i32x4 g_srd, i32x4 dg_srd, con
   __builtin_amdgcn_sched_barrier(0);
   float lo, hi;
   glu_bounds<ACT>(lo, hi);
-  if constexpr (GATE) {
-    typedef float f4 __attribute__((ext_vector_type(4)));
-    const int r0 = row_unit * RT::rows + 4 * (lane >> 4);
-#pragma unroll
-    for (int i = 0; i < RT::height; i++) {
-      const f4 sgv = *(const __attribute__((address_space(3))) f4 *)(sgl + r0 + i * RT::base_tile_rows);
-      f4 ds = {0.0f, 0.0f, 0.0f, 0.0f};
-#pragma unroll
-      for (int r = 0; r < 4; r++) {
-        const uint32_t so = sbase + (uint32_t)(i * RT::base_tile_rows + r) * rstride;
-#pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-          const uint32_t vo = lane_voff + j * RT::base_tile_cols * 2;
-          const uint32_t w  = gu[(i * RT::width + j) * 4 + r];
-          const float dav = (r & 1) ? src.tiles[i][j].data[r >> 1].y : src.tiles[i][j].data[r >> 1].x;
-          float dgate, dup, act;
-          swiglu_bwd_elem<ACT>(dav * sgv[r], __builtin_bit_cast(float, w << 16),
-                               __builtin_bit_cast(float, w & 0xffff0000u), lo, hi, dgate, dup, act);
-          ds[r] = fmaf(dav, act, ds[r]);
-          llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dgate), dg_srd, vo, so, 0);
-          llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dup), dg_srd, vo, so + up_soff, 0);
-        }
-        // The row's 16 lanes: quad_perm [1,0,3,2], [2,3,0,1], row_half_mirror, row_mirror.
-        ds[r] += glu_dpp<0xB1>(ds[r]);
-        ds[r] += glu_dpp<0x4E>(ds[r]);
-        ds[r] += glu_dpp<0x141>(ds[r]);
-        ds[r] += glu_dpp<0x140>(ds[r]);
-      }
-      // Every lane of the 16 holds its rows' sums; all write them (one LDS address per row group).
-      *(__attribute__((address_space(3))) f4 *)(sgl + BLOCK_ROW * (1 + col_unit % (BLOCK_COL / RT::cols)) + r0 +
-                                                 i * RT::base_tile_rows) = ds;
-    }
-    return;
-  }
 #pragma unroll
   for (int i = 0; i < RT::height; i++) {
 #pragma unroll
@@ -137,11 +89,7 @@ __device__ __forceinline__ void swiglu_bwd_c_tile(i32x4 g_srd, i32x4 dg_srd, con
         swiglu_bwd_elem<ACT>(dav, __builtin_bit_cast(float, w << 16), __builtin_bit_cast(float, w & 0xffff0000u), lo,
                              hi, dgate, dup, act);
         llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dgate), dg_srd, vo, so, 0);
-        if constexpr (MEG) {
-          llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dup), dg_srd, vo, so + up_soff, 0);
-        } else {
-          llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dup), dg_srd, vo + 256, so, 0);
-        }
+        llvm_amdgcn_raw_buffer_store_b16(__builtin_bit_cast(uint16_t, (__bf16)dup), dg_srd, vo + 256, so, 0);
       }
     }
   }
@@ -271,41 +219,6 @@ __device__ __forceinline__ void sh_lds_f32(__attribute__((address_space(3))) flo
   }
 }
 
-// One 128-row half of a 256x256 fp32 C tile, staged in LDS (lds), stored to dst (row stride ld floats).
-__device__ __forceinline__ void sh_half_park(const unsigned char *lds, float *dst, int ld) {
-  typedef float v4f __attribute__((ext_vector_type(4)));
-  typedef __attribute__((address_space(1))) v4f gv4f;
-  const __attribute__((address_space(3))) v4f *sv =
-      (const __attribute__((address_space(3))) v4f *)(const __attribute__((address_space(3))) unsigned char *)lds;
-  int tid_c = (int)threadIdx.x;
-  asm volatile("" : "+v"(tid_c));
-#pragma unroll 4
-  for (int k = 0; k < HALF_ROW * BLOCK_COL / 4 / NUM_THREADS; k++) {
-    const int q = tid_c + k * NUM_THREADS;
-    *(gv4f *)(fs_g(dst) + (size_t)(q >> 6) * ld + (q & 63) * 4) = sv[q];
-  }
-}
-
-// The fp32 C tile (rows rf0 / rf0 + 2 in units of RT::rows) to dst through LDS, in two 128-row halves.
-template <typename RT>
-__device__ __forceinline__ void sh_tile_park(unsigned char *lds, const RT &c00, const RT &c01, const RT &c10,
-                                             const RT &c11, int rf0, int cf0, int cf1, int lane, float *dst, int ld) {
-  static_assert(HALF_ROW * BLOCK_COL * sizeof(float) == LEGA_LDS_TILES, "a C half must fill the tile region");
-  static_assert(2 * RT::rows == HALF_ROW, "rf0 covers the first half, rf0 + 2 the second");
-  __attribute__((address_space(3))) float *st =
-      (__attribute__((address_space(3))) float *)(__attribute__((address_space(3))) unsigned char *)lds;
-  __syncthreads();
-  sh_lds_f32(st, c00, rf0, cf0, BLOCK_COL, lane);
-  sh_lds_f32(st, c01, rf0, cf1, BLOCK_COL, lane);
-  __syncthreads();
-  sh_half_park(lds, dst, ld);
-  __syncthreads();
-  sh_lds_f32(st, c10, rf0, cf0, BLOCK_COL, lane);
-  sh_lds_f32(st, c11, rf0, cf1, BLOCK_COL, lane);
-  __syncthreads();
-  sh_half_park(lds, dst + (size_t)HALF_ROW * ld, ld);
-}
-
 // The fp32 C tile added into dw at element off (row stride ld) through LDS in two 128-row halves: acc 1 dw is fp32, 2
 // bf16 (the sum rounded to nearest even once).
 template <typename RT>
@@ -343,12 +256,10 @@ __device__ __forceinline__ void wg_tile_acc(unsigned char *lds, const RT &c00, c
   }
 }
 
-// R: the B operand is (act, act_rows, act_cols) instead of wa's, and rows of dw at or past rlim are not stored. SHE:
-// rlim = -1 - p parks the tile in fp32 instead, in partial region p of the shared expert's buffer at dw (p 0: fc2 [H][I],
-// 1 and 2: fc1 slices [2I][H]), then counts it on the region's tile counter (stored after the 5 H I floats). ACC: rlim
-// > BLOCK_ROW adds the tile to dw (an expert's rows split over rounds). WA: wacc 1 or 2 adds the tile into dw instead
-// (wg_tile_acc), every round alike; 0 as without.
-template <bool R = false, bool SHE = false, bool ACC = false, bool WA = false>
+// R: the B operand is (act, act_rows, act_cols) instead of wa's, and rows of dw at or past rlim are not stored. ACC:
+// rlim > BLOCK_ROW adds the tile to dw (an expert's rows split over rounds). WA: wacc 1 or 2 adds the tile into dw
+// instead (wg_tile_acc), every round alike; 0 as without.
+template <bool R = false, bool ACC = false, bool WA = false>
 __device__ __forceinline__ void lega_wgrad2_tile(const FsGl &a_gl, const LegAWgrad2 *__restrict__ wa, unsigned char *lds,
                                                  int e, int nblk, int mblk, int kt0, int k_real, bf16 *dw,
                                                  const bf16 *act = nullptr, int act_rows = 0, int act_cols = 0,
@@ -414,9 +325,9 @@ __device__ __forceinline__ void lega_wgrad2_tile(const FsGl &a_gl, const LegAWgr
   LegaLoader<ST_AB, cps / 2> ldA{As, a_gl, kt0, k_real, nblk, sw_A, a_srd, a_base, a_lds};
   LegaLoader<ST_AB, cps / 2> ldB{Bs, b_gl, kt0, k_real, mblk, sw_B, b_srd, b_base, b_lds};
 #define NT_READ_A(T, P, J) \
-  nt_load_frag<((P) * 2 + (J)) * (int)sizeof(ST_AB)>(T, As[0][0], warp_m * (NT_REG_M / 2), lane_t)
+  nt_load_frag<(P * 2 + J) * (int)sizeof(ST_AB)>(T, As[0][0], warp_m * (NT_REG_M / 2), lane_t)
 #define NT_READ_B(T, P, J) \
-  nt_load_frag<((P) * 2 + (J)) * (int)sizeof(ST_AB)>(T, Bs[0][0], warp_n * (NT_REG_N / 2), lane_t)
+  nt_load_frag<(P * 2 + J) * (int)sizeof(ST_AB)>(T, Bs[0][0], warp_n * (NT_REG_N / 2), lane_t)
 
   RT_C c00, c01, c10, c11;
   RT_A A_tile;
@@ -439,27 +350,6 @@ __device__ __forceinline__ void lega_wgrad2_tile(const FsGl &a_gl, const LegAWgr
   const int cf0 = __builtin_amdgcn_readfirstlane(warp_n);
   int lane_epi = lane0;
   asm volatile("" : "+v"(lane_epi));
-  if constexpr (SHE) {
-    if (rlim < 0) {
-      // fc2: A_LEAD = H, B_LEAD = I; fc1: A_LEAD = 2I, B_LEAD = H.
-      const int p = -1 - rlim, hi = p ? A_LEAD / 2 * B_LEAD : A_LEAD * B_LEAD;
-      float *base = (float *)(void *)fs_uniform_ptr(dw);
-      sh_tile_park(lds, c00, c01, c10, c11, rf0, cf0, cf0 + WARPS_COL, lane_epi,
-                   base + (size_t)hi * (p ? 2 * p - 1 : 0) + (size_t)nblk * BLOCK_ROW * B_LEAD + mblk * BLOCK_COL,
-                   B_LEAD);
-      // Every wave's stores drained, then one release add on the tile's counter.
-      asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-      __syncthreads();
-      if (fs_tid() == 0) {
-        const int n2 = hi / (BLOCK_ROW * BLOCK_COL);
-        gint *wd = fs_g((int *)(base + (size_t)5 * hi));
-        (void)__hip_atomic_fetch_add(wd + (p ? n2 : 0) + nblk * (B_LEAD / BLOCK_COL) + mblk, 1, __ATOMIC_RELEASE,
-                                     __HIP_MEMORY_SCOPE_AGENT);
-      }
-      __syncthreads();
-      return;
-    }
-  }
   if constexpr (WA) {
     if (wacc) {
       wg_tile_acc(lds, c00, c01, c10, c11, rf0, cf0, cf0 + WARPS_COL, lane_epi, dw,

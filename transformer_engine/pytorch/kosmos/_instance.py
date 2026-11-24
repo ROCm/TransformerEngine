@@ -35,7 +35,7 @@ _TORCH_SYMM_MEM_MIN = (2, 12)
 # (ROCm 7.14) never frees it, so every instance destroy leaks the buffer.
 _TORCH_SYMM_MEM_AUTO_MIN = (2, 13)
 _ALIGN = 256  # every saved-buffer pointer (src/moe/moe.h, KosmosMoeSaved)
-_SAVED_NAMES = ("xp", "g", "a", "y", "rec")
+_SAVED_NAMES = ("xp", "g", "a", "y", "route")
 
 
 def _log_enabled() -> bool:
@@ -109,17 +109,17 @@ class SavedState:
 
     __slots__ = ("tier", "rows") + _SAVED_NAMES
 
-    def __init__(self, tier: int, rows: int, xp, g, a, y, rec):
+    def __init__(self, tier: int, rows: int, xp, g, a, y, route):
         self.tier = tier
         self.rows = rows
         self.xp = xp
         self.g = g
         self.a = a
         self.y = y
-        self.rec = rec
+        self.route = route
 
     def tensors(self) -> tuple:
-        """``(xp, g, a, y, rec)``, for ``save_for_backward``."""
+        """``(xp, g, a, y, route)``, for ``save_for_backward``."""
         return tuple(getattr(self, n) for n in _SAVED_NAMES)
 
     @classmethod
@@ -141,7 +141,7 @@ class SavedState:
         return cls(tier, rows, **fixed)
 
     def pointers(self) -> tuple:
-        """``(xp, g, a, y, rec)`` device pointers, 0 for an absent buffer."""
+        """``(xp, g, a, y, route)`` device pointers, 0 for an absent buffer."""
         ptrs = []
         for name in _SAVED_NAMES:
             t = getattr(self, name)
@@ -349,7 +349,7 @@ class KosmosInstance:
     # saved state
     # ------------------------------------------------------------------ #
     def saved_bytes(self, rows: int) -> Dict[str, int]:
-        """Bytes of each saved buffer (``xp``, ``g``, ``a``, ``y``, ``rec``) for ``rows`` saved
+        """Bytes of each saved buffer (``xp``, ``g``, ``a``, ``y``, ``route``) for ``rows`` saved
         rows."""
         got = self._saved_bytes.get(rows)
         if got is None:
@@ -367,7 +367,7 @@ class KosmosInstance:
 
     def empty_saved(self, save: str, rows: int) -> SavedState:
         """Uninitialized saved buffers for one training call from the caching allocator: ``xp`` for
-        tier ``xp`` and up, ``g`` and ``a`` for tier ``all``, ``y`` and ``rec`` always."""
+        tier ``xp`` and up, ``g`` and ``a`` for tier ``all``, ``y`` and ``route`` always."""
         tier = self.tier(save)
         nbytes = self.saved_bytes(rows)
         keep = {
@@ -375,7 +375,7 @@ class KosmosInstance:
             "g": tier >= self.tiers["all"],
             "a": tier >= self.tiers["all"],
             "y": True,
-            "rec": True,
+            "route": True,
         }
         bufs = [
             torch.empty(nbytes[n], dtype=torch.uint8, device=self.device) if keep[n] else None
@@ -388,8 +388,8 @@ class KosmosInstance:
         nb = self.saved_bytes(rows)
         return {
             "all": sum(nb.values()),
-            "xp": nb["xp"] + nb["y"] + nb["rec"],
-            "none": nb["y"] + nb["rec"],
+            "xp": nb["xp"] + nb["y"] + nb["route"],
+            "none": nb["y"] + nb["route"],
         }
 
     # ------------------------------------------------------------------ #

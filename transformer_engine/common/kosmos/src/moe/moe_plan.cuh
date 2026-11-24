@@ -23,7 +23,7 @@ static_assert(PLAN_IDS_OFF >= NUM_WARPS * PLAN_MAXU * (int)sizeof(int) &&
               "chunk counts, chunk ids, running counts, then the layout");
 static_assert(MOE_EP * PLAN_MAXU * (int)sizeof(int) <= PLAN_IDS_OFF &&
                   PLAN_IDS_OFF + 2 * PLAN_MAXU * (int)sizeof(int) <= PLAN_LAYOUT_OFF,
-              "a round's clipped counts, then MXFP8's send offsets and starts (plan_clip), below the layout");
+              "a round's clipped counts and scratch (plan_clip), below the layout");
 
 // The thread id; O: opaque (bf16, whose start phase is in the round loop: lane masks of threadIdx would be hoisted
 // out of it and held across the tile loop).
@@ -32,25 +32,19 @@ __device__ __forceinline__ int plan_tid() {
   return O ? fs_tid() : (int)threadIdx.x;
 }
 
-// v from the lane o below (lane: this lane's id, opaque in MXFP8's rounds: __shfl_up's own lane id and the shuffle
-// addresses derived from it would be hoisted out of the round loop).
-template <bool OS>
+// v from the lane o below.
 __device__ __forceinline__ int plan_shfl_up(int v, int o, int lane) {
-  if constexpr (OS) {
-    return __builtin_amdgcn_ds_bpermute((lane >= o ? lane - o : lane) << 2, v);
-  } else {
-    return __shfl_up(v, o, kittens::WARP_THREADS);
-  }
+  return __shfl_up(v, o, kittens::WARP_THREADS);
 }
 
 // Exclusive scan of one value per thread over the workgroup; *total gets the sum.
-template <bool O = false, bool OS = false>
+template <bool O = false>
 __device__ __forceinline__ int plan_scan(int x, int *tmp, int *total) {
   const int tid = plan_tid<O>(), lane = tid % kittens::WARP_THREADS, wv = tid / kittens::WARP_THREADS;
   int v = x;
 #pragma unroll
   for (int o = 1; o < kittens::WARP_THREADS; o <<= 1) {
-    const int y = plan_shfl_up<OS>(v, o, lane);
+    const int y = plan_shfl_up(v, o, lane);
     v += lane >= o ? y : 0;
   }
   if (lane == kittens::WARP_THREADS - 1) {
@@ -70,13 +64,13 @@ __device__ __forceinline__ int plan_scan(int x, int *tmp, int *total) {
 }
 
 // Two exclusive scans at once (as plan_scan); *ta and *tb get the sums.
-template <bool O = false, bool OS = false>
+template <bool O = false>
 __device__ __forceinline__ int2 plan_scan2(int a, int b, int *tmp, int *ta, int *tb) {
   const int tid = plan_tid<O>(), lane = tid % kittens::WARP_THREADS, wv = tid / kittens::WARP_THREADS;
   int va = a, vb = b;
 #pragma unroll
   for (int o = 1; o < kittens::WARP_THREADS; o <<= 1) {
-    const int ya = plan_shfl_up<OS>(va, o, lane), yb = plan_shfl_up<OS>(vb, o, lane);
+    const int ya = plan_shfl_up(va, o, lane), yb = plan_shfl_up(vb, o, lane);
     va += lane >= o ? ya : 0;
     vb += lane >= o ? yb : 0;
   }
@@ -366,10 +360,8 @@ __device__ __forceinline__ void moe_plan_local(FsArgsC *a, const int *idx, const
 
 // The layout from the count matrix cs. Every rank derives the same Mpad_max, so an over-capacity routing gives every
 // rank the empty layout; so does fz (the pool forces the call into rounds).
-// MXFP8 training with I < 1024 (the forward writes the column-wise Xp) pads each (source, expert) segment to 32 rows,
-// so no column-wise block spans two sources.
 // O: the opaque thread id (in a round loop).
-template <bool MXK, bool O = !MXK, typename CS>
+template <bool O = true, typename CS>
 __device__ __forceinline__ void plan_derive(FsArgsC *a, MoeLayout *L, CS cs, int fz = 0) {
   const int tid = plan_tid<O>(), E = a->E_loc, EG = MOE_EP * E, me = a->my_rank;
   const int e = tid / MOE_EP, x = tid % MOE_EP, g = x * E + e;
@@ -390,22 +382,9 @@ __device__ __forceinline__ void plan_derive(FsArgsC *a, MoeLayout *L, CS cs, int
       part += s < me ? v[s] : 0;
     }
   }
-  const bool p32 = MXK && a->mxt && a->xc_fwd;
   int colp = col;
-  if constexpr (MXK) {
-    if (p32 && tid < EG) {
-      int pp = 0;
-      colp = 0;
-#pragma unroll
-      for (int s = 0; s < MOE_EP; s++) {
-        colp += plan_pad32(v[s]);
-        pp += s < me ? plan_pad32(v[s]) : 0;
-      }
-      L->colp[tid] = colp, L->ppart[tid] = pp;
-    }
-  }
   int tp, tc;
-  const int2 pc = plan_scan2<O, MXK && O>(plan_pad(colp), col, L->tmp, &tp, &tc);
+  const int2 pc = plan_scan2<O>(plan_pad(colp), col, L->tmp, &tp, &tc);
   if (tid < EG) {
     L->col[tid] = col, L->part[tid] = part, L->pof[tid] = pc.x, L->cpof[tid] = pc.y;
   }
@@ -420,26 +399,17 @@ __device__ __forceinline__ void plan_derive(FsArgsC *a, MoeLayout *L, CS cs, int
   snd = ovf ? 0 : snd;
   rcv = ovf ? 0 : rcv;
   int td, tr;
-  const int2 su = plan_scan2<O, MXK && O>(snd, rcv, L->tmp, &td, &tr);
+  const int2 su = plan_scan2<O>(snd, rcv, L->tmp, &td, &tr);
   const int uof = su.y;
-  if constexpr (MXK) {
-    if (p32) {
-      int tu;
-      const int up = plan_scan<O, MXK && O>(plan_pad32(rcv), L->tmp, &tu);
-      if (tid < EG) {
-        L->uofp[tid] = up;
-      }
-    }
-  }
   if (tid < EG) {
     L->snd[tid] = snd, L->sof[tid] = su.x, L->rcv[tid] = rcv, L->uof[tid] = uof;
-    L->dbase[tid] = ovf ? 0 : L->pof[g] - L->pof[x * E] + (MXK && p32 ? L->ppart[g] : L->part[g]);
+    L->dbase[tid] = ovf ? 0 : L->pof[g] - L->pof[x * E] + (L->part[g]);
     L->sbase[tid] = ovf ? 0 : L->cpof[g] - L->cpof[x * E] + L->part[g];
     if (x == 0) {
       L->est[e] = uof;
     }
   }
-  const int cn = tid < E && !ovf ? (MXK && p32 ? L->colp[me * E + tid] : L->col[me * E + tid]) : 0;
+  const int cn = tid < E && !ovf ? (L->col[me * E + tid]) : 0;
   if (tid < E) {
     L->ro[tid] = ovf ? 0 : L->pof[me * E + tid] - L->pof[me * E];
     L->cn[tid] = cn;
@@ -448,15 +418,10 @@ __device__ __forceinline__ void plan_derive(FsArgsC *a, MoeLayout *L, CS cs, int
     L->est[E] = tr;
     L->mpad_max = mx, L->ovf = ovf, L->mpad = ovf ? 0 : mine;
     L->drows = td, L->crows = tr;
-    if constexpr (!MXK) {
-      L->cur = L->gr = L->ar = 0;
-      if (a->pool) {
-        const int cur = fs_g(a->pool)[0], R = (ovf ? 0 : mx) + BLOCK_ROW;
-        L->cur = cur, L->gr = cur + R, L->ar = pool_a_row(cur, R, a->pgq);
-      }
-    } else {
-      // MXFP8 training: the block's base and rows (gr).
-      L->cur = a->pool ? fs_g(a->pool)[0] : 0, L->gr = (ovf ? 0 : mx) + BLOCK_ROW;
+    L->cur = L->gr = L->ar = 0;
+    if (a->pool) {
+      const int cur = fs_g(a->pool)[0], R = (ovf ? 0 : mx) + BLOCK_ROW;
+      L->cur = cur, L->gr = cur + R, L->ar = pool_a_row(cur, R, a->pgq);
     }
   }
   __syncthreads();
@@ -469,19 +434,15 @@ __device__ __forceinline__ const gint *plan_counts(FsArgsC *a, const MoeLayout *
 
 // Over capacity: receiver d's rows cut into windows of <= cap rows at expert boundaries (inside a larger expert at
 // 256-row multiples); thread d finds window r and d's count. Passes: the most rounds plus the empty overflow pass.
-// MXK with xc_fwd (MXFP8 training, I < 1024; the host sets xc_fwd for no other call): an expert's rows with padded
-// segments (colp), so every cut is on a 32-row group boundary.
-template <bool MXK = false>
 __device__ __forceinline__ void plan_windows(FsArgsC *a, MoeLayout *L, int r) {
   const int tid = plan_tid<true>(), E = a->E_loc, EG = MOE_EP * E, me = a->my_rank;
   const gint *cs = plan_counts(a, L);
   const int cap = a->p.cap / BLOCK_ROW * BLOCK_ROW;
-  const bool p32 = MXK && a->xc_fwd;
   if (tid < MOE_EP) {
     const int d = tid, b0 = L->pof[d * E];
     int q = 0, A = 0, wa = -1, wb = -1, tot = 0;
     for (int e = 0; e < E; e++) {
-      const int base = L->pof[d * E + e] - b0, end = base + plan_pad(p32 ? L->colp[d * E + e] : L->col[d * E + e]);
+      const int base = L->pof[d * E + e] - b0, end = base + plan_pad(L->col[d * E + e]);
       while (end - A > cap) {
         const int nA = base > A ? base : A + cap;
         if (q == r) {
@@ -513,24 +474,20 @@ __device__ __forceinline__ void plan_windows(FsArgsC *a, MoeLayout *L, int r) {
 
 // Round r's layout from the counts clipped to the windows (a row's index less its window start), sends from the full
 // order. wm: each local expert's wgrads in round r, 0 none, 1 stored (first rows, or no rows in round 0), 2 added.
-// MXK: segments padded as plan_windows'; the sends' offsets and starts in the scratch below the layout, as
-// plan_derive<true> writes colp and ppart.
-template <bool MXK = false>
 __device__ __forceinline__ void plan_clip(FsArgsC *a, MoeLayout *L, int r) {
   typedef __attribute__((address_space(3))) int lint;
   const int tid = plan_tid<true>(), E = a->E_loc, EG = MOE_EP * E, me = a->my_rank;
   const gint *cs = plan_counts(a, L);
-  const bool p32 = MXK && a->xc_fwd;
   if (tid < E) {
     const int g = me * E + tid, base = L->pof[g] - L->pof[me * E], A = L->wa[me], B = L->wb[me];
-    const int c = p32 ? L->colp[g] : L->col[g];
+    const int c = L->col[g];
     L->wm[tid] = c ? (base + c > A && base < B ? (base < A ? 2 : 1) : 0) : r == 0;
   }
   lint *cm = (lint *)((char *)L - PLAN_LAYOUT_OFF);
-  int *sfv = MXK ? (int *)((char *)L - PLAN_LAYOUT_OFF + PLAN_IDS_OFF) : L->colp;
-  int *ppv = MXK ? (int *)((char *)L - PLAN_LAYOUT_OFF + PLAN_IDS_OFF) + PLAN_MAXU : L->ppart;
+  int *sfv = L->colp;
+  int *ppv = L->ppart;
   int t;
-  const int sf = plan_scan<true, MXK>(tid < EG ? cs[me * EG + (tid % MOE_EP) * E + tid / MOE_EP] : 0, L->tmp, &t);
+  const int sf = plan_scan<true>(tid < EG ? cs[me * EG + (tid % MOE_EP) * E + tid / MOE_EP] : 0, L->tmp, &t);
   if (tid < EG) {
     const int d = tid / E, base = L->pof[tid] - L->pof[d * E], A = L->wa[d], B = L->wb[d];
     int lo = base;
@@ -541,22 +498,20 @@ __device__ __forceinline__ void plan_clip(FsArgsC *a, MoeLayout *L, int r) {
       if (s == me) {
         ppv[tid] = min(max(A - lo, 0), v);
       }
-      lo += p32 ? plan_pad32(v) : v;
+      lo += v;
     }
     sfv[tid] = sf;
   }
   __syncthreads();
   const int nr = L->nr, cap = L->mpad_max;
-  plan_derive<MXK, true>(a, L, (const lint *)cm);
+  plan_derive<true>(a, L, (const lint *)cm);
   if (tid < EG) {
     L->sof[tid] = sfv[tid] + ppv[(tid % MOE_EP) * E + tid / MOE_EP];
   }
   if (tid == 0) {
     L->nr = nr, L->mpad_max = cap;
-    if constexpr (!MXK) {
-      if (a->pool) {
-        L->gr = L->cur + cap + BLOCK_ROW, L->ar = pool_a_row(L->cur, cap + BLOCK_ROW, a->pgq);
-      }
+    if (a->pool) {
+      L->gr = L->cur + cap + BLOCK_ROW, L->ar = pool_a_row(L->cur, cap + BLOCK_ROW, a->pgq);
     }
   }
   __syncthreads();
@@ -565,7 +520,7 @@ __device__ __forceinline__ void plan_clip(FsArgsC *a, MoeLayout *L, int r) {
 // Every workgroup: waits until all 8 ranks have published this call's counts (every bucket group), then derives the
 // layout into L; RK (the fused forwards, the backwards' rounds) over capacity: r < 0 counts the rounds (the layout
 // stays empty), r >= 0 is round r's.
-template <bool MXK, bool PK, bool RK, bool O>
+template <bool PK, bool RK, bool O>
 __device__ __forceinline__ void moe_plan_layout(FsArgsC *a, MoeLayout *L, unsigned epoch, int r, int fz) {
   const int tid = plan_tid<O>(), E = a->E_loc, EG = MOE_EP * E, me = a->my_rank;
   if (tid < MOE_EP) {
@@ -578,9 +533,9 @@ __device__ __forceinline__ void moe_plan_layout(FsArgsC *a, MoeLayout *L, unsign
       L->cpar = epoch & 1u;
     }
   }
-  // fz: a storing forward that cannot keep a full-capacity Xp (MXFP8: block) in the pool runs in rounds, keeping
+  // fz: a storing forward that cannot keep a full-capacity Xp in the pool runs in rounds, keeping
   // nothing (its start reads that from the pool; its backward's rounds from the record).
-  plan_derive<MXK, O>(a, L, cs, fz);
+  plan_derive<O>(a, L, cs, fz);
   if constexpr (PK) {
     // The call's full-routing peak, before any round window clips it: one running max per call for the host.
     if (blockIdx.x == 0 && tid == 0) {
@@ -594,9 +549,9 @@ __device__ __forceinline__ void moe_plan_layout(FsArgsC *a, MoeLayout *L, unsign
         L->nr = 1;
       }
     } else {
-      plan_windows<MXK>(fs_args((const MoeFwdArgs *)a), L, r < 0 ? 0 : r);
+      plan_windows(fs_args((const MoeFwdArgs *)a), L, r < 0 ? 0 : r);
       if (r >= 0) {
-        plan_clip<MXK>(fs_args((const MoeFwdArgs *)a), L, r);
+        plan_clip(fs_args((const MoeFwdArgs *)a), L, r);
       }
     }
     __syncthreads();
@@ -604,12 +559,12 @@ __device__ __forceinline__ void moe_plan_layout(FsArgsC *a, MoeLayout *L, unsign
 }
 
 // The tile queues' offsets into L: GEMM1 tiles in expert order, GEMM2 tiles by XCD bucket (experts b, b + 8, ...).
-template <bool O, bool OS>
+template <bool O>
 __device__ __forceinline__ void moe_plan_queues(FsArgsC *a, MoeLayout *L) {
   const int tid = plan_tid<O>(), E = a->E_loc;
   const int nb = tid < E ? plan_pad(L->cn[tid]) / BLOCK_ROW : 0;
   int t1;
-  const int o1 = plan_scan<O, OS>(nb * (2 * a->I / BLOCK_COL), L->tmp, &t1);
+  const int o1 = plan_scan<O>(nb * (2 * a->I / BLOCK_COL), L->tmp, &t1);
   if (tid < E) {
     int p = tid / NUM_XCDS_AFF;
     for (int q = 0; q < tid % NUM_XCDS_AFF; q++) {
@@ -624,7 +579,7 @@ __device__ __forceinline__ void moe_plan_queues(FsArgsC *a, MoeLayout *L) {
   }
   __syncthreads();
   int t2;
-  const int o2 = plan_scan<O, OS>(tid < E ? L->o2[tid] : 0, L->tmp, &t2);
+  const int o2 = plan_scan<O>(tid < E ? L->o2[tid] : 0, L->tmp, &t2);
   if (tid < E) {
     L->o2[tid] = o2;
   }
@@ -644,11 +599,10 @@ __device__ __forceinline__ void plan_put5(int *tab, int j, int v0, int v1, int v
 
 // This call's scalars for the host (MoePlanRec) and the backward's row counts; the backward's crews and wgrad run
 // lengths are the context's, set once from the shape (moe_impl.cuh, bwd_shape_plan).
-template <bool MXK, bool RK>
+template <bool RK>
 __device__ __forceinline__ void plan_scalars(FsArgsC *a, const MoeLayout *L) {
   const int E = a->E_loc, me = a->my_rank, H = a->H, I = a->I, Mpad = L->mpad, nrb = Mpad / BLOCK_ROW;
   int st = __hip_atomic_load(fs_g(a->p.ctr) + PC_BAD, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-  st |= L->ovf && MXK && !RK ? PLAN_OVERFLOW : 0;
   st |= RK && L->nr > 1 ? PLAN_ROUNDS : 0;
   int dself = 0, cself = 0;
   for (int e = 0; e < E; e++) {
@@ -697,7 +651,7 @@ __device__ __forceinline__ void plan_set_x0(FsArgsC *a, const bf16 *x) {
 
 // A stored forward's last workgroup keeps its block of the pool from its base: Xp, then G and A if they fit
 // (pool_update; nothing after rounds, which reuse the block); for what it does not keep, the backward's operands are
-// its scratch. Not inlined: inlined it raises the router kernels' SGPR peak.
+// its scratch. Not inlined. The training API has no pool (pool null): it never runs.
 __device__ __noinline__ void pool_commit(const MoeFwdArgs *args, int *scr, int R, bool rounds) {
   const auto *a = (const __attribute__((address_space(1))) MoeFwdArgs *)fs_uniform_ptr(args);
   gint *pool = fs_g(a->pool);
@@ -719,47 +673,26 @@ __device__ __noinline__ void pool_commit(const MoeFwdArgs *args, int *scr, int R
   }
 }
 
-// MXFP8 training's pool_commit: a stored forward's last workgroup keeps its whole block (G, the column-wise A and with
-// I < 1024 the column-wise Xp) or, after rounds or with no room, nothing; it writes the backward's operands (one
-// writer). Nothing kept: its backward runs in rounds, recomputing them at the pool's head.
-__device__ __noinline__ void pool_commit_mx(const MoeFwdArgs *args, int *scr, int R, bool rounds) {
-  const auto *a = (const __attribute__((address_space(1))) MoeFwdArgs *)fs_uniform_ptr(args);
-  gint *pool = fs_g(a->pool);
-  const int cur = pool[0], H = a->H, I = a->I, top = cur + pool_mx_rows(R, H, I, a->xc_fwd);
-  const int keep = pool_update(pool, a->pslot, a->prows, a->phead, 0, a->phead, cur, top, top, scr, rounds);
-  if (fs_tid() == 0) {
-    uint8_t *b = a->pbase + (size_t)cur * 2 * H;
-    auto *ba = (__attribute__((address_space(1))) SingleArgs *)fs_g(a->p.ba);
-    ba->g = (const bf16 *)b, ba->actc = b + pool_mx_ac(R, I), ba->actcs = b + pool_mx_acs(R, I);
-    if (a->xc_fwd) {
-      ba->xpc = b + pool_mx_xc(R, I), ba->xpcs = b + pool_mx_xcs(R, H, I);
-    }
-    if (!keep) {
-      __hip_atomic_fetch_or(fs_g(a->p.status), rounds ? PLAN_KEPT_NONE : PLAN_ONEPASS_NONE, __ATOMIC_RELAXED,
-                            __HIP_MEMORY_SCOPE_AGENT);
-    }
-  }
-}
-
 // Copy items after the last pass drains: 0 receive slots, 1..nseg table segments, then the Xp blocks GEMM1 skipped and
 // the zero row; each acquires every plan workgroup's tables and, for the slots and Xp, every source's dispatch.
-__device__ __forceinline__ bool rec_fwd_copy(const MoeFwdArgs *args, uint8_t *rec, int *ctr, const RecSeg *seg,
+__device__ __forceinline__ bool route_fwd_copy(const MoeFwdArgs *args, uint8_t *route, int *ctr, const RouteSeg *seg,
                                              bf16 *xp, int nseg, int off_slot, int kept, int mpad, int nr, int crows,
                                              unsigned epoch, int nw, int *s_item) {
   const auto *a = (const __attribute__((address_space(1))) MoeFwdArgs *)fs_uniform_ptr(args);
-  constexpr int XD = XP_LDS_PERIOD > XP_LDS_BLOCKS ? XP_LDS_PERIOD - XP_LDS_BLOCKS : 1;
+  constexpr int XD = XP_GEMM1_PERIOD > XP_GEMM1_BLOCKS ? XP_GEMM1_PERIOD - XP_GEMM1_BLOCKS : 1;
   const int t = fs_tid(), nrb = mpad / BLOCK_ROW;
-  const int nt =
-      XP_LDS_PERIOD > XP_LDS_BLOCKS ? nrb / XP_LDS_PERIOD * XD + max(0, nrb % XP_LDS_PERIOD - XP_LDS_BLOCKS) : 0;
-  const int n = rec && kept >= 0 ? 1 + nseg + (kept >= 1 ? nt + 1 : 0) : 0;
+  const int nt = XP_GEMM1_PERIOD > XP_GEMM1_BLOCKS
+                     ? nrb / XP_GEMM1_PERIOD * XD + max(0, nrb % XP_GEMM1_PERIOD - XP_GEMM1_BLOCKS)
+                     : 0;
+  const int n = route && kept >= 0 ? 1 + nseg + (kept >= 1 ? nt + 1 : 0) : 0;
   if (!n) {
     return false;
   }
   __syncthreads();
   if (t == 0) {
-    *s_item = __hip_atomic_fetch_add(fs_g(ctr) + ICTR_CLAIM, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    *s_item = __hip_atomic_fetch_add(fs_g(ctr) + INST_CTR_CLAIM, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
     if (*s_item < n) {
-      plan_wait(fs_g(ctr) + ICTR_LATE, nw, false);
+      plan_wait(fs_g(ctr) + INST_CTR_LATE, nw, false);
     }
   }
   __syncthreads();
@@ -786,13 +719,13 @@ __device__ __forceinline__ bool rec_fwd_copy(const MoeFwdArgs *args, uint8_t *re
   if (it == 0) {
     if (nr == 1) {
       // Whole 16-byte words: the slot array holds the capacity's rows, a multiple of 256.
-      wg_copy16(rec + off_slot, a->slot[a->my_rank], 0, ((size_t)crows + 3) / 4);
+      wg_copy16(route + off_slot, a->slot[a->my_rank], 0, ((size_t)crows + 3) / 4);
     }
   } else if (it <= nseg) {
-    const RecSeg sg = seg[it - 1];
-    wg_copy16(rec + sg.off, sg.dev, 0, sg.bytes / 16);
+    const RouteSeg sg = seg[it - 1];
+    wg_copy16(route + sg.off, sg.dev, 0, sg.bytes / 16);
   } else {
-    const int j = it - 1 - nseg, b = j / XD * XP_LDS_PERIOD + XP_LDS_BLOCKS + j % XD;
+    const int j = it - 1 - nseg, b = j / XD * XP_GEMM1_PERIOD + XP_GEMM1_BLOCKS + j % XD;
     const int r0 = j < nt ? b * BLOCK_ROW : mpad, r1 = j < nt ? r0 + BLOCK_ROW : mpad + 1;
     wg_copy16(xp, a->p.zf, (size_t)r0 * H / 8, (size_t)r1 * H / 8);
   }
@@ -801,13 +734,13 @@ __device__ __forceinline__ bool rec_fwd_copy(const MoeFwdArgs *args, uint8_t *re
 
 // The training forward's last workgroup: the record's header and this call's count matrix (the layout's, acquired by
 // every workgroup), the kept tier's status notes, and the instance's copy counters back to 0.
-__device__ __forceinline__ void rec_fwd_finish(const MoeFwdArgs *args, uint8_t *rec, int *ctr, int kept, int tier,
+__device__ __forceinline__ void route_fwd_finish(const MoeFwdArgs *args, uint8_t *route, int *ctr, int kept, int tier,
                                                int mpad, int mpadx, int nr, int crows, unsigned epoch) {
   const auto *a = (const __attribute__((address_space(1))) MoeFwdArgs *)fs_uniform_ptr(args);
   const int t = fs_tid(), EG = MOE_EP * a->E_loc;
-  if (rec && kept >= 0) {
+  if (route && kept >= 0) {
     const gint *cs = fs_g(a->p.cnts[a->my_rank]) + (size_t)(epoch & 1u) * MOE_EP * EG;
-    gint *rc = (gint *)fs_g(rec + REC_CNT);
+    gint *rc = (gint *)fs_g(route + ROUTE_COUNTS_OFF);
     for (int i = t; i < MOE_EP * EG; i += NUM_THREADS) {
       rc[i] = cs[i];
     }
@@ -815,17 +748,18 @@ __device__ __forceinline__ void rec_fwd_finish(const MoeFwdArgs *args, uint8_t *
       const int note = kept < tier ? (kept ? PLAN_KEPT_XP : PLAN_KEPT_NONE) : 0;
       int st = __hip_atomic_load(fs_g(a->p.ctr) + PC_BAD, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       st |= (nr > 1 ? PLAN_ROUNDS : 0) | note;
-      gint *h = (gint *)fs_g(rec);
-      h[RECH_KEPT] = kept, h[RECH_NR] = nr, h[RECH_NROW] = (nr > 1 ? mpadx : mpad) + 1, h[RECH_MPAD] = mpad;
-      h[RECH_MPADX] = mpadx, h[RECH_STATUS] = st, h[RECH_EPOCH] = (int)epoch, h[RECH_CROWS] = crows;
-      h[RECH_MAGIC] = REC_MAGIC;
+      gint *h = (gint *)fs_g(route);
+      h[ROUTE_HDR_KEPT] = kept, h[ROUTE_HDR_NR] = nr, h[ROUTE_HDR_NROW] = (nr > 1 ? mpadx : mpad) + 1;
+      h[ROUTE_HDR_MPAD] = mpad, h[ROUTE_HDR_MPADX] = mpadx, h[ROUTE_HDR_STATUS] = st, h[ROUTE_HDR_EPOCH] = (int)epoch;
+      h[ROUTE_HDR_CROWS] = crows;
+      h[ROUTE_HDR_MAGIC] = ROUTE_MAGIC;
       if (note) {
         __hip_atomic_fetch_or(fs_g(a->p.status), note, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       }
     }
   }
   if (t < 2) {
-    __hip_atomic_store(fs_g(ctr) + (t ? ICTR_LATE : ICTR_CLAIM), 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    __hip_atomic_store(fs_g(ctr) + (t ? INST_CTR_LATE : INST_CTR_CLAIM), 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   }
   asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
   __syncthreads();
@@ -833,21 +767,20 @@ __device__ __forceinline__ void rec_fwd_finish(const MoeFwdArgs *args, uint8_t *
 
 // The forward's receive-side tables, sliced over workgroups wi of nw; workgroup 0 also zeroes the receive arena's zero
 // row. With padded segments the arrival tables count each source's padding rows, zeroed here.
-template <bool MXK, bool RK, bool O>
+template <bool RK, bool O>
 __device__ __forceinline__ void moe_plan_tables(FsArgsC *a, const MoeLayout *L, int wi, int nw) {
   const int tid = plan_tid<O>(), E = a->E_loc, EG = MOE_EP * E;
   const int gi = wi * NUM_THREADS + tid, gs = nw * NUM_THREADS;
   const int nrb = L->mpad / BLOCK_ROW;
-  const bool p32 = MXK && a->mxt && a->xc_fwd;
   for (int u = gi; u < EG; u += gs) {
     const int e = u / MOE_EP, x = u % MOE_EP, cs = L->snd[u], cr = L->rcv[u];
-    const int roff = L->ro[e], st = p32 ? L->uofp[u] - L->uofp[e * MOE_EP] : L->uof[u] - L->est[e], lo = roff + st;
+    const int roff = L->ro[e], st = L->uof[u] - L->est[e], lo = roff + st;
     const int rbp = max(0, min(roff / BLOCK_ROW, nrb - 1));
     gint *rb = fs_g((int *)a->rbs) + 4 * u;
     rb[0] = cr ? lo / BLOCK_ROW : rbp, rb[1] = x, rb[2] = L->uof[u], rb[3] = cr;
     fs_g(a->rb_hi)[u] = cr ? (lo + cr - 1) / BLOCK_ROW : rbp;
     fs_g(a->start_by_src)[sig_index(x, e)] = st;
-    fs_g(a->cnt_by_src)[sig_index(x, e)] = p32 ? plan_pad32(cr) : cr;
+    fs_g(a->cnt_by_src)[sig_index(x, e)] = cr;
   }
   if (gi < E) {
     fs_g(a->cnt)[gi] = L->cn[gi];
@@ -865,98 +798,63 @@ __device__ __forceinline__ void moe_plan_tables(FsArgsC *a, const MoeLayout *L, 
   }
   for (int ci = gi; ci < L->crows; ci += gs) {
     const int e = fs_seg(L->est, E, ci);
-    if (p32) {
-      int u = e * MOE_EP;
-      while (u + 1 < (e + 1) * MOE_EP && L->uof[u + 1] <= ci) {
-        u++;
-      }
-      fs_g(a->lb_src)[ci] = L->ro[e] + L->uofp[u] - L->uofp[e * MOE_EP] + ci - L->uof[u];
-    } else {
-      fs_g(a->lb_src)[ci] = L->ro[e] + ci - L->est[e];
-    }
+    fs_g(a->lb_src)[ci] = L->ro[e] + ci - L->est[e];
   }
   if (wi == 0) {
-    plan_zero_rows<O>(a->p.zf, (MXK ? 0 : L->cur) + L->mpad, (MXK ? 0 : L->cur) + L->mpad + 1, a->H);
-  }
-  if constexpr (MXK) {
-    for (int u = wi; p32 && u < EG; u += nw) {
-      const int e = u / MOE_EP, cr = L->rcv[u], lo = L->ro[e] + L->uofp[u] - L->uofp[e * MOE_EP] + cr;
-      plan_zero_rows<O>(a->p.zf, lo, lo + plan_pad32(cr) - cr, a->H);
-    }
+    plan_zero_rows<O>(a->p.zf, (L->cur) + L->mpad, (L->cur) + L->mpad + 1, a->H);
   }
 }
 
 // After the forward's tables are released: the backward's tables and this call's scalars, then the padding rows the
-// wgrads read directly (an expert's rows up to its count rounded to K_STEP_64, not gathered) are zeroed; the backward
-// zeroes those of a column-wise Xp it writes (mx_xcol_zero).
-template <bool MXK, bool RK, bool O>
+// wgrads read directly (an expert's rows up to its count rounded to K_STEP_64, not gathered) are zeroed.
+template <bool RK, bool O>
 __device__ __forceinline__ void moe_plan_late(FsArgsC *a, const MoeLayout *L, int wi, int nw, bool sc) {
   const int tid = plan_tid<O>(), E = a->E_loc, EG = MOE_EP * E;
-  const bool p32 = MXK && a->mxt && a->xc_fwd;
   if (a->p.ba) {
     for (int u = wi * NUM_THREADS + tid; u < EG; u += nw * NUM_THREADS) {
       const int e = u / MOE_EP, x = u % MOE_EP, cs = L->snd[u], cr = L->rcv[u];
-      const int st = p32 ? L->uofp[u] - L->uofp[e * MOE_EP] : L->uof[u] - L->est[e], lo = L->ro[e] + st;
+      const int st = L->uof[u] - L->est[e], lo = L->ro[e] + st;
       plan_put5(a->p.bblks, u, x, e, L->sof[u], cs, cs ? L->dbase[u] : 0);
       plan_put5(a->p.cblks, u, x, cr ? lo / BLOCK_ROW : 0, cr ? (lo + cr - 1) / BLOCK_ROW : -1, L->uof[u], cr);
       if constexpr (RK) {
         fs_g(a->sbase)[u] = L->sbase[u];
       }
-      fs_g(a->p.cnt_by_src)[sig_index(x, e)] = p32 ? plan_pad32(cr) : cr;
+      fs_g(a->p.cnt_by_src)[sig_index(x, e)] = cr;
       fs_g(a->p.start_by_src)[sig_index(x, e)] = cr ? st : 0;
     }
   }
   if (wi == 0 && tid == 0 && sc) {
-    plan_scalars<MXK, RK>(a, L);
+    plan_scalars<RK>(a, L);
   }
   if (L->ovf || (RK && L->nr > 1)) {
     return;
   }
   for (int e = wi; e < E; e += nw) {
-    const int c = L->cn[e], lo = (MXK ? 0 : L->cur) + L->ro[e] + c;
+    const int c = L->cn[e], lo = (L->cur) + L->ro[e] + c;
     plan_zero_rows<O>(a->p.zf, lo, lo + (K_STEP_64 - c % K_STEP_64) % K_STEP_64, a->H);
-    if constexpr (MXK) {
-      if (a->mxt && a->xc_fwd && c) {
-        const int hi = L->ro[e] + K_STEP_128 * max(2, (c + K_STEP_128 - 1) / K_STEP_128), lp = L->ro[e] + plan_pad32(c);
-        uint8_t *xb = a->pbase + (size_t)L->cur * 2 * a->H;
-        plan_zero_rows<O>((bf16 *)(xb + pool_mx_xc(L->gr, a->I)), lp, hi, a->H / 2);
-        plan_zero_rows<O>((bf16 *)(xb + pool_mx_xcs(L->gr, a->H, a->I)), lp / 32, hi / 32, a->H / 2);
-      }
-    }
   }
 }
 
 
 // The backward of a forward over capacity: one workgroup derives round r's tables with the forward's plan (its layout
-// in the tile region lds), and round r's rows and wgrad modes into rinfo. MX: MXFP8 training, which reads no gather or
-// tile queue (no index phase).
-template <bool MX = false>
+// in the tile region lds), and round r's rows and wgrad modes into rinfo.
 __device__ __forceinline__ void single_round_tables(const SingleArgs *args, unsigned char *lds, int r) {
   const auto *ka = (const __attribute__((address_space(1))) SingleArgs *)fs_uniform_ptr(args);
   FsArgsC *fa = fs_args(fs_uniform_ptr(ka->fa));
   MoeLayout *L = reinterpret_cast<MoeLayout *>(lds + PLAN_LAYOUT_OFF);
   const unsigned epoch = (unsigned)__builtin_amdgcn_readfirstlane(fs_g(fa->ep)[0]) - 1u;
-  if constexpr (MX) {
-    moe_plan_layout<true, false, true, true>(fa, L, epoch, r,
-                                             ((const __attribute__((address_space(1))) MoePlanRec *)fs_g(fa->p.rec))->forced);
-    moe_plan_tables<true, true, true>(fa, L, 0, 1);
-    moe_plan_late<true, true, true>(fa, L, 0, 1, false);
-  } else {
-    moe_plan_layout<false>(fa, L, epoch, r,
-                           ((const __attribute__((address_space(1))) MoePlanRec *)fs_g(fa->p.rec))->forced);
-    moe_plan_queues<true>(fa, L);
-    moe_plan_tables<false>(fa, L, 0, 1);
-    fs_index_phase<false, true>(fa, L, 0, 1, false);
-    moe_plan_late<false>(fa, L, 0, 1, false);
-  }
+  moe_plan_layout(fa, L, epoch, r,
+                         ((const __attribute__((address_space(1))) MoePlanRec *)fs_g(fa->p.rec))->forced);
+  moe_plan_queues<true>(fa, L);
+  moe_plan_tables(fa, L, 0, 1);
+  fs_index_phase<true>(fa, L, 0, 1, false);
+  moe_plan_late(fa, L, 0, 1, false);
   gint *ri = fs_g(ka->rinfo);
   const int t = fs_tid();
   if (t == 0) {
     ri[RINFO_NROW] = L->mpad + 1;
-    if constexpr (!MX) {
-      // The index phase counted itself into the forward's idx_done, which its next forward waits on: back to 0.
-      __hip_atomic_store(fs_g(fa->idx_done), 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-    }
+    // The index phase counted itself into the forward's idx_done, which its next forward waits on: back to 0.
+    __hip_atomic_store(fs_g(fa->idx_done), 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   }
   if (t < fa->E_loc) {
     ri[RINFO_WM + t] = L->wm[t];
@@ -979,12 +877,11 @@ __device__ __forceinline__ void single_round_info(const SingleArgs *args, int *n
 }
 
 // Before round 0: the last workgroup to arrive derives its tables, then releases the others.
-template <bool MX = false>
 __device__ __forceinline__ void single_round_open(const SingleArgs *args, unsigned char *lds, int nwg) {
   const auto *ka = (const __attribute__((address_space(1))) SingleArgs *)fs_uniform_ptr(args);
   gint *ri = fs_g(ka->rinfo);
   if (single_last_wg(ka->rinfo + RINFO_ARR, nwg)) {
-    single_round_tables<MX>(args, lds, 0);
+    single_round_tables(args, lds, 0);
     if (fs_tid() == 0) {
       __hip_atomic_store(ri + RINFO_ARR, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       __hip_atomic_store(ri + RINFO_GO, 1, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
@@ -996,9 +893,7 @@ __device__ __forceinline__ void single_round_open(const SingleArgs *args, unsign
 }
 
 // After round r (not the last): the last workgroup resets its counters, takes back its dY and X arrivals, derives
-// round r + 1's tables, stores RFREE in every peer (its next round may write here) and releases the others. MX: also
-// the dY and X quantization items' counts.
-template <bool MX = false>
+// round r + 1's tables, stores RFREE in every peer (its next round may write here) and releases the others.
 __device__ __forceinline__ void single_round_end(const SingleArgs *args, int *tc, unsigned char *lds, int r, int nrb,
                                                  int nwg, unsigned bcall) {
   const auto *ka = (const __attribute__((address_space(1))) SingleArgs *)fs_uniform_ptr(args);
@@ -1016,18 +911,12 @@ __device__ __forceinline__ void single_round_end(const SingleArgs *args, int *tc
       __hip_atomic_store(fs_g(ka->dg_done) + i, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       __hip_atomic_store(fs_g(ka->rg_done) + i, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
     }
-    if constexpr (MX) {
-      for (int i = t; i < nrb * (ka->H / MX_QCOLS); i += NUM_THREADS) {
-        __hip_atomic_store(fs_g(ka->qdy_done) + i, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-        __hip_atomic_store(fs_g(ka->qx_done) + i, 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-      }
-    }
     hk_comm::moe_bwd_dispatch_credit(ka->a.g.push.peers.sig[me], ka->a.g.cnt_by_src, ka->a.g.start_by_src,
                                      ka->row_off, E, sigb);
     hk_comm::moe_bwd_dispatch_credit(ka->xsg[me], ka->a.g.cnt_by_src, ka->a.g.start_by_src, ka->row_off, E, sigb);
     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
     __syncthreads();
-    single_round_tables<MX>(args, lds, r + 1);
+    single_round_tables(args, lds, r + 1);
     if (t < MOE_EP) {
       __hip_atomic_store((gint *)ka->a.g.push.peers.sig[t] + hk_comm::bfree_index(MOE_EP + me, sigb),
                          (int)(bcall << 16 | (unsigned)(r + 2)), __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);

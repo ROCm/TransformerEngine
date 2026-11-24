@@ -44,7 +44,7 @@ SCALE_TOL = 1e-2
 NAMES = ("y", "dx", "dtw", "dw1", "dw2")
 # The op's save_for_backward order (functional._KosmosMoeFn.forward): x, topk_weights, w1, w2,
 # topk_idx (int32), then the saved buffers.
-SAVED_INDEX = {"xp": 5, "g": 6, "a": 7, "y": 8, "rec": 9}
+SAVED_INDEX = {"xp": 5, "g": 6, "a": 7, "y": 8, "route": 9}
 
 
 class Env:
@@ -461,8 +461,8 @@ def check_save_tiers(env, d):
 
 
 def check_saved_rows_below(env, d):
-    """Saved rows (256) below the rows a call receives. Expected: the forward keeps less (status bit
-    16 or 32), outputs and gradients bit for bit equal to the full save, smaller saved buffers; no
+    """Saved rows (256) below the rows a call receives. Expected: the forward keeps nothing (status
+    bit 32), outputs and gradients bit for bit equal to the full save, smaller saved buffers; no
     error bit."""
     inst = _main_instance(env)
     x, idx, w, dy = d.tok[11]
@@ -474,7 +474,7 @@ def check_saved_rows_below(env, d):
     st = _status(env)
     eq = bitwise(res, full)
     big = inst.saved_bytes_per_call(inst.capacity_rows)["all"]
-    fell_back = bool(st & (kf.STATUS_KEPT_XP | kf.STATUS_KEPT_NOTHING))
+    fell_back = bool(st & kf.STATUS_KEPT_NOTHING)
     ok = all(eq.values()) and fell_back and not _errors(st) and small < big
     return ok, {"bitwise_vs_full": eq, "status": st, "saved_bytes": small, "full_bytes": big}
 

@@ -2,15 +2,16 @@ Vendored copy of the KOSMOS MoE library. Do not edit the files listed in SHA256S
 re-vendoring from upstream, in a pull request of its own, with the numerics and performance tests rerun.
 
 repository  AMD-BRAIN-Internal/KOSMOS (private)
-commit      4c5e5311783ecbcefdd00157ad501a06b4164f85, head of pull request #1 (branch yewang12/moe_training_api, PR title
-            "MoE (bf16 training): instance API with caller-owned saved state; clang 24 build fix"), on top of
-            main a9331457a62a2b2d4ae2f6a9e61432065c1c9bd4; not merged into main
+commit      0a49964f0d59901d047e71297d5e32a352100b00, head of pull request #1 (branch
+            yewang12/moe_training_api, on top of main a9331457a62a; not merged into main): 4c5e531 adds the
+            bf16 training API, 43049ed cuts the library down to it, d9459c6 removes the dead branches that
+            cut left, 0a49964 renames the saved route record and the training state
 license     MIT (LICENSE, from the same commit)
 copied      src/moe/*, src/utils/*, python/kosmos.cpp, Makefile, LICENSE, byte-identical to that commit
 hipkittens  3rdparty/hipkittens_kosmos at e4fa1cc3 (HazyResearch/HipKittens, branch alexmagro_earlyclobber),
             the pin KOSMOS records for 3rdparty/hipkittens at that commit; used by these sources only
 
 Verify the copy:   cd transformer_engine/common/kosmos && sha256sum -c SHA256SUMS
-                   (and against KOSMOS: git -C <KOSMOS> archive 4c5e531 src/moe src/utils python/kosmos.cpp Makefile LICENSE)
+                   (and against KOSMOS: git -C <KOSMOS> archive 0a49964 src/moe src/utils python/kosmos.cpp Makefile LICENSE)
 Built by:          transformer_engine/common/kosmos.cmake (KOSMOS's own Makefile builds libkosmos_moe.a, plus the
                    Python module transformer_engine_kosmos compiled from python/kosmos.cpp under that module name)

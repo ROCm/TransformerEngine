@@ -4,48 +4,18 @@
 *************************************************************************/
 // moe_fwd_single from its first pass on: each pass (RND: of a call in rounds) to its drained tile loop, then the
 // last workgroup's reset; textually included.
-// MXFP8 (FWD_FK, training and inference): its rounds take the kernel's arguments, workgroup and thread id at each use (fk_arg, fk_wg,
-// fk_tid, fk_a0, FKR): live from the start, they would be held across the first pass.
-#if FWD_FK
-#define args fk_arg<RND && MX>(args, MX_KP_ARGS)
-#define tile_counter fk_arg<RND && MX>(tile_counter, MX_KP_TC)
-#define wg fk_wg<RND && MX>(wg)
-#define tid fk_tid<RND && MX>(tid)
-#define A0 fk_a0<RND && MX>(A0)
-#endif
-  // Each pass (RND: the overflow layout's, then one per round) to its drained tile loop. With RNDO (bf16: both copies,
-  // MXFP8: the rounds'), values the two copies could share come opaquely (fs_tid, s_ngr, fs_args, fs_opaque_s): held
-  // across the other copy, they spill.
-  constexpr bool RNDO = RNDK && (!MX || RND);
-  constexpr bool FKR = RND && MX;
-  // R0: MXFP8's round-free copy, also the first pass of a call in rounds (s_nr > 1); its rounds' copy has no
-  // shared expert tiles (SHP).
-  constexpr bool R0 = MX && RNDK && !RND;
-  constexpr bool SHP = SH && !(MX && RND);
-  FsArgsC *const ka0 = ka;
-  // MXFP8: never taken (s_rnd is 0 here); a second entry makes the round loop irreducible, so the optimizer hoists no
-  // loop-invariant value out of it (one held across the tile loop spills).
-  if (RND && MX && *fs_lds(&s_rnd) < 0) {
-    goto FWD_RMID;
-  }
-  if constexpr (RND && MX) {
-    fs_round_end(args, tile_counter, 0, *fs_lds(&s_mpad) / BLOCK_ROW, (unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0),
-                 *fs_lds(&s_ngr));
-    if (tid == 0) {
-      s_rnd = 1;
-    }
-    __syncthreads();
-  }
+  // Each pass (RND: the overflow layout's, then one per round) to its drained tile loop. Values the two copies could
+  // share come opaquely (fs_tid, s_ngr, fs_args, fs_opaque_s): held across the other copy, they spill.
   for (;;) {
-  if constexpr (PART < 3) {
+  {
     char *scr = reinterpret_cast<char *>(&As[0][0]);
     MoeLayout *L = reinterpret_cast<MoeLayout *>(scr + PLAN_LAYOUT_OFF);
-    FsArgsC *ka = RNDO ? fs_args(args) : ka0;
-    const int ng = RNDO ? *fs_lds(&s_ngr) : (int)gridDim.x;
+    FsArgsC *ka = fs_args(args);
+    const int ng = *fs_lds(&s_ngr);
     const int dn = ka->dncomm, d0 = ng > dn ? dn : 0, nw = ng - d0;
     const int rnd = RND ? *fs_lds(&s_rnd) : 0;
-    if (!RNDK || rnd > 0) {
-      moe_plan_layout<MX, false, RNDK, RNDO>(ka, L, (unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0), rnd - 1,
+    if (rnd > 0) {
+      moe_plan_layout<false, true, true>(ka, L, (unsigned)fk_epoch<true>(epoch, s_kp, 0), rnd - 1,
                                              RND ? *fs_lds(&s_fz) : 0);
     }
     if (tid == 0) {
@@ -53,89 +23,54 @@
       s_mpad = L->mpad;
       s_nt[0] = nrb * (2 * ka->I / BLOCK_COL);
       s_nt[1] = nrb * (ka->H / BLOCK_COL);
-      if constexpr (!MX) {
-        s_cur = L->cur, s_gr = L->gr, s_ar = L->ar;
-        if (!TRAIN_API && wg == 0 && ka->pool && ka->p.ba && !rnd) {
-          plan_set_x0(ka, FKP(const bf16, X, FK_X));
-        }
-      } else if constexpr (MXT) {
-        if (!rnd) {
-          const int R = L->gr, I = ka->I;
-          uint8_t *b = fs_uniform_ptr(ka->pbase) + (size_t)L->cur * 2 * ka->H;
-          s_cur = L->cur, s_gr = R;
-          s_mxp[0] = (unsigned long long)b, s_mxp[1] = (unsigned long long)(b + pool_mx_ac(R, I));
-          s_mxp[2] = (unsigned long long)(b + pool_mx_acs(R, I));
-        }
-      }
-      if constexpr (RND || R0) {
+      s_cur = L->cur, s_gr = L->gr, s_ar = L->ar;
+      if constexpr (RND) {
         s_nr = L->nr;
       }
-      if constexpr (TRAIN_API) {
-        // The kept tier, alike on every rank (Mpad_max): nothing over capacity or past the caller's rows.
-        if (!rnd) {
-          int *vi = tc_si();
-          unsigned long long *vp = tc_sp();
-          const int rq = vp[TCP_REC] ? vi[TCI_TIER] : -1;
-          const int kept = rq < 0 ? -1 : L->nr > 1 || L->mpad_max > vi[TCI_ROWS] ? 0 : rq;
-          vi[TCI_KEPT] = kept;
-          vi[TCI_MPAD] = L->mpad, vi[TCI_MPADX] = L->mpad_max, vi[TCI_NR] = L->nr, vi[TCI_CROWS] = L->crows;
-          vp[TCP_GK] = kept == 2 ? vp[TCP_G] : 0ull;
-          vp[TCP_AK] = kept == 2 ? vp[TCP_A] : (unsigned long long)ka->act;
-          vp[TCP_YK] = kept >= 0 ? vp[TCP_Y] : 0ull;
-        }
-      }
-      if (SH && !rnd) {
-        s_nt[0] += ka->T / BLOCK_ROW * (2 * ka->I / BLOCK_COL);
-        s_nt[1] += ka->T / BLOCK_ROW * (ka->H / BLOCK_COL);
+      // The kept tier, alike on every rank (Mpad_max): nothing over capacity or past the caller's rows.
+      if (!rnd) {
+        int *vi = train_ints();
+        unsigned long long *vp = train_ptrs();
+        const int rq = vp[TRAIN_PTR_ROUTE] ? vi[TRAIN_INT_TIER] : -1;
+        const int kept = rq < 0 ? -1 : L->nr > 1 || L->mpad_max > vi[TRAIN_INT_ROWS] ? 0 : rq;
+        vi[TRAIN_INT_KEPT] = kept;
+        vi[TRAIN_INT_MPAD] = L->mpad, vi[TRAIN_INT_MPADX] = L->mpad_max, vi[TRAIN_INT_NR] = L->nr,
+            vi[TRAIN_INT_CROWS] = L->crows;
+        vp[TRAIN_PTR_G_OUT] = kept == 2 ? vp[TRAIN_PTR_G] : 0ull;
+        vp[TRAIN_PTR_A_OUT] = kept == 2 ? vp[TRAIN_PTR_A] : (unsigned long long)ka->act;
+        vp[TRAIN_PTR_Y_OUT] = kept >= 0 ? vp[TRAIN_PTR_Y] : 0ull;
       }
     }
-    if (PART != 2 && wg >= d0) {
-      moe_plan_queues<RND, MX && RND>(ka, L);
-      moe_plan_tables<MX, RNDK && !R0, RNDO>(ka, L, wg - d0, nw);
-      fs_index_phase<SH, RND>(ka, L, (RND ? fs_opaque_s(wg) : wg) - d0, nw, !rnd);
+    if (wg >= d0) {
+      moe_plan_queues<RND>(ka, L);
+      moe_plan_tables<true, true>(ka, L, wg - d0, nw);
+      fs_index_phase<RND>(ka, L, (RND ? fs_opaque_s(wg) : wg) - d0, nw, !rnd);
     }
     if (RND && rnd && wg < dn && tid == 0) {
       // A round's rows go where the destination's previous pass read them: wait for its RFREE.
       plan_wait(fs_g(ka->my_sig) + RFREE_OFF + wg % MOE_EP,
-                (int)((unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0) << 16 | (unsigned)rnd), true);
+                (int)((unsigned)fk_epoch<true>(epoch, s_kp, 0) << 16 | (unsigned)rnd), true);
     }
-    // MXFP8 with the router: dn re-read, else the first compare's lane mask is kept across the router and spilled.
-    if (PART != 1 && wg < (MX && ROUTER ? fs_args(args)->dncomm : dn)) {
-      fs_dispatch_role<MXT ? 2 : MX ? 1 : 0, PIN, BURST == 0, PIN && SH, (MX && ROUTER) || RNDO>(
+    if (wg < dn) {
+      fs_dispatch_role<BURST == 0, true>(
           ka, L, RND ? fs_uniform_ptr((const bf16 *)*fs_lds(&s_kp[FK_X])) : FKP(const bf16, X, FK_X), wg, ka->H,
-          fk_epoch<KP || FKR>(xepoch, s_kp, 32));
+          fk_epoch<true>(xepoch, s_kp, 32));
       asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)" ::: "memory");
       __syncthreads();
       if (tid == 0) {
         __hip_atomic_fetch_add(fs_g(ka->disp_done), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       }
-      if constexpr (MXT && !RND) {
-        if (ka->mxt && ka->xc_fwd) {
-          // PART 2: H joins the tid == 0 load above in a VGPR phi, which mx_qput's "s" asm operand cannot take.
-          // The destination's pool block is at this rank's offset: every rank's pool decides alike.
-          uint8_t *xb = ka->xcp[wg % MOE_EP] + (size_t)L->cur * 2 * ka->H;
-          (void)mx_xcol_units<true, PIN>(MxUnitsL{L}, ka->nblks, ka->dncomm, wg, FKP(const bf16, X, FK_X),
-                                         ka->send_slot, ka->topk,
-                                         PART == 2 ? __builtin_amdgcn_readfirstlane(ka->H) : ka->H, 0,
-                                         xb + pool_mx_xc(L->gr, ka->I), xb + pool_mx_xcs(L->gr, ka->H, ka->I),
-                                         nullptr, nullptr, PIN ? ka->wts : nullptr);
-        }
+    }
+    if (wg >= d0 && !rnd) {
+      moe_plan_late<true, true>(fs_args(args), L, wg - d0, nw);
+      // The record's copies wait for every plan workgroup's tables.
+      asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+      __syncthreads();
+      if (tid == 0) {
+        (void)__hip_atomic_fetch_add(train_ptr<int>(TRAIN_PTR_CTR) + INST_CTR_LATE, 1, __ATOMIC_RELEASE,
+                                     __HIP_MEMORY_SCOPE_AGENT);
       }
     }
-    if (PART != 2 && !(MX && RND) && wg >= d0 && !rnd) {
-      moe_plan_late<MX, RNDK, RNDO>(fs_args(args), L, wg - d0, nw);
-      if constexpr (TRAIN_API) {
-        // The record's copies wait for every plan workgroup's tables.
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-        __syncthreads();
-        if (tid == 0) {
-          (void)__hip_atomic_fetch_add(tc_ptr<int>(TCP_CTR) + ICTR_LATE, 1, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
-        }
-      }
-    }
-  }
-  if constexpr (PART == 1 || PART == 2) {
-    return;
   }
 FWD_RMID:
 
@@ -143,7 +78,7 @@ FWD_RMID:
     FsArgsC *jp = fs_args(args);
     auto *ix = fs_g(jp->idx_done);
     int n = 0;
-    const int ng = RNDO ? *fs_lds(&s_ngr) : (int)gridDim.x;
+    const int ng = *fs_lds(&s_ngr);
     const int nw = ng > jp->dncomm ? ng - jp->dncomm : ng;
     while (__hip_atomic_load(ix, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) < nw) {
       spin_backoff(n);
@@ -154,7 +89,7 @@ FWD_RMID:
 
   constexpr int SZA = sizeof(ST_A);  // As[p][q] = As[0][0] + (2p + q) * SZA: the fragment loads' immediate
   constexpr int SZB = sizeof(ST_B);
-  const int wid = (RND && MX ? fs_tid() / kittens::WARP_THREADS : warpid()) % NUM_WARPS;
+  const int wid = (warpid()) % NUM_WARPS;
   using T = bf16;
   constexpr int bpt           = ST_A::underlying_subtile_bytes_per_thread;
   constexpr int bpm           = bpt * NUM_THREADS;
@@ -189,34 +124,29 @@ FWD_RMID:
   __shared__ int s_arr;
   __shared__ int s_frd;
   __shared__ int s_fsel;
-  bool c_left = (PART == 0 || PART == 5) && wg < fs_args(args)->cncomm;
-  const int ts = RNDO ? fs_tid() : tid;
+  bool c_left = wg < fs_args(args)->cncomm;
+  const int ts = fs_tid();
   if (ts < 2) {
     s_dmask[ts] = 0u;
   }
   if (ts == 0) {
     s_arr = 0;
-    s_g1done = PART == 4;
+    s_g1done = false;
     s_dall = 0;
   }
   moe_walk_caps(s_cap, s_nt[0], ts);
   __syncthreads();
 
-  bool drained = PART == 5;
-  bool f_early = c_left && (R0 || !RND || *fs_lds(&s_rnd) + 1 == *fs_lds(&s_nr));
+  bool drained = false;
+  bool f_early = c_left && (!RND || *fs_lds(&s_rnd) + 1 == *fs_lds(&s_nr));
   int f_pend = -1;
-  // One pass (RNDK): the call's pool rows in SGPRs across the tile loop; the rounds' passes read them at each use. The
-  // training API has no pool: 0.
-  const int p_cur = !MX && RNDK && !RND && !TRAIN_API ? __builtin_amdgcn_readfirstlane(s_cur) : 0;
-  const int p_gr  = !MX && RNDK && !RND && !TRAIN_API ? __builtin_amdgcn_readfirstlane(s_gr) : 0;
-  const int p_ar  = !MX && RNDK && !RND && !TRAIN_API ? __builtin_amdgcn_readfirstlane(s_ar) : 0;
   while (true) {
     if (c_left) {
       FsArgsC *cp = fs_args(args);
       const int sel = fs_combine_claim(cp, wg, fs_lds(s_dmask), fs_lds(s_dsel), fs_lds(&s_dall));
       if (sel >= 0) {
         cp = fs_args(args);
-        fs_combine_push<BURST, Q8, (MXT || FOLD_READY) && !RND>(cp, sel, cp->H, s_kp);
+        fs_combine_push<BURST, !RND>(cp, sel, cp->H, s_kp);
         continue;
       }
       c_left = sel == -1;
@@ -233,51 +163,40 @@ FWD_RMID:
       if (tid < 64 && !*fs_lds(&s_arr)) {
         FsArgsC *fp = fs_args(args);
         const bool ok = moe_fold_arrived((const int *)fs_my_acc(fp), fp->owed, fp->fold_ctr + 1, fp->cncomm,
-                                         SH ? fp->sy_done : nullptr, fp->T / BLOCK_ROW * (fp->H / BLOCK_COL));
+                                         nullptr, fp->T / BLOCK_ROW * (fp->H / BLOCK_COL));
         bool rd = ok;
-        if constexpr ((MXT || FOLD_READY) && !RND) {
-          // MXFP8 training publishes per unit, not per source: acc stays 0, so ok holds only for the empty layout. Its
-          // rounds publish per source (a unit may land over several rounds).
-          bool sy = true;
-          if constexpr (SH) {
-            sy = __hip_atomic_load(fs_g(fp->sy_done), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) >=
-                 fp->T / BLOCK_ROW * (fp->H / BLOCK_COL);
-          }
-          rd = ok || (sy && fs_fold_block_ready(fp, s_kp, f_pend));
+        if constexpr (!RND) {
+          // One pass: an item may also start once its own rows have landed (fs_fold_block_ready), before every
+          // source's count; rounds wait for the counts (a unit may land over several rounds).
+          rd = ok || fs_fold_block_ready(fp, s_kp, f_pend);
         }
         if (tid == 0) {
           *fs_lds(&s_arr) = ok;
-          if constexpr ((MXT || FOLD_READY) && !RND) {
+          if constexpr (!RND) {
             *fs_lds(&s_frd) = rd;
           }
         }
       }
       __syncthreads();
-      if (*fs_lds(&s_arr) || ((MXT || FOLD_READY) && !RND && *fs_lds(&s_frd))) {
+      if (*fs_lds(&s_arr) || (!RND && *fs_lds(&s_frd))) {
         FsArgsC *fp = fs_args(args);
         __builtin_amdgcn_s_waitcnt(0);
-        if constexpr (TRAIN_API) {
-          moe_fold_item<SH, KS, Q8, PIN, !ROUTER, true>(fp->lpeers.comb[fp->my_rank], fp->wts,
-                                                        FKP(bf16, fold_out, FK_OUT), fp->T, fp->H, fp->topk, f_pend,
-                                                        nullptr, tc_ptr<bf16>(TCP_YK));
-        } else {
-          moe_fold_item<SH, KS, Q8, PIN, !ROUTER>(fp->lpeers.comb[fp->my_rank], fp->wts, FKP(bf16, fold_out, FK_OUT),
-                                                  fp->T, fp->H, fp->topk, f_pend,
-                                                  SH ? fs_uniform_ptr(fp->sy) : nullptr);
-        }
+        moe_fold_item<KS, true, true>(fp->lpeers.comb[fp->my_rank], fp->wts,
+                                                      FKP(bf16, fold_out, FK_OUT), fp->T, fp->H, fp->topk, f_pend,
+                                                      nullptr, train_ptr<bf16>(TRAIN_PTR_Y_OUT));
         f_pend = -1;
       } else {
         __builtin_amdgcn_s_sleep(16);
       }
       continue;
     }
-    if (f_early && !c_left && !drained && (!R0 || *fs_lds(&s_nr) == 1)) {
+    if (f_early && !c_left && !drained) {
       __syncthreads();
       if (tid < 64) {
         FsArgsC *fp = fs_args(args);
         const bool ok =
             *fs_lds(&s_arr) || moe_fold_arrived((const int *)fs_my_acc(fp), fp->owed, fp->fold_ctr + 1, fp->cncomm,
-                                                SH ? fp->sy_done : nullptr, fp->T / BLOCK_ROW * (fp->H / BLOCK_COL));
+                                                nullptr, fp->T / BLOCK_ROW * (fp->H / BLOCK_COL));
         if (tid == 0) {
           int i = -1;
           if (ok) {
@@ -297,20 +216,18 @@ FWD_RMID:
       f_early = i == -1;
     }
     if (drained) {
-      if constexpr (PART == 3 || PART == 4) {
+      if (RND && *fs_lds(&s_rnd) + 1 < *fs_lds(&s_nr)) {
         break;
       }
-      if (R0 ? *fs_lds(&s_nr) > 1 : RND && *fs_lds(&s_rnd) + 1 < *fs_lds(&s_nr)) {
-        break;
-      }
-      if constexpr (TRAIN_API) {
+      {
         // The call's last pass: the record's and Xp's copy items run in the combine's tail, before any fold item.
-        const int ng = RNDO ? *fs_lds(&s_ngr) : (int)gridDim.x, dn = fs_args(args)->dncomm;
-        if (rec_fwd_copy(args, tc_ptr<uint8_t>(TCP_REC), tc_ptr<int>(TCP_CTR), tc_ptr<const RecSeg>(TCP_SEG),
-                         tc_ptr<bf16>(TCP_XP), tc_int(TCI_NSEG), tc_int(TCI_OFFSLOT), tc_int(TCI_KEPT),
-                         tc_int(TCI_MPAD), tc_int(TCI_NR), tc_int(TCI_CROWS),
-                         (unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0), ng > dn ? ng - dn : ng,
-                         &tc_si()[TCI_ITEM])) {
+        const int ng = *fs_lds(&s_ngr), dn = fs_args(args)->dncomm;
+        if (route_fwd_copy(args, train_ptr<uint8_t>(TRAIN_PTR_ROUTE), train_ptr<int>(TRAIN_PTR_CTR),
+                           train_ptr<const RouteSeg>(TRAIN_PTR_SEG), train_ptr<bf16>(TRAIN_PTR_XP),
+                           train_int(TRAIN_INT_NSEG), train_int(TRAIN_INT_OFFSLOT), train_int(TRAIN_INT_KEPT),
+                           train_int(TRAIN_INT_MPAD), train_int(TRAIN_INT_NR), train_int(TRAIN_INT_CROWS),
+                           (unsigned)fk_epoch<true>(epoch, s_kp, 0), ng > dn ? ng - dn : ng,
+                           &train_ints()[TRAIN_INT_ITEM])) {
           continue;
         }
       }
@@ -343,35 +260,17 @@ FWD_RMID:
       } else {
         *fs_lds(&s_g1done) = fs_imm<1>();
         kind = FS_G2;
-        if constexpr (PART == 3) {
-          dr = 1;
-        } else if constexpr (SH) {
-          t = __hip_atomic_fetch_add(fs_g(cp->g2_ctr), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-          if (t < *fs_lds(&s_nt[1])) {
-            const auto *qd = fs_g(cp->q2) + t;
-            e = qd->expert, rb = qd->tile_m, col = qd->tile_n;
-            auto *ad = e == cp->E_loc ? fs_g(cp->sa_done) : a_done;
-            int n = 0;
-            while (__hip_atomic_load(ad + rb, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) < tN1) {
-              spin_backoff(n);
-            }
-            (void)__hip_atomic_load(ad + rb, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-          } else {
-            dr = 1;
+        t = __hip_atomic_fetch_add(fs_g(cp->g2_ctr), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        if (t < *fs_lds(&s_nt[1])) {
+          const auto *qd = fs_g(cp->q2) + t;
+          e = qd->expert, rb = qd->tile_m, col = qd->tile_n;
+          int n = 0;
+          while (__hip_atomic_load(a_done + rb, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) < tN1) {
+            spin_backoff(n);
           }
+          (void)__hip_atomic_load(a_done + rb, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
         } else {
-          t = __hip_atomic_fetch_add(fs_g(cp->g2_ctr), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-          if (t < *fs_lds(&s_nt[1])) {
-            const auto *qd = fs_g(cp->q2) + t;
-            e = qd->expert, rb = qd->tile_m, col = qd->tile_n;
-            int n = 0;
-            while (__hip_atomic_load(a_done + rb, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) < tN1) {
-              spin_backoff(n);
-            }
-            (void)__hip_atomic_load(a_done + rb, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-          } else {
-            dr = 1;
-          }
+          dr = 1;
         }
       }
       int *sd = fs_lds(s_desc);
@@ -391,9 +290,8 @@ FWD_RMID:
     const int block_row = __builtin_amdgcn_readfirstlane(sd[2]);
     const int block_col = __builtin_amdgcn_readfirstlane(sd[3]);
     const int kd        = __builtin_amdgcn_readfirstlane(sd[4]);
-    const bool sh = SHP && el == fs_args(args)->E_loc;
-    if ((PART == 0 || PART == 3) && (PART == 3 || kd == FS_G1)) {
-      if (!sh && (TRAIN_API ? fs_tid() : tid) < MOE_EP) {
+    if (kd == FS_G1) {
+      if (fs_tid() < MOE_EP) {
         FsArgsC *gp = fs_args(args);
         const int s  = fs_tid();
         const int b0 = block_row * BLOCK_ROW - fs_g(gp->row_off)[el];
@@ -402,7 +300,7 @@ FWD_RMID:
         const int st = fs_g(gp->start_by_src)[sig_index(s, el)];
         const auto *ms = fs_g(gp->my_sig);
         if (c > 0 && st < b1 && st + c > b0) {
-          const unsigned want = ((unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0) + 1u) * (unsigned)(gp->dncomm / MOE_EP);
+          const unsigned want = ((unsigned)fk_epoch<true>(epoch, s_kp, 0) + 1u) * (unsigned)(gp->dncomm / MOE_EP);
           int n = 0;
           while ((int)((unsigned)__hip_atomic_load(ms + sig_index(s, el), __ATOMIC_RELAXED,
                                                    __HIP_MEMORY_SCOPE_SYSTEM) - want) < 0) {
@@ -411,40 +309,22 @@ FWD_RMID:
           (void)__hip_atomic_load(ms + sig_index(s, el), __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
         }
       }
-      if constexpr (SH && MX) {
-        if (sh && tid == 0) {
-          FsArgsC *gp = fs_args(args);
-          gint *xd = fs_g(gp->xq_done);
-          const int nq = gp->T / BLOCK_ROW * (gp->H / MX_QCOLS) * (PIN ? 2 : 1);
-          int n = 0;
-          while (__hip_atomic_load(xd, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) < nq) {
-            spin_backoff(n);
-          }
-          (void)__hip_atomic_load(xd, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-        }
-      }
       __syncthreads();
-      if constexpr (MX) {
-#include "moe_mx_g1.inc"
-        continue;
-      }
       using RT_C = rt_fl<REG_N, REG_M, col_l, rt_16x16_s>;
       FsArgsC *ap = fs_args(args);
       const int H = ap->H, I = ap->I;
-      // The routed rows of this call start at the pool's row s_cur (0 without a pool), in A's view (dma_load's offsets
-      // are A's addresses less a_base); the epilogue reads it again: kept live across the K loop, it raises the SGPR peak.
+      // The pass's rows start at row s_cur (0 in one pass), in A's view (dma_load's offsets are A's addresses less
+      // a_base); the epilogue reads it again: kept live across the K loop, it raises the SGPR peak.
       FsGl A(A0);
-      if (SH && sh) {
-        A = fs_view(A0, FKP(const bf16, X, FK_X), ap->T, H);
-      } else {
-        const int cur = RNDK && !RND ? p_cur : __builtin_amdgcn_readfirstlane(*fs_lds(&s_cur));
+      {
+        const int cur = !RND ? 0 : __builtin_amdgcn_readfirstlane(*fs_lds(&s_cur));
         A = fs_view(A0, A0.raw_ptr + (size_t)cur * H, A0.rows(), H);
       }
-      const bf16 *w1p = sh ? fs_uniform_ptr(fs_lds(&s_sh)->w1) : FKP(const bf16, W1, FK_W1);
+      const bf16 *w1p = FKP(const bf16, W1, FK_W1);
       FsGl B_local(fs_view(A0, w1p, 2 * I, H));
       const T *w_base = fs_uniform_ptr(w1p);
       const long long w_stride_elems = (long long)2 * I * H;
-      bf16 *out = fs_uniform_ptr(sh ? ap->sact : ap->act);
+      bf16 *out = fs_uniform_ptr(ap->act);
       const int K            = H;
       const int N_TOTAL      = 2 * I;
       const int k_tiles      = K / K_STEP_64;
@@ -457,7 +337,7 @@ FWD_RMID:
       i32x4 b_srd;
       uint32_t sw_B[copies_B];
       const auto *a_gather = fs_g(ap->gather);
-      b_base = w_base + (sh ? 0ll : (long long)el * w_stride_elems);
+      b_base = w_base + (long long)el * w_stride_elems;
       B_local.raw_ptr = (bf16 *)b_base;
       b_srd = fs_srd(b_base, (uint32_t)((size_t)N_TOTAL * b_row_stride), b_row_stride);
 
@@ -469,8 +349,8 @@ FWD_RMID:
       const int gbase = block_row * BLOCK_ROW;
 #pragma unroll
       for (int i = 0; i < copies_A; i++) {
-        const int r0 = sh ? gbase + ga_row[i] : a_gather[gbase + ga_row[i]];
-        const int r1 = sh ? gbase + HALF_ROW + ga_row[i] : a_gather[gbase + HALF_ROW + ga_row[i]];
+        const int r0 = a_gather[gbase + ga_row[i]];
+        const int r1 = a_gather[gbase + HALF_ROW + ga_row[i]];
         sw_A[i] = MOE_SW_OFF(r0, a_row_stride, ga_col[i]);
         sw_A1[i] = MOE_SW_OFF(r1, a_row_stride, ga_col[i]);
       }
@@ -481,13 +361,13 @@ FWD_RMID:
       }
 
       RT_C c00, c01, c10, c11;
-      if constexpr (TRAIN_API && !RND) {
+      if constexpr (!RND) {
         // A kept Xp: each column tile of a row block writes its share of the k-steps, in pairs.
         G1Xp xq = {nullptr, nullptr, nullptr, nullptr, 0u, 0, 0};
         static_assert(copies_A == 2, "two parts per lane and stage");
-        if (tc_int(TCI_KEPT) >= 1 && block_row % XP_LDS_PERIOD < XP_LDS_BLOCKS) {
+        if (train_int(TRAIN_INT_KEPT) >= 1 && block_row % XP_GEMM1_PERIOD < XP_GEMM1_BLOCKS) {
           const int tn = N_TOTAL / BLOCK_COL, upc = (k_tiles / 2 + tn - 1) / tn * 2;
-          char *xb = (char *)tc_ptr<bf16>(TCP_XP) + (size_t)gbase * a_row_stride;
+          char *xb = (char *)train_ptr<bf16>(TRAIN_PTR_XP) + (size_t)gbase * a_row_stride;
           xq.a0 = xb + ga_row[0] * a_row_stride + ga_col[0];
           xq.a1 = xb + ga_row[1] * a_row_stride + ga_col[1];
           xq.b0 = xq.a0 + HALF_ROW * a_row_stride;
@@ -500,13 +380,9 @@ FWD_RMID:
                                  a_lds_01, a_lds_10, a_lds_11, b_lds_00, b_lds_01, b_lds_10, b_lds_11, block_col * 2,
                                  block_col * 2 + 1, k_tiles, lane, warp_m, warp_n, c00, c01, c10, c11, xq);
       } else {
-        // The shared fc1 weight is Megatron's [gate; up]: the tile's gate and up halves are 128-row blocks
-        // I / 128 apart.
         g1_kloop<false, 0>(As, Bs, A, B_local, a_srd, b_srd, a_base, b_base, sw_A, sw_A1, sw_B, a_lds_00, a_lds_01,
-                           a_lds_10, a_lds_11, b_lds_00, b_lds_01, b_lds_10, b_lds_11,
-                           SH ? (sh ? block_col : block_col * 2) : block_col * 2,
-                           SH ? (sh ? I / HALF_COL + block_col : block_col * 2 + 1) : block_col * 2 + 1, k_tiles, lane,
-                           warp_m, warp_n, c00, c01, c10, c11);
+                           a_lds_10, a_lds_11, b_lds_00, b_lds_01, b_lds_10, b_lds_11, block_col * 2, block_col * 2 + 1,
+                           k_tiles, lane, warp_m, warp_n, c00, c01, c10, c11);
       }
       const int fe = fs_tid();
       const int we = fe / kittens::WARP_THREADS;
@@ -520,19 +396,13 @@ FWD_RMID:
       asm volatile("" : "+v"(lane_epi));
       // G is read only by a later launch: write-back stores (act and c2 write through for this kernel's readers).
       bf16 *gout = nullptr;
-      if constexpr (SH) {
-        gout = sh ? fs_uniform_ptr(fs_lds(&s_sh)->g) : FKP(bf16, G, FK_G);
-      }
-      if constexpr (TRAIN_API) {
-        gout = tc_ptr<bf16>(TCP_GK);
-      }
-      if (SH || TRAIN_API ? gout != nullptr : FKP(bf16, G, FK_G) != nullptr) {
+      gout = train_ptr<bf16>(TRAIN_PTR_G_OUT);
+      if (gout != nullptr) {
         const size_t gr =
-            sh ? 0 : (size_t)(RNDK && !RND ? p_gr : __builtin_amdgcn_readfirstlane(*fs_lds(&s_gr))) * H;
-        bf16 *gbase = (SH || TRAIN_API ? gout : FKP(bf16, G, FK_G)) + gr + (size_t)block_row * BLOCK_ROW * N_TOTAL;
-        const int cg = SH ? __builtin_amdgcn_readfirstlane((sh ? block_col : block_col * 2) * WARPS_COL + we % WARPS_COL)
-                          : __builtin_amdgcn_readfirstlane(block_col * 2 * WARPS_COL + we % WARPS_COL);
-#define cu (SH ? (sh ? cg * REG_N + I : (cg + WARPS_COL) * REG_N) : (cg + WARPS_COL) * REG_N)
+            (size_t)(!RND ? 0 : __builtin_amdgcn_readfirstlane(*fs_lds(&s_gr))) * H;
+        bf16 *gbase = gout + gr + (size_t)block_row * BLOCK_ROW * N_TOTAL;
+        const int cg = __builtin_amdgcn_readfirstlane(block_col * 2 * WARPS_COL + we % WARPS_COL);
+#define cu ((cg + WARPS_COL) * REG_N)
         store_T16_bf16<false>(gbase, c00, rf0 * REG_M, cg * REG_N, N_TOTAL, lane_epi);
         store_T16_bf16<false>(gbase, c01, rf0 * REG_M, cu, N_TOTAL, lane_epi);
         store_T16_bf16<false>(gbase, c10, rf1 * REG_M, cg * REG_N, N_TOTAL, lane_epi);
@@ -541,18 +411,10 @@ FWD_RMID:
       }
       swiglu_inplace<ACT>(c00, c01);
       swiglu_inplace<ACT>(c10, c11);
-      if constexpr (SH) {
-        const float *sg = fs_uniform_ptr(fs_lds(&s_sh)->sg);
-        if (sh && sg) {
-          sg += (size_t)block_row * BLOCK_ROW;
-          glu_gate_rows(c00, sg + rf0 * REG_M, lane_epi);
-          glu_gate_rows(c10, sg + rf1 * REG_M, lane_epi);
-        }
-      }
       const int N_OUT = N_TOTAL / 2;
       const size_t ar =
-          sh ? 0 : (size_t)(RNDK && !RND ? p_ar : __builtin_amdgcn_readfirstlane(*fs_lds(&s_ar))) * H;
-      auto *sbase = (TRAIN_API ? tc_ptr<bf16>(TCP_AK) : out + ar) + (size_t)block_row * BLOCK_ROW * N_OUT;
+          (size_t)(!RND ? 0 : __builtin_amdgcn_readfirstlane(*fs_lds(&s_ar))) * H;
+      auto *sbase = train_ptr<bf16>(TRAIN_PTR_A_OUT) + (size_t)block_row * BLOCK_ROW * N_OUT;
       const int cf = __builtin_amdgcn_readfirstlane(block_col * WARPS_COL + we % WARPS_COL);
       store_T16_bf16<true>(sbase, c00, rf0 * REG_M, cf * REG_N, N_OUT, lane_epi);
       store_T16_bf16<true>(sbase, c10, rf1 * REG_M, cf * REG_N, N_OUT, lane_epi);
@@ -562,26 +424,22 @@ FWD_RMID:
       __syncthreads();
       if (tid == 0) {
         FsArgsC *pp = fs_args(args);
-        (void)__hip_atomic_fetch_add(fs_g(sh ? pp->sa_done : pp->a_done) + block_row, 1, __ATOMIC_RELAXED,
+        (void)__hip_atomic_fetch_add(fs_g(pp->a_done) + block_row, 1, __ATOMIC_RELAXED,
                                      __HIP_MEMORY_SCOPE_AGENT);
       }
-    } else if constexpr (PART == 0 || PART == 4) {
-      if constexpr (MX) {
-#include "moe_mx_g2.inc"
-        continue;
-      }
+    } else {
       using RT_C = rt_fl<REG_N, REG_M, col_l, rt_16x16_s>;
       FsArgsC *ap = fs_args(args);
       const int H = ap->H, I = ap->I;
       const size_t ar =
-          sh ? 0 : (size_t)(RNDK && !RND ? p_ar : __builtin_amdgcn_readfirstlane(*fs_lds(&s_ar))) * H;
-      const FsGl A(fs_view(A0, TRAIN_API ? tc_ptr<bf16>(TCP_AK) : sh ? ap->sact : ap->act + ar,
-                           sh ? ap->T : A0.rows(), I));
-      const bf16 *w2p = sh ? fs_uniform_ptr(fs_lds(&s_sh)->w2) : FKP(const bf16, W2, FK_W2);
+          (size_t)(!RND ? 0 : __builtin_amdgcn_readfirstlane(*fs_lds(&s_ar))) * H;
+      const FsGl A(fs_view(A0, train_ptr<bf16>(TRAIN_PTR_A_OUT),
+                           A0.rows(), I));
+      const bf16 *w2p = FKP(const bf16, W2, FK_W2);
       FsGl B_local(fs_view(A0, w2p, H, I));
       const T *w_base = fs_uniform_ptr(w2p);
       const long long w_stride_elems = (long long)H * I;
-      bf16 *out = fs_uniform_ptr(sh ? ap->sy : ap->c2);
+      bf16 *out = fs_uniform_ptr(ap->c2);
       const int K            = I;
       const int N_TOTAL      = H;
       const int k_tiles      = K / K_STEP_64;
@@ -594,7 +452,7 @@ FWD_RMID:
       i32x4 b_srd;
       uint32_t sw_B[copies_B];
       const auto *a_gather = fs_g(ap->gid);
-      b_base = w_base + (sh ? 0ll : (long long)el * w_stride_elems);
+      b_base = w_base + (long long)el * w_stride_elems;
       B_local.raw_ptr = (bf16 *)b_base;
       b_srd = fs_srd(b_base, (uint32_t)((size_t)N_TOTAL * b_row_stride), b_row_stride);
 
@@ -606,8 +464,8 @@ FWD_RMID:
       const int gbase = block_row * BLOCK_ROW;
 #pragma unroll
       for (int i = 0; i < copies_A; i++) {
-        const int r0 = sh ? gbase + ga_row[i] : a_gather[gbase + ga_row[i]];
-        const int r1 = sh ? gbase + HALF_ROW + ga_row[i] : a_gather[gbase + HALF_ROW + ga_row[i]];
+        const int r0 = a_gather[gbase + ga_row[i]];
+        const int r1 = a_gather[gbase + HALF_ROW + ga_row[i]];
         sw_A[i] = MOE_SW_OFF(r0, a_row_stride, ga_col[i]);
         sw_A1[i] = MOE_SW_OFF(r1, a_row_stride, ga_col[i]);
       }
@@ -818,7 +676,7 @@ FWD_RMID:
       __syncthreads();
       if (tid == 0) {
         FsArgsC *pp = fs_args(args);
-        __hip_atomic_fetch_add(sh ? fs_g(pp->sy_done) : fs_g(pp->tile_done) + block_row, 1, __ATOMIC_RELAXED,
+        __hip_atomic_fetch_add(fs_g(pp->tile_done) + block_row, 1, __ATOMIC_RELAXED,
                                __HIP_MEMORY_SCOPE_AGENT);
       }
     }
@@ -830,37 +688,30 @@ FWD_RMID:
       break;
     }
     fs_round_end(args, tile_counter, *fs_lds(&s_rnd), *fs_lds(&s_mpad) / BLOCK_ROW,
-                 (unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0), *fs_lds(&s_ngr));
+                 (unsigned)fk_epoch<true>(epoch, s_kp, 0), *fs_lds(&s_ngr));
     if (tid == 0) {
       s_rnd++;
     }
     __syncthreads();
   }
   }
-  // The first pass of a call in rounds ends in the rounds' copy.
-  if ((PART == 0 || PART == 5) && !(R0 && *fs_lds(&s_nr) > 1) &&
-      (RNDO ? moe_last_wg_n(tile_counter + NUM_XCDS_AFF, *fs_lds(&s_ngr)) : moe_last_wg(tile_counter + NUM_XCDS_AFF))) {
+  if (moe_last_wg_n(tile_counter + NUM_XCDS_AFF, *fs_lds(&s_ngr))) {
     FsArgsC *rp = fs_args(args);
     const int nrb = *fs_lds(&s_mpad) / BLOCK_ROW;
-    if constexpr (TRAIN_API) {
-      rec_fwd_finish(args, tc_ptr<uint8_t>(TCP_REC), tc_ptr<int>(TCP_CTR), tc_int(TCI_KEPT), tc_int(TCI_TIER),
-                     tc_int(TCI_MPAD), tc_int(TCI_MPADX), tc_int(TCI_NR), tc_int(TCI_CROWS),
-                     (unsigned)fk_epoch<KP || FKR>(epoch, s_kp, 0));
-    }
-    fs_reset_words<MX || RNDK>(fs_g(tile_counter), NUM_XCDS_AFF + 1);
-    fs_reset_words<MX || RNDK>(fs_g(rp->p.ctr), PC_N);
-    fs_reset_words<MX || RNDK>(fs_g(rp->g2_ctr), 1);
-    fs_reset_words<MX || RNDK>(fs_g(rp->disp_done), 1);
-    fs_reset_words<MX || RNDK>(fs_g(rp->idx_done), 1);
-    fs_reset_words<MX || RNDK>(fs_g(rp->tile_done), nrb);
-    fs_reset_words<MX || RNDK>(fs_g(rp->a_done), nrb);
-    if constexpr (SH) {
-      fs_reset_words<MX || RNDK>(fs_g(rp->sa_done), rp->T / BLOCK_ROW);
-      fs_reset_words<MX || RNDK>(fs_g(rp->sy_done), 1);
-    }
+    route_fwd_finish(args, train_ptr<uint8_t>(TRAIN_PTR_ROUTE), train_ptr<int>(TRAIN_PTR_CTR), train_int(TRAIN_INT_KEPT),
+                     train_int(TRAIN_INT_TIER), train_int(TRAIN_INT_MPAD), train_int(TRAIN_INT_MPADX),
+                     train_int(TRAIN_INT_NR), train_int(TRAIN_INT_CROWS),
+                     (unsigned)fk_epoch<true>(epoch, s_kp, 0));
+    fs_reset_words<true>(fs_g(tile_counter), NUM_XCDS_AFF + 1);
+    fs_reset_words<true>(fs_g(rp->p.ctr), PC_N);
+    fs_reset_words<true>(fs_g(rp->g2_ctr), 1);
+    fs_reset_words<true>(fs_g(rp->disp_done), 1);
+    fs_reset_words<true>(fs_g(rp->idx_done), 1);
+    fs_reset_words<true>(fs_g(rp->tile_done), nrb);
+    fs_reset_words<true>(fs_g(rp->a_done), nrb);
     // Every fold item is done. The re-check orders the subtraction after this call's adds on each acc word.
     const int te = fs_tid();
-    if ((!(MXT || FOLD_READY) || RND) && te < MOE_EP) {
+    if (RND && te < MOE_EP) {
       const int ow = fs_g(rp->owed)[te];
       int n = 0;
       gint *acc = fs_my_acc(rp) + te;
@@ -869,21 +720,9 @@ FWD_RMID:
       }
       __hip_atomic_fetch_add(acc, -ow, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
     }
-    fs_reset_words<MX || RNDK>(fs_g(rp->fold_ctr), 2 + rp->nrbs);
-    if constexpr (ROUTER) {
-      moe_router_fwd_reset<MX || RNDK>(rp);
-    }
-    if constexpr (MXT) {
-      fs_reset_words<MX || RNDK>(fs_g(rp->xq_done), 1);
-    }
-    if constexpr (!MX) {
-      if (rp->pool && FKP(bf16, G, FK_G) != nullptr) {
-        pool_commit(args, (int *)&As[0][0], *fs_lds(&s_gr) - *fs_lds(&s_cur), RND && *fs_lds(&s_nr) > 1);
-      }
-    } else if constexpr (MXT) {
-      if (FKP(bf16, G, FK_G) != nullptr) {
-        pool_commit_mx(args, (int *)&As[0][0], *fs_lds(&s_gr), RND);
-      }
+    fs_reset_words<true>(fs_g(rp->fold_ctr), 2 + rp->nrbs);
+    if (rp->pool && FKP(bf16, G, FK_G) != nullptr) {
+      pool_commit(args, (int *)&As[0][0], *fs_lds(&s_gr) - *fs_lds(&s_cur), RND && *fs_lds(&s_nr) > 1);
     }
     if constexpr (RND) {
       fs_reset_words<true>(fs_g(rp->rgo), 1);
@@ -894,10 +733,3 @@ FWD_RMID:
       __hip_atomic_store((gint *)fs_g(rp->wep) + 1, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
     }
   }
-#if FWD_FK
-#undef args
-#undef tile_counter
-#undef wg
-#undef tid
-#undef A0
-#endif
