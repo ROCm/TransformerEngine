@@ -1,0 +1,16 @@
+Vendored copy of the KOSMOS MoE library. Do not edit the files listed in SHA256SUMS: update them only by
+re-vendoring from upstream, in a pull request of its own, with the numerics and performance tests rerun.
+
+repository  AMD-BRAIN-Internal/KOSMOS (private)
+commit      4c5e5311783ecbcefdd00157ad501a06b4164f85, head of pull request #1 (branch yewang12/moe_training_api, PR title
+            "MoE (bf16 training): instance API with caller-owned saved state; clang 24 build fix"), on top of
+            main a9331457a62a2b2d4ae2f6a9e61432065c1c9bd4; not merged into main
+license     MIT (LICENSE, from the same commit)
+copied      src/moe/*, src/utils/*, python/kosmos.cpp, Makefile, LICENSE, byte-identical to that commit
+hipkittens  3rdparty/hipkittens_kosmos at e4fa1cc3 (HazyResearch/HipKittens, branch alexmagro_earlyclobber),
+            the pin KOSMOS records for 3rdparty/hipkittens at that commit; used by these sources only
+
+Verify the copy:   cd transformer_engine/common/kosmos && sha256sum -c SHA256SUMS
+                   (and against KOSMOS: git -C <KOSMOS> archive 4c5e531 src/moe src/utils python/kosmos.cpp Makefile LICENSE)
+Built by:          transformer_engine/common/kosmos.cmake (KOSMOS's own Makefile builds libkosmos_moe.a, plus the
+                   Python module transformer_engine_kosmos compiled from python/kosmos.cpp under that module name)

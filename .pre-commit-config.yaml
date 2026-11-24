@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +12,9 @@ ci:
   autoupdate_schedule: quarterly
   submodules: false
   skip: []
+
+# A vendored copy, kept byte-identical to upstream (transformer_engine/common/kosmos/SHA256SUMS)
+exclude: ^transformer_engine/common/kosmos/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
