@@ -43,6 +43,20 @@ on:
         type: string
         required: false
         default: ''
+      rocm_arch:
+        description: 'Comma separated list of GPU architectures to build for. Empty: gfx942,gfx950,gfx1250.'
+        type: string
+        required: false
+      use_ccache:
+        description: 'Use ccache for the TransformerEngine build.'
+        type: boolean
+        required: false
+        default: false
+      save_ccache:
+        description: 'Save the ccache directory to the Actions cache after a successful build.'
+        type: boolean
+        required: false
+        default: false
   workflow_call:
     inputs:
       use_local_version:
@@ -63,11 +77,23 @@ on:
       docker_image_tag_override:
         type: string
         default: ''
+      rocm_arch:
+        type: string
+        required: false
+      use_ccache:
+        type: boolean
+        default: false
+      save_ccache:
+        type: boolean
+        default: false
 
 env:
   ROCM_DOCKERFILE: build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
+  ROCM_ARCH: ${{ inputs.rocm_arch || 'gfx942,gfx950,gfx1250' }}
+  CCACHE_VERSION: 4.14.2
+  CCACHE_SHA256: b20ff6415151226ac5a10dfd6839700c694bd67d1871c8fddb266d366ff25bfb
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -203,19 +229,87 @@ jobs:
       - name: Create wheelhouse directory
         run: mkdir -p "${{ runner.temp }}/wheelhouse"
 
+      - name: Install ccache
+        id: ccache
+        if: ${{ inputs.use_ccache }}
+        run: |
+          echo "key_prefix=te-ccache-${ROCM_ARCH//,/-}-${{ hashFiles(env.ROCM_DOCKERFILE) }}-" >> "$GITHUB_OUTPUT"
+          CCACHE_TARBALL="ccache-${CCACHE_VERSION}-linux-x86_64-musl-static.tar.xz"
+          curl -fsSL -o "${{ runner.temp }}/${CCACHE_TARBALL}" \
+            "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/${CCACHE_TARBALL}"
+          echo "${CCACHE_SHA256}  ${{ runner.temp }}/${CCACHE_TARBALL}" | sha256sum -c -
+          mkdir -p "${{ runner.temp }}/ccache-bin" "${{ runner.temp }}/ccache"
+          tar -xJf "${{ runner.temp }}/${CCACHE_TARBALL}" -C "${{ runner.temp }}/ccache-bin" \
+            --strip-components=1 "ccache-${CCACHE_VERSION}-linux-x86_64-musl-static/ccache"
+          "${{ runner.temp }}/ccache-bin/ccache" --version | head -n1
+
+      - name: Restore ccache
+        if: ${{ inputs.use_ccache }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key_prefix }}${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.ccache.outputs.key_prefix }}
+
+      - name: Reset ccache statistics
+        if: ${{ inputs.use_ccache }}
+        run: |
+          "${{ runner.temp }}/ccache-bin/ccache" --dir "${{ runner.temp }}/ccache" --zero-stats
+          echo "CCACHE_BUILD_START=$(date +%s)" >> "$GITHUB_ENV"
+
       # Mount the checked-out workspace to /TransformerEngine in the container.
       # The container writes all wheels and logs under /wheelhouse.
       - name: Build TransformerEngine wheels
         run: |
+          CCACHE_ARGS=()
+          if [ "${{ inputs.use_ccache }}" = "true" ]; then
+            CCACHE_ARGS=(
+              --volume "${{ runner.temp }}/ccache-bin:/opt/ccache:ro"
+              --volume "${{ runner.temp }}/ccache:/ccache"
+              --env NVTE_USE_CCACHE=1
+              --env NVTE_CCACHE_BIN=/opt/ccache/ccache
+              --env NVTE_CMAKE_BUILD_DIR=/TransformerEngine/build/cmake
+              --env CCACHE_DIR=/ccache
+              --env CCACHE_BASEDIR=/TransformerEngine
+              --env CCACHE_COMPILERCHECK=content
+              --env CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime
+              --env CCACHE_MAXSIZE=1G
+              --env CCACHE_UMASK=002
+            )
+          fi
           docker run --rm \
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
             --env TARGET_BRANCH="${{ github.ref_name }}" \
-            --env NVTE_ROCM_ARCH=gfx942,gfx950,gfx1250 \
+            --env NVTE_ROCM_ARCH="${ROCM_ARCH}" \
             ${{ inputs.use_local_version && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
+            "${CCACHE_ARGS[@]}" \
             --volume "${{ github.workspace }}:/TransformerEngine" \
             --volume "${{ runner.temp }}/wheelhouse:/wheelhouse" \
             "${{ steps.set-tag.outputs.image_tag }}"
+
+      - name: Evict ccache entries not used by this build
+        if: ${{ success() && inputs.use_ccache && inputs.save_ccache }}
+        run: |
+          docker run --rm \
+            --volume "${{ runner.temp }}/ccache-bin:/opt/ccache:ro" \
+            --volume "${{ runner.temp }}/ccache:/ccache" \
+            --entrypoint /opt/ccache/ccache \
+            "${{ steps.set-tag.outputs.image_tag }}" \
+            --dir /ccache --evict-older-than "$(( $(date +%s) - CCACHE_BUILD_START ))s"
+
+      - name: Show ccache statistics
+        if: ${{ always() && inputs.use_ccache }}
+        run: |
+          "${{ runner.temp }}/ccache-bin/ccache" --dir "${{ runner.temp }}/ccache" --show-stats -v || true
+
+      - name: Save ccache
+        if: ${{ success() && inputs.use_ccache && inputs.save_ccache }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key_prefix }}${{ github.run_id }}
 
       - name: List built artifacts
         if: always()
