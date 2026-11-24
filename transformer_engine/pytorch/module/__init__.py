@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -7,6 +8,7 @@ from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .grouped_linear import GroupedLinear, is_module_grouped_tensor_path_supported
 from .layernorm_mlp import LayerNormMLP
+from .moe import MoE, MoEWorkspace
 from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
 from .fp8_padding import Fp8Padding

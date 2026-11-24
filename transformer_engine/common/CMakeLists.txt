@@ -10,6 +10,7 @@ option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels" ON)
+option(USE_KOSMOS_MOE "Build the KOSMOS expert-parallel MoE kernels (gfx950)" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -338,6 +339,7 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
+     moe/moe_api.cpp
      newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
@@ -851,6 +853,10 @@ else() # USE_ROCM
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
   endif()
 
+  if(USE_KOSMOS_MOE)
+    add_subdirectory(kosmos_moe ${CMAKE_CURRENT_BINARY_DIR}/kosmos_moe)
+  endif()
+
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   find_package(hiprtc)
@@ -868,6 +874,10 @@ else() # USE_ROCM
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
+  endif()
+  if(USE_KOSMOS_MOE)
+    target_compile_definitions(transformer_engine PRIVATE USE_KOSMOS_MOE)
+    list(APPEND transformer_engine_LINKER_LIBS kosmos_moe)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()

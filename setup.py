@@ -138,6 +138,8 @@ def setup_common_extension() -> CMakeExtension:
             print("Turning NVTE_ENABLE_ROCSHMEM on, disabling NVTE_ENABLE_NVSHMEM")
         if bool(int(os.getenv("NVTE_ENABLE_ROCSHMEM", "0"))):
             cmake_flags.append("-DNVTE_ENABLE_ROCSHMEM=ON")
+        if int(os.getenv("NVTE_KOSMOS_MOE", "1")) == 0:
+            cmake_flags.append("-DUSE_KOSMOS_MOE=OFF")
 
     else:
         cmake_flags.extend(("-DUSE_ROCM=OFF", "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)))

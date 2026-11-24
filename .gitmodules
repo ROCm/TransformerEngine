@@ -33,3 +33,7 @@
 [submodule "3rdparty/nccl-extensions"]
 	path = 3rdparty/nccl-extensions
 	url = https://github.com/NVIDIA/nccl-extensions.git
+[submodule "3rdparty/hipkittens_kosmos"]
+	path = 3rdparty/hipkittens_kosmos
+	url = https://github.com/HazyResearch/HipKittens.git
+	branch = alexmagro_earlyclobber

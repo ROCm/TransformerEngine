@@ -873,6 +873,12 @@ void rocshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_
 void rocshmem_finalize();
 #endif
 
+/***************************************************************************************************
+ * Fused expert-parallel MoE (KOSMOS)
+ **************************************************************************************************/
+// Registers the fused MoE workspace and layer classes on `m`.
+void register_moe_bindings(pybind11::module_ &m);
+
 #ifndef USE_ROCM
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers

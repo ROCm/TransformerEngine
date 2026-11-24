@@ -128,13 +128,20 @@ option(NVTE_WITH_CUTEDSL
 
 add_subdirectory(operator)
 add_subdirectory(util)
+if(USE_ROCM)
+  add_subdirectory(moe)
+endif()
 
 if(NVTE_WITH_CUTEDSL)
   # Executables that link libtransformerengine.so must also link to the Python::Python to provide
   # the definitions of these CPython symbols at runtime via dynamic linking.
   # Find the interpreter too so older CMake versions use its version to locate libpython.
   find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
-  foreach(test_target test_operator test_util)
+  set(cutedsl_test_targets test_operator test_util)
+  if(USE_ROCM)
+    list(APPEND cutedsl_test_targets test_kosmos_moe)
+  endif()
+  foreach(test_target ${cutedsl_test_targets})
     target_link_libraries(${test_target} PRIVATE
                           "-Wl,--no-as-needed"
                           Python::Python
