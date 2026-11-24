@@ -10,6 +10,7 @@ option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels" ON)
+option(USE_KOSMOS_MOE "Build the KOSMOS fused expert-parallel MoE (gfx950 only)" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -217,6 +218,7 @@ if(USE_ROCM)
   message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
   message(STATUS "USE_FUSED_ATTN_CK ${USE_FUSED_ATTN_CK}")
   message(STATUS "USE_FUSED_ATTN_AOTRITON ${USE_FUSED_ATTN_AOTRITON}")
+  message(STATUS "USE_KOSMOS_MOE ${USE_KOSMOS_MOE}")
 endif()
 
 # Python
@@ -870,6 +872,11 @@ else() # USE_ROCM
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
+
+  # A separate Python module, not part of libtransformer_engine
+  if(USE_KOSMOS_MOE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/kosmos.cmake")
+  endif()
 endif()
 
 # Helper functions to make header files with C++ strings
