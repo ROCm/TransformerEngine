@@ -187,6 +187,14 @@ __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
     return val;
 }
 
+// MX pre-swizzle inverse index (matches swizzle_scaling_factors_mx in swizzle.cu):
+//   dst = (j / 4) * (padded_dim * 4) + i * 4 + (j % 4)
+// The grouped-by-4 dimension is j; the contiguous dimension is i.
+__device__ __forceinline__ size_t mx_preswizzle_scale_idx(size_t i, size_t j, size_t padded_dim) {
+  constexpr size_t GROUP = 4;  // MX_PRESWIZZLE_GROUP_SIZE in swizzle.cu
+  return (j / GROUP) * (padded_dim * GROUP) + i * GROUP + (j % GROUP);
+}
+
 // N-wide alignment check and vectorized load/store using NTVec.
 template <int N, typename T>
 __device__ __forceinline__ bool is_aligned_n(const T *p) {
