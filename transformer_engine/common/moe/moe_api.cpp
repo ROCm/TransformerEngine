@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// nvte_moe_*: the fused expert-parallel MoE (KOSMOS kernels in common/kosmos_moe) behind TE's C API.
+// nvte_rocm_moe_*: the fused expert-parallel MoE (KOSMOS kernels in common/kosmos_moe) behind TE's C API.
 
 #include <transformer_engine/moe.h>
 
@@ -21,17 +21,17 @@
 
 #include "../kosmos_moe/moe/moe.h"
 
-struct NVTEMoeWorkspace_ {
+struct NVTERocmMoeWorkspace_ {
   KosmosMoeWorkspace *ws = nullptr;
   KosmosMoeConfig kcfg{};
-  NVTEMoeConfig cfg{};
+  NVTERocmMoeConfig cfg{};
   KosmosAllocator alloc{};  // the comm's allocator (unset: hipMalloc)
   int nlayers = 0;
 };
 
-struct NVTEMoeLayer_ {
+struct NVTERocmMoeLayer_ {
   KosmosMoe *ctx = nullptr;
-  NVTEMoeWorkspace_ *ws = nullptr;
+  NVTERocmMoeWorkspace_ *ws = nullptr;
 };
 
 namespace {
@@ -39,7 +39,7 @@ namespace {
 // Every KOSMOS call of a workspace allocates through its allocator (set on the calling thread for the call).
 class AllocScope {
  public:
-  explicit AllocScope(const NVTEMoeWorkspace_ *w)
+  explicit AllocScope(const NVTERocmMoeWorkspace_ *w)
       : prev_(kosmos_set_thread_allocator(w && w->alloc.alloc ? &w->alloc : nullptr)) {}
   ~AllocScope() { kosmos_set_thread_allocator(prev_); }
   AllocScope(const AllocScope &) = delete;
@@ -52,10 +52,10 @@ class AllocScope {
 using transformer_engine::DType;
 using transformer_engine::Tensor;
 
-constexpr size_t kConfigMinSize = offsetof(NVTEMoeConfig, router_config) + sizeof(NVTEMoeRouterConfig);
-constexpr size_t kCommMinSize = offsetof(NVTEMoeComm, free) + sizeof(void *);
-constexpr size_t kFwdArgsMinSize = offsetof(NVTEMoeForwardArgs, save_for_backward) + sizeof(int);
-constexpr size_t kBwdArgsMinSize = offsetof(NVTEMoeBackwardArgs, wgrad_accumulate) + sizeof(int);
+constexpr size_t kConfigMinSize = offsetof(NVTERocmMoeConfig, router_config) + sizeof(NVTERocmMoeRouterConfig);
+constexpr size_t kCommMinSize = offsetof(NVTERocmMoeComm, free) + sizeof(void *);
+constexpr size_t kFwdArgsMinSize = offsetof(NVTERocmMoeForwardArgs, save_for_backward) + sizeof(int);
+constexpr size_t kBwdArgsMinSize = offsetof(NVTERocmMoeBackwardArgs, wgrad_accumulate) + sizeof(int);
 
 // A caller's versioned struct in the current layout: fields it did not provide are zero.
 template <typename S>
@@ -74,7 +74,7 @@ int no_allgather(void *, const void *, void *, size_t) {
   return 1;
 }
 
-KosmosMoeConfig to_kosmos(const NVTEMoeConfig &c, const NVTEMoeComm *comm) {
+KosmosMoeConfig to_kosmos(const NVTERocmMoeConfig &c, const NVTERocmMoeComm *comm) {
   KosmosMoeConfig k;
   std::memset(&k, 0, sizeof(k));
   k.H = c.hidden_size;
@@ -107,7 +107,7 @@ KosmosMoeConfig to_kosmos(const NVTEMoeConfig &c, const NVTEMoeComm *comm) {
     k.coll.nranks = comm->nranks;
   } else {
     k.coll.allgather = no_allgather;
-    k.coll.nranks = NVTE_MOE_EP_SIZE;
+    k.coll.nranks = NVTE_ROCM_MOE_EP_SIZE;
   }
   return k;
 }
@@ -124,13 +124,13 @@ bool present(const Tensor *t) {
 void *rowwise(NVTETensor h, const char *name, DType dt, size_t n, bool required) {
   const Tensor *t = get(h);
   if (!present(t)) {
-    NVTE_CHECK(!required, "nvte_moe: ", name, " is required");
+    NVTE_CHECK(!required, "nvte_rocm_moe: ", name, " is required");
     return nullptr;
   }
-  NVTE_CHECK(t->data.dptr != nullptr, "nvte_moe: ", name, " has no row-wise data");
-  NVTE_CHECK(t->data.dtype == dt, "nvte_moe: ", name, " must be ", transformer_engine::to_string(dt), ", got ",
+  NVTE_CHECK(t->data.dptr != nullptr, "nvte_rocm_moe: ", name, " has no row-wise data");
+  NVTE_CHECK(t->data.dtype == dt, "nvte_rocm_moe: ", name, " must be ", transformer_engine::to_string(dt), ", got ",
              transformer_engine::to_string(t->data.dtype));
-  NVTE_CHECK(t->data.numel() == n, "nvte_moe: ", name, " must have ", n, " elements, got ",
+  NVTE_CHECK(t->data.numel() == n, "nvte_rocm_moe: ", name, " must have ", n, " elements, got ",
              t->data.numel());
   return t->data.dptr;
 }
@@ -144,30 +144,30 @@ struct Mx {
 Mx mxfp8(NVTETensor h, const char *name, size_t n, bool columnwise, bool required) {
   const Tensor *t = get(h);
   if (!present(t)) {
-    NVTE_CHECK(!required, "nvte_moe: ", name, " is required");
+    NVTE_CHECK(!required, "nvte_rocm_moe: ", name, " is required");
     return {};
   }
-  NVTE_CHECK(t->scaling_mode == NVTE_MXFP8_1D_SCALING, "nvte_moe: ", name, " must be an MXFP8 tensor");
-  NVTE_CHECK(!t->with_gemm_swizzled_scales, "nvte_moe: ", name, " must have unswizzled scales");
+  NVTE_CHECK(t->scaling_mode == NVTE_MXFP8_1D_SCALING, "nvte_rocm_moe: ", name, " must be an MXFP8 tensor");
+  NVTE_CHECK(!t->with_gemm_swizzled_scales, "nvte_rocm_moe: ", name, " must have unswizzled scales");
   const transformer_engine::SimpleTensor &d = columnwise ? t->columnwise_data : t->data;
   const transformer_engine::SimpleTensor &s = columnwise ? t->columnwise_scale_inv : t->scale_inv;
   const char *usage = columnwise ? "column-wise" : "row-wise";
-  NVTE_CHECK(d.dptr != nullptr && s.dptr != nullptr, "nvte_moe: ", name, " has no ", usage, " data or scales");
-  NVTE_CHECK(d.dtype == DType::kFloat8E4M3, "nvte_moe: ", name, " must be e4m3");
-  NVTE_CHECK(d.numel() == n, "nvte_moe: ", name, " must have ", n, " elements, got ", d.numel());
-  NVTE_CHECK(s.numel() == n / 32, "nvte_moe: ", name, " ", usage, " scales must have ", n / 32,
+  NVTE_CHECK(d.dptr != nullptr && s.dptr != nullptr, "nvte_rocm_moe: ", name, " has no ", usage, " data or scales");
+  NVTE_CHECK(d.dtype == DType::kFloat8E4M3, "nvte_rocm_moe: ", name, " must be e4m3");
+  NVTE_CHECK(d.numel() == n, "nvte_rocm_moe: ", name, " must have ", n, " elements, got ", d.numel());
+  NVTE_CHECK(s.numel() == n / 32, "nvte_rocm_moe: ", name, " ", usage, " scales must have ", n / 32,
              " elements (unpadded), got ", s.numel());
   return {d.dptr, s.dptr};
 }
 
-void check(hipError_t e, const char *what, const NVTEMoeLayer_ *l) {
+void check(hipError_t e, const char *what, const NVTERocmMoeLayer_ *l) {
   if (e != hipSuccess) {
     (void)hipGetLastError();  // a failed HIP call's sticky error must not fail the caller's next unrelated call
     NVTE_ERROR(what, ": ", hipGetErrorString(e), " / ", l && l->ctx ? kosmos_moe_error(l->ctx) : "");
   }
 }
 
-void check_ws(hipError_t e, const char *what, const NVTEMoeWorkspace_ *w) {
+void check_ws(hipError_t e, const char *what, const NVTERocmMoeWorkspace_ *w) {
   if (e != hipSuccess) {
     (void)hipGetLastError();
     NVTE_ERROR(what, ": ", hipGetErrorString(e), " / ", w && w->ws ? kosmos_moe_workspace_error(w->ws) : "");
@@ -176,14 +176,14 @@ void check_ws(hipError_t e, const char *what, const NVTEMoeWorkspace_ *w) {
 
 struct Dims {
   size_t T, H, I, E, k, Eg;
-  explicit Dims(const NVTEMoeConfig &c)
+  explicit Dims(const NVTERocmMoeConfig &c)
       : T(c.num_tokens), H(c.hidden_size), I(c.ffn_hidden_size), E(c.num_local_experts), k(c.topk),
-        Eg((size_t)NVTE_MOE_EP_SIZE * c.num_local_experts) {}
+        Eg((size_t)NVTE_ROCM_MOE_EP_SIZE * c.num_local_experts) {}
 };
 
 }  // namespace
 
-int nvte_moe_is_supported(void) {
+int nvte_rocm_moe_is_supported(void) {
   int dev = 0;
   hipDeviceProp_t prop;
   if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&prop, dev) != hipSuccess) {
@@ -192,8 +192,8 @@ int nvte_moe_is_supported(void) {
   return std::strncmp(prop.gcnArchName, "gfx950", 6) == 0;
 }
 
-int nvte_moe_config_valid(const NVTEMoeConfig *cfg, char *why, size_t why_len) {
-  const NVTEMoeConfig c = normalize(cfg, kConfigMinSize, "cfg");
+int nvte_rocm_moe_config_valid(const NVTERocmMoeConfig *cfg, char *why, size_t why_len) {
+  const NVTERocmMoeConfig c = normalize(cfg, kConfigMinSize, "cfg");
   const KosmosMoeConfig k = to_kosmos(c, nullptr);
   char buf[512] = {0};
   hipError_t e = kosmos_moe_validate_why(&k, buf, sizeof(buf));
@@ -207,17 +207,18 @@ int nvte_moe_config_valid(const NVTEMoeConfig *cfg, char *why, size_t why_len) {
   return e == hipSuccess;
 }
 
-NVTEMoeWorkspace nvte_moe_workspace_create(const NVTEMoeConfig *cfg, const NVTEMoeComm *comm) {
-  NVTE_CHECK(nvte_moe_is_supported(), "nvte_moe: the fused MoE needs a gfx950 device");
-  const NVTEMoeConfig c = normalize(cfg, kConfigMinSize, "cfg");
-  const NVTEMoeComm m = normalize(comm, kCommMinSize, "comm");
-  NVTE_CHECK(m.allgather != nullptr, "nvte_moe: comm.allgather is required");
-  NVTE_CHECK((m.alloc == nullptr) == (m.free == nullptr), "nvte_moe: comm.alloc and comm.free go together");
-  NVTE_CHECK(m.nranks == NVTE_MOE_EP_SIZE, "nvte_moe: the EP group must have ", NVTE_MOE_EP_SIZE, " ranks, got ",
+NVTERocmMoeWorkspace nvte_rocm_moe_workspace_create(const NVTERocmMoeConfig *cfg, const NVTERocmMoeComm *comm) {
+  NVTE_CHECK(nvte_rocm_moe_is_supported(), "nvte_rocm_moe: the fused MoE needs a gfx950 device");
+  const NVTERocmMoeConfig c = normalize(cfg, kConfigMinSize, "cfg");
+  const NVTERocmMoeComm m = normalize(comm, kCommMinSize, "comm");
+  NVTE_CHECK(m.allgather != nullptr, "nvte_rocm_moe: comm.allgather is required");
+  NVTE_CHECK((m.alloc == nullptr) == (m.free == nullptr), "nvte_rocm_moe: comm.alloc and comm.free go together");
+  NVTE_CHECK(m.nranks == NVTE_ROCM_MOE_EP_SIZE, "nvte_rocm_moe: the EP group must have ", NVTE_ROCM_MOE_EP_SIZE,
+             " ranks, got ",
              m.nranks);
   char why[512];
-  NVTE_CHECK(nvte_moe_config_valid(&c, why, sizeof(why)), "nvte_moe: configuration refused: ", why);
-  auto *w = new NVTEMoeWorkspace_();
+  NVTE_CHECK(nvte_rocm_moe_config_valid(&c, why, sizeof(why)), "nvte_rocm_moe: configuration refused: ", why);
+  auto *w = new NVTERocmMoeWorkspace_();
   w->cfg = c;
   w->kcfg = to_kosmos(c, &m);
   w->alloc = KosmosAllocator{m.alloc, m.free, m.ctx};
@@ -231,21 +232,21 @@ NVTEMoeWorkspace nvte_moe_workspace_create(const NVTEMoeConfig *cfg, const NVTEM
   return w;
 }
 
-void nvte_moe_workspace_destroy(NVTEMoeWorkspace ws) {
+void nvte_rocm_moe_workspace_destroy(NVTERocmMoeWorkspace ws) {
   AllocScope scope(ws);
   if (!ws) {
     return;
   }
-  NVTE_CHECK(ws->nlayers == 0, "nvte_moe_workspace_destroy: ", ws->nlayers, " layer handles still open");
+  NVTE_CHECK(ws->nlayers == 0, "nvte_rocm_moe_workspace_destroy: ", ws->nlayers, " layer handles still open");
   const hipError_t e = kosmos_moe_workspace_destroy(ws->ws);
   delete ws;
   NVTE_CHECK(e == hipSuccess, "kosmos_moe_workspace_destroy: ", hipGetErrorString(e));
 }
 
-NVTEMoeLayer nvte_moe_layer_create(NVTEMoeWorkspace ws) {
+NVTERocmMoeLayer nvte_rocm_moe_layer_create(NVTERocmMoeWorkspace ws) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_layer_create: null workspace");
-  auto *l = new NVTEMoeLayer_();
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_layer_create: null workspace");
+  auto *l = new NVTERocmMoeLayer_();
   l->ws = ws;
   const hipError_t e = kosmos_moe_create(&l->ctx, ws->ws);
   if (e != hipSuccess) {
@@ -256,7 +257,7 @@ NVTEMoeLayer nvte_moe_layer_create(NVTEMoeWorkspace ws) {
   return l;
 }
 
-void nvte_moe_layer_destroy(NVTEMoeLayer layer) {
+void nvte_rocm_moe_layer_destroy(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
   if (!layer) {
     return;
@@ -267,15 +268,15 @@ void nvte_moe_layer_destroy(NVTEMoeLayer layer) {
   NVTE_CHECK(e == hipSuccess, "kosmos_moe_destroy: ", hipGetErrorString(e));
 }
 
-void nvte_moe_layer_prepare(NVTEMoeLayer layer) {
+void nvte_rocm_moe_layer_prepare(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_layer_prepare: null layer");
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_layer_prepare: null layer");
   check(kosmos_moe_prepare(layer->ctx), "kosmos_moe_prepare", layer);
 }
 
-void nvte_moe_layer_reset(NVTEMoeLayer layer) {
+void nvte_rocm_moe_layer_reset(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_layer_reset: null layer");
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_layer_reset: null layer");
   const Dims d(layer->ws->cfg);
   std::vector<int> idx(d.T * d.k);
   std::vector<float> w(d.T * d.k, 1.0f / d.k);
@@ -287,50 +288,50 @@ void nvte_moe_layer_reset(NVTEMoeLayer layer) {
   check(kosmos_moe_plan(layer->ctx, idx.data(), w.data()), "kosmos_moe_plan (reset)", layer);
 }
 
-int nvte_moe_layer_status(NVTEMoeLayer layer) {
+int nvte_rocm_moe_layer_status(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_layer_status: null layer");
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_layer_status: null layer");
   int status = 0;
   check(kosmos_moe_plan_status(layer->ctx, &status), "kosmos_moe_plan_status", layer);
   return status;
 }
 
-void nvte_moe_layer_release(NVTEMoeLayer layer) {
+void nvte_rocm_moe_layer_release(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
   if (layer && layer->ctx) {
     (void)kosmos_moe_release(layer->ctx);
   }
 }
 
-int nvte_moe_layer_release_state(NVTEMoeLayer layer) {
+int nvte_rocm_moe_layer_release_state(NVTERocmMoeLayer layer) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_layer_release_state: null layer");
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_layer_release_state: null layer");
   int state = 0;
   check(kosmos_moe_release_state(layer->ctx, &state), "kosmos_moe_release_state", layer);
   return state;
 }
 
-void nvte_moe_release_sync(NVTEMoeWorkspace ws) {
+void nvte_rocm_moe_release_sync(NVTERocmMoeWorkspace ws) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_release_sync: null workspace");
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_release_sync: null workspace");
   check_ws(kosmos_moe_release_sync(ws->ws), "kosmos_moe_release_sync", ws);
 }
 
-void nvte_moe_forward(NVTEMoeLayer layer, const NVTEMoeForwardArgs *args, cudaStream_t stream) {
+void nvte_rocm_moe_forward(NVTERocmMoeLayer layer, const NVTERocmMoeForwardArgs *args, cudaStream_t stream) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_forward: null layer");
-  const NVTEMoeForwardArgs a = normalize(args, kFwdArgsMinSize, "args");
-  const NVTEMoeConfig &c = layer->ws->cfg;
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_forward: null layer");
+  const NVTERocmMoeForwardArgs a = normalize(args, kFwdArgsMinSize, "args");
+  const NVTERocmMoeConfig &c = layer->ws->cfg;
   const Dims d(c);
   KosmosMoe *ctx = layer->ctx;
-  NVTE_CHECK(!a.save_for_backward || c.training, "nvte_moe_forward: save_for_backward needs a training config");
+  NVTE_CHECK(!a.save_for_backward || c.training, "nvte_rocm_moe_forward: save_for_backward needs a training config");
   void *G = a.save_for_backward ? KOSMOS_MOE_SAVE : nullptr;
   void *out = rowwise(a.out, "out", DType::kBFloat16, d.T * d.H, true);
   const int *idx = nullptr;
   const float *tw = nullptr;
   if (c.router) {
     NVTE_CHECK(!present(get(a.topk_idx)) && !present(get(a.topk_weights)),
-               "nvte_moe_forward: topk_idx / topk_weights must be absent with the fused router");
+               "nvte_rocm_moe_forward: topk_idx / topk_weights must be absent with the fused router");
   } else {
     idx = (const int *)rowwise(a.topk_idx, "topk_idx", DType::kInt32, d.T * d.k, true);
     tw = (const float *)rowwise(a.topk_weights, "topk_weights", DType::kFloat32, d.T * d.k, true);
@@ -352,7 +353,7 @@ void nvte_moe_forward(NVTEMoeLayer layer, const NVTEMoeForwardArgs *args, cudaSt
   void *Gs = nullptr;
   if (c.shared_expert) {
     sgate = (const float *)rowwise(a.shared_gate, "shared_gate", DType::kFloat32, d.T, false);
-    NVTE_CHECK(((uintptr_t)sgate & 15) == 0, "nvte_moe_forward: shared_gate must be 16-byte aligned");
+    NVTE_CHECK(((uintptr_t)sgate & 15) == 0, "nvte_rocm_moe_forward: shared_gate must be 16-byte aligned");
     Gs = rowwise(a.shared_pre_act, "shared_pre_act", DType::kBFloat16, d.T * 2 * d.I, c.mxfp8 && c.training);
   }
   const size_t n1 = d.E * 2 * d.I * d.H, n2 = d.E * d.H * d.I, s1 = 2 * d.I * d.H, s2 = d.H * d.I;
@@ -381,7 +382,7 @@ void nvte_moe_forward(NVTEMoeLayer layer, const NVTEMoeForwardArgs *args, cudaSt
     const Mx W2 = mxfp8(a.fc2_weight, "fc2_weight", n2, false, true);
     if (!c.training) {
       NVTE_CHECK(!c.router && !c.shared_expert,
-                 "nvte_moe_forward: MXFP8 inference supports neither the fused router nor the shared expert");
+                 "nvte_rocm_moe_forward: MXFP8 inference supports neither the fused router nor the shared expert");
       const Mx X = mxfp8(a.x, "x", d.T * d.H, false, true);
       e = kosmos_moe_forward_mxfp8(ctx, X.data, X.scale, W1.data, W1.scale, W2.data, W2.scale, idx, tw, out, stream);
     } else {
@@ -406,17 +407,17 @@ void nvte_moe_forward(NVTEMoeLayer layer, const NVTEMoeForwardArgs *args, cudaSt
       }
     }
   }
-  check(e, "nvte_moe_forward", layer);
+  check(e, "nvte_rocm_moe_forward", layer);
 }
 
-void nvte_moe_backward(NVTEMoeLayer layer, const NVTEMoeBackwardArgs *args, cudaStream_t stream) {
+void nvte_rocm_moe_backward(NVTERocmMoeLayer layer, const NVTERocmMoeBackwardArgs *args, cudaStream_t stream) {
   AllocScope scope(layer ? layer->ws : nullptr);
-  NVTE_CHECK(layer != nullptr, "nvte_moe_backward: null layer");
-  const NVTEMoeBackwardArgs a = normalize(args, kBwdArgsMinSize, "args");
-  const NVTEMoeConfig &c = layer->ws->cfg;
+  NVTE_CHECK(layer != nullptr, "nvte_rocm_moe_backward: null layer");
+  const NVTERocmMoeBackwardArgs a = normalize(args, kBwdArgsMinSize, "args");
+  const NVTERocmMoeConfig &c = layer->ws->cfg;
   const Dims d(c);
   KosmosMoe *ctx = layer->ctx;
-  NVTE_CHECK(c.training, "nvte_moe_backward: the workspace was created without training");
+  NVTE_CHECK(c.training, "nvte_rocm_moe_backward: the workspace was created without training");
   const void *G = KOSMOS_MOE_SAVE;
   const size_t n1 = d.E * 2 * d.I * d.H, n2 = d.E * d.H * d.I, s1 = 2 * d.I * d.H, s2 = d.H * d.I;
   const void *dout = rowwise(a.dout, "dout", DType::kBFloat16, d.T * d.H, true);
@@ -424,7 +425,7 @@ void nvte_moe_backward(NVTEMoeLayer layer, const NVTEMoeBackwardArgs *args, cuda
   void *dX = rowwise(a.dx, "dx", DType::kBFloat16, d.T * d.H, true);
   // main_grad accumulation (one acc for every weight gradient): 0 bf16 overwritten, 1 fp32 / 2 bf16 added into.
   const int acc = a.wgrad_accumulate;
-  NVTE_CHECK(acc >= 0 && acc <= 2, "nvte_moe_backward: wgrad_accumulate must be 0, 1 or 2");
+  NVTE_CHECK(acc >= 0 && acc <= 2, "nvte_rocm_moe_backward: wgrad_accumulate must be 0, 1 or 2");
   const DType wdt = acc == 1 ? DType::kFloat32 : DType::kBFloat16;
   void *dW1 = rowwise(a.fc1_wgrad, "fc1_wgrad", wdt, n1, true);
   void *dW2 = rowwise(a.fc2_wgrad, "fc2_wgrad", wdt, n2, true);
@@ -497,12 +498,12 @@ void nvte_moe_backward(NVTEMoeLayer layer, const NVTEMoeBackwardArgs *args, cuda
                                     acc, stream);
     }
   }
-  check(e, "nvte_moe_backward", layer);
+  check(e, "nvte_rocm_moe_backward", layer);
 }
 
-int nvte_moe_pool_resize(NVTEMoeWorkspace ws, size_t bytes) {
+int nvte_rocm_moe_pool_resize(NVTERocmMoeWorkspace ws, size_t bytes) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_pool_resize: null workspace");
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_pool_resize: null workspace");
   const hipError_t e = kosmos_moe_pool_resize(ws->ws, bytes);
   if (e == hipErrorNotReady || e == hipErrorStreamCaptureUnsupported) {
     return e == hipErrorNotReady ? 1 : 2;
@@ -511,9 +512,9 @@ int nvte_moe_pool_resize(NVTEMoeWorkspace ws, size_t bytes) {
   return 0;
 }
 
-void nvte_moe_pool_info(NVTEMoeWorkspace ws, size_t *bytes, size_t *head_bytes, size_t *reserve_bytes) {
+void nvte_rocm_moe_pool_info(NVTERocmMoeWorkspace ws, size_t *bytes, size_t *head_bytes, size_t *reserve_bytes) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_pool_info: null workspace");
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_pool_info: null workspace");
   size_t b = 0, h = 0, r = 0;
   check_ws(kosmos_moe_pool_info(ws->ws, &b, &h, &r), "kosmos_moe_pool_info", ws);
   if (bytes) {
@@ -527,9 +528,9 @@ void nvte_moe_pool_info(NVTEMoeWorkspace ws, size_t *bytes, size_t *head_bytes, 
   }
 }
 
-int nvte_moe_set_capacity(NVTEMoeWorkspace ws, int rows) {
+int nvte_rocm_moe_set_capacity(NVTERocmMoeWorkspace ws, int rows) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_set_capacity: null workspace");
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_set_capacity: null workspace");
   const hipError_t e = kosmos_moe_set_capacity(ws->ws, rows);
   if (e == hipErrorNotReady || e == hipErrorStreamCaptureUnsupported || e == hipErrorOutOfMemory) {
     return e == hipErrorNotReady ? 1 : e == hipErrorStreamCaptureUnsupported ? 2 : 3;
@@ -538,9 +539,9 @@ int nvte_moe_set_capacity(NVTEMoeWorkspace ws, int rows) {
   return 0;
 }
 
-void nvte_moe_capacity_query(NVTEMoeWorkspace ws, NVTEMoeCapacityStat *stat) {
+void nvte_rocm_moe_capacity_query(NVTERocmMoeWorkspace ws, NVTERocmMoeCapacityStat *stat) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr && stat != nullptr, "nvte_moe_capacity_query: null argument");
+  NVTE_CHECK(ws != nullptr && stat != nullptr, "nvte_rocm_moe_capacity_query: null argument");
   KosmosMoeCapacityStat s;
   check_ws(kosmos_moe_capacity_query(ws->ws, &s), "kosmos_moe_capacity_query", ws);
   stat->peak = s.peak;
@@ -551,48 +552,54 @@ void nvte_moe_capacity_query(NVTEMoeWorkspace ws, NVTEMoeCapacityStat *stat) {
   stat->cap_rounds = s.cap_rounds;
 }
 
-size_t nvte_moe_capacity_bytes(NVTEMoeWorkspace ws, int rows) {
+size_t nvte_rocm_moe_capacity_bytes(NVTERocmMoeWorkspace ws, int rows) {
   AllocScope scope(ws);
-  NVTE_CHECK(ws != nullptr, "nvte_moe_capacity_bytes: null workspace");
+  NVTE_CHECK(ws != nullptr, "nvte_rocm_moe_capacity_bytes: null workspace");
   size_t bytes = 0;
   check_ws(kosmos_moe_capacity_bytes(ws->ws, rows, &bytes), "kosmos_moe_capacity_bytes", ws);
   return bytes;
 }
 
-size_t nvte_moe_untracked_bytes(void) { return kosmos_untracked_bytes(); }
+size_t nvte_rocm_moe_untracked_bytes(void) { return kosmos_untracked_bytes(); }
 
 #else  // !USE_KOSMOS_MOE
 
-struct NVTEMoeWorkspace_ {};
-struct NVTEMoeLayer_ {};
+struct NVTERocmMoeWorkspace_ {};
+struct NVTERocmMoeLayer_ {};
 
-#define NVTE_MOE_UNAVAILABLE() \
+#define NVTE_ROCM_MOE_UNAVAILABLE() \
   NVTE_ERROR("TransformerEngine was built without the fused MoE (needs ROCm, gfx950 and USE_KOSMOS_MOE)")
 
-int nvte_moe_is_supported(void) { return 0; }
-int nvte_moe_config_valid(const NVTEMoeConfig *, char *why, size_t why_len) {
+int nvte_rocm_moe_is_supported(void) { return 0; }
+int nvte_rocm_moe_config_valid(const NVTERocmMoeConfig *, char *why, size_t why_len) {
   if (why && why_len) {
     std::snprintf(why, why_len, "built without the fused MoE");
   }
   return 0;
 }
-NVTEMoeWorkspace nvte_moe_workspace_create(const NVTEMoeConfig *, const NVTEMoeComm *) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_workspace_destroy(NVTEMoeWorkspace) {}
-NVTEMoeLayer nvte_moe_layer_create(NVTEMoeWorkspace) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_layer_destroy(NVTEMoeLayer) {}
-void nvte_moe_layer_prepare(NVTEMoeLayer) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_layer_reset(NVTEMoeLayer) { NVTE_MOE_UNAVAILABLE(); }
-int nvte_moe_layer_status(NVTEMoeLayer) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_layer_release(NVTEMoeLayer) {}
-int nvte_moe_layer_release_state(NVTEMoeLayer) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_release_sync(NVTEMoeWorkspace) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_forward(NVTEMoeLayer, const NVTEMoeForwardArgs *, cudaStream_t) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_backward(NVTEMoeLayer, const NVTEMoeBackwardArgs *, cudaStream_t) { NVTE_MOE_UNAVAILABLE(); }
-int nvte_moe_pool_resize(NVTEMoeWorkspace, size_t) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_pool_info(NVTEMoeWorkspace, size_t *, size_t *, size_t *) { NVTE_MOE_UNAVAILABLE(); }
-int nvte_moe_set_capacity(NVTEMoeWorkspace, int) { NVTE_MOE_UNAVAILABLE(); }
-void nvte_moe_capacity_query(NVTEMoeWorkspace, NVTEMoeCapacityStat *) { NVTE_MOE_UNAVAILABLE(); }
-size_t nvte_moe_capacity_bytes(NVTEMoeWorkspace, int) { NVTE_MOE_UNAVAILABLE(); }
-size_t nvte_moe_untracked_bytes(void) { return 0; }
+NVTERocmMoeWorkspace nvte_rocm_moe_workspace_create(const NVTERocmMoeConfig *, const NVTERocmMoeComm *) {
+  NVTE_ROCM_MOE_UNAVAILABLE();
+}
+void nvte_rocm_moe_workspace_destroy(NVTERocmMoeWorkspace) {}
+NVTERocmMoeLayer nvte_rocm_moe_layer_create(NVTERocmMoeWorkspace) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_layer_destroy(NVTERocmMoeLayer) {}
+void nvte_rocm_moe_layer_prepare(NVTERocmMoeLayer) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_layer_reset(NVTERocmMoeLayer) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+int nvte_rocm_moe_layer_status(NVTERocmMoeLayer) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_layer_release(NVTERocmMoeLayer) {}
+int nvte_rocm_moe_layer_release_state(NVTERocmMoeLayer) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_release_sync(NVTERocmMoeWorkspace) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_forward(NVTERocmMoeLayer, const NVTERocmMoeForwardArgs *, cudaStream_t) {
+  NVTE_ROCM_MOE_UNAVAILABLE();
+}
+void nvte_rocm_moe_backward(NVTERocmMoeLayer, const NVTERocmMoeBackwardArgs *, cudaStream_t) {
+  NVTE_ROCM_MOE_UNAVAILABLE();
+}
+int nvte_rocm_moe_pool_resize(NVTERocmMoeWorkspace, size_t) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_pool_info(NVTERocmMoeWorkspace, size_t *, size_t *, size_t *) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+int nvte_rocm_moe_set_capacity(NVTERocmMoeWorkspace, int) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+void nvte_rocm_moe_capacity_query(NVTERocmMoeWorkspace, NVTERocmMoeCapacityStat *) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+size_t nvte_rocm_moe_capacity_bytes(NVTERocmMoeWorkspace, int) { NVTE_ROCM_MOE_UNAVAILABLE(); }
+size_t nvte_rocm_moe_untracked_bytes(void) { return 0; }
 
 #endif  // USE_KOSMOS_MOE

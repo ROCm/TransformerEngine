@@ -55,7 +55,7 @@ class _IpcPool:
         idx = device.index
         if idx not in _IpcPool._pools:
             alloc = torch.cuda.memory.CUDAPluggableAllocator(
-                tex.__file__, "nvte_moe_ipc_malloc", "nvte_moe_ipc_free"
+                tex.__file__, "nvte_rocm_moe_ipc_malloc", "nvte_rocm_moe_ipc_free"
             )
             _IpcPool._pools[idx] = torch.cuda.MemPool(alloc.allocator())
         self.pool = _IpcPool._pools[idx]

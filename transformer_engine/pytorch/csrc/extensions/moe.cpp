@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// PyTorch binding of the fused expert-parallel MoE (nvte_moe_*): workspace and layer handles.
+// PyTorch binding of the fused expert-parallel MoE (nvte_rocm_moe_*): workspace and layer handles.
 
 #include <c10/core/Allocator.h>
 #include <transformer_engine/moe.h>
@@ -106,12 +106,12 @@ TensorWrapper wrap(const py::object &t) {
 class MoeWorkspace {
  public:
   MoeWorkspace(int hidden_size, int ffn_hidden_size, int num_local_experts, int topk, int num_tokens, int rank,
-               py::function allgather, py::function ipc_alloc, py::function ipc_free, int capacity_rows, int wgcap, bool training, size_t pool_bytes,
-               int activation, bool mxfp8, bool fp8_combine, bool probs_on_input, bool shared_expert, bool router,
-               int router_score, int router_groups, int router_group_topk, int router_aux_groups,
-               float router_aux_coeff, float router_scale)
+               py::function allgather, py::function ipc_alloc, py::function ipc_free, int capacity_rows, int wgcap,
+               bool training, size_t pool_bytes, int activation, bool mxfp8, bool fp8_combine, bool probs_on_input,
+               bool shared_expert, bool router, int router_score, int router_groups, int router_group_topk,
+               int router_aux_groups, float router_aux_coeff, float router_scale)
       : coll_(std::make_unique<PyAllgather>()) {
-    NVTEMoeConfig cfg = NVTE_MOE_CONFIG_INIT;
+    NVTERocmMoeConfig cfg = NVTE_ROCM_MOE_CONFIG_INIT;
     cfg.hidden_size = hidden_size;
     cfg.ffn_hidden_size = ffn_hidden_size;
     cfg.num_local_experts = num_local_experts;
@@ -130,41 +130,41 @@ class MoeWorkspace {
     cfg.router_config = {router_score, router_groups, router_group_topk, router_aux_groups, router_aux_coeff,
                          router_scale};
     char why[512];
-    if (!nvte_moe_config_valid(&cfg, why, sizeof(why))) {
+    if (!nvte_rocm_moe_config_valid(&cfg, why, sizeof(why))) {
       throw std::invalid_argument(std::string("fused MoE configuration refused: ") + why);
     }
     coll_->fn = std::move(allgather);
     coll_->ipc_alloc = std::move(ipc_alloc);
     coll_->ipc_free = std::move(ipc_free);
-    coll_->nranks = NVTE_MOE_EP_SIZE;
-    NVTEMoeComm comm = NVTE_MOE_COMM_INIT;
+    coll_->nranks = NVTE_ROCM_MOE_EP_SIZE;
+    NVTERocmMoeComm comm = NVTE_ROCM_MOE_COMM_INIT;
     comm.ctx = coll_.get();
     comm.rank = rank;
-    comm.nranks = NVTE_MOE_EP_SIZE;
+    comm.nranks = NVTE_ROCM_MOE_EP_SIZE;
     comm.allgather = py_allgather;
     comm.alloc = torch_alloc;
     comm.free = torch_free;
-    run([&] { ws_ = nvte_moe_workspace_create(&cfg, &comm); });
+    run([&] { ws_ = nvte_rocm_moe_workspace_create(&cfg, &comm); });
   }
 
   // Collective; every layer handle on the workspace must be destroyed first.
   void destroy() {
     if (ws_) {
-      NVTEMoeWorkspace ws = ws_;
+      NVTERocmMoeWorkspace ws = ws_;
       ws_ = nullptr;
-      run([&] { nvte_moe_workspace_destroy(ws); });
+      run([&] { nvte_rocm_moe_workspace_destroy(ws); });
     }
   }
 
   int pool_resize(size_t bytes) {
     int r = 0;
-    run([&] { r = nvte_moe_pool_resize(live(), bytes); });
+    run([&] { r = nvte_rocm_moe_pool_resize(live(), bytes); });
     return r;
   }
 
   py::dict pool_info() {
     size_t b = 0, h = 0, r = 0;
-    run([&] { nvte_moe_pool_info(live(), &b, &h, &r); });
+    run([&] { nvte_rocm_moe_pool_info(live(), &b, &h, &r); });
     py::dict d;
     d["bytes"] = b;
     d["head_bytes"] = h;
@@ -174,13 +174,13 @@ class MoeWorkspace {
 
   int set_capacity(int rows) {
     int r = 0;
-    run([&] { r = nvte_moe_set_capacity(live(), rows); });
+    run([&] { r = nvte_rocm_moe_set_capacity(live(), rows); });
     return r;
   }
 
   py::dict capacity_query() {
-    NVTEMoeCapacityStat s{};
-    run([&] { nvte_moe_capacity_query(live(), &s); });
+    NVTERocmMoeCapacityStat s{};
+    run([&] { nvte_rocm_moe_capacity_query(live(), &s); });
     py::dict d;
     d["peak"] = s.peak;
     d["rows"] = s.rows;
@@ -193,16 +193,16 @@ class MoeWorkspace {
 
   // Reads every launched forward's release agreement (host-blocking; call it alike on every rank).
   void release_sync() {
-    run([&] { nvte_moe_release_sync(live()); });
+    run([&] { nvte_rocm_moe_release_sync(live()); });
   }
 
   size_t capacity_bytes(int rows) {
     size_t b = 0;
-    run([&] { b = nvte_moe_capacity_bytes(live(), rows); });
+    run([&] { b = nvte_rocm_moe_capacity_bytes(live(), rows); });
     return b;
   }
 
-  NVTEMoeWorkspace live() const {
+  NVTERocmMoeWorkspace live() const {
     if (!ws_) {
       throw std::runtime_error("MoeWorkspace used after destroy()");
     }
@@ -225,7 +225,7 @@ class MoeWorkspace {
   }
 
  private:
-  NVTEMoeWorkspace ws_ = nullptr;
+  NVTERocmMoeWorkspace ws_ = nullptr;
   std::unique_ptr<PyAllgather> coll_;
 };
 
@@ -233,42 +233,42 @@ class MoeLayer {
  public:
   explicit MoeLayer(py::object workspace) : ws_obj_(std::move(workspace)) {
     ws_ = ws_obj_.cast<MoeWorkspace *>();
-    ws_->run([&] { layer_ = nvte_moe_layer_create(ws_->live()); });
+    ws_->run([&] { layer_ = nvte_rocm_moe_layer_create(ws_->live()); });
   }
 
   // Collective.
   void destroy() {
     if (layer_) {
-      NVTEMoeLayer l = layer_;
+      NVTERocmMoeLayer l = layer_;
       layer_ = nullptr;
-      ws_->run([&] { nvte_moe_layer_destroy(l); });
+      ws_->run([&] { nvte_rocm_moe_layer_destroy(l); });
     }
   }
 
   void prepare() {
-    ws_->run([&] { nvte_moe_layer_prepare(live()); });
+    ws_->run([&] { nvte_rocm_moe_layer_prepare(live()); });
   }
 
   void reset() {
-    ws_->run([&] { nvte_moe_layer_reset(live()); });
+    ws_->run([&] { nvte_rocm_moe_layer_reset(live()); });
   }
 
   int status() {
     int s = 0;
-    ws_->run([&] { s = nvte_moe_layer_status(live()); });
+    ws_->run([&] { s = nvte_rocm_moe_layer_status(live()); });
     return s;
   }
 
   // The saving forward will get no backward: local and thread-safe; a no-op on a destroyed handle (finalizers).
   void release() {
     if (layer_) {
-      nvte_moe_layer_release(layer_);
+      nvte_rocm_moe_layer_release(layer_);
     }
   }
 
   int release_state() {
     int s = 0;
-    ws_->run([&] { s = nvte_moe_layer_release_state(live()); });
+    ws_->run([&] { s = nvte_rocm_moe_layer_release_state(live()); });
     return s;
   }
 
@@ -283,7 +283,7 @@ class MoeLayer {
       keep.push_back(wrap(o));
       return keep.back().data();
     };
-    NVTEMoeForwardArgs a{};
+    NVTERocmMoeForwardArgs a{};
     a.struct_size = sizeof(a);
     a.x = t(x);
     a.topk_idx = t(topk_idx);
@@ -307,7 +307,7 @@ class MoeLayer {
     // launches back); the callbacks that need Python take it back.
     ws_->run([&] {
       py::gil_scoped_release nogil;
-      nvte_moe_forward(live(), &a, stream);
+      nvte_rocm_moe_forward(live(), &a, stream);
     });
   }
 
@@ -323,7 +323,7 @@ class MoeLayer {
       keep.push_back(wrap(o));
       return keep.back().data();
     };
-    NVTEMoeBackwardArgs a{};
+    NVTERocmMoeBackwardArgs a{};
     a.struct_size = sizeof(a);
     a.dout = t(dout);
     a.x = t(x);
@@ -350,12 +350,12 @@ class MoeLayer {
     // launches back); the callbacks that need Python take it back.
     ws_->run([&] {
       py::gil_scoped_release nogil;
-      nvte_moe_backward(live(), &a, stream);
+      nvte_rocm_moe_backward(live(), &a, stream);
     });
   }
 
  private:
-  NVTEMoeLayer live() const {
+  NVTERocmMoeLayer live() const {
     if (!layer_) {
       throw std::runtime_error("MoeLayer used after destroy()");
     }
@@ -364,13 +364,13 @@ class MoeLayer {
 
   py::object ws_obj_;
   MoeWorkspace *ws_ = nullptr;
-  NVTEMoeLayer layer_ = nullptr;
+  NVTERocmMoeLayer layer_ = nullptr;
 };
 
 void register_moe_bindings(py::module_ &m) {
-  m.def("moe_is_supported", &nvte_moe_is_supported, "Whether the fused MoE is built and the device supports it.");
-  m.attr("MOE_EP_SIZE") = NVTE_MOE_EP_SIZE;
-  m.def("moe_untracked_bytes", &nvte_moe_untracked_bytes,
+  m.def("moe_is_supported", &nvte_rocm_moe_is_supported, "Whether the fused MoE is built and the device supports it.");
+  m.attr("MOE_EP_SIZE") = NVTE_ROCM_MOE_EP_SIZE;
+  m.def("moe_untracked_bytes", &nvte_rocm_moe_untracked_bytes,
         "Device bytes the fused MoE holds outside PyTorch's allocator (0 for workspaces created from Python).");
   py::class_<MoeWorkspace>(m, "MoeWorkspace")
       .def(py::init<int, int, int, int, int, int, py::function, py::function, py::function, int, int, bool, size_t,
@@ -419,11 +419,11 @@ void register_moe_bindings(py::module_ &m) {
 
 // The fused MoE's IPC memory pool (torch.cuda.MemPool over torch.cuda.memory.CUDAPluggableAllocator): plain
 // hipMalloc segments, whose IPC handles work whatever the caching allocator's expandable_segments setting.
-extern "C" __attribute__((visibility("default"))) void *nvte_moe_ipc_malloc(ssize_t size, int, cudaStream_t) {
+extern "C" __attribute__((visibility("default"))) void *nvte_rocm_moe_ipc_malloc(ssize_t size, int, cudaStream_t) {
   void *p = nullptr;
   return cudaMalloc(&p, static_cast<size_t>(size)) == cudaSuccess ? p : nullptr;
 }
 
-extern "C" __attribute__((visibility("default"))) void nvte_moe_ipc_free(void *ptr, ssize_t, int, cudaStream_t) {
+extern "C" __attribute__((visibility("default"))) void nvte_rocm_moe_ipc_free(void *ptr, ssize_t, int, cudaStream_t) {
   (void)cudaFree(ptr);
 }

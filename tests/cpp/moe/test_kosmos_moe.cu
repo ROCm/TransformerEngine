@@ -3,9 +3,9 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// Tests of the fused expert-parallel MoE C API (nvte_moe_*, KOSMOS kernels) on 8 GPUs without MPI: every TEST forks
-// one process per GPU (before any HIP call in the gtest process; hipIpc handles do not work within one process), and
-// the ranks' allgather runs over a shared-memory segment the parent maps before forking.
+// Tests of the fused expert-parallel MoE C API (nvte_rocm_moe_*, KOSMOS kernels) on 8 GPUs without MPI: every TEST
+// forks one process per GPU (before any HIP call in the gtest process; hipIpc handles do not work within one
+// process), and the ranks' allgather runs over a shared-memory segment the parent maps before forking.
 
 #include <omp.h>
 #include <sched.h>
@@ -55,7 +55,7 @@ using transformer_engine::TensorWrapper;
 // Problem size and configuration
 // ---------------------------------------------------------------------------------------------------------------------
 
-constexpr int      kRanks    = NVTE_MOE_EP_SIZE;
+constexpr int      kRanks    = NVTE_ROCM_MOE_EP_SIZE;
 constexpr int      kH        = 2048;
 constexpr int      kI        = 256;
 constexpr int      kEloc     = 2;
@@ -82,8 +82,8 @@ constexpr int kExitFail      = 1;
 constexpr int kExitException = 2;
 constexpr int kExitSkip      = 77;
 
-NVTEMoeConfig make_config(bool mxfp8) {
-  NVTEMoeConfig c = NVTE_MOE_CONFIG_INIT;
+NVTERocmMoeConfig make_config(bool mxfp8) {
+  NVTERocmMoeConfig c = NVTE_ROCM_MOE_CONFIG_INIT;
   c.hidden_size              = kH;
   c.ffn_hidden_size          = kI;
   c.num_local_experts        = kEloc;
@@ -92,11 +92,11 @@ NVTEMoeConfig make_config(bool mxfp8) {
   c.wgcap                    = kWgcap;
   c.capacity_rows            = mxfp8 ? kCapacityMx : kCapacity;
   c.training                 = 1;
-  c.activation               = kNVTEMoeSwiGLU;
+  c.activation               = kNVTERocmMoeSwiGLU;
   c.mxfp8                    = mxfp8 ? 1 : 0;
   c.shared_expert            = 1;
   c.router                   = 1;
-  c.router_config.score      = kNVTEMoeRouterSoftmax;
+  c.router_config.score      = kNVTERocmMoeRouterSoftmax;
   c.router_config.aux_groups = 1;
   c.router_config.aux_coeff  = kAuxCoeff;
   c.router_config.scale      = 1.0f;
@@ -146,7 +146,7 @@ struct Rank {
   int rank = 0;
   Shm *shm = nullptr;
   int sense = 0;
-  NVTEMoeComm comm = NVTE_MOE_COMM_INIT;
+  NVTERocmMoeComm comm = NVTE_ROCM_MOE_COMM_INIT;
   cudaStream_t stream = nullptr;
   bool skip = false;
   std::vector<std::string> fails;
@@ -175,7 +175,8 @@ bool barrier(Rank *r) {
   return true;
 }
 
-// NVTEMoeComm::allgather: each rank writes its bytes into its slot, then copies every slot out (in slot-sized chunks).
+// NVTERocmMoeComm::allgather: each rank writes its bytes into its slot, then copies every slot out (in slot-sized
+// chunks).
 int shm_allgather(void *ctx, const void *send, void *recv, size_t bytes) {
   Rank *r = static_cast<Rank *>(ctx);
   Shm *s = r->shm;
@@ -319,7 +320,7 @@ void expect_all_ranks_pass(const std::vector<RankOutcome> &res) {
   }
 }
 
-// Empty when the fused MoE can run here: 8 gfx950 devices and nvte_moe_is_supported(); probed in a forked child.
+// Empty when the fused MoE can run here: 8 gfx950 devices and nvte_rocm_moe_is_supported(); probed in a forked child.
 const std::string &skip_reason() {
   static const std::string why = [] {
     const std::vector<RankOutcome> res = run_ranks(1, [](Rank &r) {
@@ -337,9 +338,9 @@ const std::string &skip_reason() {
           return;
         }
       }
-      if (cudaSetDevice(0) != cudaSuccess || !nvte_moe_is_supported()) {
+      if (cudaSetDevice(0) != cudaSuccess || !nvte_rocm_moe_is_supported()) {
         r.skip = true;
-        r.note("nvte_moe_is_supported() is 0");
+        r.note("nvte_rocm_moe_is_supported() is 0");
       }
     });
     if (res[0].code == kExitPass) {
@@ -906,8 +907,8 @@ void poison(const DevOutputs &o, cudaStream_t st) {
   }
 }
 
-void forward(NVTEMoeLayer layer, const DevInputs &in, const DevOutputs &o, cudaStream_t st) {
-  NVTEMoeForwardArgs a;
+void forward(NVTERocmMoeLayer layer, const DevInputs &in, const DevOutputs &o, cudaStream_t st) {
+  NVTERocmMoeForwardArgs a;
   std::memset(&a, 0, sizeof(a));
   a.struct_size       = sizeof(a);
   a.x                 = in.tx.data();
@@ -921,7 +922,7 @@ void forward(NVTEMoeLayer layer, const DevInputs &in, const DevOutputs &o, cudaS
   a.aux_loss          = o.taux.data();
   a.tokens_per_expert = o.ttpe.data();
   a.save_for_backward = 1;
-  nvte_moe_forward(layer, &a, st);
+  nvte_rocm_moe_forward(layer, &a, st);
 }
 
 // fp32 main_grad buffers of the router, fc1, fc2, shared fc1 and shared fc2 weights (wgrad_accumulate 1).
@@ -946,9 +947,9 @@ std::unique_ptr<MainGrads> make_main_grads() {
   return m;
 }
 
-void backward(NVTEMoeLayer layer, const DevInputs &in, const DevOutputs &o, cudaStream_t st,
+void backward(NVTERocmMoeLayer layer, const DevInputs &in, const DevOutputs &o, cudaStream_t st,
               const MainGrads *mg = nullptr) {
-  NVTEMoeBackwardArgs a;
+  NVTERocmMoeBackwardArgs a;
   std::memset(&a, 0, sizeof(a));
   a.struct_size       = sizeof(a);
   a.dout              = in.tdout.data();
@@ -975,7 +976,7 @@ void backward(NVTEMoeLayer layer, const DevInputs &in, const DevOutputs &o, cuda
     a.shared_fc2_wgrad = mg->t[4].data();
     a.wgrad_accumulate = 1;
   }
-  nvte_moe_backward(layer, &a, st);
+  nvte_rocm_moe_backward(layer, &a, st);
 }
 
 // bf16 bits of x, rounded to nearest even (finite x).
@@ -1094,12 +1095,12 @@ void expect_matches_reference(Rank &rk, const HostResult &h, const Ref &R, bool 
 // rank is unwinding from an exception or another rank aborted, as the peers may never join.
 class Workspace {
  public:
-  Workspace(Rank &rk, const NVTEMoeConfig &cfg) : shm_(rk.shm) {
+  Workspace(Rank &rk, const NVTERocmMoeConfig &cfg) : shm_(rk.shm) {
     char why[512] = {0};
-    if (!nvte_moe_config_valid(&cfg, why, sizeof(why))) {
-      throw std::runtime_error(std::string("nvte_moe_config_valid refused the configuration: ") + why);
+    if (!nvte_rocm_moe_config_valid(&cfg, why, sizeof(why))) {
+      throw std::runtime_error(std::string("nvte_rocm_moe_config_valid refused the configuration: ") + why);
     }
-    ws_ = nvte_moe_workspace_create(&cfg, &rk.comm);
+    ws_ = nvte_rocm_moe_workspace_create(&cfg, &rk.comm);
   }
   ~Workspace() {
     if (std::uncaught_exceptions() > 0 || shm_->abort.load()) {
@@ -1107,41 +1108,41 @@ class Workspace {
       return;
     }
     try {
-      nvte_moe_workspace_destroy(ws_);
+      nvte_rocm_moe_workspace_destroy(ws_);
     } catch (...) {
       shm_->abort.store(1);
     }
   }
   Workspace(const Workspace &) = delete;
   Workspace &operator=(const Workspace &) = delete;
-  NVTEMoeWorkspace get() const { return ws_; }
+  NVTERocmMoeWorkspace get() const { return ws_; }
 
  private:
   Shm *shm_;
-  NVTEMoeWorkspace ws_ = nullptr;
+  NVTERocmMoeWorkspace ws_ = nullptr;
 };
 
 class Layer {
  public:
-  Layer(Rank &rk, const Workspace &ws) : shm_(rk.shm), l_(nvte_moe_layer_create(ws.get())) {}
+  Layer(Rank &rk, const Workspace &ws) : shm_(rk.shm), l_(nvte_rocm_moe_layer_create(ws.get())) {}
   ~Layer() {
     if (std::uncaught_exceptions() > 0 || shm_->abort.load()) {
       shm_->abort.store(1);
       return;
     }
     try {
-      nvte_moe_layer_destroy(l_);
+      nvte_rocm_moe_layer_destroy(l_);
     } catch (...) {
       shm_->abort.store(1);
     }
   }
   Layer(const Layer &) = delete;
   Layer &operator=(const Layer &) = delete;
-  NVTEMoeLayer get() const { return l_; }
+  NVTERocmMoeLayer get() const { return l_; }
 
  private:
   Shm *shm_;
-  NVTEMoeLayer l_;
+  NVTERocmMoeLayer l_;
 };
 
 void init_device(Rank &rk) {
@@ -1152,10 +1153,10 @@ void init_device(Rank &rk) {
 // Status bits of the layer's calls: errors (bad expert, duplicate) fail; these cases are sized to run in one pass
 // keeping everything, so rounds or a reduced keep (recompute) fail too: they would test another path.
 void check_status(Rank &rk, const Layer &l, const char *what) {
-  const int st = nvte_moe_layer_status(l.get());
+  const int st = nvte_rocm_moe_layer_status(l.get());
   rk.note(std::string(what) + " status " + std::to_string(st));
-  const int bad = kNVTEMoeStatusBadExpert | kNVTEMoeStatusDuplicate | kNVTEMoeStatusRounds |
-                  kNVTEMoeStatusKeptXpOnly | kNVTEMoeStatusKeptNothing;
+  const int bad = kNVTERocmMoeStatusBadExpert | kNVTERocmMoeStatusDuplicate | kNVTERocmMoeStatusRounds |
+                  kNVTERocmMoeStatusKeptXpOnly | kNVTERocmMoeStatusKeptNothing;
   if (st & bad) {
     rk.fail(std::string(what) + ": layer status " + std::to_string(st));
   }
@@ -1365,7 +1366,7 @@ TEST(KosmosMoe, AgreedRelease) {
     const std::unique_ptr<DevInputs> inn = upload(pn, rk.rank, false, rk.stream);
     const std::unique_ptr<DevOutputs> oa = make_outputs(), ob = make_outputs(), oc = make_outputs();
     auto expect_state = [&rk](const Layer &l, const char *what, int want) {
-      const int st = nvte_moe_layer_release_state(l.get());
+      const int st = nvte_rocm_moe_layer_release_state(l.get());
       if (st != want) {
         rk.fail(std::string(what) + ": release state " + std::to_string(st) + ", expected " + std::to_string(want));
       }
@@ -1380,22 +1381,22 @@ TEST(KosmosMoe, AgreedRelease) {
     poison(*oa, rk.stream);
     forward(la.get(), *ina, *oa, rk.stream);
     CK(cudaStreamSynchronize(rk.stream));
-    expect_state(la, "A after its forward", kNVTEMoeReleaseStored);
+    expect_state(la, "A after its forward", kNVTERocmMoeReleaseStored);
 
     // 2. Each rank releases A at its own point of the same sequence of calls on B.
     for (int i = 0; i < 6; i++) {
       if (i == rk.rank % 3) {
-        nvte_moe_layer_release(la.get());
-        expect_state(la, "A right after its release", kNVTEMoeReleasePending);
+        nvte_rocm_moe_layer_release(la.get());
+        expect_state(la, "A right after its release", kNVTERocmMoeReleasePending);
       }
       run_b(1);
     }
 
     // 3. More forwards than the lag, then read every agreement: A reclaimed on every rank.
     run_b(6);
-    nvte_moe_release_sync(ws.get());
-    const int st = nvte_moe_layer_release_state(la.get());
-    expect_state(la, "A after release_sync", kNVTEMoeReleaseReclaimed);
+    nvte_rocm_moe_release_sync(ws.get());
+    const int st = nvte_rocm_moe_layer_release_state(la.get());
+    expect_state(la, "A after release_sync", kNVTERocmMoeReleaseReclaimed);
     std::array<int, kRanks> all;
     if (rk.comm.allgather(&rk, &st, all.data(), sizeof(int)) != 0) {
       throw std::runtime_error("allgather of the release states failed");
@@ -1409,15 +1410,15 @@ TEST(KosmosMoe, AgreedRelease) {
 
     // 4. The reclaimed A runs a new forward and backward, bitwise equal to a fresh handle.
     const HostResult ra = run_step(la, *inn, *oa, rk.stream);
-    expect_state(la, "A after its reuse", kNVTEMoeReleaseIdle);
+    expect_state(la, "A after its reuse", kNVTERocmMoeReleaseIdle);
     Layer lc(rk, ws);
     const HostResult rc = run_step(lc, *inn, *oc, rk.stream);
     expect_bitwise_equal(rk, "reclaimed A vs fresh C", ra, rc);
 
     // 5. A released forward refuses its backward; C is then reclaimed before its destruction.
     forward(lc.get(), *inn, *oc, rk.stream);
-    nvte_moe_layer_release(lc.get());
-    expect_state(lc, "C right after its release", kNVTEMoeReleasePending);
+    nvte_rocm_moe_layer_release(lc.get());
+    expect_state(lc, "C right after its release", kNVTERocmMoeReleasePending);
     bool refused = false;
     try {
       backward(lc.get(), *inn, *oc, rk.stream);
@@ -1428,8 +1429,8 @@ TEST(KosmosMoe, AgreedRelease) {
       rk.fail("backward of a released forward was not refused");
     }
     run_b(5);
-    nvte_moe_release_sync(ws.get());
-    expect_state(lc, "C after release_sync", kNVTEMoeReleaseReclaimed);
+    nvte_rocm_moe_release_sync(ws.get());
+    expect_state(lc, "C after release_sync", kNVTERocmMoeReleaseReclaimed);
     check_status(rk, la, "A");
     check_status(rk, lb, "B");
     check_status(rk, lc, "C");

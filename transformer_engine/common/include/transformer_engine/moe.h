@@ -13,7 +13,7 @@
  *
  *  Calls marked collective must be issued by every EP rank in the same order; per-step calls are stream-ordered and
  *  must also be issued in the same order on every rank. A failed per-step call leaves the workspace in an undefined
- *  state: quiesce every rank and call nvte_moe_layer_reset on every rank.
+ *  state: quiesce every rank and call nvte_rocm_moe_layer_reset on every rank.
  */
 
 #ifndef TRANSFORMER_ENGINE_MOE_H_
@@ -29,20 +29,20 @@ extern "C" {
 #endif
 
 /*! \brief Number of EP ranks the fused MoE supports. */
-#define NVTE_MOE_EP_SIZE 8
+#define NVTE_ROCM_MOE_EP_SIZE 8
 
 /*! \brief GLU of the experts' [gate; up] fc1 output. */
-enum NVTEMoeActivation {
-  kNVTEMoeSwiGLU = 0,        /*!< silu(g) * u */
-  kNVTEMoeSwiGLUClamp10 = 1, /*!< silu(min(g, 10)) * clamp(u, -10, 10) (clamped_swiglu_v2, limit 10) */
+enum NVTERocmMoeActivation {
+  kNVTERocmMoeSwiGLU = 0,        /*!< silu(g) * u */
+  kNVTERocmMoeSwiGLUClamp10 = 1, /*!< silu(min(g, 10)) * clamp(u, -10, 10) (clamped_swiglu_v2, limit 10) */
 };
 
 /*! \brief Score function of the fused router (Megatron semantics). */
-enum NVTEMoeRouterScore {
-  kNVTEMoeRouterSoftmax = 0,      /*!< softmax over the top k logits */
-  kNVTEMoeRouterSigmoid = 1,      /*!< sigmoid, top k of score + expert bias, normalized */
-  kNVTEMoeRouterSqrtSoftplus = 2, /*!< sqrt(softplus), as sigmoid */
-  kNVTEMoeRouterSoftmaxPre = 3,   /*!< softmax over all experts, then top k, not renormalized */
+enum NVTERocmMoeRouterScore {
+  kNVTERocmMoeRouterSoftmax = 0,      /*!< softmax over the top k logits */
+  kNVTERocmMoeRouterSigmoid = 1,      /*!< sigmoid, top k of score + expert bias, normalized */
+  kNVTERocmMoeRouterSqrtSoftplus = 2, /*!< sqrt(softplus), as sigmoid */
+  kNVTERocmMoeRouterSoftmaxPre = 3,   /*!< softmax over all experts, then top k, not renormalized */
 };
 
 /*! \brief Host collectives over the EP group, and the device-memory allocator.
@@ -63,44 +63,44 @@ typedef struct {
   int (*allgather)(void *ctx, const void *send, void *recv, size_t bytes);
   int (*alloc)(void *ctx, size_t bytes, int ipc, void **ptr);
   void (*free)(void *ctx, void *ptr);
-} NVTEMoeComm;
+} NVTERocmMoeComm;
 
 /*! \brief Fused-router configuration. */
 typedef struct {
-  int score;         /*!< NVTEMoeRouterScore */
+  int score;         /*!< NVTERocmMoeRouterScore */
   int groups;        /*!< expert groups for group-limited routing (0: none) */
   int group_topk;    /*!< groups selected per token */
   int aux_groups;    /*!< 0: no aux loss; 1: over the batch; n > 1: per sequence, token t in sequence t % n */
   float aux_coeff;   /*!< aux-loss coefficient */
   float scale;       /*!< routing-weight scale (0 means 1) */
-} NVTEMoeRouterConfig;
+} NVTERocmMoeRouterConfig;
 
 /*! \brief Layer configuration, identical on every EP rank. Begins with struct_size (0: the base layout). */
 typedef struct {
   size_t struct_size;
   int hidden_size;       /*!< H, multiple of 256 (MXFP8 training: 1024) */
   int ffn_hidden_size;   /*!< I per expert, multiple of 256 */
-  int num_local_experts; /*!< E_loc; global experts NVTE_MOE_EP_SIZE * E_loc */
+  int num_local_experts; /*!< E_loc; global experts NVTE_ROCM_MOE_EP_SIZE * E_loc */
   int topk;              /*!< k in {1, 2, 4, 6, 8, 10} */
   int num_tokens;        /*!< T tokens per rank (fixed per workspace) */
   int wgcap;             /*!< launch width in workgroups, [9, 256] */
   int capacity_rows;     /*!< receive rows per rank to reserve (> 0) */
   size_t pool_bytes;     /*!< training saved-state pool bytes per rank (0: one call's block) */
   int training;          /*!< nonzero: backward supported */
-  int activation;        /*!< NVTEMoeActivation */
+  int activation;        /*!< NVTERocmMoeActivation */
   int mxfp8;             /*!< MXFP8 GEMM operands */
   int fp8_combine;       /*!< MXFP8 training: MXFP8 combines */
   int probs_on_input;    /*!< k = 1: routing weight applied to the input, unweighted fold */
   int shared_expert;     /*!< a shared expert runs in the same launches */
   int router;            /*!< nonzero: the routing is computed by the fused router (router_config) */
-  NVTEMoeRouterConfig router_config;
-} NVTEMoeConfig;
+  NVTERocmMoeRouterConfig router_config;
+} NVTERocmMoeConfig;
 
-#define NVTE_MOE_CONFIG_INIT {sizeof(NVTEMoeConfig)}
-#define NVTE_MOE_COMM_INIT {sizeof(NVTEMoeComm)}
+#define NVTE_ROCM_MOE_CONFIG_INIT {sizeof(NVTERocmMoeConfig)}
+#define NVTE_ROCM_MOE_COMM_INIT {sizeof(NVTERocmMoeComm)}
 
-typedef struct NVTEMoeWorkspace_ *NVTEMoeWorkspace;
-typedef struct NVTEMoeLayer_ *NVTEMoeLayer;
+typedef struct NVTERocmMoeWorkspace_ *NVTERocmMoeWorkspace;
+typedef struct NVTERocmMoeLayer_ *NVTERocmMoeLayer;
 
 /*! \brief Forward operands. Absent tensors are null NVTETensors or tensors without data.
  *
@@ -135,8 +135,8 @@ typedef struct {
   NVTETensor out;
   NVTETensor aux_loss;
   NVTETensor tokens_per_expert;
-  int save_for_backward; /*!< training: keep the saved state for nvte_moe_backward */
-} NVTEMoeForwardArgs;
+  int save_for_backward; /*!< training: keep the saved state for nvte_rocm_moe_backward */
+} NVTERocmMoeForwardArgs;
 
 /*! \brief Backward operands (the forward's, plus gradients). Gradients are overwritten unless noted.
  *
@@ -172,9 +172,9 @@ typedef struct {
   NVTETensor shared_fc2_wgrad;
   NVTETensor shared_gate_grad;
   int wgrad_accumulate;
-} NVTEMoeBackwardArgs;
+} NVTERocmMoeBackwardArgs;
 
-/*! \brief Statistics since the previous query or capacity change (see nvte_moe_capacity_query). */
+/*! \brief Statistics since the previous query or capacity change (see nvte_rocm_moe_capacity_query). */
 typedef struct {
   int peak;       /*!< most receive rows a rank needed in any call */
   int rows;       /*!< current capacity */
@@ -182,94 +182,94 @@ typedef struct {
   int nlayers;    /*!< open layer handles */
   int rounds;     /*!< handles that ran a call in rounds */
   int cap_rounds; /*!< of those, how many needed more rows than the capacity */
-} NVTEMoeCapacityStat;
+} NVTERocmMoeCapacityStat;
 
-/*! \brief Layer status bits (nvte_moe_layer_status). */
-enum NVTEMoeStatus {
-  kNVTEMoeStatusBadExpert = 1,     /*!< an expert id outside [0, 8 E_loc) (also every -1 padding row) */
-  kNVTEMoeStatusDuplicate = 2,     /*!< an expert repeated in a token's top k */
-  kNVTEMoeStatusRounds = 8,        /*!< a call ran in rounds */
-  kNVTEMoeStatusKeptXpOnly = 16,   /*!< bf16 training: a forward kept only Xp (backward recomputes GEMM1) */
-  kNVTEMoeStatusKeptNothing = 32,  /*!< training: a forward kept nothing (backward re-sends X) */
+/*! \brief Layer status bits (nvte_rocm_moe_layer_status). */
+enum NVTERocmMoeStatus {
+  kNVTERocmMoeStatusBadExpert = 1,     /*!< an expert id outside [0, 8 E_loc) (also every -1 padding row) */
+  kNVTERocmMoeStatusDuplicate = 2,     /*!< an expert repeated in a token's top k */
+  kNVTERocmMoeStatusRounds = 8,        /*!< a call ran in rounds */
+  kNVTERocmMoeStatusKeptXpOnly = 16,   /*!< bf16 training: a forward kept only Xp (backward recomputes GEMM1) */
+  kNVTERocmMoeStatusKeptNothing = 32,  /*!< training: a forward kept nothing (backward re-sends X) */
 };
 
 /*! \brief Whether the fused MoE is built and the current device supports it. */
-int nvte_moe_is_supported(void);
+int nvte_rocm_moe_is_supported(void);
 
 /*! \brief Host-only configuration check; returns 0 and writes the reason to why (if not null) when refused. */
-int nvte_moe_config_valid(const NVTEMoeConfig *cfg, char *why, size_t why_len);
+int nvte_rocm_moe_config_valid(const NVTERocmMoeConfig *cfg, char *why, size_t why_len);
 
 /*! \brief Create a workspace (local). cfg and comm are copied; comm->ctx must outlive the workspace. */
-NVTEMoeWorkspace nvte_moe_workspace_create(const NVTEMoeConfig *cfg, const NVTEMoeComm *comm);
+NVTERocmMoeWorkspace nvte_rocm_moe_workspace_create(const NVTERocmMoeConfig *cfg, const NVTERocmMoeComm *comm);
 
 /*! \brief Destroy a workspace (collective), after every layer on it. */
-void nvte_moe_workspace_destroy(NVTEMoeWorkspace ws);
+void nvte_rocm_moe_workspace_destroy(NVTERocmMoeWorkspace ws);
 
 /*! \brief Create a layer handle on a workspace (local; its first forward or prepare is collective). */
-NVTEMoeLayer nvte_moe_layer_create(NVTEMoeWorkspace ws);
+NVTERocmMoeLayer nvte_rocm_moe_layer_create(NVTERocmMoeWorkspace ws);
 
 /*! \brief Destroy a layer handle (collective). Frees its saved state, if any. */
-void nvte_moe_layer_destroy(NVTEMoeLayer layer);
+void nvte_rocm_moe_layer_destroy(NVTERocmMoeLayer layer);
 
 /*! \brief Map the layer's buffers now (collective, host-blocking), so that its calls can be graph-captured. */
-void nvte_moe_layer_prepare(NVTEMoeLayer layer);
+void nvte_rocm_moe_layer_prepare(NVTERocmMoeLayer layer);
 
 /*! \brief Re-zero the layer's and the workspace's state after a failed call (collective, host-blocking). */
-void nvte_moe_layer_reset(NVTEMoeLayer layer);
+void nvte_rocm_moe_layer_reset(NVTERocmMoeLayer layer);
 
 /*! \brief OR of the status bits of the layer's calls since the last query (local, host-blocking). */
-int nvte_moe_layer_status(NVTEMoeLayer layer);
+int nvte_rocm_moe_layer_status(NVTERocmMoeLayer layer);
 
-/*! \brief Saved-state ownership of a layer handle (nvte_moe_layer_release_state). */
-enum NVTEMoeReleaseState {
-  kNVTEMoeReleaseIdle = 0,      /*!< nothing stored */
-  kNVTEMoeReleaseStored = 1,    /*!< a saving forward awaits its backward */
-  kNVTEMoeReleasePending = 2,   /*!< released on this rank, not yet on every rank */
-  kNVTEMoeReleaseReclaimed = 3, /*!< released on every rank: the handle may run a new forward */
+/*! \brief Saved-state ownership of a layer handle (nvte_rocm_moe_layer_release_state). */
+enum NVTERocmMoeReleaseState {
+  kNVTERocmMoeReleaseIdle = 0,      /*!< nothing stored */
+  kNVTERocmMoeReleaseStored = 1,    /*!< a saving forward awaits its backward */
+  kNVTERocmMoeReleasePending = 2,   /*!< released on this rank, not yet on every rank */
+  kNVTERocmMoeReleaseReclaimed = 3, /*!< released on every rank: the handle may run a new forward */
 };
 
 /*! \brief The handle's saving forward will get no backward (local, host-only, thread-safe; e.g. from a finalizer).
  *
  *  Its pool block is freed once every rank released it: the ranks agree inside their next forwards (any layer of the
- *  workspace), and the handle becomes kNVTEMoeReleaseReclaimed a few forwards later, at the same point of the call
+ *  workspace), and the handle becomes kNVTERocmMoeReleaseReclaimed a few forwards later, at the same point of the call
  *  sequence on every rank. Off for calls captured into a graph.
  */
-void nvte_moe_layer_release(NVTEMoeLayer layer);
+void nvte_rocm_moe_layer_release(NVTERocmMoeLayer layer);
 
-/*! \brief The handle's NVTEMoeReleaseState (local, host-only). */
-int nvte_moe_layer_release_state(NVTEMoeLayer layer);
+/*! \brief The handle's NVTERocmMoeReleaseState (local, host-only). */
+int nvte_rocm_moe_layer_release_state(NVTERocmMoeLayer layer);
 
 /*! \brief Read every launched forward's agreement (host-blocking; call it alike on every rank). */
-void nvte_moe_release_sync(NVTEMoeWorkspace ws);
+void nvte_rocm_moe_release_sync(NVTERocmMoeWorkspace ws);
 
 /*! \brief Forward: one launch on stream. */
-void nvte_moe_forward(NVTEMoeLayer layer, const NVTEMoeForwardArgs *args, cudaStream_t stream);
+void nvte_rocm_moe_forward(NVTERocmMoeLayer layer, const NVTERocmMoeForwardArgs *args, cudaStream_t stream);
 
 /*! \brief Backward of the layer's most recent saving forward: one launch on stream. */
-void nvte_moe_backward(NVTEMoeLayer layer, const NVTEMoeBackwardArgs *args, cudaStream_t stream);
+void nvte_rocm_moe_backward(NVTERocmMoeLayer layer, const NVTERocmMoeBackwardArgs *args, cudaStream_t stream);
 
 /*! \brief Resize the saved-state pool (collective, host-blocking, between steps).
  *  \return 0 resized; 1 refused (a saved forward awaits its backward); 2 refused (inside a stream capture).
  */
-int nvte_moe_pool_resize(NVTEMoeWorkspace ws, size_t bytes);
+int nvte_rocm_moe_pool_resize(NVTERocmMoeWorkspace ws, size_t bytes);
 
 /*! \brief Pool bytes per rank, one call's block, and the Xp bytes reserved per layer still to save. */
-void nvte_moe_pool_info(NVTEMoeWorkspace ws, size_t *bytes, size_t *head_bytes, size_t *reserve_bytes);
+void nvte_rocm_moe_pool_info(NVTERocmMoeWorkspace ws, size_t *bytes, size_t *head_bytes, size_t *reserve_bytes);
 
 /*! \brief Set the receive capacity in rows (collective, host-blocking, between steps).
- *  \return as nvte_moe_pool_resize; 3: an allocation failed on some rank and the old capacity is kept.
+ *  \return as nvte_rocm_moe_pool_resize; 3: an allocation failed on some rank and the old capacity is kept.
  */
-int nvte_moe_set_capacity(NVTEMoeWorkspace ws, int rows);
+int nvte_rocm_moe_set_capacity(NVTERocmMoeWorkspace ws, int rows);
 
 /*! \brief Read and clear the capacity statistics of every open layer (collective, host-blocking). */
-void nvte_moe_capacity_query(NVTEMoeWorkspace ws, NVTEMoeCapacityStat *stat);
+void nvte_rocm_moe_capacity_query(NVTERocmMoeWorkspace ws, NVTERocmMoeCapacityStat *stat);
 
-/*! \brief Device bytes nvte_moe_set_capacity would allocate at rows. */
-size_t nvte_moe_capacity_bytes(NVTEMoeWorkspace ws, int rows);
+/*! \brief Device bytes nvte_rocm_moe_set_capacity would allocate at rows. */
+size_t nvte_rocm_moe_capacity_bytes(NVTERocmMoeWorkspace ws, int rows);
 
 /*! \brief Bytes of device memory the fused MoE currently holds from hipMalloc, i.e. allocated outside every
- *  workspace's NVTEMoeComm allocator (0 when every workspace has one). */
-size_t nvte_moe_untracked_bytes(void);
+ *  workspace's NVTERocmMoeComm allocator (0 when every workspace has one). */
+size_t nvte_rocm_moe_untracked_bytes(void);
 
 #ifdef __cplusplus
 }

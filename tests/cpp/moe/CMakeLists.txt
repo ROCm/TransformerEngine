@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-# The fused expert-parallel MoE (nvte_moe_*, KOSMOS kernels): ROCm gfx950, 8 GPUs. A separate executable, as every
+# The fused expert-parallel MoE (nvte_rocm_moe_*, KOSMOS kernels): ROCm gfx950, 8 GPUs. A separate executable, as every
 # test forks one process per GPU.
 set(test_kosmos_moe_cuda_sources test_kosmos_moe.cu)
 add_executable(test_kosmos_moe ${test_kosmos_moe_cuda_sources})
