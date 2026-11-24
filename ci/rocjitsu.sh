@@ -33,8 +33,6 @@ TEST_UTIL=$ROCJITSU_CPP_BUILD_DIR/util/test_util
 # Shapes that take minutes per test case under emulation, as they appear in gtest names.
 LARGE_SHAPES="*8192X7168*:*2048X12288*:*256X65536*:*65536X*:*4096X13312*:*1024X16384*:*X768X6144X*"
 LARGE_SHAPES="$LARGE_SHAPES:*X16384X1616*:*32X1481X677*:*2304x768x4096*:*768x3072x4096*:*768x768x4096*"
-# Known gfx1250 MXFP8 bug (compact scales in GEMM-swizzled outputs); delete once fixed
-KNOWN_FAILURES="*/SwizzledScalesFusedCastMXFP8TestSuite.*"
 
 install_prerequisites() {
     # The CI image carries no gfx1250 device code for the ROCm libraries and PyTorch.
@@ -155,7 +153,7 @@ cpp() {
         if [ -n "$TE_CI_LIST_ITEMS" ]; then
             echo "TE_CI_ITEM $tag"
         else
-            gtest_run $tag $shard $shards "$test_binary" "$3-$LARGE_SHAPES:$KNOWN_FAILURES"
+            gtest_run $tag $shard $shards "$test_binary" "$3-$LARGE_SHAPES"
         fi
     done
 }

@@ -389,9 +389,10 @@ legacy single-stage atomic kernel by setting:
 Tensor Data Mover kernels on gfx1250
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-On gfx1250, the FP8, MXFP8, MXFP4 and NVFP4 quantize and dequantize kernels move their data with
-the Tensor Data Mover (TDM) where the tensor shapes and alignment allow it, and use the other
-kernels otherwise. NVTE_USE_ATOMIC_AMAX=1 also applies to their amax.
+On gfx1250, the FP8, MXFP8, MXFP4 and NVFP4 quantize and dequantize kernels, the LayerNorm and
+RMSNorm kernels, and the transposes of tensors and MXFP8 scales move their data with the Tensor
+Data Mover (TDM) where they apply, and use the other kernels otherwise. NVTE_USE_ATOMIC_AMAX=1 also
+applies to their amax.
 
 If needed (e.g., for debugging or performance comparisons), you can disable the TDM kernels by
 setting:
