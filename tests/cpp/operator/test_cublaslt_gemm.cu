@@ -1669,13 +1669,17 @@ INSTANTIATE_TEST_SUITE_P(
         BlockwiseParams{256, 128, 256, false, true,  1e-4f, false, 0.0f},
         BlockwiseParams{256, 384, 256, false, false, 1e-4f, false, 0.0f},
         BlockwiseParams{256, 384, 256, false, true,  1e-4f, false, 0.0f},
+        BlockwiseParams{256, 384, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 384, 256, true,  true,  1e-4f, false, 0.0f},
 
         // ---- large K: FP8 row strides of 16 KiB and more -------------------------------------
         //
         // HipKittens buffer descriptors keep 14 stride bits: K = 16384 wraps to 0 (no cache
-        // swizzle), 20480 to 4096 and 28672 to 12288.
+        // swizzle), 20480 to 4096 and 28672 to 12288.  K = 20480 also runs with FP32 scales,
+        // which take gfx950's other main kernel.
         BlockwiseParams{256, 16384, 256, false, false, 1e-4f, false, 0.0f},
         BlockwiseParams{256, 20480, 256, true,  false, 1e-4f, false, 0.0f},
+        BlockwiseParams{256, 20480, 256, true,  true,  1e-4f, false, 0.0f},
         BlockwiseParams{256, 28672, 256, false, false, 1e-4f, false, 0.0f}),
     BlockwiseTestName);
 
