@@ -2,25 +2,13 @@
 #
 # See LICENSE for license information.
 #
-# TE CI deps image
-
+# TE CI deps image.
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCK_RELEASE_VERSION=10.1.0
 ARG PYTHON_VERSION=3.14
-ARG TORCH_VERSION=2.13.0
-ARG TORCHVISION_VERSION=0.28.0
-# triton 3.8.0 ships as a git snapshot: triton-3.8.0+<TRITON_LOCAL>.rocm<rel>
-ARG TRITON_VERSION=3.8.0
-ARG TRITON_LOCAL=git669b31ac
-ARG JAX_VERSION=0.11.1
-ARG FA_VERSION=v2.8.3.post2
-ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
-ARG FLYDSL_VERSION=0.4.0
-ARG GPU_ARCH=gfx950;gfx942
 
 # Package sources. Noble has no Python ${PYTHON_VERSION}, so add deadsnakes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,39 +35,70 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN python -m pip install --upgrade pip setuptools wheel pyyaml \
     && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
-# Python ROCm SDK + torch + Jax from https://stable.repo.amd.com/rocm/whl-next/
-RUN W="https://stable.repo.amd.com/rocm/whl-next" \
-    && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
-    && pip install --no-cache-dir \
-        --extra-index-url "${W}" \
+ARG ROCM_WHEEL_INDEX=https://stable.repo.amd.com/rocm/whl-next
+ARG ROCK_RELEASE_VERSION=10.1.0
+
+# ROCm SDK. The devel tree is unpacked here, in the layer that installs it: the
+# unpack hardlinks it to the packages' files and deletes _devel.tar. In a later
+# layer, the linked files would be stored again and the tarball would stay here.
+RUN pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
         "rocm==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-core==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-devel==${ROCK_RELEASE_VERSION}" \
         "rocm-sdk-libraries==${ROCK_RELEASE_VERSION}" \
-        "torch==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
-        "torchvision==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" \
-        "triton==${TRITON_VERSION}+${TRITON_LOCAL}.${ROCM_WHEEL_TAG}" \
-        "jax==${JAX_VERSION}" \
-        "jax-rocm10-pjrt==${JAX_VERSION}+${ROCM_WHEEL_TAG}" \
-        "jax-rocm10-plugin==${JAX_VERSION}+${ROCM_WHEEL_TAG}" \
+    && ROCM_ROOT="$(rocm-sdk path --root)" \
+    && ! ls "${ROCM_ROOT%/*}"/rocm_sdk_devel/_devel.tar* 2> /dev/null
+
+# Device kernels: the first GPU_ARCH entry in its own layer and the rest in the
+# next, so they download in parallel; list the arch with the most kernels first.
+# `rocm-sdk path --root` hardlinks each package into the devel tree, which must
+# happen in the layer that installs it.
+ARG GPU_ARCH=gfx942;gfx950
+RUN pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+        "rocm-sdk-device-${GPU_ARCH%%;*}==${ROCK_RELEASE_VERSION}" \
+    && rocm-sdk path --root > /dev/null
+RUN for arch in ${GPU_ARCH//;/ }; do \
+         pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+           "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" ; \
+       done \
+    && rocm-sdk path --root > /dev/null
+
+ARG TRITON_VERSION=3.8.0
+ARG TRITON_LOCAL=git669b31ac
+RUN pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+        "triton==${TRITON_VERSION}+${TRITON_LOCAL}.rocm${ROCK_RELEASE_VERSION}"
+
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
+RUN pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+        "torch==${TORCH_VERSION}+rocm${ROCK_RELEASE_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}+rocm${ROCK_RELEASE_VERSION}" \
     && for arch in ${GPU_ARCH//;/ }; do \
-         pip install --no-cache-dir --extra-index-url "${W}" \
-           "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" \
-           "amd-torch-device-${arch}==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
-           "amd-torchvision-device-${arch}==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" ; \
+         pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+           "amd-torch-device-${arch}==${TORCH_VERSION}+rocm${ROCK_RELEASE_VERSION}" \
+           "amd-torchvision-device-${arch}==${TORCHVISION_VERSION}+rocm${ROCK_RELEASE_VERSION}" ; \
        done
 
-# Install FlyDSL to enable running FlyDSL GEMM tests.
-RUN pip install --no-cache-dir "flydsl==${FLYDSL_VERSION}"
-
-# Install Flash Attention
+# Install Flash Attention.
+ARG FA_VERSION=v2.8.3.post2
 RUN export ROCM_PATH="$(rocm-sdk path --root)" \
     && git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
     && cd /tmp/flash-attention \
     && GPU_ARCHS="${GPU_ARCH}" python setup.py install \
     && rm -rf /tmp/flash-attention
 
+ARG JAX_VERSION=0.11.1
+RUN pip install --no-cache-dir --extra-index-url "${ROCM_WHEEL_INDEX}" \
+        "jax==${JAX_VERSION}" \
+        "jax-rocm10-pjrt==${JAX_VERSION}+rocm${ROCK_RELEASE_VERSION}" \
+        "jax-rocm10-plugin==${JAX_VERSION}+rocm${ROCK_RELEASE_VERSION}"
+
+# Install FlyDSL to enable running FlyDSL GEMM tests.
+ARG FLYDSL_VERSION=0.4.0
+RUN pip install --no-cache-dir "flydsl==${FLYDSL_VERSION}"
+
 # Install Aiter
+ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 RUN export ROCM_PATH="$(rocm-sdk path --root)" \
     && git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
     && cd /tmp/aiter \
