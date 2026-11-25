@@ -1,0 +1,87 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# The CI test environment: every version it uses. ci/install_deps.sh installs it from
+# uv.lock next to this file; after editing, `ci/install_deps.sh --update-locks` regenerates
+# uv.lock (see "CI test environment" in ci/README.md).
+
+[project]
+name = "te-ci-env"
+# uv requires a version; this environment is never built as a package, so it stays 0
+version = "0"
+requires-python = "==3.14.*"
+# In every venv: ROCm, Triton, and the build and test tools
+dependencies = [
+    "rocm[libraries,devel]==10.1.0",
+    "triton==3.8.0+git669b31ac.rocm10.1.0",
+    "pip",
+    "setuptools",
+    "wheel",
+    "ninja",
+    "pybind11[global]",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "pydantic",
+    "fire",
+    "ipython",
+    "pytest",
+    "pytest-timeout",
+    "hypothesis",
+    "expecttest",
+]
+
+[dependency-groups]
+# aiter and Flash Attention are installed apart (tool.te-ci); their requirements are here
+torch = [
+    "torch==2.13.0+rocm10.1.0",
+    "torchvision==0.28.0+rocm10.1.0",
+    "flydsl==0.4.0",
+    "einops",
+    "onnxscript",
+    "safetensors",
+    "psutil",
+    "packaging",
+]
+jax = [
+    "jax==0.11.1",
+    "jax-rocm10-pjrt==0.11.1+rocm10.1.0",
+    "jax-rocm10-plugin==0.11.1+rocm10.1.0",
+    "flax",
+    "etils",
+    "typing_extensions",
+]
+# One group per GPU arch CI tests, with its device libraries, and torch's for that arch
+gfx942 = ["rocm[device-gfx942]"]
+gfx950 = ["rocm[device-gfx950]"]
+torch-gfx942 = ["torch[device-gfx942]", "torchvision[device-gfx942]"]
+torch-gfx950 = ["torch[device-gfx950]", "torchvision[device-gfx950]"]
+
+[tool.uv]
+package = false
+# Its version also fixes the Python patch release
+required-version = "==0.13.9"
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# AMD's index (ROCm and its builds of torch, Triton and JAX) besides PyPI; every
+# source's versions count, and uv.lock's hashes keep the bytes exact
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+url = "https://stable.repo.amd.com/rocm/whl-next"
+
+# What isn't a Python package. The scripts read these lines as they are: keep each a
+# single `key = "value"`.
+[tool.te-ci]
+# Plain OS image the test container starts from
+base-image = "docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+uv-sha256 = "a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5"
+# aiter is installed from source. aiter-ck-commit is the CK submodule commit aiter-commit
+# pins; --update-locks refreshes it. 77455e3e was validated in CI for MXFP4 FP4 GEMM
+# kernel coverage.
+aiter-commit = "77455e3ecf4f0d28756afc452e914940c45b944b"
+aiter-ck-commit = "d5acfd8d5287082794158a60bc47264db06ef81f"
+# Flash Attention depends on the exact torch, ROCm and Python, so it isn't in uv.lock:
+# install_deps.sh installs this release's wheel built for uv.lock's, from the ghcr.io
+# package CI publishes it to, or builds it (see "Flash Attention" in ci/README.md)
+flash-attn = "2.8.3.post2"
+flash-attn-wheels = "ghcr.io/rocm/te-ci-fa-wheels"

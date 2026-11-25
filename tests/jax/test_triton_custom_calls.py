@@ -20,7 +20,7 @@ import triton
 import triton.language as tl
 
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
-from transformer_engine.jax.triton_extensions import triton_call_lowering
+from transformer_engine.jax.triton_extensions import get_triton_target, triton_call_lowering
 
 # Gluon support is optional and warp-size explicit. HAS_GLUON gates the Gluon
 # test below so the Triton test still runs when Gluon is unavailable.
@@ -42,7 +42,7 @@ else:
         from triton.experimental import gluon
         from triton.experimental.gluon import language as gl
 
-        WARP_SIZE = triton.runtime.driver.active.get_current_target().warp_size
+        WARP_SIZE = get_triton_target().warp_size
         # Gluon-on-ROCm needs the make_ir fix shipped after Triton 3.4.0. Compare
         # the base release so a "+rocm.git" local segment can't slip past.
         HAS_GLUON = Version(triton.__version__).release > (3, 4, 0)

@@ -17,27 +17,14 @@ on:
         required: false
         default: '1'
         type: string
-      docker_image_override:
-        description: 'Manual Docker Image (Leave empty to use config file value)'
-        required: false
-        type: string
-      test_config_from_source:
-        description: 'DEBUG: Use config.json from current source branch instead of dev'
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
         description: 'Test Level (1-3)'
         required: true
         default: '1'
-      docker_image_override:
-        description: 'Manual Docker Image (Leave empty to use config file value)'
-        required: false
-        type: string
-      test_config_from_source:
-        description: 'DEBUG: Use config.json from current source branch instead of dev'
+      full_run:
+        description: 'Full run: Runs the Build, and all test suites regardless of changes'
         type: boolean
         default: false
 
@@ -52,64 +39,24 @@ env:
   TE_CI_DATA_DIR: ci-data
 
 jobs:
-  select_image:
-    name: Select Docker Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      image-tag: ${{ steps.select-image.outputs.image-tag }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
-          sparse-checkout: ci/ci_config.json
-          sparse-checkout-cone-mode: false
-
-      - name: Select Docker Image Tag
-        id: select-image
-        run: |
-          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
-          else
-             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
-          fi
-
-          if [[ ! -f "ci/ci_config.json" ]]; then
-             echo "::error::Config file not found in checkout."
-             exit 1
-          fi
-
-          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
-          echo "Determining image for branch: $BRANCH_NAME"
-          VERSION_KEY="$BRANCH_NAME"
-
-          if jq -e --arg key "$VERSION_KEY" '.docker_images[$key]' ci/ci_config.json > /dev/null; then
-            JSON_KEY="$VERSION_KEY"
-          else
-            JSON_KEY="default"
-          fi
-
-          echo "Selected config key: $JSON_KEY"
-          IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
-
-          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
-          if [[ -n "$MANUAL_OVERRIDE" ]]; then
-            echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-          fi
-
-          echo "Selected base image tag: $IMAGE_BASE"
-          echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
-
-  # Which suites this run needs. A PR runs only the suites its changed paths affect
-  # (.github/scripts/change_scope.py, the PR's own copy); pushes, manual runs and
-  # PRs labelled ci-skip-scope run every suite.
+  # What this run builds and tests. A PR or a manual run runs only the suites its changed
+  # paths affect (.github/scripts/change_scope.py, the run's own copy); a manual run's
+  # changes are its branch's against dev. Runs on dev and release branches, and manual
+  # runs with "full run", run every suite. Then it finds a TE build to reuse and checks
+  # whether the Flash Attention wheel is published.
   scope:
-    name: Select Test Suites
+    name: Plan Build and Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      actions: read
     outputs:
       run_build: ${{ steps.scope.outputs.run_build }}
+      build_key: ${{ steps.wheels.outputs.build_key }}
+      wheels_run_id: ${{ steps.wheels.outputs.run_id }}
+      flash_attn_build: ${{ steps.flash_attn.outputs.build }}
       sgpu_suites: ${{ steps.scope.outputs.sgpu_suites }}
       mgpu_suites: ${{ steps.scope.outputs.mgpu_suites }}
       emu_suites: ${{ steps.scope.outputs.emu_suites }}
@@ -121,62 +68,186 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          # A PR is diffed against its base branch, which needs the history
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # A PR is diffed against its base branch and a manual run against dev, which
+          # needs the history
+          fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && '0' || '1' }}
 
       - name: Select suites
         id: scope
         env:
           EVENT: ${{ github.event_name }}
-          SKIP_SCOPE: ${{ contains(github.event.pull_request.labels.*.name, 'ci-skip-scope') }}
+          REF_NAME: ${{ github.ref_name }}
+          FULL_RUN: ${{ inputs.full_run }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           everything() {
             python3 .github/scripts/change_scope.py --all "$1" \
-              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+              --github-output "$GITHUB_OUTPUT" --summary "$RUNNER_TEMP/summary-tests.md"
           }
 
-          if [[ "$EVENT" != "pull_request" ]]; then
+          if [[ "$EVENT" == "pull_request" ]]; then
+            # The whole PR against its merge base, not just the latest push
+            range="${BASE_SHA}...${HEAD_SHA}"
+          elif [[ "$REF_NAME" == dev || "$REF_NAME" == release_* ]]; then
+            everything "runs on dev and release branches are not gated"
+            exit 0
+          elif [[ "$FULL_RUN" == true ]]; then
+            everything "this manual run is a full run"
+            exit 0
+          elif [[ "$EVENT" == "workflow_dispatch" ]]; then
+            # The branch's changes against dev
+            range="origin/dev...HEAD"
+          else
             everything "${EVENT} runs are not gated"
             exit 0
           fi
-          if [[ "$SKIP_SCOPE" == "true" ]]; then
-            everything "the PR is labelled ci-skip-scope"
-            exit 0
-          fi
 
-          # The whole PR against its merge base, not just the latest push.
           # --no-renames lists a moved file at both its old and its new path.
-          if ! git diff --name-status --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed.txt; then
-            echo "::warning::could not list the PR's changes; running every suite"
-            everything "the PR's changes could not be listed"
+          if ! git diff --name-status --no-renames "$range" > /tmp/changed.txt; then
+            echo "::warning::could not list the changes; running every suite"
+            everything "the changes could not be listed"
             exit 0
           fi
-          if ! python3 .github/scripts/change_scope.py --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" \
-                < /tmp/changed.txt; then
+          if ! python3 .github/scripts/change_scope.py --github-output "$GITHUB_OUTPUT" \
+                --summary "$RUNNER_TEMP/summary-tests.md" < /tmp/changed.txt; then
             echo "::warning::.github/scripts/change_scope.py failed; running every suite"
             everything "the gating rules failed"
           fi
 
+      # The TE wheels this run reuses: an earlier build of the same files (the build key,
+      # BUILD_RULES in .github/scripts/change_scope.py) from this PR's or branch's own
+      # runs, or from the branch a PR targets (dev for a manual run). Runs on dev and
+      # release branches, and manual runs with "full run", always build.
+      - name: Find a TE build to reuse
+        id: wheels
+        if: steps.scope.outputs.run_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          REPO_ID: ${{ github.repository_id }}
+          FULL_RUN: ${{ inputs.full_run }}
+        run: |
+          key=$(python3 .github/scripts/change_scope.py --build-key | cut -d= -f2)
+          echo "build_key=$key" >> "$GITHUB_OUTPUT"
+          own=""
+          if [[ "$EVENT" == pull_request ]]; then
+            own_repo=$HEAD_REPO_ID own=$HEAD_REF base=$BASE_REF
+          elif [[ "$REF_NAME" == dev || "$REF_NAME" == release_* ]]; then
+            msg="Building; runs on dev and release branches always build"
+          elif [[ "$FULL_RUN" == true ]]; then
+            msg="Building; this manual run is a full run"
+          else
+            own_repo=$REPO_ID own=$REF_NAME base=dev
+          fi
+          run=""
+          if [[ -n "$own" ]]; then
+            # The latest one, as: run ID, branch, commit
+            if ! found=$(set -o pipefail
+                gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=te-rocm-wheels-$key&per_page=100" \
+                | jq -r --argjson own_repo "$own_repo" --arg own "$own" --argjson repo "$REPO_ID" --arg base "$base" '
+                    [.artifacts[] | select(.expired | not) | select(.workflow_run as $r
+                      | ($r.head_repository_id == $own_repo and $r.head_branch == $own)
+                        or ($r.head_repository_id == $repo and $r.head_branch == $base))]
+                    | sort_by(.created_at) | last // empty
+                    | [.workflow_run.id, .workflow_run.head_branch, .workflow_run.head_sha[:9]] | @tsv'); then
+              echo "::warning::Couldn't list the earlier TE builds; this run builds TE"
+              msg="Couldn't list the earlier builds; building"
+            elif [[ -n "$found" ]]; then
+              IFS=$'\t' read -r run branch sha <<< "$found"
+              msg="Found \`te-rocm-wheels-$key\` in [run $run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run) ($branch, $sha); reusing it"
+            else
+              msg="No \`te-rocm-wheels-$key\` found in the runs on $own or $base; building"
+            fi
+          fi
+          echo "run_id=$run" >> "$GITHUB_OUTPUT"
+          echo "TE: $msg"
+          echo "- **TE:** $msg" >> "$RUNNER_TEMP/summary-build.md"
+
+      # Whether the Flash Attention wheel the torch suites install is published on
+      # ghcr.io, so a build runner starts only when it has to be built
+      - name: Check the Flash Attention wheel
+        id: flash_attn
+        if: steps.scope.outputs.run_build == 'true'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          ref=$(ci/deps/build_fa_wheel.sh --ref)
+          rc=0
+          ci/deps/build_fa_wheel.sh --check || rc=$?
+          if [[ $rc == 0 ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            msg="Found the wheel at \`$ref\`"
+          else
+            # Missing, or not known: the Flash Attention job checks again and builds it
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            msg="No wheel found at \`$ref\`; building it"
+          fi
+          echo "Flash Attention: $msg"
+          echo "- **Flash Attention:** $msg" >> "$RUNNER_TEMP/summary-build.md"
+
+      # The job summary: what the build steps found, then the test suites
+      - name: Write the job summary
+        if: always()
+        run: |
+          {
+            if [[ -s "$RUNNER_TEMP/summary-build.md" ]]; then
+              printf '## Build\n\n'
+              cat "$RUNNER_TEMP/summary-build.md"
+              echo
+            fi
+            if [[ -s "$RUNNER_TEMP/summary-tests.md" ]]; then
+              printf '## Test suites\n\n'
+              cat "$RUNNER_TEMP/summary-tests.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     needs: scope
-    if: needs.scope.outputs.run_build == 'true'
-    # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    if: needs.scope.outputs.run_build == 'true' && needs.scope.outputs.wheels_run_id == ''
+    permissions:
+      contents: read
+    # Delegate wheel building to the reusable workflow. It produces a core .whl plus framework .tar.gz sdists, named by the build key so later runs can reuse them.
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
     with:
+      artifact_name: te-rocm-wheels-${{ needs.scope.outputs.build_key }}
       use_ccache: true
       save_ccache: ${{ github.event_name != 'pull_request' }}
 
+  # Builds and publishes the Flash Attention wheel the torch suites install, when the
+  # scope job found this branch's torch, ROCm or Python has none yet
+  flash_attn:
+    name: Flash Attention wheel
+    needs: scope
+    if: needs.scope.outputs.flash_attn_build == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/fa-wheel-publish.yml
+
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
-    needs: [scope, select_image, build]
-    if: needs.scope.outputs.sgpu_suites != ''
+    needs: [scope, build, flash_attn]
+    # build is skipped when an earlier build is reused, flash_attn when the wheel is published
+    if: >-
+      !cancelled()
+      && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.scope.outputs.wheels_run_id != ''))
+      && contains(fromJSON('["success", "skipped"]'), needs.flash_attn.result)
+      && needs.scope.outputs.sgpu_suites != ''
+    permissions:
+      contents: read
+      packages: read
+      actions: read
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      SUITES: ${{ needs.scope.outputs.sgpu_suites }}
+      GPU_ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
     strategy:
       fail-fast: false
       matrix:
@@ -201,38 +272,70 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      # Download artifacts and pull the Docker image concurrently
+      # Download artifacts and set up the test container concurrently
       - parallel:
           - name: Download build artifacts
             uses: actions/download-artifact@v8
             with:
-              name: te-rocm-wheels
+              name: te-rocm-wheels-${{ needs.scope.outputs.build_key }}
               path: dist/
+              # A reused build is in an earlier run
+              github-token: ${{ needs.scope.outputs.wheels_run_id && github.token || '' }}
+              run-id: ${{ needs.scope.outputs.wheels_run_id || github.run_id }}
 
-          - name: Pull Docker Image
+          - &start_container
+            name: Start container
+            env:
+              # Reads the Flash Attention wheel while its ghcr.io package is private
+              GHCR_TOKEN: ${{ github.token }}
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+              DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
+              test -n "$DEVICE_FLAG"
+              echo "Using device flag: $DEVICE_FLAG"
+              # A plain OS image: install_deps.sh installs each framework the job's suites
+              # use into its own venv, for this runner's GPU arch; each suite runs in its own.
+              FRAMEWORKS=""
+              for suite in $SUITES; do
+                case "$suite" in
+                  torch|torch-mgpu|core) FRAMEWORKS="$FRAMEWORKS torch" ;;
+                  jax|jax-mgpu) FRAMEWORKS="$FRAMEWORKS jax" ;;
+                  *) FRAMEWORKS="$FRAMEWORKS torch jax" ;;
+                esac
+              done
+              FRAMEWORKS=$(printf '%s\n' $FRAMEWORKS | sort -ur | xargs)
+              VENV_ENV=()
+              for fw in $FRAMEWORKS; do
+                VENV_ENV+=(-e "TE_CI_${fw^^}_VENV=/opt/venv-$fw")
+              done
+              # The queue's own Python (GPU probes, CK JIT prebuild) runs in the first venv:
+              # torch when the job has it
+              DEFAULT_VENV=/opt/venv-${FRAMEWORKS%% *}
+              TE_CI_BASE_IMAGE=$(sed -n 's/^base-image = "\(.*\)"$/\1/p' ci/deps/pyproject.toml)
+              SECONDS=0
+              docker pull "$TE_CI_BASE_IMAGE"
+              docker run -dt \
+                --rm \
+                --name te-runner \
+                --network=host \
+                --device=/dev/kfd $DEVICE_FLAG \
+                --shm-size=16G \
+                --pid=host \
+                --group-add $(getent group render | cut -d: -f3) \
+                --group-add $(getent group video | cut -d: -f3) \
+                "${VENV_ENV[@]}" \
+                -e VIRTUAL_ENV=$DEFAULT_VENV \
+                -e PATH=$DEFAULT_VENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                -v "${{ github.workspace }}:/workspace" \
+                -w /workspace \
+                "$TE_CI_BASE_IMAGE"
+              for fw in $FRAMEWORKS; do
+                docker exec -e GHCR_TOKEN -e GITHUB_ACTOR \
+                  te-runner bash ci/install_deps.sh "$GPU_ARCH" --frameworks "$fw"
+              done
+              echo "Test environment ready in ${SECONDS} s"
 
-      - &run_container
-        name: Run Container
-        run: |
-          DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
-          test -n "$DEVICE_FLAG"
-          echo "Using device flag: $DEVICE_FLAG"
-          docker run -dt \
-            --rm \
-            --name te-runner \
-            --network=host \
-            --device=/dev/kfd $DEVICE_FLAG \
-            --shm-size=16G \
-            --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
-
-      - name: Install packages
+      - &install_packages
+        name: Install packages
         run: |
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
@@ -244,11 +347,18 @@ jobs:
           TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
           test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
-          pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
-          pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
-          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
+          # Each framework venv the job has gets the core wheel and its own package,
+          # built with only that venv on PATH. The build tools are in the locks.
+          if [ -n "${TE_CI_TORCH_VENV:-}" ]; then
+            ( export VIRTUAL_ENV="$TE_CI_TORCH_VENV" PATH="$TE_CI_TORCH_VENV/bin:$PATH"
+              pip install --no-deps "$TE_CORE_PKG"
+              pip install --no-build-isolation --no-deps "$TE_TORCH_PKG" )
+          fi
+          if [ -n "${TE_CI_JAX_VENV:-}" ]; then
+            ( export VIRTUAL_ENV="$TE_CI_JAX_VENV" PATH="$TE_CI_JAX_VENV/bin:$PATH"
+              pip install --no-deps "$TE_CORE_PKG"
+              pip install --no-build-isolation --no-deps "$TE_JAX_PKG" )
+          fi
           EOF
           )"
 
@@ -394,12 +504,22 @@ jobs:
   # Each item runs on the whole box, one after another -- see ci/run_queue.sh.
   mgpu_tests:
     name: mGPU Tests (${{ matrix.arch_label }})
-    needs: [scope, select_image, build]
-    if: needs.scope.outputs.mgpu_suites != ''
+    needs: [scope, build, flash_attn]
+    # build is skipped when an earlier build is reused, flash_attn when the wheel is published
+    if: >-
+      !cancelled()
+      && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.scope.outputs.wheels_run_id != ''))
+      && contains(fromJSON('["success", "skipped"]'), needs.flash_attn.result)
+      && needs.scope.outputs.mgpu_suites != ''
+    permissions:
+      contents: read
+      packages: read
+      actions: read
     timeout-minutes: 240
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      SUITES: ${{ needs.scope.outputs.mgpu_suites }}
+      GPU_ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
     strategy:
       fail-fast: false
       matrix:
@@ -417,37 +537,20 @@ jobs:
           rocm-smi
           echo "::endgroup::"
 
-      # Download artifacts and pull the Docker image concurrently
+      # Download artifacts and set up the test container concurrently
       - parallel:
           - name: Download build artifacts
             uses: actions/download-artifact@v8
             with:
-              name: te-rocm-wheels
+              name: te-rocm-wheels-${{ needs.scope.outputs.build_key }}
               path: dist/
+              # A reused build is in an earlier run
+              github-token: ${{ needs.scope.outputs.wheels_run_id && github.token || '' }}
+              run-id: ${{ needs.scope.outputs.wheels_run_id || github.run_id }}
 
-          - name: Pull Docker Image
-            run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
+          - *start_container
 
-      - *run_container
-
-      - name: Install packages
-        run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
-          set -ex
-
-          TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
-
-          pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
-          pip install --upgrade hypothesis setuptools
-          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
-          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
-          EOF
-          )"
+      - *install_packages
 
       # What failed on an earlier attempt of this run; see the sGPU job.
       - name: Restore the previous attempt's failed items
@@ -557,14 +660,20 @@ jobs:
   # (ci/run_queue.sh --queue emu) with an item per CPU slot.
   emu_tests:
     name: Emulated gfx1250 Tests
-    needs: [scope, select_image, build]
-    if: needs.scope.outputs.emu_suites != ''
+    needs: [scope, build]
+    # build is skipped when an earlier build is reused
+    if: >-
+      !cancelled()
+      && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.scope.outputs.wheels_run_id != ''))
+      && needs.scope.outputs.emu_suites != ''
+    permissions:
+      contents: read
+      actions: read
     # Advisory until the emulator and the test selection have proven stable
     continue-on-error: true
     timeout-minutes: 240
     runs-on: ${{ vars.TE_CPU_TEST_RUNNER || 'build-only-te' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
       # CPU runners can be shared, so the container name is unique to this run
       CONTAINER: te-emu-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -578,42 +687,54 @@ jobs:
             3rdparty/hipify_torch \
             3rdparty/composable_kernel
 
-      - name: Get rocjitsu revision
+      - name: Get rocjitsu revision and base image
         id: rocjitsu
         run: |
           echo "ref=$(sed -n 's/^: \${ROCJITSU_REF:=\([0-9a-f]*\)}$/\1/p' ci/rocjitsu.sh)" >> "$GITHUB_OUTPUT"
+          echo "base_image=$(sed -n 's/^base-image = "\(.*\)"$/\1/p' ci/deps/pyproject.toml)" >> "$GITHUB_OUTPUT"
 
       # ci/rocjitsu.sh reuses a build of the same rocm-systems commit
       - name: Cache rocjitsu build
         uses: actions/cache@v6
         with:
           path: build/rocjitsu
-          key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ env.DOCKER_IMAGE }}
+          key: rocjitsu-${{ steps.rocjitsu.outputs.ref }}-${{ steps.rocjitsu.outputs.base_image }}
 
-      # Download artifacts and pull the Docker image concurrently
+      # Download artifacts and set up the test container concurrently
       - parallel:
           - name: Download build artifacts
             uses: actions/download-artifact@v8
             with:
-              name: te-rocm-wheels
+              name: te-rocm-wheels-${{ needs.scope.outputs.build_key }}
               path: dist/
+              # A reused build is in an earlier run
+              github-token: ${{ needs.scope.outputs.wheels_run_id && github.token || '' }}
+              run-id: ${{ needs.scope.outputs.wheels_run_id || github.run_id }}
 
-          - name: Pull Docker Image
+          - name: Start container
+            env:
+              TE_CI_BASE_IMAGE: ${{ steps.rocjitsu.outputs.base_image }}
             run: |
-              docker pull ${{ env.DOCKER_IMAGE }}
-
-      - name: Run Container
-        run: |
-          # --init reaps the helper processes of emulator runs that were killed
-          docker run -dt \
-            --rm \
-            --init \
-            --name "$CONTAINER" \
-            --network=host \
-            --shm-size=16G \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ${{ env.DOCKER_IMAGE }}
+              # A plain OS image with the torch venv, which the emulated suite runs in. The
+              # runner has no GPU: the first arch's device libraries stand in, and
+              # ci/rocjitsu.sh adds gfx1250's. Flash Attention isn't built for gfx1250.
+              SECONDS=0
+              docker pull "$TE_CI_BASE_IMAGE"
+              # --init reaps the helper processes of emulator runs that were killed
+              docker run -dt \
+                --rm \
+                --init \
+                --name "$CONTAINER" \
+                --network=host \
+                --shm-size=16G \
+                -e TE_CI_TORCH_VENV=/opt/venv-torch \
+                -e VIRTUAL_ENV=/opt/venv-torch \
+                -e PATH=/opt/venv-torch/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                -v "${{ github.workspace }}:/workspace" \
+                -w /workspace \
+                "$TE_CI_BASE_IMAGE"
+              docker exec "$CONTAINER" bash ci/install_deps.sh --frameworks torch --no-gpu-check --no-flash-attn
+              echo "Test environment ready in ${SECONDS} s"
 
       - name: Install packages
         run: |
@@ -626,9 +747,8 @@ jobs:
           TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
           test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG"
 
+          # Into the torch venv, the container's default; the build tools are in the locks
           pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
-          pip install --upgrade hypothesis setuptools
           pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
           EOF
           )"

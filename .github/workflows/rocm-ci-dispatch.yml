@@ -35,7 +35,7 @@ jobs:
             let dispatch = false;
             if (action === 'labeled') {
               // A ci-level label was added: dispatch at the highest level on the PR. Any
-              // other label, ci-skip-scope included, leaves CI alone.
+              // other label leaves CI alone.
               const addedLevel = parseLevelLabel(context.payload.label?.name);
               dispatch = addedLevel > 0;
             } else {
@@ -54,12 +54,17 @@ jobs:
     # - A commit is pushed
     # - The PR is reopened
     # To run at a lower level, remove the higher label first: removing a label
-    # does not start a run. ci-skip-scope starts no run of its own; while it is
-    # on the PR, each run skips the path rules of .github/scripts/change_scope.py
-    # and runs every suite at its level.
+    # does not start a run. For every suite and a fresh TE build, run "Build and
+    # Test Branch" by hand with "full run".
     if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
+    # packages: the CI publishes the Flash Attention wheel to ghcr.io when it is missing;
+    # actions: it reuses TE builds of earlier runs
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     uses: ./.github/workflows/rocm-ci.yml
     secrets: inherit
     with:

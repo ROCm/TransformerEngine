@@ -6,6 +6,8 @@
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
+# Needs only ROCm and the TE core library, both in the torch venv
+use_framework_venv "${TE_CI_TORCH_VENV:-}"
 
 start_message
 if [ -z "$TEST_SGPU" ]; then

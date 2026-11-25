@@ -11,16 +11,22 @@ path on it, so a deletion or a rename still counts against the path it left.
 Each path is matched against RULES, first match wins, and the PR runs the union
 of what its paths ask for. A path that matches no rule is considered to require all suites.
 
-Only pull requests are gated. For pushes to dev and release branches, for
-manual runs, and for a PR labelled ci-skip-scope, the workflow calls this
-script with --all, which ignores the rules and selects every suite.
+Pull requests and manual runs are gated; a manual run by its branch's changes
+against dev. For runs on dev and release branches, and for manual runs with
+"full run", the workflow calls this script with --all, which ignores the rules
+and selects every suite.
+
+With --build-key it prints instead a hash of the files the TE wheels are built
+from, by BUILD_RULES; a run reuses an earlier build with the same hash.
 
 Example:
   git diff --name-status --no-renames dev...HEAD | python3 .github/scripts/change_scope.py
 """
 
 import argparse
+import hashlib
 import re
+import subprocess
 import sys
 
 # Suite labels, as named in ci/ci_sgpu_queue.conf, ci/ci_mgpu_queue.conf and
@@ -68,15 +74,13 @@ RULES = [
     (".github/workflows/rocm-ci.yml", EVERYTHING, "the CI workflow"),
     (".github/workflows/rocm-ci-dispatch.yml", EVERYTHING, "the CI workflow"),
     (".github/workflows/rocm-wheels-build.yml", EVERYTHING, "the CI build"),
+    (".github/workflows/fa-wheel-publish.yml", EVERYTHING, "the CI's Flash Attention wheel"),
     (".github/scripts/run_examples.sh", frozenset({"examples"}), "examples suite script"),
     (".github/scripts/run_example.py", frozenset({"examples"}), "examples suite helper"),
     # A PR is gated by its own copy of these rules, so one that edits them runs
     # every suite rather than trusting the rules it is changing.
     (".github/scripts/change_scope.py", EVERYTHING, "the gating rules"),
-    # Scripts of manually triggered workflows. The CI image in particular is
-    # published by hand and named in ci/ci_config.json, so a PR editing its
-    # recipe still runs on the published image.
-    (".github/scripts/Dockerfile.ci.deps", NOTHING, "CI image recipe; ci-deps-docker-publish.yml"),
+    # Scripts of manually triggered workflows
     (".github/scripts/aiter_prebuild_upload.sh", NOTHING, "aiter-prebuilt-upload.yml"),
     (".github/scripts/check_for_ngc_images.sh", NOTHING, "attach-wheels-to-release.yml"),
     (".github/scripts/**", EVERYTHING, "CI scripts"),
@@ -116,8 +120,11 @@ RULES = [
     ("ci/ci_sgpu_queue.conf", frozenset(SGPU_SUITES), "sGPU queue config"),
     ("ci/ci_mgpu_queue.conf", frozenset(MGPU_SUITES), "mGPU queue config"),
     ("ci/ci_emu_queue.conf", EMU, "emulated-GPU queue config"),
-    # The CI docker images: a new image runs every suite
-    ("ci/ci_config.json", EVERYTHING, "names the CI docker images"),
+    # The release branches' CI reads its docker images from dev's copy; dev's CI
+    # installs its test environment at runtime instead
+    ("ci/ci_config.json", NOTHING, "docker images of the release branches' CI"),
+    # The test environment's versions, lock and scripts fall to the catch-all below,
+    # which runs every suite
     # Everything else every suite shares: the C++ library all frameworks link,
     # the build, the submodules and the rest of the CI scripts. The catch-all
     # is spelled out so the table reads as complete.
@@ -127,6 +134,31 @@ RULES = [
     ("build_tools/**", EVERYTHING, "build"),
     ("setup.py", EVERYTHING, "build"),
     ("**", EVERYTHING, "no rule names this path"),
+]
+
+# (pattern, built) for the TE wheels, first match wins, patterns as in RULES. A
+# run reuses an earlier TE build while none of the files it is built from
+# changed (build_key). A path no rule names counts as built, so a new directory
+# that isn't part of the build rebuilds until it is listed here.
+BUILD_RULES = [
+    (".github/workflows/rocm-wheels-build.yml", True),
+    (".github/**", False),
+    ("tests/**", False),
+    ("docs/**", False),
+    ("examples/**", False),
+    ("benchmarks/**", False),
+    ("qa/**", False),
+    ("ci/**", False),
+    ("**/*.md", False),
+    ("*.rst", False),
+    ("LICENSE", False),
+    ("CODEOWNERS", False),
+    ("Acknowledgements.txt", False),
+    (".gitignore", False),
+    (".clang-format", False),
+    (".pre-commit-config.yaml", False),
+    ("pylintrc", False),
+    ("CPPLINT.cfg", False),
 ]
 
 
@@ -151,6 +183,7 @@ def _compile(pattern):
 
 
 _COMPILED = [(_compile(pattern), pattern, suites, why) for pattern, suites, why in RULES]
+_BUILD_COMPILED = [(_compile(pattern), built) for pattern, built in BUILD_RULES]
 
 
 def classify(path):
@@ -159,6 +192,30 @@ def classify(path):
         if regex.match(path):
             return pattern, suites, why
     raise AssertionError("the catch-all rule matches every path")
+
+
+def built(path):
+    """Whether ``path`` is one of the files the TE wheels are built from."""
+    for regex, is_built in _BUILD_COMPILED:
+        if regex.match(path):
+            return is_built
+    return True
+
+
+def build_key(rev="HEAD"):
+    """A hash of the files the TE wheels are built from, as committed at ``rev``.
+
+    It hashes git's own object IDs of those files, so a submodule counts by the
+    commit it pins.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", rev], check=True, capture_output=True, text=True
+    ).stdout
+    digest = hashlib.sha256()
+    for entry in listing.split("\0"):
+        if entry and built(entry.split("\t", 1)[1]):
+            digest.update(entry.encode() + b"\0")
+    return digest.hexdigest()[:16]
 
 
 def read_paths(lines):
@@ -191,25 +248,20 @@ def ordered(suites, names):
 
 
 def summary_lines(needed, decisions, reason):
-    """Markdown for the job summary: the verdict, then why, path by path."""
-    sgpu = ordered(needed, SGPU_SUITES) or "none"
-    mgpu = ordered(needed, MGPU_SUITES) or "none"
-    emu = ordered(needed, EMU_SUITES) or "none"
-    out = ["## CI scope", ""]
+    """Markdown for the job summary's test suites: the verdict, then why, path by path."""
     if reason:
-        out += [f"Running every suite: {reason}.", ""]
-        return out
+        return [f"Every suite; {reason}", ""]
     if needed:
-        out += [
-            f"- sGPU suites: **{sgpu}**",
-            f"- mGPU suites: **{mgpu}**",
-            f"- Emulated GPU suites: **{emu}**",
-            "",
+        out = [
+            f"- sGPU: {ordered(needed, SGPU_SUITES) or 'none'}",
+            f"- mGPU: {ordered(needed, MGPU_SUITES) or 'none'}",
+            f"- Emulated GPU: {ordered(needed, EMU_SUITES) or 'none'}",
         ]
     else:
-        out += ["Nothing this PR changes is built or tested by CI, so no test job runs.", ""]
+        out = ["None; these changes need no build or tests"]
     out += [
-        f"<details><summary>Why -- {len(decisions)} changed paths</summary>",
+        "",
+        f"<details><summary>Why: {len(decisions)} changed paths</summary>",
         "",
         "| Path | Rule | Runs | Reason |",
         "|---|---|---|---|",
@@ -229,7 +281,7 @@ def main():
     parser.add_argument(
         "--all",
         metavar="REASON",
-        help="skip the rules and select every suite, e.g. for a push or a ci-skip-scope label; "
+        help="skip the rules and select every suite, e.g. for a push to dev or a full run; "
         "stdin is not read",
     )
     parser.add_argument(
@@ -237,8 +289,21 @@ def main():
         metavar="FILE",
         help="append run_build, sgpu_suites, mgpu_suites and emu_suites to FILE ($GITHUB_OUTPUT)",
     )
-    parser.add_argument("--summary", metavar="FILE", help="append a Markdown explanation to FILE")
+    parser.add_argument(
+        "--summary",
+        metavar="FILE",
+        help="append the verdict and why to FILE, in Markdown",
+    )
+    parser.add_argument(
+        "--build-key",
+        action="store_true",
+        help="print build_key=<hash of the files the TE wheels are built from>; stdin is not read",
+    )
     args = parser.parse_args()
+
+    if args.build_key:
+        print(f"build_key={build_key()}")
+        return 0
 
     if args.all:
         needed, decisions = set(EVERYTHING), []

@@ -1,0 +1,67 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+#
+# The Flash Attention wheel ci/install_deps.sh installs on this branch: the flash-attn
+# release in ci/deps/pyproject.toml, built for ci/deps/uv.lock's torch, ROCm and Python and
+# every GPU arch, published to its ghcr.io package (flash-attn-wheels in pyproject.toml).
+# rocm-ci.yml runs this when the wheel isn't published yet. Run it by hand with "override"
+# to rebuild a published wheel and replace it; only that replaces one.
+
+name: Publish Flash Attention wheel
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      override:
+        description: 'Rebuild the wheel and replace it if it is published already'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  wheel:
+    name: Build and publish
+    runs-on: build-only-te
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_TOKEN: ${{ github.token }}
+      OVERRIDE: ${{ inputs.override }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check whether it is published
+        id: check
+        run: |
+          ref=$(ci/deps/build_fa_wheel.sh --ref)
+          rc=0
+          ci/deps/build_fa_wheel.sh --check || rc=$?
+          if [[ "$OVERRIDE" == true ]]; then
+            echo "Rebuilding the wheel to replace \`$ref\`" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [[ $rc == 0 ]]; then
+            echo "Found the wheel at \`$ref\` already" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [[ $rc == 1 ]]; then
+            echo "No wheel found at \`$ref\`; building it"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            exit $rc
+          fi
+
+      - name: Build and publish it
+        if: steps.check.outputs.build == 'true'
+        run: |
+          set -o pipefail
+          base_image=$(sed -n 's/^base-image = "\(.*\)"$/\1/p' ci/deps/pyproject.toml)
+          # The builder has no GPU: install_deps.sh sets up the torch venv for one of the archs
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e GHCR_TOKEN -e GITHUB_ACTOR -e OVERRIDE \
+            "$base_image" bash -c '
+              set -e
+              ci/install_deps.sh --frameworks torch --no-gpu-check --no-flash-attn
+              ci/deps/build_fa_wheel.sh --upload $([ "$OVERRIDE" = true ] && echo --override)' 2>&1 | tee fa-build.log
+          grep -E "^Published|published" fa-build.log >> "$GITHUB_STEP_SUMMARY" || true

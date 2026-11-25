@@ -8,6 +8,7 @@ export NVTE_FRAMEWORK=jax
 DIR=`dirname $0`
 
 . $DIR/_utils.sh
+use_framework_venv "${TE_CI_JAX_VENV:-}"
 
 install_prerequisites() {
     _req_file=$(mktemp)
