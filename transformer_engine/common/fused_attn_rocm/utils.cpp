@@ -274,6 +274,11 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *seed, size_t q_max_s
   //both aiter and aotriton now follows flash-attn rng design
   size_t increment = 16;
   auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
+  // A failed-but-handled HIP call earlier in the process (XLA sizes its memory pool by letting
+  // hipMalloc fail and retrying smaller) leaves its status in the thread-local last-error slot,
+  // where it survives every later successful call. Clear it so the check below reports only this
+  // launch.
+  (void)cudaGetLastError();
   populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
                                                  reinterpret_cast<const int64_t *>(seed), offset);
   NVTE_CHECK_CUDA(cudaGetLastError());
