@@ -8,12 +8,12 @@ commit      10d98f9e473c5b32d7210ff97684cef24f023fe7, head of pull request #1 (b
             cut left, 0a49964 renames the saved route record and the training state, 10d98f9 adds
             CMakeLists.txt (the Makefile's libkosmos_moe.a, objects and flags)
 license     MIT (LICENSE, from the same commit)
-copied      src/moe/*, src/utils/*, CMakeLists.txt, LICENSE, byte-identical to that commit
+copied      src/moe/* (without README.md and moe_linkcheck.cpp, KOSMOS-repository documentation and a
+            build check TE does not use), src/utils/*, CMakeLists.txt, LICENSE, byte-identical to that commit
 hipkittens  3rdparty/hipkittens_kosmos at e4fa1cc3 (HazyResearch/HipKittens, branch alexmagro_earlyclobber),
             the pin KOSMOS records for 3rdparty/hipkittens at that commit; used by these sources only
 
-Verify the copy:   cd transformer_engine/common/kosmos && sha256sum -c SHA256SUMS
-                   (and against KOSMOS: git -C <KOSMOS> archive 10d98f9 src/moe src/utils CMakeLists.txt LICENSE)
+Check the copy:    cd transformer_engine/common/kosmos && sha256sum -c SHA256SUMS (detects edits to it)
 Built by:          transformer_engine/common/CMakeLists.txt, add_subdirectory(kosmos): CMakeLists.txt builds the static
                    libkosmos_moe.a, linked into libtransformer_engine behind the C API nvte_rocm_moe_*
                    (include/transformer_engine/rocm_moe.h, rocm_moe/rocm_moe.cpp)

@@ -76,7 +76,7 @@ size_t symmetric_buffer_bytes(int H, int I, int E_loc, int k, int T, int capacit
   if (!nvte_rocm_moe_config_valid(&cfg)) {
     throw std::invalid_argument(
         "rocm_moe: configuration refused (bf16 training, capacity_rows > 0; see "
-        "transformer_engine/common/kosmos/src/moe/README.md)");
+        "transformer_engine/common/include/transformer_engine/rocm_moe.h)");
   }
   return nvte_rocm_moe_symmetric_buffer_bytes(&cfg);
 }
@@ -100,7 +100,7 @@ class RocmMoeInstance {
     if (!nvte_rocm_moe_config_valid(&cfg_)) {
       throw std::invalid_argument(
           "RocmMoeInstance: configuration refused (bf16 training, capacity_rows > 0; see "
-          "transformer_engine/common/kosmos/src/moe/README.md)");
+          "transformer_engine/common/include/transformer_engine/rocm_moe.h)");
     }
     coll_->fn = std::move(allgather);
     NVTERocmMoeComm comm{};
