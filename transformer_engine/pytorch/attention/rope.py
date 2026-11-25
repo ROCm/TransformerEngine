@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,29 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
+
+try:
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+except ImportError:
+    IS_HIP_EXTENSION = False
+
+_aiter_rope_fwd = None
+_aiter_rope_bwd = None
+_HAVE_AITER_ROPE = False
+
+if IS_HIP_EXTENSION:
+    import os  # pylint: disable=wrong-import-order,wrong-import-position
+    if os.environ.get("NVTE_USE_AITER_ROPE", "0") == "1":
+        try:
+            from aiter.ops.rope import (  # pylint: disable=import-error
+                rope_fwd as _aiter_rope_fwd,
+                rope_bwd as _aiter_rope_bwd,
+            )
+            _HAVE_AITER_ROPE = True
+        except Exception as _aiter_import_err:  # pylint: disable=broad-except
+            raise RuntimeError(
+                "NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed."
+            ) from _aiter_import_err
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
@@ -119,6 +144,23 @@ class FusedRoPEFunc(torch.autograd.Function):
     """
 
     @staticmethod
+    def has_aiter_rope():
+        """Return whether AITER RoPE kernels are available."""
+        return _HAVE_AITER_ROPE
+
+    @staticmethod
+    def _can_use_aiter(tensor_format, interleaved, cu_seqlens, cp_size, start_positions):
+        """Check if we can dispatch to AITER's faster rope kernel."""
+        return (
+            _HAVE_AITER_ROPE
+            and tensor_format == "sbhd"
+            and not interleaved
+            and cu_seqlens is None
+            and cp_size == 1
+            and start_positions is None
+        )
+
+    @staticmethod
     def forward(
         ctx,
         t: torch.Tensor,
@@ -139,21 +181,36 @@ class FusedRoPEFunc(torch.autograd.Function):
             "bshd",
             "thd",
         ), f"Unsupported tensor_format: {tensor_format}."
-        output = tex.fused_rope_forward(
-            t,
-            freqs,
-            start_positions,
-            QKVFormat[tensor_format],
-            interleaved,
-            cu_seqlens,
-            cp_size,
-            cp_rank,
+
+        use_aiter = FusedRoPEFunc._can_use_aiter(
+            tensor_format, interleaved, cu_seqlens, cp_size, start_positions
         )
+
+        if use_aiter:
+            rotate_style = 1 if interleaved else 0
+            output = _aiter_rope_fwd(
+                t, freqs, rotate_style,
+                False,  # reuse_freqs_front_part
+                False,  # nope_first
+            )
+        else:
+            output = tex.fused_rope_forward(
+                t,
+                freqs,
+                start_positions,
+                QKVFormat[tensor_format],
+                interleaved,
+                cu_seqlens,
+                cp_size,
+                cp_rank,
+            )
+
         ctx.save_for_backward(freqs, cu_seqlens, start_positions)
         ctx.tensor_format = tensor_format
         ctx.cp_size = cp_size
         ctx.cp_rank = cp_rank
         ctx.interleaved = interleaved
+        ctx.use_aiter = use_aiter
 
         return output
 
@@ -161,16 +218,25 @@ class FusedRoPEFunc(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """Fused RoPE backward."""
         freqs, cu_seqlens, start_positions = ctx.saved_tensors
-        grad_input = tex.fused_rope_backward(
-            grad_output,
-            freqs,
-            start_positions,
-            QKVFormat[ctx.tensor_format],
-            ctx.interleaved,
-            cu_seqlens,
-            ctx.cp_size,
-            ctx.cp_rank,
-        )
+
+        if ctx.use_aiter:
+            rotate_style = 1 if ctx.interleaved else 0
+            grad_input = _aiter_rope_bwd(
+                grad_output, freqs, rotate_style,
+                False,  # reuse_freqs_front_part
+                False,  # nope_first
+            )
+        else:
+            grad_input = tex.fused_rope_backward(
+                grad_output,
+                freqs,
+                start_positions,
+                QKVFormat[ctx.tensor_format],
+                ctx.interleaved,
+                cu_seqlens,
+                ctx.cp_size,
+                ctx.cp_rank,
+            )
 
         return grad_input, None, None, None, None, None, None, None, None
 
