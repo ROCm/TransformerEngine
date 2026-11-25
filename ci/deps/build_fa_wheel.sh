@@ -52,10 +52,10 @@ if [[ "$MODE" != build && -n "${UPLOAD}${OVERRIDE}" ]]; then
     exit 1
 fi
 
-# The wheel's name, from uv.lock's torch and pyproject.toml's Python, and its tag in the
+# The wheel's name, from uv.lock's torch and Python, and its tag in the
 # package: the version, which can't hold "+" there, and the Python
 torch_version=$(awk '$0 == "name = \"torch\"" { getline; gsub(/^version = "|"$/, ""); print; exit }' "$DEPS_DIR/uv.lock")
-py=$(sed -n 's/^requires-python = "==\([0-9]*\)\.\([0-9]*\).*/cp\1\2/p' "$DEPS_DIR/pyproject.toml")
+py=$(sed -n 's/^requires-python = "==\([0-9]*\)\.\([0-9]*\).*/cp\1\2/p' "$DEPS_DIR/uv.lock")
 version="${FLASH_ATTN_VERSION}+rocm${torch_version#*+rocm}.torch$(cut -d. -f1,2 <<< "${torch_version%%+*}").${GPU_ARCHS// /.}"
 name="flash_attn-${version}-${py}-${py}-linux_x86_64.whl"
 tag="${version/+/-}-${py}"
