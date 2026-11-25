@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -306,6 +308,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
                         Result_Type recv_tokens_per_expert, Result_Type total_recv_tokens,
                         Result_Type handle_mem, EpConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -356,6 +359,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
                          Result_Type recv_tokens, Result_Type recv_topk_weights, EpConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -438,6 +442,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
 
 Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                         Buffer_Type expert_out, Result_Type result, EpConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;
   auto eo_dims = expert_out.dimensions();
   NVTE_CHECK(eo_dims.size() >= 2,
@@ -487,6 +492,7 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                             Buffer_Type grad, Buffer_Type g_recv_topk_weights,
                             Result_Type grad_tokens, Result_Type grad_topk_weights,
                             EpConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -561,6 +567,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                            Buffer_Type grad, Result_Type grad_expert_out, EpConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -624,6 +631,7 @@ Error_Type EpBootstrapBorrowedCommFFI(cudaStream_t stream, EpInstanceState* ep_s
                                       FfiCollectivesCtx coll, Buffer_Type token, Result_Type out,
                                       Span_Type<int64_t> replica_groups, int64_t group_size,
                                       int64_t communication_id) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)ep_state;
   auto groups = ffi_collectives::ReplicaGroupsFromFlat(replica_groups.begin(),
                                                        replica_groups.size(), group_size);

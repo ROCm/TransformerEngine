@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -19,6 +21,7 @@ namespace jax {
 Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
                    Result_Type keys_out_buf, Result_Type indices_out_buf, Result_Type workspace_buf,
                    int64_t k_value) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto keys_in_dtype = convert_ffi_datatype_to_te_dtype(keys_in_buf.element_type());
   auto keys_out_dtype = convert_ffi_datatype_to_te_dtype(keys_out_buf->element_type());
   auto idx_out_dtype = convert_ffi_datatype_to_te_dtype(indices_out_buf->element_type());

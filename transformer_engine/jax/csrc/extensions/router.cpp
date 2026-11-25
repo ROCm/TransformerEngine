@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -26,6 +28,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
     int64_t topk, int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk,
     double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores,
     JAXX_Routing_Map_Format routing_map_format) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto dtype = convert_ffi_datatype_to_te_dtype(logits_buf.element_type());
   auto dims = logits_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
@@ -115,6 +118,7 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     int64_t topk, int64_t use_pre_softmax, double scaling_factor,
     JAXX_Score_Function score_function, int64_t compute_aux_scores,
     JAXX_Routing_Map_Format routing_map_format) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
   NVTE_CHECK(
@@ -186,6 +190,7 @@ Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
                                      Result_Type aux_loss_buf,           // scalar
                                      Result_Type const_buf,              // scalar
                                      int64_t topk, double coeff) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto dtype = convert_ffi_datatype_to_te_dtype(probs_buf.element_type());
   auto probs_dims = probs_buf.dimensions();
   auto num_tokens = static_cast<int>(probs_dims[0]);
@@ -230,6 +235,7 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
                                       Buffer_Type tokens_per_expert_buf,  // [num_experts]
                                       Buffer_Type grad_aux_loss_buf,      // scalar
                                       Result_Type grad_probs_buf) {  // [num_tokens, num_experts]
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto grad_dtype = convert_ffi_datatype_to_te_dtype(grad_aux_loss_buf.element_type());
   auto tpe_dtype = convert_ffi_datatype_to_te_dtype(tokens_per_expert_buf.element_type());
 

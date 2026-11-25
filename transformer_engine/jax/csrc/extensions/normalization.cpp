@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -67,6 +69,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                           Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
                           double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
                           JAXX_Quantize_Layout quantize_layout, bool output_amax_when_no_scaling) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
@@ -272,6 +275,7 @@ Error_Type NormBackwardFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type 
                            Result_Type xgrad_buf, Result_Type wgrad_buf, Result_Type dbeta_buf,
                            Result_Type wkspace_buf, int64_t norm_type, bool zero_centered_gamma,
                            int64_t sm_margin) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
   auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());

@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -20,6 +22,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Result_Type updated_amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
                     JAXX_Quantize_Layout quantize_layout, ActivationConfig act_params,
                     bool output_amax_when_no_scaling) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
@@ -269,6 +272,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   JAXX_Scaling_Mode scaling_mode, int64_t act_enum,
                                   JAXX_Quantize_Layout quantize_layout, bool is_dbias,
                                   ActivationConfig act_params, bool output_amax_when_no_scaling) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;

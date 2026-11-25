@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -30,6 +32,7 @@ namespace jax {
 
 Error_Type ScaledSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_buf,
                                    Result_Type output_buf, double scale_factor_) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   SOFTMAX_COMMON_BLOCK(input_buf);
   auto shape = std::vector<size_t>{batch_size, head_dim, q_seqlen, k_seqlen};
   SOFTMAX_FORWARD_COMMON_BLOCK;
@@ -40,6 +43,7 @@ Error_Type ScaledSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_buf,
 Error_Type ScaledMaskedSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_buf,
                                          Buffer_Type mask_buf, Result_Type output_buf,
                                          double scale_factor_) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   SOFTMAX_COMMON_BLOCK(input_buf);
 
   // Mask would be casted to uint8_t
@@ -58,6 +62,7 @@ Error_Type ScaledMaskedSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_
 
 Error_Type ScaledUpperTriangMaskedSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_buf,
                                                     Result_Type output_buf, double scale_factor_) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   SOFTMAX_COMMON_BLOCK(input_buf);
   auto shape = std::vector<size_t>{batch_size * head_dim, q_seqlen, k_seqlen};
   SOFTMAX_FORWARD_COMMON_BLOCK;
@@ -149,6 +154,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHan
 Error_Type ScaledSoftmaxBackwardFFI(cudaStream_t stream, Buffer_Type grad_output_buf,
                                     Buffer_Type softmax_output_buf, Result_Type dgrad_buf,
                                     double scale_factor_) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   SOFTMAX_COMMON_BLOCK(grad_output_buf);
   auto shape = std::vector<size_t>{batch_size, head_dim, q_seqlen, k_seqlen};
   SOFTMAX_BACKWARD_COMMON_BLOCK;
@@ -161,6 +167,7 @@ Error_Type ScaledUpperTriangMaskedSoftmaxBackwardFFI(cudaStream_t stream,
                                                      Buffer_Type grad_output_buf,
                                                      Buffer_Type softmax_output_buf,
                                                      Result_Type dgrad_buf, double scale_factor_) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   SOFTMAX_COMMON_BLOCK(grad_output_buf);
   auto shape = std::vector<size_t>{batch_size * head_dim, q_seqlen, k_seqlen};
   SOFTMAX_BACKWARD_COMMON_BLOCK;

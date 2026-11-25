@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -39,6 +41,7 @@ static std::string SanitizeProbeName(std::string_view name) {
 Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type min_buf,
                       Buffer_Type max_buf, Buffer_Type mean_buf, Buffer_Type std_buf,
                       Result_Type output_buf, std::string_view name) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   NVTE_CHECK(input_buf.untyped_data() != nullptr, "Input must be provided for inspect operation");
   NVTE_CHECK(output_buf->untyped_data() != nullptr,
              "Output must be provided for inspect operation");
