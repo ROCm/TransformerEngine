@@ -58,6 +58,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
+      ghcr-image-tag: ${{ steps.select-image.outputs.ghcr-image-tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -100,6 +101,16 @@ jobs:
 
           echo "Selected base image tag: $IMAGE_BASE"
           echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
+
+          # Image for runners that pull from GHCR (matrix.ghcr). Taken from the "ghcr" key if
+          # present, else derived from the selected tag: a PR run reads dev's config, which has no
+          # "ghcr" key, and the GHCR image carries the same tag as the Harbor one.
+          GHCR_IMAGE_BASE=$(jq -r '.docker_images["ghcr"] // empty' ci/ci_config.json)
+          if [[ -z "$GHCR_IMAGE_BASE" ]]; then
+            GHCR_IMAGE_BASE="ghcr.io/rocm/te-ci-deps:${IMAGE_BASE##*:}"
+          fi
+          echo "Selected GHCR image tag: $GHCR_IMAGE_BASE"
+          echo "ghcr-image-tag=$GHCR_IMAGE_BASE" >> $GITHUB_OUTPUT
 
   # Which suites this run needs. A PR runs only the suites its changed paths affect
   # (.github/scripts/change_scope.py, the PR's own copy); pushes, manual runs and
@@ -174,13 +185,16 @@ jobs:
     needs: [scope, select_image, build]
     if: needs.scope.outputs.sgpu_suites != ''
     timeout-minutes: 270
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
+    runs-on: ${{ matrix.runner }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || (matrix.ghcr && needs.select_image.outputs.ghcr-image-tag || needs.select_image.outputs.image-tag) }}
     strategy:
       fail-fast: false
       matrix:
-        arch_label: [mi30x, mi35x]
+        # DPX pilot: mi30x on Vultr MI325 DPX, mi35x on DPX gfx950. Both pull from GHCR.
+        include:
+          - { arch_label: mi30x, runner: linux-te-vultr-mi325-4, ghcr: true }
+          - { arch_label: mi35x, runner: amd-dpx-linux.te.gpu.gfx950.4, ghcr: true }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -397,13 +411,16 @@ jobs:
     needs: [scope, select_image, build]
     if: needs.scope.outputs.mgpu_suites != ''
     timeout-minutes: 240
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    runs-on: ${{ matrix.runner }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || (matrix.ghcr && needs.select_image.outputs.ghcr-image-tag || needs.select_image.outputs.image-tag) }}
     strategy:
       fail-fast: false
       matrix:
-        arch_label: [mi30x, mi35x]
+        # DPX pilot: mi30x on Vultr MI325 DPX, mi35x on DPX gfx950. Both pull from GHCR.
+        include:
+          - { arch_label: mi30x, runner: linux-te-vultr-mi325-8, ghcr: true }
+          - { arch_label: mi35x, runner: amd-dpx-linux.te.gpu.gfx950.8, ghcr: true }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
