@@ -391,6 +391,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   transformer_engine::pytorch::register_ep_bindings(m);
 #endif  // NVTE_WITH_NCCL_EP
 
+  // Fused expert-parallel MoE training on ROCm (KOSMOS): the submodule rocm_moe
+  transformer_engine::pytorch::register_rocm_moe_bindings(m);
+
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
         py::call_guard<py::gil_scoped_release>());
