@@ -602,6 +602,7 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Result_Type max_tensor_buf, Result_Type rng_state_buf,
                                Result_Type workspace_buf,
                                Dictionary attrs) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   FUSED_ATTN_FFI_GET_ATTRS;
   bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);
 
@@ -959,6 +960,7 @@ Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_T
                                 Result_Type dq_buf, Result_Type dk_buf, Result_Type dv_buf,
                                 Result_Type dbias_buf, Result_Type dsoftmax_offset_buf,
                                 Result_Type workspace_buf, Dictionary attrs) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   FUSED_ATTN_FFI_GET_ATTRS;
 
   FusedAttnBackwardImpl(
@@ -1106,6 +1108,7 @@ ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
 Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
                                 const std::vector<void *> &input_ptrs,
                                 const std::vector<void *> &output_ptrs, void *workspace) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto graph = GetScoreModGraph(stream, attrs);
   auto input_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "input_uids");
   auto output_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "output_uids");

@@ -47,6 +47,10 @@ void launch_fwd_thd_inst(size_t batch,
   using Config =
       FmhaKernelConfig<HEAD_NUM, 17, HEAD_DIM, 256, false, CausalMaskType::DISABLE, 17>;
   using Launcher = AttnForwardMfmaDispatchLauncher<T, Config>;
+  // A failed-but-handled HIP call earlier in the process leaves its status in the thread-local
+  // last-error slot, where it survives every later successful call. Clear it so the check below
+  // reports only this launch.
+  (void)hipGetLastError();
   Launcher::run_attn_fwd_kernel(Q, K, V, nullptr, 0.0f, attn_scale, O, softmax_lse,
                                 0, cu_q, cu_qp, cu_kv, cu_kvp, total_padded_q,
                                 static_cast<int>(batch), stream);
@@ -68,6 +72,8 @@ void launch_fwd_bshd_inst(size_t batch,
       FmhaKernelConfig<HEAD_NUM, 17, HEAD_DIM, 256, false, CausalMaskType::DISABLE, 17>;
   using Launcher = AttnForwardMfmaDispatchLauncher<T, Config>;
   const int total_tokens_q = static_cast<int>(batch) * seqlen_q;
+  // Clear any stale thread-local HIP error so the check below reports only this launch.
+  (void)hipGetLastError();
   Launcher::run_attn_fwd_kernel(Q, K, V, nullptr, 0.0f, attn_scale, O, softmax_lse, seqlen_q,
                                 nullptr, nullptr, nullptr, nullptr, total_tokens_q,
                                 static_cast<int>(batch), stream);
@@ -175,6 +181,8 @@ void launch_bwd_thd_inst(size_t batch,
   using Config =
       FmhaKernelConfig<HEAD_NUM, 17, HEAD_DIM, 256, false, CausalMaskType::DISABLE, 17>;
   using Launcher = AttnBackwardMfma16x16KernelLauncher<T, Config>;
+  // Clear any stale thread-local HIP error so the check below reports only this launch.
+  (void)hipGetLastError();
   Launcher::run_attn_bwd_kernel(Q, K, V, dO, softmax_lse, dQ, dK, dV, attn_scale, 0, cu_q, cu_qp,
                                 cu_kv, cu_kvp, static_cast<int>(batch), stream);
   HIP_CHECK(hipGetLastError());
@@ -197,6 +205,8 @@ void launch_bwd_bshd_inst(size_t batch,
   using Config =
       FmhaKernelConfig<HEAD_NUM, 17, HEAD_DIM, 256, false, CausalMaskType::DISABLE, 17>;
   using Launcher = AttnBackwardMfma16x16KernelLauncher<T, Config>;
+  // Clear any stale thread-local HIP error so the check below reports only this launch.
+  (void)hipGetLastError();
   Launcher::run_attn_bwd_kernel(Q, K, V, dO, softmax_lse, dQ, dK, dV, attn_scale, seqlen_q,
                                 nullptr, nullptr, nullptr, nullptr, static_cast<int>(batch),
                                 stream);

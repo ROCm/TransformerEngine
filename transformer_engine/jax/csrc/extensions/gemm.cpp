@@ -157,6 +157,7 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
                          Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type alpha,
                          Buffer_Type beta, Result_Type output, Result_Type workspace,
                          GemmConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   nvte_cublas_handle_init();
 
   // Init UB buffer
@@ -299,6 +300,7 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
                      Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
                      Buffer_Type alpha, Buffer_Type beta, Result_Type output, Result_Type workspace,
                      GemmConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   // cuBLAS workspace + 256 alignment enforcement (+ swizzle scales)
   uint8_t *lhs_swizzle_scale_ptr = nullptr, *rhs_swizzle_scale_ptr = nullptr;
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
@@ -576,6 +578,7 @@ size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *
 
 Error_Type GroupedGemmD2HGroupSizesFFI(cudaStream_t stream, Buffer_Type group_sizes,
                                        Result_Type dummy_output, size_t num_gemms) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   int32_t *dev_group_sizes = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
   GroupedGemmGetGroupSizes(stream, num_gemms, dev_group_sizes, nullptr);
   return ffi_with_cuda_error_check();
@@ -975,6 +978,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type alpha, Buffer_Type beta, Result_Type output,
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
         lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size] = config;
 
@@ -1099,6 +1103,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type out_first_dims, Buffer_Type out_last_dims,
                           Buffer_Type group_offset, Result_Type output, Result_Type workspace,
                           GroupedGemmConfig config) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes,
         lhs_axis_boundary, rhs_axis_boundary, lhs_left_size, lhs_right_size, rhs_left_size,
         rhs_right_size] = config;

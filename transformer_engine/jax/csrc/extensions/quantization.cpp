@@ -95,6 +95,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
                             Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
                             JAXX_Quantize_Layout quantize_layout, bool is_dbias,
                             int64_t flatten_axis, bool stochastic_rounding, bool use_rht) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
@@ -290,6 +291,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
 
 Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
                          Buffer_Type scale_buf, Buffer_Type scale_inv_buf, Result_Type output_buf) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
@@ -325,6 +327,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
                               Result_Type colwise_scale_invs, Result_Type amaxs,
                               Result_Type _unused, JAXX_Scaling_Mode scaling_mode,
                               JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::NO_SCALING,
              "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
 
@@ -513,6 +516,7 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
                                 Result_Type colwise_sinv, Result_Type updated_amaxs,
                                 Result_Type int64_workspace, JAXX_Quantize_Layout quantize_layout,
                                 int64_t flatten_axis) {
+  (void)cudaGetLastError();  // Drop stale last-error state before this handler's work.
   (void)scale_unused;  // scale is unused for MXFP8; accepted to match V1 input arity
   auto in_dtype = convert_ffi_datatype_to_te_dtype(inputs.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(rowwise_out->element_type());
