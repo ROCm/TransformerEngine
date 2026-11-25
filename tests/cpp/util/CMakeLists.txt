@@ -8,6 +8,9 @@ list(APPEND test_cuda_sources
                test_nvrtc.cpp
                test_string.cpp
                ../test_common.cu)
+if(USE_ROCM)
+    list(APPEND test_cuda_sources test_rocm_tdm.cu)
+endif()
 if(USE_CUDA)
     add_executable(test_util ${test_cuda_sources})
 else()  
