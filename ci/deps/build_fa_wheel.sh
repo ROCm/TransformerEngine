@@ -5,7 +5,7 @@
 # The Flash Attention wheel the CI test environment installs: the flash-attn release in
 # pyproject.toml, compiled for uv.lock's torch, ROCm and Python and every GPU arch in
 # pyproject.toml, its version labelled with them, e.g.
-# 2.8.3.post2+rocm10.1.0.torch2.13.gfx942.gfx950. CI publishes it to the flash-attn-wheels
+# 2.8.3.post2+torch2.13.0.rocm10.1.0.gfx942.gfx950. CI publishes it to the flash-attn-wheels
 # package on ghcr.io, tagged with that version; ci/install_deps.sh fetches it from there, or
 # runs this to build it. Wheels go to /opt/fa-wheels, where later installs find them.
 #
@@ -56,7 +56,7 @@ fi
 # package: the version, which can't hold "+" there, and the Python
 torch_version=$(awk '$0 == "name = \"torch\"" { getline; gsub(/^version = "|"$/, ""); print; exit }' "$DEPS_DIR/uv.lock")
 py=$(sed -n 's/^requires-python = "==\([0-9]*\)\.\([0-9]*\).*/cp\1\2/p' "$DEPS_DIR/uv.lock")
-version="${FLASH_ATTN_VERSION}+rocm${torch_version#*+rocm}.torch$(cut -d. -f1,2 <<< "${torch_version%%+*}").${GPU_ARCHS// /.}"
+version="${FLASH_ATTN_VERSION}+torch${torch_version/+/.}.${GPU_ARCHS// /.}"
 name="flash_attn-${version}-${py}-${py}-linux_x86_64.whl"
 tag="${version/+/-}-${py}"
 whl="${WHEELS_DIR}/${name}"
