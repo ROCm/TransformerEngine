@@ -218,7 +218,7 @@ python -m pip install --quiet --no-deps --force-reinstall "$whl"
 echo "Installed ${name} into ${VENV}"
 
 if [[ -n "$UPLOAD" ]]; then
-    # Without --override, a wheel another run published meanwhile stays
+    # Without --override, a wheel another run published since the check above stays
     if [[ -z "$OVERRIDE" ]] && published; then
         echo "${FLASH_ATTN_WHEELS}:${tag} was published meanwhile; keeping that one"
         exit 0
