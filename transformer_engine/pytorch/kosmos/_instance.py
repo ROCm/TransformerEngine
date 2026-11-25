@@ -13,8 +13,8 @@ may come in any order, and a forward whose backward never runs leaves nothing be
 its saved tensors are freed with its autograd graph.
 
 The symmetric buffer is a torch symmetric-memory tensor (``symm_mem.empty`` and ``rendezvous`` over
-the EP group) handed to KOSMOS through ``kosmos_comm_wrap`` from torch 2.13, or else KOSMOS's own
-allocation (see :func:`resolve_allocator`).
+the EP group) handed to KOSMOS from torch 2.13, or else KOSMOS's own allocation (see
+:func:`resolve_allocator`). The binding is ``transformer_engine_torch.rocm_moe`` (``_ext``).
 """
 
 import contextlib
@@ -140,16 +140,13 @@ class SavedState:
             fixed[name] = t
         return cls(tier, rows, **fixed)
 
-    def pointers(self) -> tuple:
-        """``(xp, g, a, y, route)`` device pointers, 0 for an absent buffer."""
-        ptrs = []
+    def buffers(self) -> tuple:
+        """``(xp, g, a, y, route)`` for the binding, None for an absent buffer."""
         for name in _SAVED_NAMES:
             t = getattr(self, name)
-            p = 0 if t is None else t.data_ptr()
-            if p % _ALIGN:
+            if t is not None and t.data_ptr() % _ALIGN:
                 raise ValueError(f"KOSMOS MoE: saved buffer {name} is not {_ALIGN}-byte aligned")
-            ptrs.append(p)
-        return tuple(ptrs)
+        return self.tensors()
 
     def nbytes(self) -> int:
         """Bytes of the buffers present."""
@@ -201,20 +198,11 @@ class KosmosInstance:
         self._allgather = _host_allgather(group)
 
         self._check_same_config()
-        # The bytes to allocate for MoeInstance(ext_*): the instance's symmetric bytes plus the peer
-        # flags kosmos_comm_wrap carves from the end of a buffer given without a signal pad.
+        # The bytes to allocate for RocmMoeInstance(symmetric_*): the instance's symmetric bytes plus
+        # the peer flags carved from the end of a buffer given without a flag area.
         need = int(
-            mod.instance_bytes(
-                hidden,
-                inter,
-                local_experts,
-                topk,
-                tokens,
-                capacity_rows,
-                self.rank,
-                self._allgather,
-                wgcap=wgcap,
-                act=act,
+            mod.symmetric_buffer_bytes(
+                hidden, inter, local_experts, topk, tokens, capacity_rows, wgcap=wgcap, act=act
             )
         )
         self.instance_bytes = need
@@ -222,8 +210,8 @@ class KosmosInstance:
             ext = {}
             if allocator == "torch":
                 ext = self._torch_symmetric_buffer(need)
-                self.symmetric_bytes = ext["ext_bytes"]
-            self._inst = mod.MoeInstance(
+                self.symmetric_bytes = ext["symmetric_bytes"]
+            self._inst = mod.RocmMoeInstance(
                 hidden,
                 inter,
                 local_experts,
@@ -275,7 +263,7 @@ class KosmosInstance:
 
     def _torch_symmetric_buffer(self, nbytes: int) -> dict:
         """Collective: one torch symmetric-memory buffer on every rank of the EP group, as the
-        ``ext_*`` arguments of ``MoeInstance``."""
+        ``symmetric_*`` arguments of ``RocmMoeInstance``."""
         # pylint: disable-next=import-outside-toplevel
         import torch.distributed._symmetric_memory as symm_mem
 
@@ -307,7 +295,11 @@ class KosmosInstance:
         offset = buf.data_ptr() - base[self.rank]
         peers = torch.tensor([p + offset for p in base], dtype=torch.int64, device=self.device)
         self._symm = (buf, hdl, peers)
-        return {"ext_local": buf.data_ptr(), "ext_peers": peers.data_ptr(), "ext_bytes": nbytes}
+        return {
+            "symmetric_local": buf.data_ptr(),
+            "symmetric_peers": peers.data_ptr(),
+            "symmetric_bytes": nbytes,
+        }
 
     @contextlib.contextmanager
     def _measure(self):
@@ -399,23 +391,11 @@ class KosmosInstance:
         """A training forward (``saved`` given) or an inference forward (``saved`` None: nothing
         is kept)."""
         inst = self._live()
-        stream = torch.cuda.current_stream(self.device).cuda_stream
         if saved is None:
-            tier, rows, ptrs = -1, 0, (0, 0, 0, 0, 0)
+            tier, rows, bufs = -1, 0, (None,) * len(_SAVED_NAMES)
         else:
-            tier, rows, ptrs = saved.tier, saved.rows, saved.pointers()
-        inst.forward(
-            x.data_ptr(),
-            w1.data_ptr(),
-            w2.data_ptr(),
-            topk_idx32.data_ptr(),
-            topk_w.data_ptr(),
-            out.data_ptr(),
-            tier,
-            rows,
-            *ptrs,
-            stream,
-        )
+            tier, rows, bufs = saved.tier, saved.rows, saved.buffers()
+        inst.forward(x, w1, w2, topk_idx32, topk_w, out, tier, rows, *bufs)
 
     def backward(
         self, saved: SavedState, dout, x, w1, w2, topk_idx32, topk_w, dx, dprobs, dw1, dw2, acc
@@ -423,23 +403,21 @@ class KosmosInstance:
         """The backward of the forward that filled ``saved``; ``acc`` 0 writes bf16 ``dw1`` /
         ``dw2``, 1 adds into fp32 buffers, 2 adds into bf16 buffers."""
         inst = self._live()
-        stream = torch.cuda.current_stream(self.device).cuda_stream
         inst.backward(
-            dout.data_ptr(),
-            x.data_ptr(),
-            w1.data_ptr(),
-            w2.data_ptr(),
-            topk_idx32.data_ptr(),
-            topk_w.data_ptr(),
+            dout,
+            x,
+            w1,
+            w2,
+            topk_idx32,
+            topk_w,
             saved.tier,
             saved.rows,
-            *saved.pointers(),
-            dx.data_ptr(),
-            dprobs.data_ptr(),
-            dw1.data_ptr(),
-            dw2.data_ptr(),
+            *saved.buffers(),
+            dx,
+            dprobs,
+            dw1,
+            dw2,
             acc,
-            stream,
         )
 
     # ------------------------------------------------------------------ #

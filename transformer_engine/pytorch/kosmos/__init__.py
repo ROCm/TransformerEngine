@@ -14,7 +14,8 @@ What a training call keeps for its backward lives in ordinary tensors that autog
 activation recompute, saved-tensor offload and memory snapshots apply to it; KOSMOS itself holds
 a fixed amount per configuration, its symmetric buffer and scratch (:func:`memory_report`).
 
-Importing this package loads nothing; the KOSMOS extension module is imported on first use.
+KOSMOS is part of libtransformer_engine (the C API ``nvte_rocm_moe_*``), bound as
+``transformer_engine_torch.rocm_moe``; :func:`is_available` says whether this build has it.
 """
 
 from .functional import (

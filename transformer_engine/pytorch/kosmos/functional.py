@@ -32,7 +32,7 @@ STATUS_ERROR = 64
 
 
 def is_available() -> bool:
-    """True if the KOSMOS binding can be imported and the current device is gfx950."""
+    """True if Transformer Engine was built with KOSMOS and the current device is gfx950."""
     if not torch.cuda.is_available():
         return False
     arch = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "gcnArchName", "")

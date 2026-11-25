@@ -341,6 +341,7 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
      newton_schulz/newton_schulz.cpp #CUDA-only
+     rocm_moe/rocm_moe.cpp
      )
 
 if(NVTE_WITH_CUTEDSL AND USE_CUDA)
@@ -853,6 +854,22 @@ else() # USE_ROCM
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
   endif()
 
+  # kosmos/ is a byte-identical copy of KOSMOS (kosmos/UPSTREAM); its CMakeLists.txt builds libkosmos_moe.a with the
+  # flags KOSMOS is validated with, against KOSMOS's own HipKittens pin (3rdparty/hipkittens_kosmos).
+  if(USE_KOSMOS_MOE AND NOT "gfx950" IN_LIST CMAKE_HIP_ARCHITECTURES)
+    message(STATUS "KOSMOS MoE disabled (gfx950 not in CMAKE_HIP_ARCHITECTURES)")
+    set(USE_KOSMOS_MOE OFF)
+  endif()
+  if(USE_KOSMOS_MOE)
+    set(KOSMOS_HIPKITTENS_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/hipkittens_kosmos/include")
+    if(NOT EXISTS "${KOSMOS_HIPKITTENS_INCLUDE}/kittens.cuh")
+      message(FATAL_ERROR
+        "Could not find KOSMOS's HipKittens headers at ${KOSMOS_HIPKITTENS_INCLUDE}. "
+        "Try running 'git submodule update --init --recursive', or configure with -DUSE_KOSMOS_MOE=OFF.")
+    endif()
+    add_subdirectory(kosmos ${CMAKE_CURRENT_BINARY_DIR}/kosmos)
+  endif()
+
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   find_package(hiprtc)
@@ -872,10 +889,9 @@ else() # USE_ROCM
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
-
-  # A separate Python module, not part of libtransformer_engine
   if(USE_KOSMOS_MOE)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/kosmos.cmake")
+    target_compile_definitions(transformer_engine PRIVATE USE_KOSMOS_MOE)
+    target_link_libraries(transformer_engine PRIVATE kosmos_moe)
   endif()
 endif()
 
