@@ -2245,12 +2245,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 ub_overlap_ag_dgrad = False
             if ub_overlap_rs_fprop and not fused_rs_gemm_eligible(
                 self.ub_name + "_fprop", weight_tensor, linear_bias_tensor,
-                self.activation_dtype, self.tp_size, self.fp8,
+                self.activation_dtype, self.tp_size, self.fp8, mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs_fprop = False
             if ub_overlap_rs_dgrad and not fused_rs_gemm_eligible(
                 self.ub_name + "_dgrad", weight_tensor, None,
-                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True, mxfp8=is_mxfp8,
             ):
                 ub_overlap_rs_dgrad = False
             if ub_bulk_dgrad and not fused_bulk_ag_eligible(
@@ -2260,7 +2260,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = False
             if ub_bulk_wgrad and not fused_bulk_rs_eligible(
                 self.ub_name + "_wgrad", inp, weight_tensor,
-                self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8, linear_bias_tensor, mxfp8=is_mxfp8,
             ):
                 ub_bulk_wgrad = False
             fwd_args = LayerNormLinearFwdArgs(

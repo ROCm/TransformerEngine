@@ -216,6 +216,8 @@ jobs:
     secrets: inherit
     with:
       artifact_name: te-rocm-wheels-${{ needs.scope.outputs.build_key }}
+      use_ccache: true
+      save_ccache: ${{ github.event_name != 'pull_request' }}
 
   # Builds and publishes the Flash Attention wheel the torch suites install, when the
   # scope job found this branch's torch, ROCm or Python has none yet

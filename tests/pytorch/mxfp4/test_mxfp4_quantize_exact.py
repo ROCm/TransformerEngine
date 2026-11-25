@@ -401,3 +401,40 @@ def test_quantization_rejects_non_bf16_input(x_dtype):
     x = torch.randn((128, 128), dtype=x_dtype, device="cuda")
     with pytest.raises(RuntimeError, match="only supports BF16 input"):
         tex.quantize(x, MXFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1))
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        (128, 128),  # rows and scale columns padded
+        (4096, 128),  # scale columns padded: a K=128 GEMM operand
+        (256, 384),  # scale columns padded
+        (256, 256),  # no padding
+    ],
+)
+@pytest.mark.parametrize(
+    "with_gemm_swizzled_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+)
+def test_quantization_zeroes_scale_padding(M, N, with_gemm_swizzled_scales):
+    """Scale padding must read as zero: the FP4 GEMMs read it, the cast kernel never writes it."""
+    # Allocations nobody writes then read as 0xFF, a NaN scale in E8M0
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    fill = torch.utils.deterministic.fill_uninitialized_memory
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    try:
+        x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP4Quantizer(
+            fp4_dtype=tex.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=True,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        )
+        result = quantizer(x)
+    finally:
+        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+        torch.utils.deterministic.fill_uninitialized_memory = fill
+    for scale in (result._rowwise_scale_inv, result._columnwise_scale_inv):
+        assert not (scale.view(torch.uint8) == 0xFF).any()
