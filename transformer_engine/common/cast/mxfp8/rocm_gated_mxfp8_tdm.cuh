@@ -143,10 +143,18 @@ bool quantize_gated_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *o
     return false;
   }
   const dim3 grid(DIVUP(cols, tdm_kernel::CHUNK_DIM_X), DIVUP(rows, tdm_kernel::CHUNK_DIM_Y));
+  // TDM implies gfx1250, whose GEMM reads the scales pre-swizzled where the output asks for that.
+  const bool preswizzled = output->with_gemm_swizzled_scales;
+  ScalePadding padding(nullptr, stream);
   const ScaleLayout rowwise_scales =
-      rowwise ? scale_layout(output->scale_inv, false) : ScaleLayout{};
+      rowwise ? prepare_scales(output->scale_inv, false, preswizzled, rows,
+                               (IS_BWD ? 2 : 1) * DIVUP(cols, size_t{32}), padding)
+              : ScaleLayout{};
   const ScaleLayout colwise_scales =
-      colwise ? scale_layout(output->columnwise_scale_inv, true) : ScaleLayout{};
+      colwise ? prepare_scales(output->columnwise_scale_inv, true, preswizzled,
+                               (IS_BWD ? 2 : 1) * cols, DIVUP(rows, size_t{32}), padding)
+              : ScaleLayout{};
+  padding.fill();
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       gated_input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(

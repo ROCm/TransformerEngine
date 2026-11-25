@@ -805,6 +805,19 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
     return;
   }
 
+  // The generic batched kernel writes compact scales, the single-tensor quantize also pre-swizzled
+  // ones.
+  if (std::any_of(output_list.begin(), output_list.end(),
+                  [](const Tensor *t) { return mxfp8::preswizzled_scales(*t); })) {
+    Tensor dummy_tensor;
+    for (size_t i = 0; i < num_tensors; i++) {
+      mxfp8::quantize<false, false, false, Empty, nullptr>(*input_list[i], nullptr, &dummy_tensor,
+                                                           output_list[i], nullptr, nullptr, false,
+                                                           stream);
+    }
+    return;
+  }
+
   DType itype = input_list[0]->data.dtype;
   DType otype = output_list[0]->dtype();
   const bool use_rowwise = output_list[0]->has_data();

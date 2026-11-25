@@ -33,8 +33,6 @@ TEST_UTIL=$ROCJITSU_CPP_BUILD_DIR/util/test_util
 # Shapes that take minutes per test case under emulation, as they appear in gtest names.
 LARGE_SHAPES="*8192X7168*:*2048X12288*:*256X65536*:*65536X*:*4096X13312*:*1024X16384*:*X768X6144X*"
 LARGE_SHAPES="$LARGE_SHAPES:*X16384X1616*:*32X1481X677*:*2304x768x4096*:*768x3072x4096*:*768x768x4096*"
-# Known gfx1250 MXFP8 bug (compact scales in GEMM-swizzled outputs); delete once fixed
-KNOWN_FAILURES="*/SwizzledScalesFusedCastMXFP8TestSuite.*"
 
 install_prerequisites() {
     # The CI image carries no gfx1250 device code for the ROCm libraries and PyTorch.
@@ -155,7 +153,7 @@ cpp() {
         if [ -n "$TE_CI_LIST_ITEMS" ]; then
             echo "TE_CI_ITEM $tag"
         else
-            gtest_run $tag $shard $shards "$test_binary" "$3-$LARGE_SHAPES:$KNOWN_FAILURES"
+            gtest_run $tag $shard $shards "$test_binary" "$3-$LARGE_SHAPES"
         fi
     done
 }
@@ -180,6 +178,8 @@ run_test_config() {
     cpp 1 mxfp4 "*MXFP4*"
     cpp 1 fp8 "$FP8"
     cpp 1 norm "OperatorTest/NormTestSuite.*"
+    # TDM norm smoke test; the norm group's shapes take the other kernels
+    cpp 1 norm_tdm "RocmTdm/NormTestSuite.*" 1
     cpp 1 gemm "OperatorTest/GEMMTestSuite.*:OperatorTestFP8/FP8GEMMTestSuite.*"
     py 1 nvfp4/test_nvfp4_quantize_exact.py -k "not 1024 and not 2048 and not 8192"
     py 1 nvfp4/test_nvfp4_group_quantize.py -k "not 8192 and not 16384"
