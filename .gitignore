@@ -1,4 +1,5 @@
 .venv
+benchmarks/microbenchmarks/asv/results/
 *.o
 *.swp
 *.ii
