@@ -189,7 +189,7 @@ if [[ "$(python -c 'import torch; print(torch.__version__)')" != "$torch_version
     exit 1
 fi
 ROCM_PATH="$(rocm-sdk path --root)"
-export ROCM_PATH ROCM_HOME="$ROCM_PATH"
+export ROCM_PATH
 
 if [[ -f "$whl" && -z "$OVERRIDE" ]]; then
     echo "Using ${whl}, built earlier"
