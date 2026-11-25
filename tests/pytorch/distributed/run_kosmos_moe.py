@@ -9,7 +9,10 @@ Every check is built to be able to fail: numerics are compared with an independe
 on relative L2 *and* a magnitude ratio (cosine and relative L2 alone cannot see a pure scale
 error), and mutations (weights in the wrong layout, a saved buffer zeroed between forward and
 backward) must change what they feed. The multi-call checks exercise the orders a training loop
-produces and compare each call bit for bit with the same call run on its own.
+produces and compare each call bit for bit with the same call run on its own. The graph_* checks
+capture the op's forward and backward with torch.cuda.graph and compare every replay bit for bit
+with the same calls run eagerly; graph_first_call_in_capture makes a configuration's first call
+inside capture, which must fail with the op's own error on every rank.
 
 Every rank runs every check in the same order; a check never raises on one rank alone, because the
 other ranks would wait in the next KOSMOS kernel forever. Results are gathered and judged on all
@@ -38,6 +41,11 @@ SHAPES = {
     # I < 1024: KOSMOS pads each (source, expert) segment differently and sizes its crews
     # differently
     "small_i512": dict(T=1024, H=1024, I=512, E_loc=4, k=4),
+    # muse's experts (E 256, top-8) at a quarter of its tokens and half its H and I
+    "muse_small": dict(T=2048, H=2048, I=2048, E_loc=32, k=8),
+    # muse itself; too big for the fp32 reference, so only the checks that compare the op with
+    # itself (determinism, the graph_* checks)
+    "muse": dict(T=8192, H=4096, I=4096, E_loc=32, k=8),
 }
 REL_L2_MAX = 1e-2
 SCALE_TOL = 1e-2
@@ -991,6 +999,494 @@ def check_layout(env, d):
     return ok, {}
 
 
+# --------------------------------------------------------------------------- #
+# CUDA graphs: the op's calls captured with torch.cuda.graph after eager calls of the same
+# configuration (the first creates the instance, which is collective and host-blocking), every
+# replay compared bit for bit with the same calls run eagerly on inputs of their own
+# --------------------------------------------------------------------------- #
+GRAPH_REPLAYS = 5
+
+
+class _Microbatch:
+    """One microbatch's inputs; x and topk_weights are leaves that require grad. A captured graph
+    reads these addresses, so new values are copied in, never rebound."""
+
+    def __init__(self, x, idx, w, dy):
+        self.x = x.detach().clone().requires_grad_(True)
+        self.idx = idx.clone()
+        self.w = w.detach().clone().requires_grad_(True)
+        self.dy = dy.clone()
+
+    def load(self, x=None, idx=None, w=None):
+        with torch.no_grad():
+            for dst, src in ((self.x, x), (self.idx, idx), (self.w, w)):
+                if src is not None:
+                    dst.copy_(src)
+
+
+def _graph_params(env, d, main_grad=False):
+    """W1 and W2 as parameters. With ``main_grad``: Megatron's attributes, an fp32 ``main_grad``
+    that starts non-zero; returns its start values too."""
+    w1p = torch.nn.Parameter(d.w1k.clone())
+    w2p = torch.nn.Parameter(d.w2.clone())
+    start = None
+    if main_grad:
+        g = _gen(env, 71)
+        start = []
+        for p in (w1p, w2p):
+            s0 = torch.randn(p.shape, generator=g, device=env.dev) * 1e-3
+            p.main_grad = s0.clone()
+            p.grad_added_to_main_grad = False
+            start.append(s0)
+    return w1p, w2p, start
+
+
+def _layer_calls(env, mbs, order, w1p, w2p, fused=False, **kw):
+    """The forwards of ``mbs`` in turn, then their backwards in ``order`` (indices into ``mbs``).
+    Gradients by torch.autograd.grad, so nothing accumulates into .grad and the same code runs
+    eagerly and under capture. ``fused``: dW is added into main_grad and not returned."""
+    ys = [
+        kosmos.kosmos_moe(
+            env.group, mb.x, mb.idx, mb.w, w1p, w2p, fuse_wgrad_accumulation=fused, **kw
+        )
+        for mb in mbs
+    ]
+    out = [None] * len(mbs)
+    for i in order:
+        mb = mbs[i]
+        wrt = (mb.x, mb.w) if fused else (mb.x, mb.w, w1p, w2p)
+        grads = torch.autograd.grad(ys[i], wrt, grad_outputs=mb.dy)
+        res = {"y": ys[i].detach(), "dx": grads[0], "dtw": grads[1]}
+        if not fused:
+            res["dw1"] = grads[2]
+            res["dw2"] = grads[3]
+        out[i] = res
+    return out
+
+
+def _eager(env, toks, order, w1p, w2p, fused=False, **kw):
+    """_layer_calls run eagerly on microbatches with storage of their own; copies of the results."""
+    mbs = [_Microbatch(*t) for t in toks]
+    out = [
+        {n: v.detach().clone() for n, v in r.items()}
+        for r in _layer_calls(env, mbs, order, w1p, w2p, fused, **kw)
+    ]
+    torch.cuda.synchronize()
+    return out
+
+
+def _capture(fn):
+    """``fn`` (which only enqueues work) captured into a CUDA graph after one warm-up run on a side
+    stream, as torch.cuda.graph asks. Returns the graph and what ``fn`` returned during the
+    capture: the graph's static outputs."""
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        fn()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = fn()
+    torch.cuda.synchronize()
+    return graph, out
+
+
+def _replay(graph):
+    graph.replay()
+    torch.cuda.synchronize()
+
+
+def _replays_queued(graph, outputs, n, before=None):
+    """``n`` replays enqueued back to back with no host sync in between, as a training loop
+    launches them; after each, a copy of ``outputs()`` taken on the stream. ``before(i)`` enqueues
+    work ahead of replay i (copying new inputs in). Synchronizes once, at the end."""
+    got = []
+    for i in range(n):
+        if before is not None:
+            before(i)
+        graph.replay()
+        got.append({k: v.clone() for k, v in outputs().items()})
+    torch.cuda.synchronize()
+    return got
+
+
+def _flat(outs):
+    """Per-microbatch results as one dict: ``{"mb0.y": ..., "mb1.y": ...}``."""
+    return {f"mb{i}.{n}": v for i, r in enumerate(outs) for n, v in r.items()}
+
+
+def _same(a, b):
+    """Bit for bit, per tensor name present in both."""
+    return {n: bool(torch.equal(a[n], b[n])) for n in a if n in b}
+
+
+def _all_same(eqs):
+    return all(all(e.values()) for e in eqs)
+
+
+def check_graph_one_layer(env, d):
+    """One layer's forward and backward captured once and replayed GRAPH_REPLAYS times. Expected:
+    every replay's y, dx, dtopk_w, dW1 and dW2 bit for bit equal to the same call run eagerly (two
+    eager runs equal each other); status 0. Then fuse_wgrad_accumulation into an fp32 main_grad
+    that starts non-zero (KOSMOS adds into it in the kernel): main_grad after replay i bit for bit
+    equal to main_grad after eager step i from the same start, i = 1..GRAPH_REPLAYS (two eager
+    series equal each other); y, dx and dtopk_w of every replay equal to the eager step's;
+    status 0. Both parts again with the replays queued back to back, without a host sync between
+    them (as a training loop launches them), compared after one sync at the end."""
+    tok = [d.tok[11]]
+    w1p, w2p, _ = _graph_params(env, d)
+    eager = _eager(env, tok, [0], w1p, w2p)[0]
+    eager_twice = _same(_eager(env, tok, [0], w1p, w2p)[0], eager)
+    st_eager = _status(env)
+    mbs = [_Microbatch(*tok[0])]
+    graph, static = _capture(lambda: _layer_calls(env, mbs, [0], w1p, w2p))
+    _status(env)
+    replays = []
+    for _ in range(GRAPH_REPLAYS):
+        _replay(graph)
+        replays.append(_same(static[0], eager))
+    st_graph = _status(env)
+    queued = [_same(q, eager) for q in _replays_queued(graph, lambda: static[0], GRAPH_REPLAYS)]
+    st_queued = _status(env)
+    ok = all(eager_twice.values()) and _all_same(replays) and _all_same(queued)
+    ok &= st_eager == 0 and st_graph == 0 and st_queued == 0
+    details = {
+        "eager_twice_bitwise": eager_twice,
+        "replays_bitwise_vs_eager": replays,
+        "queued_replays_bitwise_vs_eager": queued,
+        "status_eager": st_eager,
+        "status_graph": st_graph,
+        "status_queued": st_queued,
+    }
+    del graph, static, mbs
+
+    w1f, w2f, start = _graph_params(env, d, main_grad=True)
+
+    def reset():
+        with torch.no_grad():
+            for p, s0 in zip((w1f, w2f), start):
+                p.main_grad.copy_(s0)
+
+    def with_main_grad(res):
+        return dict(res, mg1=w1f.main_grad, mg2=w2f.main_grad)
+
+    reset()
+    steps = []
+    for _ in range(GRAPH_REPLAYS):
+        res = _eager(env, tok, [0], w1f, w2f, fused=True)[0]
+        steps.append({n: v.clone() for n, v in with_main_grad(res).items()})
+    reset()
+    series_twice = []
+    for i in range(GRAPH_REPLAYS):
+        res = _eager(env, tok, [0], w1f, w2f, fused=True)[0]
+        series_twice.append(_same(with_main_grad(res), steps[i]))
+    st_eager_f = _status(env)
+    mbs = [_Microbatch(*tok[0])]
+    graph, static = _capture(lambda: _layer_calls(env, mbs, [0], w1f, w2f, fused=True))
+    _status(env)
+    # the warm-up added into main_grad; the graph adds into the same storage
+    reset()
+    fused_replays = []
+    for i in range(GRAPH_REPLAYS):
+        _replay(graph)
+        fused_replays.append(_same(with_main_grad(static[0]), steps[i]))
+    st_graph_f = _status(env)
+    reset()
+    queued = _replays_queued(graph, lambda: with_main_grad(static[0]), GRAPH_REPLAYS)
+    fused_queued = [_same(q, steps[i]) for i, q in enumerate(queued)]
+    del queued
+    st_queued_f = _status(env)
+    # the steps do accumulate: main_grad after the last step differs from after the first
+    accumulates = not torch.equal(steps[-1]["mg1"], steps[0]["mg1"])
+    accumulates &= not torch.equal(steps[-1]["mg2"], steps[0]["mg2"])
+    ok &= _all_same(series_twice) and _all_same(fused_replays) and _all_same(fused_queued)
+    ok &= accumulates and st_eager_f == 0 and st_graph_f == 0 and st_queued_f == 0
+    details["fused"] = {
+        "eager_series_twice_bitwise": series_twice,
+        "replays_bitwise_vs_eager_step": fused_replays,
+        "queued_replays_bitwise_vs_eager_step": fused_queued,
+        "status_queued": st_queued_f,
+        "main_grad_accumulates": accumulates,
+        "grad_added_to_main_grad": [
+            bool(w1f.grad_added_to_main_grad),
+            bool(w2f.grad_added_to_main_grad),
+        ],
+        "status_eager": st_eager_f,
+        "status_graph": st_graph_f,
+    }
+    return ok, details
+
+
+def check_graph_two_microbatches(env, d):
+    """Two microbatches in flight in one graph: forward 1, forward 2, then the backwards first-in
+    first-out (one graph) or last-in first-out (another graph). Expected: every replay bit for bit
+    equal to the same calls run eagerly in the same order, which equal each microbatch run on its
+    own, also with the replays queued back to back; status 0."""
+    toks = [d.tok[11], d.tok[12]]
+    w1p, w2p, _ = _graph_params(env, d)
+    solo = [_eager(env, [t], [0], w1p, w2p)[0] for t in toks]
+    _status(env)
+    details = {}
+    ok = True
+    for label, order in (("fifo", [0, 1]), ("lifo", [1, 0])):
+        eager = _eager(env, toks, order, w1p, w2p)
+        st_eager = _status(env)
+        mbs = [_Microbatch(*t) for t in toks]
+        graph, static = _capture(
+            lambda mbs=mbs, order=order: _layer_calls(env, mbs, order, w1p, w2p)
+        )
+        _status(env)
+        replays = []
+        for _ in range(GRAPH_REPLAYS):
+            _replay(graph)
+            replays.append([_same(static[i], eager[i]) for i in range(2)])
+        st_graph = _status(env)
+        queued = [
+            _same(q, _flat(eager))
+            for q in _replays_queued(graph, lambda static=static: _flat(static), GRAPH_REPLAYS)
+        ]
+        st_queued = _status(env)
+        vs_solo = [_same(eager[i], solo[i]) for i in range(2)]
+        ok &= all(_all_same(r) for r in replays) and _all_same(vs_solo) and _all_same(queued)
+        ok &= st_eager == 0 and st_graph == 0 and st_queued == 0
+        details[label] = {
+            "replays_bitwise_vs_eager": replays,
+            "queued_replays_bitwise_vs_eager": queued,
+            "status_queued": st_queued,
+            "eager_bitwise_vs_solo": vs_solo,
+            "status_eager": st_eager,
+            "status_graph": st_graph,
+        }
+        del graph, static, mbs
+    return ok, details
+
+
+def _rows_per_rank(env, idx):
+    """Routed rows each rank receives (global, every rank's tokens), dropped routes excluded."""
+    cnt = torch.bincount(idx[idx >= 0].view(-1), minlength=env.E)
+    dist.all_reduce(cnt, group=env.group)
+    return cnt.view(env.world, -1).sum(dim=1)
+
+
+def _skewed_routing(env, seed, capacity, over):
+    """A make_tokens Gumbel skew whose busiest rank fits the capacity with a row block of padding
+    per expert to spare (over False: the largest such skew), or receives more rows than the
+    capacity (over True: the smallest). Returns (skew, topk_idx, topk_weights, rows per rank), or
+    Nones; the same on every rank."""
+    skews = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+    for skew in skews if over else reversed(skews):
+        _, idx, w, _ = make_tokens(env, seed, skew=skew)
+        rows = _rows_per_rank(env, idx)
+        busiest = int(rows.max())
+        if (over and busiest > capacity) or (not over and busiest + 256 * env.E_loc <= capacity):
+            return skew, idx, w, rows.tolist()
+    return None, None, None, None
+
+
+def check_graph_routing(env, d):
+    """One graph captured with a balanced routing; before each replay another routing is copied
+    into its static topk_idx and topk_weights: a second balanced draw, a skewed one that fits the
+    capacity, one over the capacity (the call runs in rounds and keeps nothing), the first again.
+    Expected: every replay bit for bit equal to the same call run eagerly, and the same status:
+    0, 0, 0, 8 | 32, 0; the same with every copy and replay queued back to back, status 8 | 32
+    over the five. Then a mutant replay without routing B copied in: it must differ from
+    the eager call of B."""
+    w1p, w2p, _ = _graph_params(env, d)
+    cap = _main_instance(env).capacity_rows
+    x, idx_a, w_a, dy = d.tok[11]
+    _, idx_b, w_b, _ = d.tok[12]
+    s_skew, idx_s, w_s, rows_s = _skewed_routing(env, 21, cap, over=False)
+    s_over, idx_o, w_o, rows_o = _skewed_routing(env, 22, cap, over=True)
+    details = {
+        "capacity_rows": cap,
+        "skewed": {"skew": s_skew, "rows_per_rank": rows_s},
+        "over_capacity": {"skew": s_over, "rows_per_rank": rows_o},
+    }
+    if s_skew is None or s_over is None:
+        return False, details
+    over = kf.STATUS_ROUNDS | kf.STATUS_KEPT_NOTHING
+    routings = (
+        ("balanced_a", idx_a, w_a, 0),
+        ("balanced_b", idx_b, w_b, 0),
+        ("skewed", idx_s, w_s, 0),
+        ("over_capacity", idx_o, w_o, over),
+        ("balanced_a_again", idx_a, w_a, 0),
+    )
+    _status(env)
+    mbs = [_Microbatch(x, idx_a, w_a, dy)]
+    graph, static = _capture(lambda: _layer_calls(env, mbs, [0], w1p, w2p))
+    _status(env)
+    ok = True
+    eager_of = {}
+    for name, idx, w, want in routings:
+        eager = _eager(env, [(x, idx, w, dy)], [0], w1p, w2p)[0]
+        st_eager = _status(env)
+        mbs[0].load(idx=idx, w=w)
+        _replay(graph)
+        st_graph = _status(env)
+        eq = _same(static[0], eager)
+        ok &= all(eq.values()) and st_eager == want and st_graph == want
+        details[name] = dict(
+            details.get(name, {}),
+            bitwise_vs_eager=eq,
+            status_eager=st_eager,
+            status_graph=st_graph,
+            status_expected=want,
+        )
+        eager_of[name] = eager
+    # the same routings again, every copy and replay queued back to back: one status for all
+    queued = _replays_queued(
+        graph,
+        lambda: static[0],
+        len(routings),
+        before=lambda i: mbs[0].load(idx=routings[i][1], w=routings[i][2]),
+    )
+    queued_eq = {r[0]: _same(q, eager_of[r[0]]) for r, q in zip(routings, queued)}
+    del queued
+    st_queued = _status(env)
+    ok &= _all_same(queued_eq.values()) and st_queued == over
+    details["queued"] = {
+        "bitwise_vs_eager": queued_eq,
+        "status": st_queued,
+        "status_expected": over,
+    }
+    # mutant: a replay without routing B copied in (the static buffers still hold A)
+    _replay(graph)
+    eq = _same(static[0], eager_of["balanced_b"])
+    _status(env)
+    ok &= not eq["y"]
+    details["mutant_routing_not_copied"] = {"bitwise_vs_eager_b": eq, "detected": not eq["y"]}
+    return ok, details
+
+
+def check_graph_save_tiers(env, d):
+    """save="xp" and save="none" captured (the backward recomputes GEMM1, or sends x to the experts
+    again). Expected: every replay bit for bit equal to the same call run eagerly with the same
+    tier, which equals the eager save="all" call, also with the replays queued back to back;
+    status 0."""
+    tok = [d.tok[11]]
+    w1p, w2p, _ = _graph_params(env, d)
+    full = _eager(env, tok, [0], w1p, w2p)[0]
+    _status(env)
+    details = {}
+    ok = True
+    for save in ("xp", "none"):
+        eager = _eager(env, tok, [0], w1p, w2p, save=save)[0]
+        st_eager = _status(env)
+        mbs = [_Microbatch(*tok[0])]
+        graph, static = _capture(
+            lambda mbs=mbs, save=save: _layer_calls(env, mbs, [0], w1p, w2p, save=save)
+        )
+        _status(env)
+        replays = []
+        for _ in range(GRAPH_REPLAYS):
+            _replay(graph)
+            replays.append(_same(static[0], eager))
+        st_graph = _status(env)
+        queued = [
+            _same(q, eager)
+            for q in _replays_queued(graph, lambda static=static: static[0], GRAPH_REPLAYS)
+        ]
+        st_queued = _status(env)
+        vs_all = _same(eager, full)
+        ok &= _all_same(replays) and _all_same(queued) and all(vs_all.values())
+        ok &= st_eager == 0 and st_graph == 0 and st_queued == 0
+        details[save] = {
+            "replays_bitwise_vs_eager": replays,
+            "queued_replays_bitwise_vs_eager": queued,
+            "status_queued": st_queued,
+            "eager_bitwise_vs_save_all": vs_all,
+            "status_eager": st_eager,
+            "status_graph": st_graph,
+        }
+        del graph, static, mbs
+    return ok, details
+
+
+def check_graph_mutation(env, d):
+    """The graph checks' comparison must be able to fail: after capture one element of the static x
+    is changed (x[5, 7] += 1) and the eager call is not re-run. Expected: the replay before the
+    change equals the eager call; the replay after it differs in y (on every rank, each changes
+    its own x); restoring x makes the replay equal again."""
+    tok = [d.tok[11]]
+    w1p, w2p, _ = _graph_params(env, d)
+    eager = _eager(env, tok, [0], w1p, w2p)[0]
+    _status(env)
+    mbs = [_Microbatch(*tok[0])]
+    graph, static = _capture(lambda: _layer_calls(env, mbs, [0], w1p, w2p))
+    _status(env)
+    _replay(graph)
+    before = _same(static[0], eager)
+    with torch.no_grad():
+        mbs[0].x[5, 7] += 1.0
+    _replay(graph)
+    mutated = _same(static[0], eager)
+    mbs[0].load(x=tok[0][0])
+    _replay(graph)
+    restored = _same(static[0], eager)
+    st = _status(env)
+    ok = all(before.values()) and not mutated["y"] and all(restored.values()) and st == 0
+    return ok, {
+        "before_bitwise": before,
+        "mutated_bitwise": mutated,
+        "restored_bitwise": restored,
+        "status": st,
+    }
+
+
+def check_graph_first_call_in_capture(env, d):
+    """A configuration's first call (which creates its instance: collective, host-blocking) made
+    inside torch.cuda.graph capture, with no eager call before it. Expected on every rank: the op's
+    RuntimeError saying the first call cannot be captured (another error fails the check), no
+    hang, no instance created; then two eager calls of that configuration agree bit for bit;
+    status 0."""
+    # a capacity no other check uses, so that this configuration has no instance yet
+    cap = _default_rows(env) + 1280
+    guard_msg = "the first call of a configuration creates its instance"
+
+    def instances():
+        return [v for _, v in kf._INSTANCES.matching(env.group) if v.capacity_rows == cap]
+
+    tok = [d.tok[11]]
+    w1p, w2p, _ = _graph_params(env, d)
+    _status(env)
+    before = len(instances())
+    mbs = [_Microbatch(*tok[0])]
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    err = None
+    try:
+        with torch.cuda.graph(graph):
+            _layer_calls(env, mbs, [0], w1p, w2p, capacity_rows=cap)
+    except Exception as e:  # pylint: disable=broad-except
+        err = f"{type(e).__name__}: {e}"
+    del graph, mbs
+    guard = err is not None and err.startswith("RuntimeError: ") and guard_msg in err
+    after_capture = len(instances())
+    first = _eager(env, tok, [0], w1p, w2p, capacity_rows=cap)[0]
+    second = _eager(env, tok, [0], w1p, w2p, capacity_rows=cap)[0]
+    eq = _same(first, second)
+    st = _status(env)
+    after_eager = len(instances())
+    for inst in instances():
+        kf._INSTANCES.destroy_instance(inst)
+    errors = [None] * env.world
+    dist.all_gather_object(errors, err if err is None else err[:200], group=env.group)
+    ok = guard and before == 0 and after_capture == 0 and after_eager == 1
+    ok &= all(eq.values()) and st == 0
+    return ok, {
+        "capacity_rows": cap,
+        "capture_error_per_rank": errors,
+        "guard_error_raised": guard,
+        "instances_before": before,
+        "instances_after_capture": after_capture,
+        "instances_after_eager": after_eager,
+        "eager_twice_bitwise": eq,
+        "status": st,
+    }
+
+
 CHECKS = {
     "layout": check_layout,
     "numerics": check_numerics,
@@ -1019,6 +1515,12 @@ CHECKS = {
     "checkpoint_nonreentrant": check_checkpoint_nonreentrant,
     "symm_vs_own": check_symm_vs_own,
     "te_ep_reference": check_te_ep_reference,
+    "graph_one_layer": check_graph_one_layer,
+    "graph_two_microbatches": check_graph_two_microbatches,
+    "graph_routing": check_graph_routing,
+    "graph_save_tiers": check_graph_save_tiers,
+    "graph_mutation": check_graph_mutation,
+    "graph_first_call_in_capture": check_graph_first_call_in_capture,
 }
 
 

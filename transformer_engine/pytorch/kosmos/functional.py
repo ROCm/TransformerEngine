@@ -94,6 +94,13 @@ class _KosmosInstanceCache:
         )
         inst = self._instances.get(key)
         if inst is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "KOSMOS MoE: the first call of a configuration creates its instance, which is"
+                    " collective and host-blocking and cannot be captured in a CUDA graph; make"
+                    " one eager call with the same shapes, capacity_rows and wgcap on every EP rank"
+                    " before capturing"
+                )
             inst = KosmosInstance(
                 mod,
                 group,
@@ -388,6 +395,11 @@ def kosmos_moe(
     ``save`` and ``saved_rows``) in the same order on one stream: the kernels wait on their peers,
     and a rank that skips a call leaves the others waiting forever. The first call of a
     configuration is collective and host-blocking (it creates the instance).
+
+    Once an eager call has created the instance, forwards and backwards can be captured in a CUDA
+    graph: each enqueues one kernel and nothing on the host. A replay reads the captured tensors,
+    so new inputs are copied into them; a graph points into its instance, so it is released before
+    :func:`destroy`. :func:`status` and :func:`destroy` are host-blocking: never inside capture.
     """
     _check(group, x, topk_idx, topk_weights, w1, w2)
     if save not in _SAVE:

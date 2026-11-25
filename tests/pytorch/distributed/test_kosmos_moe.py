@@ -53,6 +53,12 @@ CHECKS = [
     "checkpoint_nonreentrant",
     "symm_vs_own",
     "te_ep_reference",
+    "graph_one_layer",
+    "graph_two_microbatches",
+    "graph_routing",
+    "graph_save_tiers",
+    "graph_mutation",
+    "graph_first_call_in_capture",
 ]
 
 
