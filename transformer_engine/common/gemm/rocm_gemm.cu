@@ -1114,15 +1114,31 @@ public:
     }
   };
 
-  bool find(const Key &cfg, size_t ws_size, Algo &algo)
+  bool find(const Key &cfg, size_t ws_size, Algo &algo, bool accumulate = false)
   {
     std::lock_guard<std::mutex> lock(mt);
-    if (auto *pentry = find_(cfg, ws_size, ws_size); pentry != nullptr)
+    auto *pentry = find_(cfg, ws_size, ws_size);
+    if (accumulate && (pentry == nullptr || !pentry->algo.has_value()))
+    {
+      if (auto *puntuned = find_(untuned, cfg, ws_size, ws_size); puntuned != nullptr)
+      {
+        pentry = puntuned;
+      }
+    }
+    if (pentry != nullptr)
     {
       algo = *pentry;
       return true;
     }
     return false;
+  }
+
+  // Picks for accumulating GEMMs whose tuning was skipped. They are kept in memory only, so the shape isn't saved
+  // untuned and a later non-accumulating call still tunes it.
+  void store_untuned(const Key &cfg, const Algo &algo)
+  {
+    std::lock_guard<std::mutex> lock(mt);
+    untuned.emplace(cfg, algo);
   }
 
   void store(const Key &cfg, const Algo &algo)
@@ -1136,8 +1152,14 @@ public:
     while (auto* pentry = find_(cfg, ws_size_min, ws_size_max)) {
       if (pentry->ws_size_min <= ws_size_min && pentry->ws_size_max >= ws_size_max)
       {
+        // Resolving a loaded algo only fills in algo, which isn't saved, so the file may not need rewriting
+        const bool changed = pentry->algoId != algo.algoId || pentry->index != algo.index ||
+                             pentry->ws_size_min != algo.ws_size_min || pentry->ws_size_max != algo.ws_size_max;
         *pentry = algo;
-        save_();
+        if (changed)
+        {
+          save_();
+        }
         return;
       }
 
@@ -1177,7 +1199,12 @@ protected:
 
   Algo* find_(const Key &cfg, size_t ws_min, size_t ws_max)
   {
-    const auto key_range = d.equal_range(cfg);
+    return find_(d, cfg, ws_min, ws_max);
+  }
+
+  static Algo* find_(std::multimap<Key, Algo, Key::Comp> &m, const Key &cfg, size_t ws_min, size_t ws_max)
+  {
+    const auto key_range = m.equal_range(cfg);
     for (auto i = key_range.first; i != key_range.second; i++)
     {
       if (ws_min <= i->second.ws_size_max && ws_max >= i->second.ws_size_min)
@@ -1425,6 +1452,7 @@ private:
    * for requested WS size be between Algo.ws_size and pair.first
    */
   std::multimap<Key, Algo, Key::Comp> d;
+  std::multimap<Key, Algo, Key::Comp> untuned;
 } algoCache;
 
 static inline int getIntEnv(const char *name, int defval, int minval)
@@ -1798,8 +1826,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     ((use_fp8 || use_mxfp4) && gelu) ? aux_type : (hipDataType)-1,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
     use_nvfp4 && !use_nvfp4_native);
+  // C aliases D, so a GEMM with beta != 0 accumulates into its output
+  const bool accumulate = beta != 0.0f;
   GemmAlgoCache::Algo cached_algo;
-  if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
+  if (algoCache.find(gemm_cfg, workspaceSize, cached_algo, accumulate) == 0 || !cached_algo.algo.has_value())
   {
     bool logTuning = getIntEnv("TE_HIPBLASLT_LOG_TUNING", 0, 0) != 0;
 
@@ -1825,12 +1855,11 @@ void hipblaslt_gemm(const Tensor *inputA,
           ws_size_min
         )) {
 
-          if (ws_size_min <= workspaceSize && ws_size_min <= algo_arr[0].workspaceSize) {
+          if (ws_size_min <= workspaceSize) {
             cached_algo.algo = algo_arr[0].algo;
-            if (cached_algo.ws_size_min != algo_arr[0].workspaceSize) {
-              cached_algo.ws_size_min = algo_arr[0].workspaceSize;
-              algoCache.store(gemm_cfg, cached_algo);
-            }
+            // Only narrow the loaded range, so the store updates the loaded entry in place.
+            cached_algo.ws_size_min = std::max(cached_algo.ws_size_min, ws_size_min);
+            algoCache.store(gemm_cfg, cached_algo);
           }
         }
       }
@@ -1840,37 +1869,44 @@ void hipblaslt_gemm(const Tensor *inputA,
       }
     }
 
-    int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
-    int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
-    int algoTuneCount = 1;
-    std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
-
-    if (tuneLoopCount)
-    {
-      /* HIPBLASLT may return hundreds of algos for some configs
-       * Limit amount by default. User may override with env
-       */
-      static const int defaultAlgoCount = 16;
-      algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
-    }
-    algoTuneCount += firstAlgo;
-    algoArr.resize(algoTuneCount);
-
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
-                            preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                            &workspaceSize, sizeof(workspaceSize)));
-
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                    Ddesc, preference, algoTuneCount, algoArr.data(),
-                                                    &algoTuneCount));
-    algoArr.resize(algoTuneCount);
-
-    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
-
     //No suitable entry in autotune cache or could not find matched algo in hipBLASLt results
     if (!cached_algo.algo.has_value())
     {
+      int firstAlgo = getIntEnv("TE_HIPBLASLT_ALGO_SELECTION", 0, 0);
+      int tuneLoopCount = getIntEnv("TE_HIPBLASLT_TUNING_RUN_COUNT", 0, 0);
+      // Timing the candidates of an accumulating GEMM would add A*B into its output again on every run
+      const bool skipTuning = tuneLoopCount > 0 && accumulate;
+      if (skipTuning)
+      {
+        tuneLoopCount = 0;
+        std::cout << "[WARNING] Skip hipBLASLt algo tuning for accumulating GEMM (beta != 0) m=" << m << " n=" << n
+                  << " k=" << k << "; its untuned algo is used and not saved" << std::endl;
+      }
+      int algoTuneCount = 1;
+      std::vector<hipblasLtMatmulHeuristicResult_t> algoArr;
+
+      if (tuneLoopCount)
+      {
+        /* HIPBLASLT may return hundreds of algos for some configs
+         * Limit amount by default. User may override with env
+         */
+        static const int defaultAlgoCount = 16;
+        algoTuneCount = getIntEnv("TE_HIPBLASLT_TUNING_ALGO_COUNT", defaultAlgoCount, 1);
+      }
+      algoTuneCount += firstAlgo;
+      algoArr.resize(algoTuneCount);
+
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&preference));
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
+                              preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                              &workspaceSize, sizeof(workspaceSize)));
+
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
+                                                      Ddesc, preference, algoTuneCount, algoArr.data(),
+                                                      &algoTuneCount));
+      algoArr.resize(algoTuneCount);
+
+      NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(preference));
 
       int bestAlgo = -1;
       if (tuneLoopCount > 0)
@@ -1967,7 +2003,14 @@ void hipblaslt_gemm(const Tensor *inputA,
       cached_algo.ws_size_min = algoArr[bestAlgo].workspaceSize;
       cached_algo.ws_size_max = workspaceSize;
 
-      algoCache.store(gemm_cfg, cached_algo);
+      if (skipTuning)
+      {
+        algoCache.store_untuned(gemm_cfg, cached_algo);
+      }
+      else
+      {
+        algoCache.store(gemm_cfg, cached_algo);
+      }
     }
 
     if (logTuning) {

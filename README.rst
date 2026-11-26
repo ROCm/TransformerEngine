@@ -178,6 +178,8 @@ This ability is controlled by environment variables when calling GEMM operations
 
 It is not guaranteed that the algorithm selection data file created with one version of TE or hipBlasLt will work with other versions. Even if it works, it is highly recommended to perform algorithm selection tuning again when switching to new libraries versions because newer hipBLASLt versions may have optimized algorithms.
 
+Auto-selection runs every candidate algorithm on the GEMM's own output buffer, so it is skipped for GEMMs that accumulate into their output (beta != 0), such as weight-gradient GEMMs that accumulate into ``main_grad``. A warning is printed for each such GEMM shape, which then uses the untuned algorithm hipBLASLt selects. That algorithm is not saved, and the shape is still tuned if it later runs without accumulation.
+
 Typical usage is as follows:
 
 1. Run single iteration of training enabling algorithm selection autotuning and saving:

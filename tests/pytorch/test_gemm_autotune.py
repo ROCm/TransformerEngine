@@ -72,6 +72,12 @@ def test_gemm_autotune():
         ofile = fname+".1"
         os.environ["TE_HIPBLASLT_ALGO_SAVE"] = ofile
 
+        #Stored algo is resolved once and reused
+        out = subprocess.run(run_args + ["2"], capture_output=True, text=True,
+                             env=dict(os.environ, TE_HIPBLASLT_LOG_TUNING="1")).stdout
+        assert "Cannot get corresponding solution" not in out, "Stored algo was rejected"
+        assert out.count("Use hipBLASLt algo") == 1, "Stored algo was not cached"
+
         #Unused cache entries
         algos[0]["m"] = "999"+algos[0]["m"] # fake record for different shape
         write_storage(fname, head, algos)
@@ -102,16 +108,54 @@ def test_gemm_autotune():
         pass
 
 
-def run_gemm():
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Autotune requires ROCm TE")
+def test_gemm_autotune_accumulate():
+    storage_dir = tempfile.mkdtemp()
+    fname = storage_dir+"/"+storage_fname
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TE_HIPBLASLT_")}
+        env.update(TE_HIPBLASLT_TUNING_RUN_COUNT="5", TE_HIPBLASLT_LOG_TUNING="1",
+                   TE_HIPBLASLT_ALGO_SAVE=fname)
+        res = subprocess.run(["python", os.path.abspath(__file__), "--accumulate"], env=env,
+                             capture_output=True, text=True)
+        assert res.returncode == 0, "Tuning changed the result of an accumulating GEMM\n" + res.stderr
+        out = res.stdout
+        assert out.count("Skip hipBLASLt algo tuning") == 1, "Expected one warning for the shape"
+        # Once for the untuned pick, once for the tuned one
+        assert out.count("Use hipBLASLt algo") == 2, "Untuned algo was not cached"
+        assert out.count("Perform hipBLASLt algo selection") == 1, "Non-accumulating GEMM was not tuned"
+        assert len(read_storage(fname)) == 1, "Expected 1 cached record, only for the tuned algo"
+    finally:
+        shutil.rmtree(storage_dir)
+
+
+def run_gemm(calls=1):
     N = 32
     datatype = torch.float16    
     inp = torch.randn((N, N), device="cuda", dtype=datatype)
-    _, _, _, _ = general_gemm(A=inp, B=inp, out_dtype=datatype)
+    for _ in range(calls):
+        _, _, _, _ = general_gemm(A=inp, B=inp, out_dtype=datatype)
+
+
+def run_gemm_accumulate():
+    N = 32
+    datatype = torch.float16
+    inp = torch.randn((N, N), device="cuda", dtype=datatype)
+    out = torch.randn((N, N), device="cuda", dtype=datatype)
+    # Untuned accumulating calls, a tuned overwriting call, then an accumulating call using the tuned algo
+    for accumulate in (True, True, False, True):
+        ref = inp.float() @ inp.float().t()
+        if accumulate:
+            ref += out.float()
+        general_gemm(A=inp, B=inp, out_dtype=datatype, out=out, accumulate=accumulate)
+        torch.testing.assert_close(out.float(), ref, atol=1e-1, rtol=1e-2)
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "--run":
-        run_gemm()
+        run_gemm(int(sys.argv[2]) if len(sys.argv) > 2 else 1)
+    elif sys.argv[1] == "--accumulate":
+        run_gemm_accumulate()
 
 
 
