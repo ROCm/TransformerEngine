@@ -2,20 +2,14 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 
-from itertools import product
-
 import triton
 import triton.language as tl
 
-def get_autotune_config(full_tuning_space=False):
-    if full_tuning_space:
-        tuning_space = product([1, 2, 4], [4, 8, 16])
-    else:
-        tuning_space = [(1, 8), (1, 16), (2, 16), (4, 4), (4, 8), (4, 16)]
-    return [
-        triton.Config({"waves_per_eu": waves_per_eu}, num_warps=num_warps, num_stages=1)
-        for waves_per_eu, num_warps in tuning_space
-    ]
+# Not autotuned: num_warps sets the reduction order, so a timed pick would vary per process.
+def _layernorm_fwd_num_warps(n_cols):
+    if n_cols <= 2048:
+        return 1
+    return 4 if n_cols <= 6144 else 8
 
 
 @triton.jit
@@ -158,9 +152,6 @@ def _layernorm_fwd_triton_impl(
             tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
         else:
             tl.store(q_amax_ptr + pid, amax)
-
-autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
-_layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit
 def _layernorm_fwd_reduce_triton(

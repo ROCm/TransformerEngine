@@ -4,10 +4,12 @@
 
 import math
 import os
+import warnings
 import torch
 import pytest
 from functools import partial
 from itertools import product
+from triton.runtime.autotuner import Autotuner
 
 from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -29,6 +31,11 @@ from transformer_engine.pytorch.triton_kernels.norms_common import (
     te_layernorm_fwd_triton,
     te_rmsnorm_bwd_triton,
     te_rmsnorm_fwd_triton,
+)
+from transformer_engine.pytorch.triton_kernels import (
+    layernorm as triton_layernorm,
+    norms_common as triton_norms_common,
+    rmsnorm as triton_rmsnorm,
 )
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from test_common import dtype_tols, te_compare_results, str_to_torch_dtype, fill_uniform
@@ -235,7 +242,7 @@ class TestNorms:
         te_out_dtype = torch_dtype_to_te_dtype(out_dtype)
 
         #TODO: fix it on GFX1250
-        if ( autotune and shape == (29, 17389) and norm == "rms" and
+        if ( shape == (29, 17389) and norm == "rms" and
             (in_dtype != torch.float32 or quantization is not None) and
             get_device_compute_capability() == (12, 5) ):
             pytest.skip("This config causes soft hang on GFX1250")
@@ -281,7 +288,9 @@ class TestNorms:
                 hip_fwd_func = rmsnorm_fwd_ref
 
         # run the triton path
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if norm == "rms":
+            fwd_args["triton"]["autotune"] = autotune
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
         if quantization == "mxfp4" and ln_out_mode is not None:
             assert ln_out_triton is fwd_args["triton"]["ln_out"], "Expected the preallocated ln_out to be returned."
 
@@ -329,21 +338,16 @@ class TestNorms:
 
         )
 
-        if norm == "layer":
-            triton_bwd_outs = triton_bwd_func(*args["triton"])
-            dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
-        elif norm == "rms":
-            triton_bwd_outs = triton_bwd_func(*args["triton"], autotune=autotune)
-            dx_triton, dgamma_triton = triton_bwd_outs
-            dbeta_triton = None
-
+        triton_bwd_outs = triton_bwd_func(*args["triton"])
         hip_bwd_outs = hip_bwd_func(*args["hip"])
 
         if norm == "layer":
+            dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
             dx_hip, dgamma_hip, dbeta_hip = hip_bwd_outs
         elif norm == "rms":
+            dx_triton, dgamma_triton = triton_bwd_outs
             dx_hip, dgamma_hip = hip_bwd_outs
-            dbeta_hip = None
+            dbeta_triton = dbeta_hip = None
 
         # Assert on dx, dgamma and dbeta:
         self._compare_bwd_tensors(
@@ -405,7 +409,9 @@ class TestNorms:
         triton_fwd_func = _triton_funcs["fwd"][norm]
         hip_fwd_func = _hip_funcs["fwd"][norm]
 
-        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(autotune=autotune, **fwd_args["triton"])
+        if norm == "rms":
+            fwd_args["triton"]["autotune"] = autotune
+        ln_out_triton, mu_triton, rsigma_triton = triton_fwd_func(**fwd_args["triton"])
         ln_out_hip, mu_hip, rsigma_hip = hip_fwd_func(**fwd_args["hip"])
 
         if ln_out_triton.dtype != out_dtype:
@@ -713,3 +719,77 @@ class TestNorms:
 
             args[provider] = _args
         return args
+
+
+@pytest.mark.parametrize("norm", norms)
+@pytest.mark.parametrize("quantization", (None, "fp8"))
+@pytest.mark.parametrize("shape", ((256, 128), (64, 512), (71, 3571), (128, 6144)))
+def test_norm_triton_invariant_to_autotune_pick(monkeypatch, norm, quantization, shape):
+    """Each process picks autotune configs by timing, so no pick may change the numerics."""
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    tuners = [
+        obj
+        for module in (triton_norms_common, triton_rmsnorm, triton_layernorm)
+        for obj in vars(module).values()
+        if isinstance(obj, Autotuner)
+    ]
+    x, dz = fill_uniform(shape, torch.bfloat16), fill_uniform(shape, torch.bfloat16)
+    gamma, beta = fill_uniform(shape[1], torch.bfloat16), fill_uniform(shape[1], torch.bfloat16)
+    te_bf16 = torch_dtype_to_te_dtype(torch.bfloat16)
+
+    def run(pick):
+        def fake_bench(self, *args, config, **kwargs):
+            # Rank candidates so that each autotuner picks the one nearest to index `pick`.
+            return [(self.configs.index(config) - pick) % len(self.configs)] * 3
+
+        monkeypatch.setattr(Autotuner, "_bench", fake_bench)
+        for tuner in tuners:
+            tuner.cache.clear()
+        quantizer = None
+        if quantization == "fp8":
+            quantizer = Float8Quantizer(
+                torch.ones(1, device="cuda"), torch.zeros(1, device="cuda"), tex.DType.kFloat8E4M3
+            )
+        if norm == "rms":
+            y, mu, rsigma = te_rmsnorm_fwd_triton(
+                x, gamma, 1e-5, None, quantizer, te_bf16, 0, False, autotune=True
+            )
+        else:
+            y, mu, rsigma = te_layernorm_fwd_triton(
+                x, gamma, beta, 1e-5, None, quantizer, te_bf16, 0, False
+            )
+        outs = [mu, rsigma]
+        if quantization == "fp8":
+            outs += [y._data, y._transpose, y._scale_inv, quantizer.amax]
+        elif norm == "rms":
+            outs += [y, *te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, 0, False)]
+        else:
+            outs += [y, *te_layernorm_bwd_triton(dz, x, mu, rsigma, gamma, 0, False)]
+        return [t for t in outs if t is not None]
+
+    ref = run(0)
+    for pick in range(1, 6):
+        for i, (a, b) in enumerate(zip(ref, run(pick))):
+            assert torch.equal(a, b), f"output {i} changed with autotune pick {pick}"
+
+
+def test_norm_triton_autotune_arg_deprecated():
+    """`autotune` warns where it has no effect (LayerNorm fwd, RMSNorm bwd), not on RMSNorm fwd."""
+    x = fill_uniform((64, 512), torch.bfloat16)
+    gamma, beta = fill_uniform(512, torch.bfloat16), fill_uniform(512, torch.bfloat16)
+    te_bf16 = torch_dtype_to_te_dtype(torch.bfloat16)
+    rms_fwd = partial(te_rmsnorm_fwd_triton, x, gamma, 1e-5, None, None, te_bf16, 0, False)
+    _, _, rsigma = rms_fwd()
+    deprecated = (
+        partial(te_layernorm_fwd_triton, x, gamma, beta, 1e-5, None, None, te_bf16, 0, False),
+        partial(te_rmsnorm_bwd_triton, x, x, rsigma, gamma, 0, False),
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*autotune", category=DeprecationWarning)
+        rms_fwd(autotune=True)
+        for call in deprecated:
+            call()
+    for call in deprecated:
+        with pytest.warns(DeprecationWarning, match="autotune"):
+            call(autotune=True)
