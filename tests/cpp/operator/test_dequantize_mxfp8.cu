@@ -202,6 +202,15 @@ void performTest_x1(const size_t rows,
     const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
     const size_t unpadded_blocks_X_colwise = cols;
 
+#ifdef __HIP_PLATFORM_AMD__
+    // On ROCm all MXFP8 scale dims share one alignment: 4 on gfx1250 (MX pre-swizzle), else 1.
+    const size_t align =
+        (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise, align);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise, align);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise, align);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise, align);
+#else
     const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
                                                                  scale_tensor_alignment_Y_rowwise);
     const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
@@ -210,6 +219,7 @@ void performTest_x1(const size_t rows,
                                                                  scale_tensor_alignment_Y_colwise);
     const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
                                                                  scale_tensor_alignment_X_colwise);
+#endif
 
     const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
     const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
@@ -322,6 +332,15 @@ void performTest_x2(const size_t rows,
     const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
     const size_t unpadded_blocks_X_colwise = cols;
 
+#ifdef __HIP_PLATFORM_AMD__
+    // On ROCm all MXFP8 scale dims share one alignment: 4 on gfx1250 (MX pre-swizzle), else 1.
+    const size_t align =
+        (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise, align);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise, align);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise, align);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise, align);
+#else
     const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
                                                                  scale_tensor_alignment_Y_rowwise);
     const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
@@ -330,6 +349,7 @@ void performTest_x2(const size_t rows,
                                                                  scale_tensor_alignment_Y_colwise);
     const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
                                                                  scale_tensor_alignment_X_colwise);
+#endif
 
     const size_t scales_stride_rowwise = blocks_X_rowwise;
     const size_t scales_stride_colwise = blocks_X_colwise;
