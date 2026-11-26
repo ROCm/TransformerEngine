@@ -21,7 +21,6 @@ from .gemm_common_utils import (
     ceildiv,
     compute_global_swizzle,
     divmod,
-    encode_waitcnt,
     min,
     pack_i32x4_i32x8,
     swizzle_128,

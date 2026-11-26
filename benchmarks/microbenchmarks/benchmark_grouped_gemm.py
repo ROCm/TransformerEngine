@@ -255,6 +255,13 @@ def generate_deepseekv3_test_cases():
     )
 
 
+def generate_qwen3_235b_test_cases():
+    # Qwen3-235B-A22B: 128 routed experts, top-8, moe_intermediate_size 1536, hidden 4096.
+    return _generate_moe_test_cases(
+        "Qwen3-235B", n_routed_experts=128, moe_intermediate_size=1536, hidden_size=4096
+    )
+
+
 def generate_deepseekv2_test_cases():
     return _generate_moe_test_cases(
         "DSV2", n_routed_experts=160, moe_intermediate_size=1536, hidden_size=5120
@@ -335,6 +342,7 @@ def generate_cases():
         + generate_deepseekv2_test_cases()
         + generate_deepseekv3_test_cases()
         + generate_grok_v2_test_cases()
+        + generate_qwen3_235b_test_cases()
     )
     cases = []
     for b in base:
