@@ -58,6 +58,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
+      ghcr-image-tag: ${{ steps.select-image.outputs.ghcr-image-tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -100,6 +101,11 @@ jobs:
 
           echo "Selected base image tag: $IMAGE_BASE"
           echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
+
+          # Image used on DPX runners (runs-on containing "amd-dpx-linux."), regardless of branch.
+          GHCR_IMAGE_BASE=$(jq -r '.docker_images["ghcr"] // .docker_images["default"]' ci/ci_config.json)
+          echo "Selected GHCR image tag: $GHCR_IMAGE_BASE"
+          echo "ghcr-image-tag=$GHCR_IMAGE_BASE" >> $GITHUB_OUTPUT
 
   # Which suites this run needs. A PR runs only the suites its changed paths affect
   # (.github/scripts/change_scope.py, the PR's own copy); pushes, manual runs and
@@ -397,9 +403,10 @@ jobs:
     needs: [scope, select_image, build]
     if: needs.scope.outputs.mgpu_suites != ''
     timeout-minutes: 240
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.8' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
+      # DPX runners (runs-on containing "amd-dpx-linux.") use the ghcr-image-tag, regardless of branch.
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || (contains(matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'amd-dpx-linux.te.gpu.gfx950.8', 'amd-dpx-linux.') && needs.select_image.outputs.ghcr-image-tag || needs.select_image.outputs.image-tag) }}
     strategy:
       fail-fast: false
       matrix:
