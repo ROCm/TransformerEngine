@@ -241,10 +241,14 @@ void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_i
     // TODO(ksivaman): Fix this to check for amaxes and other details.
     // For now only needed for swizzle.
 #ifdef __HIP_PLATFORM_AMD__
-    const DType expected_scale_dtype =
-        is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
-    auto is_valid_scale_dtype = [&](DType dtype) { return dtype == expected_scale_dtype; };
-    const std::string expected_scale_dtype_str = to_string(expected_scale_dtype);
+    // MXFP4 uses E8M0 block scales; NVFP4 uses E4M3, or UE5M3 for its wider-range variant.
+    const bool is_mxfp4 = is_mxfp4_scaling(t.scaling_mode);
+    auto is_valid_scale_dtype = [&](DType dtype) {
+      return is_mxfp4 ? dtype == DType::kFloat8E8M0
+                      : (dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3);
+    };
+    const std::string expected_scale_dtype_str =
+        is_mxfp4 ? to_string(DType::kFloat8E8M0) : "Float8E4M3 or Float8UE5M3";
 #else
     auto is_valid_scale_dtype = [](DType dtype) {
       return dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3;
@@ -313,10 +317,14 @@ void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty)
   } else if (is_fp4_dtype(type)) {
     // FP4 output needs to have the scale_inv
 #ifdef __HIP_PLATFORM_AMD__
-    const DType expected_scale_dtype =
-        is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
-    auto is_valid_scale_dtype = [&](DType dtype) { return dtype == expected_scale_dtype; };
-    const std::string expected_scale_dtype_str = to_string(expected_scale_dtype);
+    // MXFP4 uses E8M0 block scales; NVFP4 uses E4M3, or UE5M3 for its wider-range variant.
+    const bool is_mxfp4 = is_mxfp4_scaling(t.scaling_mode);
+    auto is_valid_scale_dtype = [&](DType dtype) {
+      return is_mxfp4 ? dtype == DType::kFloat8E8M0
+                      : (dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3);
+    };
+    const std::string expected_scale_dtype_str =
+        is_mxfp4 ? to_string(DType::kFloat8E8M0) : "Float8E4M3 or Float8UE5M3";
 #else
     auto is_valid_scale_dtype = [](DType dtype) {
       return dtype == DType::kFloat8E4M3 || dtype == DType::kFloat8UE5M3;

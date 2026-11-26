@@ -285,7 +285,9 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
 
         def _check_support() -> Tuple[bool, str]:
             if IS_HIP_EXTENSION:
-                return False, "FP8 UE5M3 is not supported on ROCm."
+                # UE5M3 scales work wherever NVFP4 does: gfx1250 runs the GEMM natively where
+                # hipBLASLt has the kernels, otherwise (and on gfx950) TE dequantizes to BF16.
+                return check_nvfp4_support()
             if get_device_compute_capability() != (10, 7):  # Rubin
                 return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
             if float(torch.version.cuda) < 13.4:
