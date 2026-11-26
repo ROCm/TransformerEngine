@@ -179,7 +179,7 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 5),): #TODO: enable for gfx1250 when GEMM is available
+        if gpu_arch in ((9, 5), (12, 5)):
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):

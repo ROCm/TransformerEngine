@@ -109,11 +109,15 @@ struct MXFP8GemmArgs {
     int M, N, K;
     bool transa, transb;
     int a_dtype, b_dtype;
+    bool mxfp8_compact;
     const void *bias;
     int bias_dtype;
     void *aux_gelu;
     int out_dtype, aux_dtype;
-    float beta;
+    bool grad;
+    float alpha, beta;
+    int splitk;
+    int cu_count;
     void *workspace;
     size_t workspace_size;
     hipStream_t stream;
@@ -166,6 +170,7 @@ class MXFP8GemmBackend {
  private:
     static MXFP8GemmBackend *get_for_arch(int sm_arch);
     static MXFP8GemmBackend *get_cdna4();
+    static MXFP8GemmBackend *get_cdna5();
 };
 
 inline bool kittens_mxfp8_supported() { return MXFP8GemmBackend::get() != nullptr; }
@@ -175,10 +180,11 @@ inline bool kittens_mxfp8_gemm(
     const void *scale_A, const void *scale_B,
     int M, int N, int K,
     bool transa, bool transb,
-    int a_dtype, int b_dtype,
+    int a_dtype, int b_dtype, bool mxfp8_compact,
     const void *bias, int bias_dtype,
     void *aux_gelu, int out_dtype, int aux_dtype,
-    float beta, void *workspace, size_t workspace_size,
+    bool grad, float alpha, float beta, int splitk, int cu_count,
+    void *workspace, size_t workspace_size,
     hipStream_t stream) {
     MXFP8GemmBackend *backend = MXFP8GemmBackend::get();
     if (backend == nullptr) {
@@ -187,8 +193,8 @@ inline bool kittens_mxfp8_gemm(
 
     MXFP8GemmArgs args{
         A, B, C, scale_A, scale_B, M, N, K, transa, transb,
-        a_dtype, b_dtype, bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
-        beta, workspace, workspace_size, stream};
+        a_dtype, b_dtype, mxfp8_compact, bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
+        grad, alpha, beta, splitk, cu_count, workspace, workspace_size, stream};
     return backend->gemm(args);
 }
 
@@ -227,4 +233,62 @@ inline bool kittens_grouped_mxfp8_wgrad(
         N, K, M_array, num_experts, a_dtype, b_dtype, out_dtype, accumulate,
         workspace, workspace_size, stream};
     return backend->grouped_wgrad(args);
+}
+
+struct Bf16GemmArgs {
+    const void *A;
+    const void *B;
+    void *C;
+    int M, N, K;
+    bool transa, transb;
+    int a_dtype, b_dtype;
+    const void *bias;
+    int bias_dtype;
+    void *aux_gelu;
+    int out_dtype, aux_dtype;
+    bool grad;
+    float alpha, beta;
+    int splitk;
+    int cu_count;
+    void *workspace;
+    size_t workspace_size;
+    hipStream_t stream;
+};
+
+class Bf16GemmBackend {
+ public:
+    virtual ~Bf16GemmBackend() = default;
+    virtual bool gemm(const Bf16GemmArgs &args) = 0;
+
+    static Bf16GemmBackend *get() {
+        return get_for_arch(transformer_engine::cuda::sm_arch());
+    }
+
+ private:
+    static Bf16GemmBackend *get_for_arch(int sm_arch);
+    static Bf16GemmBackend *get_cdna5();
+};
+
+inline bool kittens_bf16_supported() { return Bf16GemmBackend::get() != nullptr; }
+
+inline bool kittens_bf16_gemm(
+    const void *A, const void *B, void *C,
+    int M, int N, int K,
+    bool transa, bool transb,
+    int a_dtype, int b_dtype,
+    const void *bias, int bias_dtype,
+    void *aux_gelu, int out_dtype, int aux_dtype,
+    bool grad, float alpha, float beta, int splitk, int cu_count,
+    void *workspace, size_t workspace_size,
+    hipStream_t stream) {
+    Bf16GemmBackend *backend = Bf16GemmBackend::get();
+    if (backend == nullptr) {
+        return false;
+    }
+
+    Bf16GemmArgs args{
+        A, B, C, M, N, K, transa, transb, a_dtype, b_dtype,
+        bias, bias_dtype, aux_gelu, out_dtype, aux_dtype,
+        grad, alpha, beta, splitk, cu_count, workspace, workspace_size, stream};
+    return backend->gemm(args);
 }
