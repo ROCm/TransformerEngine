@@ -12,6 +12,7 @@ using bhalf_t = __bf16;
 using bf16x4  = __bf16 __attribute__((ext_vector_type(4)));
 using bf16x8  = __bf16 __attribute__((ext_vector_type(8)));
 using floatx4 = float __attribute__((ext_vector_type(4)));
+using shortx4 = int16_t __attribute__((ext_vector_type(4)));  // A and B of the bf16 `_1k` MFMAs
 
 #ifndef CEIL_DIV
 #define CEIL_DIV(a, b) (((a) + (b)-1) / (b))
@@ -191,7 +192,7 @@ __global__ void fmha_fwd_mfma_kernel(
 
             k_b = *(const bf16x4*)(&KV_lds[k_lds_base + k]);
 
-            qk_acc = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(q_a, k_b, qk_acc, 0, 0, 0);
+            qk_acc = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k((shortx4)q_a, (shortx4)k_b, qk_acc, 0, 0, 0);
         }
 
         // Online softmax: extract scores, update running_max/sum, rescale v_acc
@@ -320,7 +321,7 @@ __global__ void fmha_fwd_mfma_kernel(
                 mfma_acc[m] = 0.0f;
 
             mfma_acc = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
-                weight_a, v_b, mfma_acc, 0, 0, 0);
+                (shortx4)weight_a, (shortx4)v_b, mfma_acc, 0, 0, 0);
 
             #pragma unroll
             for(int m = 0; m < max_seq_q; m++)
