@@ -1,0 +1,14 @@
+# Generated microbenchmark result CSVs (wide format; ingested into the dashboard,
+# then discarded). Not source -- never commit these.
+benchmark_*.csv
+
+# Generated single-file bundle (dashboard/dist/dashboard.html embeds the CSV data).
+dashboard/dist/
+
+# Generated dashboard data shards (per-family CSV + index.csv) -- regenerable
+# output; lives only in the TE-dashboard Pages repo (the deploy target).
+dashboard/data/
+
+# Local Pages checkout used by build_bundle.py (e.g. --data-dir te-dash/data).
+# It's a separate repo clone full of generated data -- keep it out of TE.
+te-dash/
